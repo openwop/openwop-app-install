@@ -59,6 +59,10 @@ describe('forking a v1 (era-2) run', () => {
       res.status,
       `a v2 host MUST fork a run created before the cut (replay.md §"Forking a v1 run"); got ${res.status}: ${body.slice(0, 300)}`,
     ).toBe(201);
+    // …and the answer names a NEW run, tenant-bound, not the parent.
+    const forkId = (JSON.parse(body) as { runId?: string }).runId;
+    expect(forkId).toMatch(/^default\//);
+    expect(forkId).not.toBe(runId);
   });
 
   it("the fork's inherited prefix carries the SOURCE timestamps, not fork time", async () => {
@@ -86,7 +90,8 @@ describe('forking a v1 (era-2) run', () => {
     expect(poll.status).toBe(200);
     const events = (await poll.json() as { events?: Array<{ sequence?: number; timestamp?: string }> }).events ?? [];
     const inherited = events.filter((e) => typeof e.sequence === 'number' && e.sequence < 2);
-    expect(inherited.length, 'the branch fork must copy the prefix below fromSeq').toBeGreaterThan(0);
+    // The fixture's prefix below fromSeq 2 is exactly sequences 0 and 1.
+    expect(inherited.map((e) => e.sequence), 'the branch fork must copy the prefix below fromSeq').toEqual([0, 1]);
     for (const ev of inherited) {
       expect(
         ev.timestamp,

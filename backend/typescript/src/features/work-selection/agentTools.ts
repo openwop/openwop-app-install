@@ -22,12 +22,27 @@ import { resolveFeatureToggle } from '../../host/agentToolKit.js';
 import { getBoard, listCards, boardSubject, todoColumnOf, workingColumnOf } from '../../host/kanbanService.js';
 import { resolveSubjectAccess, levelSatisfies } from '../../host/subjectAccess.js';
 import { rankByPriority } from '../../host/weightedScoring.js';
+import { isHeldForReview } from '../../host/cardRunRecovery.js';
+import { isWorkTwinMockArchive } from '../../host/workflowTemplates.js';
 import { WORK_SELECTION_CRITERIA, projectCardScores } from './compiler.js';
 import { WORK_SELECTION_TOGGLE } from './service.js';
 
 export const WORK_SELECTION_PREVIEW_TOOL_ID = 'openwop:work-selection.preview';
 
 const CRITERION_NAMES = new Map(WORK_SELECTION_CRITERIA.criteria.map((c) => [c.id, c.name]));
+
+/** ADR 0963 D3 — a To Do card the loop will not pick until a person clears its
+ *  note (restored after a stop or a failure). Listed so "why is this not being
+ *  picked up?" has an answer, never ranked. */
+export interface HeldCardView {
+  cardId: string;
+  title: string;
+}
+
+export interface BoardRanking {
+  ranked: RankedCardView[];
+  held: HeldCardView[];
+}
 
 export interface RankedCardView {
   cardId: string;
@@ -51,10 +66,11 @@ export async function readBoardRanking(
   boardId: string,
   now: number,
   caller: string | undefined,
-): Promise<RankedCardView[]> {
-  if (!tenantId || !boardId) return [];
+): Promise<BoardRanking> {
+  const empty: BoardRanking = { ranked: [], held: [] };
+  if (!tenantId || !boardId) return empty;
   const board = await getBoard(boardId);
-  if (!board || board.tenantId !== tenantId) return [];
+  if (!board || board.tenantId !== tenantId) return empty;
 
   // ADR 0610 D3′ / WSC-1 (=CPC-14) — a board bound to a project is
   // membership-scoped; the tenant check above is NOT sufficient (a private
@@ -79,21 +95,27 @@ export async function readBoardRanking(
   const owner = boardSubject(board);
   if (owner) {
     const level = await resolveSubjectAccess(tenantId, owner, caller);
-    if (level !== null && !levelSatisfies(level, 'read')) return [];
+    if (level !== null && !levelSatisfies(level, 'read')) return empty;
   }
 
   // ADR 0774 — the preview ranks exactly what the pick would consider: the
   // lane resolvers, nothing on a board the loop refuses (no in-progress lane),
   // and no WorkItem card (the ADR 0738 dispatcher owns those).
   const todo = todoColumnOf(board);
-  if (!todo || !workingColumnOf(board)) return [];
+  if (!todo || !workingColumnOf(board)) return empty;
 
-  const candidates = (await listCards(boardId)).filter((c) => c.columnId === todo.id && !c.workItemId);
+  const todoCards = (await listCards(boardId)).filter((c) => c.columnId === todo.id && !c.workItemId);
+  // ADR 0963 D3 — the SAME held predicate the pick uses: held cards are not
+  // ranked (the loop will not take them) and are reported beside the ranking.
+  // ADR 0963 D8 — nor a card the loop will never take on its own: one whose
+  // workflow is a Work-Twin mock archive (ADR 0939).
+  const candidates = todoCards.filter((c) => !isHeldForReview(c) && !isWorkTwinMockArchive(c.workflowId ?? todo.triggerWorkflowId));
+  const held = todoCards.filter(isHeldForReview).map((c) => ({ cardId: c.id, title: c.title }));
   // Project ONCE per card and reuse for both ranking and the "why" rendering.
   // Projecting again inside the map would double the work per card on a path the
   // board panel polls.
   const scoresByCard = new Map(candidates.map((c) => [c.id, projectCardScores(c, now)]));
-  return rankByPriority(WORK_SELECTION_CRITERIA, candidates, (card) => scoresByCard.get(card.id) ?? {})
+  const ranked = rankByPriority(WORK_SELECTION_CRITERIA, candidates, (card) => scoresByCard.get(card.id) ?? {})
     .map((r) => ({
       cardId: r.item.id,
       title: r.item.title,
@@ -105,6 +127,7 @@ export async function readBoardRanking(
         value,
       })),
     }));
+  return { ranked, held };
 }
 
 const toolError = (code: string, message: string) => ({
@@ -128,6 +151,8 @@ export function registerWorkSelectionAgentTools(): void {
         'Show which To Do card the autonomous work loop would pick up next on a board, and why. '
         + 'Returns every candidate ranked, each with the per-criterion values behind its score '
         + '(due-date urgency, stated priority, age, blocked). Read-only — this never reorders or starts anything. '
+        + 'Cards held after a stopped or failed run are listed separately under `held`: the loop will not pick them '
+        + 'until a person clears the note on the card. '
         + 'Use it to answer "what are you working on next?" or "why is this card not being picked up?".',
       inputSchema: {
         type: 'object',
@@ -143,11 +168,11 @@ export function registerWorkSelectionAgentTools(): void {
       }
       // ADR 0308 — fail EMPTY without an acting user; never fall back to an
       // ambient tenant, which would read another caller's board.
-      if (!scope.actingUserId) return { content: JSON.stringify({ ranked: [] }) };
+      if (!scope.actingUserId) return { content: JSON.stringify({ ranked: [], held: [] }) };
 
       const boardId = typeof input.boardId === 'string' ? input.boardId : '';
-      const ranked = await readBoardRanking(scope.tenantId, boardId, Date.now(), scope.actingUserId);
-      return { content: JSON.stringify({ ranked, count: ranked.length }) };
+      const { ranked, held } = await readBoardRanking(scope.tenantId, boardId, Date.now(), scope.actingUserId);
+      return { content: JSON.stringify({ ranked, count: ranked.length, held }) };
     },
   });
 }

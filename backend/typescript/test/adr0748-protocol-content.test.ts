@@ -7,6 +7,16 @@
  * `openwop.requirement.0206.delivery-extended-locale` row) step for step, and
  * validates every body against the vendored v2 schemas, so a passing run here is
  * the same evidence the scenario collects — minus the corpus harness.
+ *
+ * Tracker TST-BAB-9. Every case seeds what it reads (the scenario page through
+ * one memoised setup), so the file passes in any order. Every refusal asserts
+ * its code AND what distinguishes it from a neighbouring refusal with the same
+ * status. Red when (sabotage-witnessed, wave 60): the approval gate is skipped
+ * on create or on a live edit; a tenant's delivery is publicly cacheable or
+ * stops varying on Authorization; another tenant (or the anonymous lane) reads
+ * a tenant page; the credential-optional carve-out widens in depth or method;
+ * negotiation skips the script step; the error catalog names the negotiated tag
+ * instead of the column used, or loses the language fallback.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -25,7 +35,7 @@ import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 
 const V2 = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'schemas', 'v2');
 const ajv = new Ajv2020({ strict: false, allErrors: true });
-(addFormats as unknown as (a: unknown) => void)(ajv);
+addFormats(ajv);
 for (const f of readdirSync(V2)) {
   if (!f.endsWith('.json')) continue;
   try { ajv.addSchema(JSON.parse(readFileSync(join(V2, f), 'utf8')) as Record<string, unknown>, f); } catch { /* duplicate $id */ }
@@ -85,7 +95,7 @@ describe('isCredentialOptionalRead — exact method and depth', () => {
 
 // ── v2 advertisement ──────────────────────────────────────────────────────────
 
-const CONFIG = { serviceName: 'test', serviceVersion: '0.0.1' } as unknown as AppConfig;
+const CONFIG: AppConfig = { port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false };
 
 describe('v2 `i18n` + `content` records', () => {
   it('are absent when no content locales are configured', () => {
@@ -129,15 +139,35 @@ const OP = 'k-op-0748-operator';     // wildcard operator key (the conformance h
 const TB = 'k-tb-0748-tenant-b';     // a key scoped to tenant-b
 const saved: Record<string, string | undefined> = {};
 
-async function call(method: string, path: string, opts: { key?: string | null; body?: unknown; headers?: Record<string, string> } = {}) {
+/** The narrow view of every body this file reads (pages, sections, envelopes). */
+interface Body {
+  error?: string;
+  message?: string;
+  details?: Record<string, unknown>;
+  status?: string;
+  order?: number;
+  pageId?: string;
+  sections?: Array<{ sectionId: string; data: Record<string, unknown> }>;
+}
+async function call(method: string, path: string, opts: { key?: string | null; body?: unknown; headers?: Record<string, string> } = {}): Promise<{ status: number; json: Body; list: Body[]; headers: Headers }> {
   // ADR 0812 P3c-0 — the protocol content ops are unversioned major-2 paths now.
   const headers: Record<string, string> = { 'openwop-version': '2', ...(opts.headers ?? {}) };
   if (opts.key !== null) headers.authorization = `Bearer ${opts.key ?? OP}`;
   if (opts.body !== undefined) headers['content-type'] = 'application/json';
   const res = await fetch(`${BASE}${path}`, { method, headers, ...(opts.body !== undefined ? { body: JSON.stringify(opts.body) } : {}) });
   const text = await res.text();
-  let json: any; try { json = JSON.parse(text); } catch { json = text; }
-  return { status: res.status, json, headers: res.headers };
+  let raw: unknown; try { raw = JSON.parse(text); } catch { raw = text; }
+  const json: Body = raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Body) : {};
+  const list: Body[] = Array.isArray(raw) ? (raw as Body[]) : [];
+  return { status: res.status, json, list, headers: res.headers };
+}
+
+/** A refusal: exact status, code, and the detail that tells it from a neighbour. */
+async function expectRefused(r: Promise<{ status: number; json: Body }>, status: number, code: string, detail?: Record<string, unknown>): Promise<void> {
+  const res = await r;
+  expect(res.status, JSON.stringify(res.json)).toBe(status);
+  expect(res.json.error).toBe(code);
+  if (detail) expect(res.json.details).toMatchObject(detail);
 }
 
 beforeAll(async () => {
@@ -164,15 +194,22 @@ describe('RFC 0206 delivery-extended-locale — the scenario flow', () => {
   const pageId = 'rfc0206-probe';
   const slug = 'rfc0206-probe';
 
-  it('creates a published page, writes base + extended overlay, and delivers the overlay', async () => {
+  /** The scenario page, created ONCE by whichever case runs first (order-free). */
+  let seeded: Promise<{ created: Awaited<ReturnType<typeof call>>; base: Awaited<ReturnType<typeof call>>; over: Awaited<ReturnType<typeof call>> }> | undefined;
+  const scenario = () => (seeded ??= (async () => {
     const created = await call('POST', '/content/pages', { body: { pageId, slug, name: 'RFC 0206 probe', status: 'published', sectionOrder: ['hero'] } });
+    const base = await call('PUT', `/content/pages/${pageId}/sections/hero`, { body: { locale: 'en', data: { heading: 'base', cta: 'base-cta' } } });
+    const over = await call('PUT', `/content/pages/${pageId}/sections/hero`, { body: { locale: tag, data: { heading: `overlay:${tag}` } } });
+    return { created, base, over };
+  })());
+
+  it('creates a published page, writes base + extended overlay, and delivers the overlay', async () => {
+    const { created, base, over } = await scenario();
     expect(created.status, JSON.stringify(created.json)).toBe(201);
     expect(schema('localized-content-page')(created.json)).toEqual([]);
     expect(created.json).toMatchObject({ pageId, slug, status: 'published', sectionOrder: ['hero'] });
 
-    const base = await call('PUT', `/content/pages/${pageId}/sections/hero`, { body: { locale: 'en', data: { heading: 'base', cta: 'base-cta' } } });
     expect(base.status, JSON.stringify(base.json)).toBe(200);
-    const over = await call('PUT', `/content/pages/${pageId}/sections/hero`, { body: { locale: tag, data: { heading: `overlay:${tag}` } } });
     expect(over.status, JSON.stringify(over.json)).toBe(200);
     expect(schema('localized-content-section')(over.json)).toEqual([]);
     expect(over.json).toMatchObject({ sectionId: 'hero', sectionType: 'fields', data: { heading: 'base', cta: 'base-cta' }, localizations: { [tag]: { heading: `overlay:${tag}` } }, status: 'published', order: 0 });
@@ -181,21 +218,23 @@ describe('RFC 0206 delivery-extended-locale — the scenario flow', () => {
     expect(res.status).toBe(200);
     expect(schema('localized-content-page-response')(res.json)).toEqual([]);
     expect(res.headers.get('content-language')).toBe(tag);
-    const hero = res.json.sections.find((s: { sectionId: string }) => s.sectionId === 'hero');
-    expect(hero.data).toEqual({ heading: `overlay:${tag}`, cta: 'base-cta' });
+    const hero = res.json.sections?.find((s) => s.sectionId === 'hero');
+    expect(hero?.data).toEqual({ heading: `overlay:${tag}`, cta: 'base-cta' });
     // a tenant's content is never publicly cacheable
     expect(res.headers.get('cache-control')).toBe('private, no-store');
-    expect(res.headers.get('vary')).toMatch(/Authorization/);
+    const vary = (res.headers.get('vary') ?? '').split(',').map((t) => t.trim().toLowerCase());
+    expect(vary).toContain('authorization');
   });
 
   it('serves the same ops under major 2 (the unversioned rewrite)', async () => {
+    await scenario();
     const res = await call('GET', `/content/pages/${slug}`, { headers: { 'accept-language': 'es-MX', 'openwop-version': '2' } });
     expect(res.status).toBe(200);
     expect(res.headers.get('content-language')).toBe(tag); // es-MX → family → es-419
     const list = await call('GET', '/content/pages', { headers: { 'openwop-version': '2' } });
     expect(list.status).toBe(200);
-    for (const p of list.json) expect(schema('localized-content-page')(p)).toEqual([]);
-    expect(list.json.map((p: { pageId: string }) => p.pageId)).toContain(pageId);
+    for (const p of list.list) expect(schema('localized-content-page')(p)).toEqual([]);
+    expect(list.list.map((p) => p.pageId)).toContain(pageId);
   });
 
   it('settings are the effective (advertised) ones and validate', async () => {
@@ -206,8 +245,12 @@ describe('RFC 0206 delivery-extended-locale — the scenario flow', () => {
   });
 
   it('§F: the page is unreachable from another tenant and from the anonymous lane', async () => {
-    expect((await call('GET', `/content/pages/${slug}`, { key: TB })).status).toBe(404);
-    expect((await call('GET', `/content/pages/${slug}`, { key: null })).status).toBe(404);
+    await scenario();
+    // Positive control: the page EXISTS and its owner reads it, so the 404s below
+    // are the tenant rule, not an absent page.
+    expect((await call('GET', `/content/pages/${slug}`)).status).toBe(200);
+    await expectRefused(call('GET', `/content/pages/${slug}`, { key: TB }), 404, 'not_found', { slug });
+    await expectRefused(call('GET', `/content/pages/${slug}`, { key: null }), 404, 'not_found', { slug });
     // …while the anonymous lane still serves the system site, publicly cacheable
     const home = await call('GET', '/content/pages/home', { key: null });
     expect(home.status).toBe(200);
@@ -216,16 +259,17 @@ describe('RFC 0206 delivery-extended-locale — the scenario flow', () => {
   });
 
   it('a presented-but-rejected bearer is a 401, never the anonymous lane', async () => {
-    expect((await call('GET', '/content/pages/home', { key: 'not-a-key' })).status).toBe(401);
+    await expectRefused(call('GET', '/content/pages/home', { key: 'not-a-key' }), 401, 'unauthenticated');
   });
 
   it('admin ops never ride the carve-out: no credential → 401', async () => {
-    expect((await call('POST', '/content/pages', { key: null, body: { pageId: 'x', slug: 'x', name: 'x', sectionOrder: [] } })).status).toBe(401);
-    expect((await call('GET', '/content/pages', { key: null })).status).toBe(401);
-    expect((await call('PUT', `/content/pages/${pageId}/sections/hero`, { key: null, body: { locale: 'en', data: {} } })).status).toBe(401);
-    expect((await call('GET', '/content/settings', { key: null })).status).toBe(401);
+    await scenario();
+    await expectRefused(call('POST', '/content/pages', { key: null, body: { pageId: 'x', slug: 'x', name: 'x', sectionOrder: [] } }), 401, 'unauthenticated');
+    await expectRefused(call('GET', '/content/pages', { key: null }), 401, 'unauthenticated');
+    await expectRefused(call('PUT', `/content/pages/${pageId}/sections/hero`, { key: null, body: { locale: 'en', data: {} } }), 401, 'unauthenticated');
+    await expectRefused(call('GET', '/content/settings', { key: null }), 401, 'unauthenticated');
     // deleteContentPage shares delivery's path item; only GET/HEAD there is credential-optional.
-    expect((await call('DELETE', `/content/pages/${pageId}`, { key: null })).status).toBe(401);
+    await expectRefused(call('DELETE', `/content/pages/${pageId}`, { key: null }), 401, 'unauthenticated');
   });
 
   it('a tenant-pinned env key authors in ITS OWN tenant only (ADR 0601 C4; ADR 0748 correction)', async () => {
@@ -243,16 +287,16 @@ describe('protocol create never adapts what the caller addressed', () => {
   it('409 on an existing pageId and on a taken slug; never a renamed slug', async () => {
     const body = { pageId: 'dup-1', slug: 'dup-one', name: 'Dup', sectionOrder: [] };
     expect((await call('POST', '/content/pages', { body })).status).toBe(201);
-    expect((await call('POST', '/content/pages', { body })).status).toBe(409);
-    expect((await call('POST', '/content/pages', { body: { ...body, pageId: 'dup-2' } })).status).toBe(409);
+    await expectRefused(call('POST', '/content/pages', { body }), 409, 'openwop-app.conflict', { pageId: 'dup-1' });
+    await expectRefused(call('POST', '/content/pages', { body: { ...body, pageId: 'dup-2' } }), 409, 'openwop-app.conflict', { slug: 'dup-one' });
   });
   it('400 on malformed input', async () => {
     const ok = { pageId: 'v-1', slug: 'v-one', name: 'V', sectionOrder: [] };
-    expect((await call('POST', '/content/pages', { body: { ...ok, slug: 'Bad Slug' } })).status).toBe(400);
-    expect((await call('POST', '/content/pages', { body: { ...ok, slug: 'double--hyphen' } })).status).toBe(400);
-    expect((await call('POST', '/content/pages', { body: { ...ok, pageId: '../etc' } })).status).toBe(400);
-    expect((await call('POST', '/content/pages', { body: { ...ok, sectionOrder: ['a', 'a'] } })).status).toBe(400);
-    expect((await call('POST', '/content/pages', { body: { ...ok, status: 'archived' } })).status).toBe(400);
+    await expectRefused(call('POST', '/content/pages', { body: { ...ok, slug: 'Bad Slug' } }), 400, 'validation_error', { field: 'slug' });
+    await expectRefused(call('POST', '/content/pages', { body: { ...ok, slug: 'double--hyphen' } }), 400, 'validation_error', { field: 'slug' });
+    await expectRefused(call('POST', '/content/pages', { body: { ...ok, pageId: '../etc' } }), 400, 'validation_error', { field: 'pageId' });
+    await expectRefused(call('POST', '/content/pages', { body: { ...ok, sectionOrder: ['a', 'a'] } }), 400, 'validation_error', { field: 'sectionOrder' });
+    await expectRefused(call('POST', '/content/pages', { body: { ...ok, status: 'archived' } }), 400, 'validation_error', { field: 'status' });
   });
   it('a draft page is created as draft and is not delivered', async () => {
     expect((await call('POST', '/content/pages', { body: { pageId: 'd-1', slug: 'd-one', name: 'D', sectionOrder: ['s'], status: 'draft' } })).json.status).toBe('draft');
@@ -262,17 +306,21 @@ describe('protocol create never adapts what the caller addressed', () => {
 });
 
 describe('section PUT validation', () => {
+  /** The validation page, created once by whichever case runs first (order-free). */
+  let valPage: Promise<unknown> | undefined;
+  const ensureValPage = () => (valPage ??= call('POST', '/content/pages', { body: { pageId: 'val-1', slug: 'val-one', name: 'Val', sectionOrder: ['s'] } }));
   it('rejects non-canonical locales, extra fields, and nested field values', async () => {
-    await call('POST', '/content/pages', { body: { pageId: 'val-1', slug: 'val-one', name: 'Val', sectionOrder: ['s'] } });
+    await ensureValPage();
     const put = (body: unknown) => call('PUT', '/content/pages/val-1/sections/s', { body });
-    for (const locale of ['en-us', 'zh-hans', 'de-CH-1996', 'en_US']) expect((await put({ locale, data: { a: 'x' } })).status).toBe(400);
-    expect((await put({ locale: 'en', data: { a: 'x' }, extra: 1 })).status).toBe(400);
-    expect((await put({ locale: 'en', data: { a: { nested: true } } })).status).toBe(400);
-    expect((await put({ locale: 'en', data: { 'bad key': 'x' } })).status).toBe(400);
+    for (const locale of ['en-us', 'zh-hans', 'de-CH-1996', 'en_US']) await expectRefused(put({ locale, data: { a: 'x' } }), 400, 'validation_error');
+    await expectRefused(put({ locale: 'en', data: { a: 'x' }, extra: 1 }), 400, 'validation_error');
+    await expectRefused(put({ locale: 'en', data: { a: { nested: true } } }), 400, 'validation_error');
+    await expectRefused(put({ locale: 'en', data: { 'bad key': 'x' } }), 400, 'validation_error');
     expect((await put({ locale: 'zh-Hant-TW', data: { a: 'x' } })).status).toBe(200);
   });
   it('404 for an unknown page; a new section id appends', async () => {
-    expect((await call('PUT', '/content/pages/nope/sections/s', { body: { locale: 'en', data: {} } })).status).toBe(404);
+    await ensureValPage();
+    await expectRefused(call('PUT', '/content/pages/nope/sections/s', { body: { locale: 'en', data: {} } }), 404, 'not_found', { pageId: 'nope' });
     const r = await call('PUT', '/content/pages/val-1/sections/extra', { body: { locale: 'en', data: { a: 'y' } } });
     expect(r.status).toBe(200);
     expect(r.json.order).toBe(1);
@@ -287,7 +335,7 @@ describe('section PUT validation', () => {
     // locale-rfc0206-grammar.test.ts (resolveSection) and the negotiateLocale block above.
     const r = await call('GET', '/content/pages/zh-one', { headers: { 'accept-language': 'zh-Hant-TW' } });
     expect(r.headers.get('content-language')).toBe('en');
-    expect(r.json.sections[0].data).toEqual({ t: 'en' });
+    expect(r.json.sections?.[0]?.data).toEqual({ t: 'en' });
   });
 });
 
@@ -298,8 +346,7 @@ describe('a shared-section reference is never silently written through', () => {
     const page = await getPage('default', 'default', 'ref-1');
     expect(page).toBeTruthy();
     await updatePage('default', 'default', 'ref-1', { sections: [{ sectionId: 'sec:shared', type: 'hero', data: {}, ref: { sharedSectionId: 'shsec:x' } }], baseLocale: 'en' }, 'test');
-    const r = await call('PUT', '/content/pages/ref-1/sections/shared', { body: { locale: 'en', data: { heading: 'x' } } });
-    expect(r.status).toBe(409);
+    await expectRefused(call('PUT', '/content/pages/ref-1/sections/shared', { body: { locale: 'en', data: { heading: 'x' } } }), 409, 'openwop-app.conflict', { sharedSectionId: 'shsec:x' });
   });
 });
 
@@ -313,8 +360,8 @@ describe('the approval gate binds the protocol lane exactly as the editor', () =
     await call('POST', '/content/pages', { body: { pageId: 'g-1', slug: 'g-one', name: 'G', sectionOrder: ['s'], status: 'published' } });
     await setGate('on');
     try {
-      expect((await call('POST', '/content/pages', { body: { pageId: 'g-2', slug: 'g-two', name: 'G', sectionOrder: [], status: 'published' } })).status).toBe(409);
-      expect((await call('PUT', '/content/pages/g-1/sections/s', { body: { locale: 'es-419', data: { a: 'x' } } })).status).toBe(409);
+      await expectRefused(call('POST', '/content/pages', { body: { pageId: 'g-2', slug: 'g-two', name: 'G', sectionOrder: [], status: 'published' } }), 409, 'openwop-app.conflict', { gate: 'cms-approval-gate' });
+      await expectRefused(call('PUT', '/content/pages/g-1/sections/s', { body: { locale: 'es-419', data: { a: 'x' } } }), 409, 'openwop-app.conflict', { gate: 'cms-approval-gate' });
       // a draft is still authorable under the gate
       expect((await call('POST', '/content/pages', { body: { pageId: 'g-3', slug: 'g-three', name: 'G', sectionOrder: [] } })).status).toBe(201);
     } finally {

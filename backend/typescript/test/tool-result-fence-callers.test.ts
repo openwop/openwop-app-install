@@ -11,6 +11,13 @@
  * PROGRAMMATIC (exempt, with a stated reason). A new dispatch path fails this
  * test until someone classifies it — complete-by-construction, rather than a
  * grep for a fence that a new spelling evades.
+ *
+ * HONEST CEILING (wave 61): the MODEL_FACING check is a substring presence of
+ * `toModelToolResult(` in the caller's source, so a comment naming it would
+ * satisfy it. That is the limit of a source ratchet; the fence's behaviour is
+ * covered where it is applied (agentDispatch / the voice tool bridge tests).
+ * The anti-vacuity case now pins the found caller set to EXACTLY the
+ * classified rows (MEASURED 2026-10-23: 12 = 12), not a `> 4` floor.
  */
 import { describe, expect, it } from 'vitest';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
@@ -65,7 +72,8 @@ describe('RFC 0137 §F1 — every executeTool caller is classified', () => {
     // vacuously true — the failure mode this whole ratchet exists to prevent.
     expect(callers).toContain('host/agentDispatch.ts');
     expect(callers).toContain('features/voice/realtime/toolBridge.ts');
-    expect(callers.length).toBeGreaterThan(4);
+    // Exact: the walk found every classified row and nothing else.
+    expect([...callers].sort()).toEqual(Object.keys(CLASSIFIED).sort());
   });
 
   it('NO unclassified caller — a new model-facing path must fail here', () => {

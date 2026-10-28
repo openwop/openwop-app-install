@@ -18,6 +18,221 @@ Commits by the `/cut-app-release` skill; required upgrade stops are tracked in
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-10-28
+
+A MINOR release under ADR 0052, including breaking startup requirements under
+its pre-1.0 policy. Configure the two security decisions below before deploying
+to an `auth` posture. This release adds schema migrations sqlite 51 / postgres
+49 for durable run admission; app migrations remain at 24.
+
+### Added
+
+- **Durable run admission, first phase (ADR 0987).** Main and evaluation run
+  creation count pending/running runs inside the storage transaction, preserving
+  concurrency limits across instances and beyond the old 60-second window
+  (#5327). Existing rows keep a null admission key and drain without counting
+  toward the new cap. Other creation lanes and load qualification remain later
+  phases; this is not complete coverage of every run-creation path.
+- **Production security profile (ADR 0981).** Startup reports missing controls
+  together; readiness reports `strict` or `evaluation`. A superadmin-only census
+  reports callers the membership and MFA rules would refuse (#5262, #5265,
+  #5272). Missing decisions now refuse an `auth` deployment before its build.
+- **Durable host-event replay (ADR 0973, RFC 0250).** Replay uses the durable
+  event log across instances. Legacy `Last-Event-ID` resumes from that log when
+  the current process lacks the cursor (#5182, #5187, #5322). Failed appends
+  retry, oversized events are retained as dead letters, and operators can
+  inspect dead-letter counts without exposing event payloads (#5323).
+- **Proposal operations and eval evidence.** RFC 0249 proposal operations
+  (#5168, #5173), RFC 0244 eval counters and isolated memory (#5225, #5291),
+  RFC 0251 regression-baseline selection (#5256), and RFC 0252 fixtures from
+  recorded runs (#5261). Conformance is pinned to 2.46.33 (#5313).
+- **Eval leaderboard and arena (ADR 0986).** Server-attributed results and
+  run-bound, credential-bound comparisons replace client-supplied claims (#5282).
+- **Chat and agent tools.** Per-workspace multi-tab chat with protected busy
+  tabs (#5231, #5237), scoped agent knowledge (#5234), personal chat-memory
+  extraction (#5250), and scheduled chats using the job's real state (#5270).
+- **Campaign collaboration (ADR 0958).** Client approver grants, vendor asset
+  intake, a ClamAV upload scanner, and collaborator erasure that anonymizes
+  accepted files while respecting legal holds (#5268, #5276, #5303, #5309).
+- **Funnels and experiments (ADRs 0948–0949).** Lead-magnet and tripwire
+  blueprints, post-purchase offers, campaign-bound publishing, persisted step
+  experiment pointers, and journey splits (#5255, #5293, #5296, #5307,
+  #5254, #5253, #5257, #5288).
+- **Managed tier selection (ADR 0990).** The site owner can select its provider
+  and model in the managed-tier administration surface (#5285, #5305).
+- **Creative fidelity judge check (ADR 0945 P2).** Workspace admins can test
+  their chosen BYOK vision model against four synthetic product edits and see
+  which changes it detected. The check uses the production judge, bounds provider
+  calls and stops on provider failure (#5316). This does not certify a model's
+  accuracy on the workspace's own product images. Provider failures now report a
+  bounded diagnostic code (#5340).
+- **Chat export and import (ADR 0992).** Exports preserve message roles and
+  content, imports are visibly identified and cannot impersonate native system
+  messages, and archive selection uses the current conversation's permissions
+  (#5312).
+- **Team prompt library (ADR 0993).** Workspace members can manage library
+  entries; private entries remain owner-only, tenant templates survive restarts,
+  and `/p-<slug>` inserts text into the invoking composer for review before sending
+  (#5329). Portability exports and erasure respect private ownership.
+- **Collaborator operations (ADR 0958).** The client Collaborators panel,
+  activity review, expiration notices and archive-time suspension share the live
+  grant rules (#5331–#5336, #5341, #5343). The collaboration feature remains
+  behind its existing toggle; upgrading does not enable it.
+- **Email routing and SES feedback (ADR 0994).** Operators can prefer separate
+  providers for transactional and marketing messages. SES uses the existing SMTP
+  Connection; signed SNS bounce/complaint notifications update suppression
+  (#5339). Existing single-provider connections continue to work.
+- **Bounded code execution (ADR 0995).** Workflow reviews show the submitted
+  program and can complete their gate; sandbox memory, scratch space, output and
+  concurrency have explicit limits, and execution reserves budget before running
+  (#5346). Production WASI execution requires explicit operator opt-in.
+- **Operator and CI tooling.** Upgrade planning, portable adopter-owned browser
+  baselines, adaptive CI width, batch branches, Tracegate red-reader packets,
+  and the advisory cross-machine release bus (#5185, #5279, #5326, #5181,
+  #5214, #5274, #5295, #5302). Deploys, configuration updates and certification
+  cuts now queue only when their configured targets overlap; waits are bounded
+  and fail open, while gates and releases to different targets proceed (#5319).
+
+### Fixed
+
+- Vector/search workflow calls accept the published pack argument names before
+  applying the reserved workflow namespace; canonical arguments take precedence
+  and conflicting aliases are removed (#5354).
+- CI tooling isolates its fixture processes, avoids accidental dependency installs
+  from a progress banner, and reports advisory browser failures separately.
+  Configured merge trains retain gate evidence for the exact candidate tree
+  (#5292). Tracegate records import-time work separately in its boot shadow
+  measurements (#5320). Live CI claims survive an unreadable process-start
+  timestamp, and preflight fixtures use an isolated marker store. Tracegate
+  checks global invalidations before per-file inputs (#5330).
+- Merge trains reject PR heads that changed after gating. Required and advisory
+  browser runs preserve separate failure artifacts, and deployment diagnostics
+  distinguish historical job activity from measured revision drain (#5337, #5342).
+- The desktop client uses Electron 45 and electron-builder 26.18 (#5183).
+- Upgrade plans put required configuration before starting the new version,
+  so operators can satisfy the startup checks before the backend boots.
+- A malformed chat import returns `400 validation_error` instead of 500 (#5301).
+- `/privacy` redirects to the brand's configured privacy policy (#5314).
+- Stream and SPA run IDs use the run's tenant, preventing request-scope tenant
+  mismatches (#5299, #5236). Node outputs containing NUL can be stored, and a
+  starter-dispatch exception marks its run failed (#5300).
+- KickTodo's operator can use the Challenge Author chat; Factory plans must
+  cite evidence before building lessons (#5289, #5235).
+- Public author bylines omit unidentified authors and the system site's byline
+  uses the host operator (#5277, #5278).
+- White-label deployment checks preserve the adopter's hosting target and
+  branding defaults (#5224, #5238). The registry's connection-pack revisions
+  are synchronized (#5241).
+
+### Security
+
+- **OpenSearch physical names.** Tenant and index segments use separate encoded
+  components instead of lossy lowercase replacement, separating the previously
+  colliding ASCII names and preserving the workflow boundary (#5355). Existing
+  OpenSearch deployments need a reviewed rebuild; see the upgrade warning below.
+- **Workflow storage isolation (ADR 0998).** Workflow nodes use a reserved `wf:`
+  namespace for vector, search, NoSQL and blob storage. Host features cannot use
+  that namespace, and workflows cannot address host-owned data through these
+  surfaces (#5351). Existing workflow-written data needs an operator-reviewed
+  transition; see the upgrade warning below.
+- **Conversation search privacy (ADR 0997).** Search reads messages from the
+  durable conversation store after checking current conversation visibility,
+  then applies the same message projection as chat. It removes the derived
+  tenant-wide search index and purges its legacy rows (#5349). Results identify
+  when the bounded candidate scan was truncated; SQLite's case-insensitive
+  matching remains limited to its native `LIKE` behavior.
+- **Chat artifact visibility (ADR 0996).** Artifacts created by chat tools follow
+  the originating conversation's current visibility. Outputs without a
+  conversation are readable only by their bound user; anonymous outputs remain
+  unreadable. Code results and interactive artifacts no longer inherit a wider
+  workspace audience (#5347).
+- **Prompt-template tenancy (ADR 0993).** User templates belong to one tenant
+  and persist in storage; reads preserve existing `Vary` headers (#5324).
+- **Superadmin MFA and enrollment.** A required second factor, QR enrollment,
+  correct otpauth encoding, and a single-factor backup guard (#5158, #5156,
+  #5157, #5159, #5171).
+- Authorization, erasure and reference checks are tightened across campaign
+  collaboration, agent memory, commerce account ownership and run approvals
+  (#5248, #5234, #5255, #5090). The DSAR matcher covers the doubled legacy
+  subject spelling (#5306).
+- Dependency advisory fixes include body-parser, undici and Azure MSAL
+  (#5164, #5165, #5192, #5233).
+
+#### Upgrading from 0.7.x
+
+- **No required stop; rolling-safe schema.** Back up the database before an
+  upgrade. Schema sqlite 51 / postgres 49 adds a nullable `runs.admission_key`
+  column and its `(admission_key, status)` index, without a backfill. App
+  migrations remain at 24. A breaking configuration decision can be made before the
+  deploy and does not require stopping on this version before later upgrades.
+- **Plan the index build.** PostgreSQL's normal boot migration uses a plain
+  `CREATE INDEX`, which blocks writes to `runs` while scanning it. Measure the
+  table and active transactions first. For a large database, arrange the nullable
+  column addition and a concurrent index build before starting the new binary;
+  verify the index is valid, not merely present. Keep the schema-version marker
+  managed by the migration runner. Measure old-revision drain before claiming
+  fleet-wide admission behavior.
+- **Preserve rollback consistency.** Follow the forward-only backup/recovery
+  policy in RELEASES.md. Dropping the new column/index alone leaves schema
+  51/49 recorded and prevents a subsequent boot from recreating them. Do not
+  manually decrement the marker or run that incomplete rollback snippet.
+- **Breaking startup requirements apply to `OPENWOP_DEPLOY_POSTURE=auth` and
+  legacy `OPENWOP_AUTH_ENFORCE_BEARER=true`.** Cookie-per-visitor and
+  bearer-shared deployments are unaffected. Only the exact value `true` counts.
+- Set `OPENWOP_AUTHORIZATION_ENFORCEMENT=true`, or explicitly accept the
+  temporary risk with `OPENWOP_ALLOW_UNENFORCED_AUTHORIZATION=true`.
+- If `OPENWOP_SUPERADMIN_TENANTS` is set, require enrolled superadmins' MFA with
+  `OPENWOP_SUPERADMIN_REQUIRE_MFA=true`, or explicitly accept the temporary
+  risk with `OPENWOP_ALLOW_SUPERADMIN_WITHOUT_MFA=true`. Enroll every listed
+  superadmin and sign in with the factor before requiring it. Break-glass
+  remains the recovery path.
+- Set these plain environment flags **before deploying**; older releases
+  ignore them. Preflight Gate 5c refuses a missing or unmeasurable decision.
+  Use incremental `scripts/update-env.sh` updates to preserve other settings.
+- To stage membership enforcement, deploy with the explicit override, allow
+  real traffic, then read the superadmin
+  `GET /host/openwop-app/operations/profile-census`. Grant the reported callers
+  the roles they need before enabling enforcement and removing the override.
+- **Postmark campaign stream:** marketing and unlabelled mail now uses
+  Postmark's Broadcast stream (default `broadcast`). Confirm that stream exists
+  on the connected server, or set `OPENWOP_POSTMARK_BROADCAST_STREAM` to its
+  existing Broadcast stream name, before upgrading. Missing streams refuse with
+  `email_stream_missing`; transactional mail remains on `outbound`. Purpose
+  preferences use `OPENWOP_EMAIL_TRANSACTIONAL_PROVIDER` and
+  `OPENWOP_EMAIL_MARKETING_PROVIDER`; unset preferences preserve the current
+  default provider. No provider Connection is created automatically.
+- **Production WASI is opt-in:** deployments that relied on the bundled runtime
+  must explicitly select `OPENWOP_CODE_EXEC_RUNTIME=wasi` to retain it. Review
+  instance memory and the documented concurrency/resource limits before enabling
+  it; merely including the WASM asset no longer activates production execution.
+- **Breaking workflow storage boundary (ADR 0998):** vector namespaces, search
+  indexes, NoSQL datasources and blob keys used by workflow nodes now resolve
+  under `wf:` internally. Node inputs and returned names remain unprefixed.
+  Previously stored, unprefixed data is not automatically moved and is no longer
+  accessible through those nodes. Before upgrading, inventory affected workflows
+  and their data, back up the relevant stores, and arrange an operator-reviewed
+  transition for data proven to belong to those workflows. Never bulk-copy host
+  feature data into `wf:`: that would expose private data to workflow runs.
+  Quiesce affected workflows during the transition; mixed old/new instances
+  address different stores. The rolling-safe declaration above covers the schema,
+  not this workflow data transition. Deployments without affected workflows need
+  no data move. No migration command is supplied or run automatically.
+- **Existing OpenSearch indexes require a rebuild (#5355).** This applies only
+  when the search adapter is OpenSearch. The new binary uses different physical
+  index names and does not read the old indexes. Inventory affected tenant/index
+  pairs, back up their data and mapping/settings, and arrange a reviewed rebuild
+  from authoritative tenant-scoped source data before switching traffic. Old
+  physical indexes may contain data from multiple logical tenant/index pairs
+  because of the previous naming collisions: do not copy an entire old index
+  into one tenant without proving every document belongs there. Quiesce affected
+  writers while transitioning and verify tenant isolation, counts and queries
+  before resuming. Preserve backups and old indexes until the reviewed rollback
+  window ends. Apply the workflow `wf:` transition as well where relevant. This
+  release supplies no automatic data migration; the rolling-safe schema claim
+  does not cover mixed-version OpenSearch reads and writes.
+- After the upgrade, verify both deployed build stamps and `/readiness`
+  reporting `version: "0.8.0"`.
+
 ## [0.7.0] — 2026-10-23
 
 PRs since v0.6.0. No schema or app migrations, rolling-safe, no required stop.

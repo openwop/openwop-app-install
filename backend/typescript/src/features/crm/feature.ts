@@ -25,6 +25,8 @@
  * on for any install that already has CRM contacts or an enabled CRM dependent.
  */
 
+import { registerSignTransactionalTemplates } from './signTemplates.js';
+import { registerBookingTransactionalTemplates } from './bookingTemplates.js';
 import type { BackendFeature } from '../types.js';
 import { registerCrmRoutes } from './routes.js';
 import { registerCrmOrgRoutes } from './orgRoutes.js';
@@ -38,10 +40,22 @@ import { registerCrmAgentTools } from './agentTools.js';
 import { onConnectionRevoked, onConnectionStatusChanged } from '../../host/connectionLifecycle.js';
 import { markGmailSyncsNeedsReconsent, pauseGmailSyncsForRevokedConnection, registerGmailSyncWorkflowFeature, resumeGmailSyncsForReconsentedConnection } from './gmailSyncService.js';
 import { registerCrmErasure } from './erasure.js';
+import { registerLeadIntelErasure } from './leadIntel/erasure.js';
+import { registerSmsSenderRoutes } from './smsSenderRoutes.js';
+import { dropSmsSendersForConnection } from './smsSenders.js';
+import { applyInboundSmsKeyword } from './smsInbound.js';
+import { registerInboundObserver, type VerifiedInboundEvent } from '../connections/inboundWebhooks.js';
+
 import { registerChainBackedWorkflow } from '../../host/chainBackedWorkflows.js';
 import { CRM_TRIAGE_WORKFLOW_ID } from './triageDispatch.js';
+import { registerLeadIntelRoutes } from './leadIntel/routes.js';
+import { GRADE_LEAD_WORKFLOW_ID, QUALIFY_LEAD_WORKFLOW_ID, ROUTE_LEAD_WORKFLOW_ID } from './leadIntel/constants.js';
+import { registerRouteLeadStarter, startRouteLeadRun } from './leadIntel/routeRun.js';
 import { registerFeatureDataExporter } from '../../host/featureDataExport.js';
 import { exportCrmData } from './dataExport.js';
+
+/** ADR 0955 D3 — the `twilio` inbound observer (a stable fn: re-registering at re-boot is a no-op). */
+const onInboundSms = async ({ tenantId, body }: VerifiedInboundEvent): Promise<void> => { await applyInboundSmsKeyword(tenantId, body); };
 
 export const crmFeature: BackendFeature = {
   id: 'crm',
@@ -56,6 +70,8 @@ export const crmFeature: BackendFeature = {
   recommends: ['commerce', 'documents'],
   registerRoutes: (deps) => {
     registerGmailSyncWorkflowFeature(); // ADR 0820 §7 / G6
+    registerSignTransactionalTemplates(); // ADR 0905 D6 — the e-sign emails' kinds
+    registerBookingTransactionalTemplates(); // ADR 0905 D6 — the booking emails' kinds
     registerCrmRoutes(deps); // preserved tenant-scoped contacts + triage (ADR 0001 §4)
     registerCrmOrgRoutes(deps); // org-scoped companies/deals/pipelines + RBAC (ADR 0008)
     registerCrmBookingRoutes(deps); // public booking links + slot claim (ADR 0402 §a)
@@ -65,12 +81,25 @@ export const crmFeature: BackendFeature = {
     registerCrmFormsSink(); // ADR 0330 §D1 — the `crm-contact` forms submission sink (crm → forms)
     registerCrmAgentTools(); // CFP-1 — sales-ops + segment-author chat tools over ctx.features.crm (ADR 0308 D2)
     registerCrmErasure(); // CRM-2 — ADR 0464 subject eraser + the email→contactId key resolver
+    registerLeadIntelErasure(); // ADR 0954 P4 — stated answers + assessments
+    // ADR 0955 D3 — SMS: the number→client bindings, and the inbound keyword ladder. The
+    // observer is UNGATED (no toggle or plan check): an opt-out applies with crm off.
+    registerSmsSenderRoutes(deps);
+    registerInboundObserver('twilio', onInboundSms); // a stable fn: re-registering at re-boot is a no-op
+    onConnectionRevoked('crm-sms-senders', async ({ tenantId, connectionId }) => { await dropSmsSendersForConnection(tenantId, connectionId); });
     registerFeatureDataExporter('crm', exportCrmData); // ADR 0820 §7 — read-only export, served after a plan lapse
     // ADR 0837 D7 — the Triage action's workflow, SAME-ID chain-backed (the
     // career.campaign precedent): the route launches it by this stable id on every
     // instance, and the chain stays gallery-visible (a from-chain copy is editable,
     // under its own id the button does not launch).
     registerChainBackedWorkflow(CRM_TRIAGE_WORKFLOW_ID, { featureId: 'crm' });
+    // ADR 0954 P1 — lead grading: the client-scoped routes, and the grading chain
+    // SAME-ID chain-backed so the route launches it by a stable id.
+    registerLeadIntelRoutes(deps);
+    registerChainBackedWorkflow(GRADE_LEAD_WORKFLOW_ID, { featureId: 'crm' });
+    registerChainBackedWorkflow(ROUTE_LEAD_WORKFLOW_ID, { featureId: 'crm' }); // ADR 0954 P2 — grade, then route
+    registerRouteLeadStarter((input) => startRouteLeadRun({ storage: deps.storage, hostSuite: deps.hostSuite }, input)); // ADR 0954 P3 — a rung-2 re-route starts a new round
+    registerChainBackedWorkflow(QUALIFY_LEAD_WORKFLOW_ID, { featureId: 'crm' }); // ADR 0954 P4 — assess, then grade
     // ADR 0285 — pause (never delete) gmail syncs when their connection is
     // revoked; the status path also disables the scheduler job.
     onConnectionRevoked('crm-gmail-sync', async ({ tenantId, connectionId }) => {
@@ -90,6 +119,18 @@ export const crmFeature: BackendFeature = {
   // proving the FeatureModule pattern generalizes. ADR 0837 D2 — the writers ask
   // what their HTTP doors ask (see CRM_SURFACE_POLICY).
   surface: { id: 'crm', build: buildCrmSurface, orgPolicy: CRM_SURFACE_POLICY },
+  // ADR 0954 (ADR 0941 D5 toggle rule) — lead intelligence is a SUB-toggle of
+  // CRM: no `dependsOn`, AND-gated with `crm` in code. v0 lead scoring stays live
+  // with it off.
+  extraToggleDefaults: [{
+    id: 'crm.lead-intelligence',
+    label: 'Lead intelligence',
+    description: 'Per-client lead scoring models with A–F grades, an AI qualifier that cites its evidence but never sets the grade, routing, and a speed-to-lead clock. Works best with Territories, the chat widget and Campaign operations turned on. A sub-capability of CRM.',
+    category: 'CRM',
+    status: 'off',
+    bucketUnit: 'tenant',
+    salt: 'crm-lead-intelligence',
+  }],
   toggleDefault: {
     id: 'crm',
     label: 'CRM',

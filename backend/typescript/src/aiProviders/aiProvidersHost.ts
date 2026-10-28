@@ -32,6 +32,8 @@
 
 import { withRunAiDefault, type RunAiDefault } from '../host/runAiDefault.js';
 import { createHash } from 'node:crypto';
+import { Resvg } from '@resvg/resvg-js';
+import { imageSize } from '../host/creativeFidelity/imageSize.js';
 import { trace, SpanStatusCode } from '@opentelemetry/api';
 import type {
   AiCallRequest,
@@ -73,7 +75,7 @@ import {
   ManagedProviderError,
 } from '../providers/managedProvider.js';
 import { dispatchSpeechMiniMax, dispatchSpeechOpenAI, dispatchSpeechGoogle, dispatchSpeechElevenLabs } from '../providers/dispatchSpeech.js';
-import { storeMediaAsset, resolveMediaAsset } from '../host/inMemorySurfaces.js';
+import { storeMediaAsset, resolveMediaAsset, type MediaAiOrigin } from '../host/inMemorySurfaces.js';
 import { AUDIO_TRANSCRIPTION_SYSTEM_PROMPT, AUDIO_TRANSCRIPTION_USER_PROMPT } from './mediaTranscriptionPrompts.js';
 import { emitCost } from '../observability/costEmitter.js';
 import { classifyProviderOutcome, recordProviderCall } from '../observability/metricSeams.js';
@@ -150,6 +152,7 @@ import {
   type RetryReason,
 } from '../host/envelopeReliabilityEmit.js';
 import { ASSET_SERVE_PATH } from '../host/assetServePath.js';
+import { listSelectableProviderIds } from '../providers/catalog.js';
 
 /**
  * Is the deterministic `mock` provider routable?
@@ -1240,10 +1243,14 @@ export function advertisedByokProviders(): string[] {
   return advertisedProviderAuthModes().byok;
 }
 
-/** Single source for discovery and run admission. MiniMax has a real BYOK
- * dispatcher; excluding it here made a valid connection unusable by runs. */
+/** Single source for the per-provider auth modes and run admission. The BYOK list
+ *  is the catalog's user-selectable providers (`!managed && !hidden`, the predicate
+ *  the SPA's Keys page uses), so a hidden provider such as MiniMax, which backs the
+ *  free tier, is never given an `apiKey` mode or admitted as a user's own run key
+ *  (ADR 0990 D6, which corrects ADR 0759). It stays in discovery's `providers[]`
+ *  (`routes/discovery.ts`), which names what the host dispatches to (RFC 0105). */
 export function advertisedProviderAuthModes(): { byok: string[]; authModes: Record<string, string[]> } {
-  return buildProviderAuthModes(['anthropic', 'openai', 'google', 'minimax'], subscriptionAdvertisedProviders());
+  return buildProviderAuthModes(listSelectableProviderIds(), subscriptionAdvertisedProviders());
 }
 
 export function buildProviderAuthModes(
@@ -1291,7 +1298,7 @@ async function callImageGenerator(
   if (provider === 'mock' && mockProviderEnabled()) {
     const images: ImageGenerationResult['images'] = [];
     for (let i = 0; i < n; i++) {
-      const stored = await storeMediaAsset(scope.tenantId, { contentBase64: MOCK_IMAGE_PNG_B64, contentType: 'image/png' });
+      const stored = await storeMediaAsset(scope.tenantId, { contentBase64: MOCK_IMAGE_PNG_B64, contentType: 'image/png', aiOrigin: aiOriginOf(scope, provider, 'mock-image-1', 'generate', { prompt: req.prompt }) });
       images.push({ url: stored.url, mimeType: 'image/png', metadata: { model: 'mock-image-1', provider, ...(req.seed != null ? { seed: req.seed } : {}) } });
     }
     return { images, totalTimeMs: Date.now() - startedAt, usage: { images: n } };
@@ -1347,7 +1354,7 @@ async function callImageGenerator(
     }), 'LLM');
     const images: ImageGenerationResult['images'] = [];
     for (const raw of raws) {
-      const stored = await storeMediaAsset(scope.tenantId, { contentBase64: raw.base64, contentType: raw.mimeType });
+      const stored = await storeMediaAsset(scope.tenantId, { contentBase64: raw.base64, contentType: raw.mimeType, aiOrigin: aiOriginOf(scope, provider, req.model, 'generate', { prompt: req.prompt }) });
       images.push({ url: stored.url, mimeType: raw.mimeType, metadata: { provider, ...(req.model ? { model: req.model } : {}), ...(req.seed != null ? { seed: req.seed } : {}) } });
     }
     await recordMediaUsage(scope.tenantId, 'images', images.length);
@@ -1391,7 +1398,7 @@ async function callImageGenerator(
     }
     const images: ImageGenerationResult['images'] = [];
     for (const raw of raws) {
-      const stored = await storeMediaAsset(scope.tenantId, { contentBase64: raw.base64, contentType: raw.mimeType });
+      const stored = await storeMediaAsset(scope.tenantId, { contentBase64: raw.base64, contentType: raw.mimeType, aiOrigin: aiOriginOf(scope, provider, req.model, 'generate', { prompt: req.prompt }) });
       images.push({ url: stored.url, mimeType: raw.mimeType, metadata: { provider, ...(req.model ? { model: req.model } : {}), ...(req.seed != null ? { seed: req.seed } : {}) } });
     }
     await recordMediaUsage(scope.tenantId, 'images', images.length);
@@ -1400,6 +1407,29 @@ async function callImageGenerator(
 
   // Honest-off: no provider wired on this host.
   throw new AiProviderError('host_capability_missing', `Image generation provider "${provider}" is not yet wired on this host.`, { provider });
+}
+
+/** Test-seam only: an input image re-rendered onto a transparent 256×256
+ *  canvas (contain fit) — the pixels survive, the bytes are new. */
+function mockCutoutPng(inputBase64: string, mimeType: string | undefined, backdrop?: string): string {
+  const href = `data:${mimeType ?? 'image/png'};base64,${inputBase64}`;
+  // Keep the input's own size (a real background removal does), so a mask or
+  // a comparison built from it lines up with the source.
+  const { w, h } = imageSize(Buffer.from(inputBase64, 'base64')) ?? { w: 256, h: 256 };
+  const bg = backdrop ? `<rect width="${w}" height="${h}" fill="${backdrop}"/>` : '';
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}">${bg}<image x="0" y="0" width="${w}" height="${h}" preserveAspectRatio="xMidYMid meet" href="${href}"/></svg>`;
+  return Buffer.from(new Resvg(svg, { font: { loadSystemFonts: false } }).render().asPng()).toString('base64');
+}
+
+/** ADR 0945 D4 — the host's own provenance record for bytes this adapter
+ *  mints, carried on the scratch asset so whoever promotes it to the library
+ *  stamps `grounding` from host truth, not from a node's claim. */
+function aiOriginOf(scope: AdapterScope, provider: string, model: string | undefined, op: string, extra: { prompt?: string | undefined; inputBase64?: string | undefined } = {}): MediaAiOrigin {
+  return {
+    provider, ...(model ? { model } : {}), op, runId: scope.runId, nodeId: scope.nodeId,
+    ...(extra.prompt ? { promptHash: createHash('sha256').update(extra.prompt).digest('hex') } : {}),
+    ...(extra.inputBase64 ? { inputSha256: createHash('sha256').update(Buffer.from(extra.inputBase64, 'base64')).digest('hex') } : {}),
+  };
 }
 
 // ── ADR 0401 P3 — the callImageGenerator siblings ───────────────────────────
@@ -1416,6 +1446,8 @@ async function dispatchImageOp(
     provider: string;
     credentialRef?: string | undefined;
     model?: string | undefined;
+    /** ADR 0945 D4 — the prompt + input bytes, hashed onto the minted asset. */
+    origin?: { prompt?: string | undefined; inputBase64?: string | undefined; mimeType?: string | undefined };
     run: (apiKey: string, signal: AbortSignal | undefined) => Promise<Array<{ base64: string; mimeType: string }>>;
   },
 ): Promise<ImageGenerationResult> {
@@ -1430,7 +1462,18 @@ async function dispatchImageOp(
     throw new AiProviderError('host_capability_missing', `Provider "${provider}" does not support image ${op}.`, { provider, op, capability: 'aiProviders.imageEdit' });
   }
   if (provider === 'mock' && mockProviderEnabled()) {
-    const stored = await storeMediaAsset(scope.tenantId, { contentBase64: MOCK_IMAGE_PNG_B64, contentType: 'image/png' });
+    // ADR 0945 P1 — the mock background removal returns the INPUT's pixels
+    // (re-encoded, so new bytes), not a constant: a constant transparent pixel
+    // made every mock cut-out an empty silhouette, which no fidelity check can
+    // pass. Deterministic; test seam only.
+    // ADR 0945 P2 — a mock inpaint "repaints the surroundings" (a flat backdrop
+    // behind the input) and leaves the product's pixels alone, so edit-mode
+    // fidelity can pass in CI.
+    const input = args.origin?.inputBase64;
+    const mockOut = input && op === 'background-remove' ? mockCutoutPng(input, args.origin?.mimeType)
+      : input && op === 'inpaint' ? mockCutoutPng(input, args.origin?.mimeType, '#9e9e9e')
+        : MOCK_IMAGE_PNG_B64;
+    const stored = await storeMediaAsset(scope.tenantId, { contentBase64: mockOut, contentType: 'image/png', aiOrigin: aiOriginOf(scope, provider, 'mock-image-1', op, args.origin) });
     return { images: [{ url: stored.url, mimeType: 'image/png', metadata: { model: 'mock-image-1', provider } }], totalTimeMs: Date.now() - startedAt, usage: { images: 1 } };
   }
   let byokKey: string | null = null;
@@ -1457,7 +1500,7 @@ async function dispatchImageOp(
   }
   const images: ImageGenerationResult['images'] = [];
   for (const raw of raws) {
-    const stored = await storeMediaAsset(scope.tenantId, { contentBase64: raw.base64, contentType: raw.mimeType });
+    const stored = await storeMediaAsset(scope.tenantId, { contentBase64: raw.base64, contentType: raw.mimeType, aiOrigin: aiOriginOf(scope, provider, args.model, op, args.origin) });
     images.push({ url: stored.url, mimeType: raw.mimeType, metadata: { provider, ...(args.model ? { model: args.model } : {}) } });
   }
   await recordMediaUsage(scope.tenantId, 'images', images.length);
@@ -1487,6 +1530,7 @@ async function callImageEditor(scope: AdapterScope, req: ImageEditRequest): Prom
     op, provider,
     ...(req.credentialRef ? { credentialRef: req.credentialRef } : {}),
     ...(req.model ? { model: req.model } : {}),
+    origin: { prompt: req.prompt, inputBase64: req.imageBase64, mimeType },
     run: (apiKey, signal) => {
       const common = { apiKey, imageBase64: req.imageBase64, mimeType, op, prompt: req.prompt, maskBase64: req.maskBase64, model: req.model, signal };
       return provider === 'openai' ? dispatchImageEditOpenAI(common) : dispatchImageEditReplicate(common);
@@ -1510,6 +1554,7 @@ async function callImageUpscaler(scope: AdapterScope, req: ImageUpscaleRequest):
     op: 'upscale', provider,
     ...(req.credentialRef ? { credentialRef: req.credentialRef } : {}),
     ...(req.model ? { model: req.model } : {}),
+    origin: { inputBase64: req.imageBase64 },
     run: (apiKey, signal) => dispatchImageUpscaleReplicate({ apiKey, imageBase64: req.imageBase64, mimeType, scale: req.scale, model: req.model, signal }),
   });
 }
@@ -1537,7 +1582,7 @@ async function callVideoGenerator(
 
   // Deterministic mock (test seam only — DEFENSE-IN-DEPTH like image-gen).
   if (provider === 'mock' && mockProviderEnabled()) {
-    const stored = await storeMediaAsset(scope.tenantId, { contentBase64: MOCK_MP4_B64, contentType: 'video/mp4' });
+    const stored = await storeMediaAsset(scope.tenantId, { contentBase64: MOCK_MP4_B64, contentType: 'video/mp4', aiOrigin: aiOriginOf(scope, provider, req.model, 'text-to-video', { prompt: req.prompt }) });
     return { video: { url: stored.url, durationSeconds, width, height, mimeType: 'video/mp4', safetyFiltered: false, metadata: { provider, ...(req.model ? { model: req.model } : {}) } }, totalTimeMs: Date.now() - startedAt, usage: { videos: 1 } };
   }
 
@@ -1606,7 +1651,7 @@ async function callVideoGenerator(
     }
     throw new AiProviderError('provider_unavailable', err instanceof Error ? err.message : 'video dispatch failed', { provider });
   }
-  const stored = await storeMediaAsset(scope.tenantId, { contentBase64: raw.base64, contentType: raw.mimeType });
+  const stored = await storeMediaAsset(scope.tenantId, { contentBase64: raw.base64, contentType: raw.mimeType, aiOrigin: aiOriginOf(scope, provider, req.model, 'text-to-video', { prompt: req.prompt }) });
   await recordMediaUsage(scope.tenantId, 'video', 1);
   return {
     video: {

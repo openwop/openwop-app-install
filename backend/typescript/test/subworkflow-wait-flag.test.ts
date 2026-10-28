@@ -14,15 +14,21 @@ import type { NodeContext } from '../src/executor/types.js';
 
 beforeAll(() => { ensureNodesRegistered(); });
 
+/** A fully typed context: every REQUIRED `NodeContext` member, no cast. The
+ *  node must refuse before it reaches any of the optional host surfaces. */
 function ctx(config: Record<string, unknown>): NodeContext {
+  let seq = 0;
   return {
     runId: 'run-wff',
     nodeId: 'n1',
     tenantId: 't-wff',
     inputs: {},
     config,
-    emit: async () => undefined,
-  } as unknown as NodeContext;
+    configurable: {},
+    attempt: 1,
+    secrets: {},
+    emit: async () => ({ eventId: `ev-${++seq}`, sequence: seq }),
+  };
 }
 
 describe('core.subWorkflow — waitForCompletion flag honesty', () => {

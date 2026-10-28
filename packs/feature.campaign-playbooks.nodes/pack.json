@@ -1,0 +1,43 @@
+{
+  "name": "feature.campaign-playbooks.nodes",
+  "version": "1.0.0",
+  "kind": "node",
+  "description": "Campaign playbooks node pack (ADR 0959). Read-only: `read-installation` (which playbook version a client runs, its rollout ring and install history) and `effective-config` (the values the client's installation runs with \u2014 the playbook's defaults, then the agency's, then the client's \u2014 and its slot bindings), over ctx.features['campaign-playbooks']. Every read is bound to the run's client. Rollouts are human-initiated; no node moves one.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": [
+    "feature",
+    "campaign-studio",
+    "campaign-playbooks",
+    "agency"
+  ],
+  "engines": {
+    "openwop": ">=1.0.0 <3.0.0"
+  },
+  "nodes": [
+    {
+      "typeId": "feature.campaign-playbooks.nodes.read-installation",
+      "version": "1.0.0",
+      "label": "Playbooks: Read installation",
+      "description": "Which version of a playbook this client runs, its rollout ring and its install history. Read-only, bound to the run's client. Inputs: { orgId, playbookId }. Output: { installed, playbookId?, version?, ring?, workflowId?, installedVersions? }.",
+      "category": "data",
+      "role": "read",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.campaign-playbooks.nodes.effective-config",
+      "version": "1.0.0",
+      "label": "Playbooks: Effective values",
+      "description": "The values this client's installation runs with \u2014 the playbook's defaults, then the agency's, then the client's \u2014 and its slot bindings. Read-only, bound to the run's client. Inputs: { orgId, playbookId }. Output: { version, params, slots }.",
+      "category": "data",
+      "role": "read",
+      "capabilities": []
+    }
+  ],
+  "runtime": {
+    "language": "javascript",
+    "format": "esm",
+    "entry": "./index.mjs",
+    "minRuntimeVersion": "node>=20"
+  }
+}

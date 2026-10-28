@@ -2735,6 +2735,10 @@ a.muted:hover { color: var(--ink); }
 
 /* RUN-1 — small-screen heads-up banner: the canvas still renders, this just
  * warns it is best used on a larger screen. Hidden above ~600px (CSS-gated). */
+/* ADR 0960 D3 — the builder canvas, read-only, inside a campaign's Command
+ * section: a bounded flex box so the canvas (flex: 1) has a height to fill. */
+.run-graph-view { display: flex; flex-direction: column; block-size: 32rem; min-block-size: 0; border: 1px solid var(--rule); border-radius: var(--radius); overflow: hidden; }
+
 .builder-canvas-mobilehint {
   display: none;
   position: absolute;
@@ -3068,7 +3072,6 @@ button.btn-ghost.is-active:hover { background: var(--clay-soft); color: var(--cl
 /* Memory ledger (A3) */
 /* (.memory-table table styling removed — RunMemoryPanel now uses <DataTable>;
  *  the row + per-cell classes below are still used by it + MemoryInspectorPage.) */
-.memory-row-mine { background: color-mix(in oklab, var(--clay) 8%, transparent); }
 .memory-content { white-space: pre-wrap; word-break: break-word; }
 .memory-tags { display: flex; flex-wrap: wrap; gap: var(--space-1); }
 .memory-tag {
@@ -7459,9 +7462,16 @@ a.btn-accent-solid:hover { color: var(--color-on-scrim); }
    narrow dialog instead of collapsing to cramped thirds. */
 .chansched-cad { flex: 1 1 8rem; }
 /* ADR 0206 D5 — the "New messages" divider (a hairline rule + label + summarize). */
-.msgfeed-unread-divider { display: flex; align-items: center; gap: var(--space-2); margin: var(--space-3) 0 var(--space-2); padding: 0 var(--space-2); }
-.msgfeed-unread-divider::before, .msgfeed-unread-divider::after { content: ''; flex: 1; height: 1px; background: var(--clay-rule); }
+.msgfeed-unread-divider, .msgfeed-imported-divider { display: flex; align-items: center; gap: var(--space-2); margin: var(--space-3) 0 var(--space-2); padding: 0 var(--space-2); }
+.msgfeed-unread-divider::before, .msgfeed-unread-divider::after, .msgfeed-imported-divider::before, .msgfeed-imported-divider::after { content: ''; flex: 1; height: 1px; background: var(--clay-rule); }
 .msgfeed-unread-label { flex: 0 0 auto; font-size: var(--text-eyebrow); font-weight: var(--weight-head); text-transform: uppercase; letter-spacing: 0.5px; color: var(--clay-text); }
+/* ADR 0992 D9 — the note after an imported block: a sentence, so not the eyebrow caps. */
+.msgfeed-imported-note { flex: 0 1 auto; font-size: var(--text-sm); color: var(--ink-3); text-align: center; }
+/* ADR 0992 D9 — the ChatGPT-archive picker's rows. */
+.import-archive-list { list-style: none; margin: var(--space-3) 0 0; padding: 0; max-height: 50vh; overflow-y: auto; display: flex; flex-direction: column; gap: var(--space-1); }
+.import-archive-row { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-1); width: 100%; text-align: start; padding: var(--space-2) var(--space-3); border-radius: var(--radius-lg); background: transparent; color: var(--ink); border: 1px solid var(--clay-rule); cursor: pointer; }
+.import-archive-row:hover { background: var(--paper-2); border-color: var(--clay-rule); color: var(--ink); }
+.import-archive-title { font-weight: var(--weight-head); overflow-wrap: anywhere; }
 
 /* ADR 0195 — message affordances: reaction chips (persistent, mine = clay
    ring), the tombstone placeholder, the edited marker, and the inline edit
@@ -7473,7 +7483,7 @@ a.btn-accent-solid:hover { color: var(--color-on-scrim); }
 .msgbubble-reaction-chip.is-static { cursor: default; } /* CH2UX-2 — read-only viewer: counts, not a toggle */
 .msgbubble-reaction-count { font-family: var(--mono); font-size: var(--text-eyebrow); font-variant-numeric: tabular-nums; }
 .msgbubble-tombstone { font-size: var(--text-sm); font-style: italic; color: var(--ink-3); padding: var(--space-1) var(--space-2); }
-.msgbubble-edited { font-size: var(--text-eyebrow); margin-left: var(--space-1); }
+.msgbubble-edited, .msgbubble-imported { font-size: var(--text-eyebrow); margin-left: var(--space-1); }
 /* VOXUX-1 — spoken-turn provenance marker (mic glyph + label; same quiet register as the edit marker). */
 .msgbubble-voicemark { display: inline-flex; align-items: center; gap: 3px; font-size: var(--text-eyebrow); margin-left: var(--space-1); }
 .msgbubble-edit-input { width: 100%; font-size: var(--text-sm); }
@@ -9391,7 +9401,10 @@ button.teampage-skill-chip:not(:disabled):hover { background: var(--clay-soft); 
 
 /* ── Steps (Author / Run / Govern) ──────────────────────────────────────── */
 .fp-steps__list { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--space-5); }
-.fp-step { display: grid; grid-template-columns: auto 1fr; gap: var(--space-4); align-items: start; }
+/* align-content: start keeps the rows at content height. Each step stretches to
+   the tallest in its row, and without it the spare height was shared between
+   the rows, so a one-line title sat lower than its two-line neighbours. */
+.fp-step { display: grid; grid-template-columns: auto 1fr; gap: var(--space-4); align-items: start; align-content: start; }
 .fp-step__num { font-family: var(--mono); font-size: 26px; font-weight: var(--weight-emphasis); color: var(--clay-text); line-height: 1; padding-top: 2px; }
 .fp-step__title { margin: 0 0 var(--space-2); font-family: var(--sans); font-weight: var(--weight-head); font-size: var(--text-title); color: var(--ink); }
 .fp-step__text { margin: 0; font-size: var(--text-body); line-height: var(--leading-prose); color: var(--ink-2); }
@@ -9660,6 +9673,11 @@ button.teampage-skill-chip:not(:disabled):hover { background: var(--clay-soft); 
 .visitor-consent__title { margin: 0; font-size: var(--text-body); font-weight: var(--weight-head); }
 .visitor-consent__body, .visitor-consent__state { margin: 0; font-size: var(--text-sm); line-height: 1.5; color: var(--ink-2); }
 .visitor-consent__actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.visitor-consent__replay { display: flex; align-items: flex-start; gap: var(--space-2); margin: 0; font-size: var(--text-sm); line-height: 1.5; color: var(--ink-2); }
+.visitor-consent__replay input { margin-top: 3px; }
+.visitor-consent__replay-label { color: var(--ink); font-weight: var(--weight-head); }
+.heatmap-grid { display: block; width: 100%; max-width: 320px; aspect-ratio: 3 / 5; border: 1px solid var(--rule); border-radius: var(--radius-lg); background: var(--paper-2); }
+.heatmap-meter { width: 100%; max-width: 240px; }
 .visitor-consent__actions > button { flex: 1 1 8rem; }
 .visitor-consent__actions > .visitor-consent__close { flex: 0 0 auto; }
 .visitor-consent__footer-btn { min-height: 24px; background: none; border: 0; padding: 0; font: inherit; color: inherit; letter-spacing: inherit; text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
@@ -13446,3 +13464,7 @@ a.dash-activity__row:hover .dash-activity__name { color: var(--clay-text); text-
   .fp-plan__bubble { position: static; justify-self: end; margin-bottom: var(--space-3); }
   .fp-plan { display: grid; padding-top: 0; }
 }
+
+/* ADR 0997 D5 — the matched words in a conversation-search snippet. A wash, not
+   a colour change, so the match reads in both themes without relying on hue. */
+.search-hit-mark { background: color-mix(in oklab, var(--clay) 24%, transparent); color: inherit; border-radius: 2px; padding: 0 1px; }

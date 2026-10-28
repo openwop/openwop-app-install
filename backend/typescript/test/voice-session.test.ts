@@ -8,6 +8,27 @@
  * real `voice.*` turn: open → append utterance chunks → commit → CORE
  * `callTranscriber({audio:{streamRef}})` reads the buffer through the
  * `StreamAudioResolver` seam and emits the canonical taxonomy.
+ *
+ * Isolation: a second configured key (`k-voice-b` → tenant `voice-b`) is the
+ * cross-tenant caller, so the "collapses cross-tenant" case uses a REAL session
+ * of another tenant, not just a missing id. Every case seeds its own agent
+ * profiles (no case depends on another's writes; shuffle-safe).
+ * The session read (`getOpenVoiceSession`) fences a foreign caller THREE ways —
+ * the tenant-keyed lookup, the row's `tenantId`, and the opener `subject` — and
+ * the stream buffer re-checks its tenant on append. A single weakened check
+ * stays green by design; the cross-tenant case is witnessed by removing the
+ * lookup key and both row checks together (probe vo-crosstenant-r2), which
+ * leaves only the buffer's "Voice stream not found." and so fails the literal.
+ *
+ * What the barge-in cases do NOT test: the §F "no synthesis_chunk after the
+ * cancel" guard lives in `/speak` (it drops a reply superseded mid-synthesis);
+ * the `/barge-in` response is a fixed two-event lifecycle, so asserting "no
+ * synthesis_chunk" on it cannot fail. Those cases pin the lifecycle and that
+ * the in-flight turn is cancelled.
+ * Witnessed (grade-tests w63): client voiceId preferred → both W6 cases red;
+ * per-turn agentId ignored → the board-voice cases red; the buffer tenant check
+ * or budget removed → the budget case red; a trusted transcript → the commit
+ * case red; a no-op session close → the end-session case red.
  */
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -24,7 +45,10 @@ import { upsertAgentProfile } from '../src/host/agentProfileService.js';
 let BASE: string;
 let server: http.Server;
 const H = { authorization: 'Bearer dev-token', 'content-type': 'application/json' };
-const post = (path: string, body?: unknown) => fetch(`${BASE}${path}`, { method: 'POST', headers: H, body: body === undefined ? undefined : JSON.stringify(body) });
+const H_OTHER = { authorization: 'Bearer k-voice-b', 'content-type': 'application/json' };
+const post = (path: string, body?: unknown, headers: Record<string, string> = H) => fetch(`${BASE}${path}`, { method: 'POST', headers, body: body === undefined ? undefined : JSON.stringify(body) });
+const ENV_KEYS = ['OPENWOP_STORAGE_DSN', 'OPENWOP_AUTH_DISABLE_COOKIES', 'OPENWOP_TEST_SEAM_ENABLED', 'OPENWOP_VOICE_MOCK', 'OPENWOP_API_KEYS'] as const;
+const savedEnv: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {};
 const del = (path: string) => fetch(`${BASE}${path}`, { method: 'DELETE', headers: H });
 const SESS = '/host/openwop-app/voice/session'; // ADR 0812 P3b: a migrated family
 const b64 = (n: number, fill = 0x61) => Buffer.alloc(n, fill).toString('base64');
@@ -37,6 +61,8 @@ type VoiceEvent = { type: string; payload: Record<string, unknown> };
 type CommitOk = { finalText: string; atMs: number; events: VoiceEvent[]; nextStreamRef: string; turns: number };
 
 beforeAll(async () => {
+  for (const k of ENV_KEYS) savedEnv[k] = process.env[k];
+  process.env.OPENWOP_API_KEYS = 'dev-token:*,k-voice-b:voice-b';
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   process.env.OPENWOP_TEST_SEAM_ENABLED = 'true';
@@ -45,8 +71,7 @@ beforeAll(async () => {
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
 });
 afterAll(async () => {
-  delete process.env.OPENWOP_TEST_SEAM_ENABLED;
-  delete process.env.OPENWOP_VOICE_MOCK;
+  for (const k of ENV_KEYS) { const v = savedEnv[k]; if (v === undefined) delete process.env[k]; else process.env[k] = v; }
   await __clearToggleStore();
   await new Promise<void>((res) => server.close(() => res()));
 });
@@ -108,8 +133,30 @@ describe('ADR 0138 P1 — live voice mode routes', () => {
 
   it('404s append/commit on an unknown session (§F — collapses cross-tenant, no existence oracle)', async () => {
     await setVoice('on');
-    expect((await post(`${SESS}/does-not-exist/audio`, { audioChunk: b64(8) })).status).toBe(404);
+    const missingAppend = await post(`${SESS}/does-not-exist/audio`, { audioChunk: b64(8) });
+    expect(missingAppend.status).toBe(404);
+    const NOT_FOUND = { error: 'not_found', message: 'Voice session not found.' };
+    const missing = await missingAppend.json() as { error?: string; message?: string };
+    expect({ error: missing.error, message: missing.message }).toEqual(NOT_FOUND);
     expect((await post(`${SESS}/does-not-exist/commit`, {})).status).toBe(404);
+
+    // A REAL session of tenant `default`, addressed by tenant `voice-b`: the same
+    // 404 body as a missing id (no existence oracle), and nothing is appended.
+    const open = await (await post(SESS, {})).json() as { session: { sessionId: string } };
+    const id = open.session.sessionId;
+    const foreignAppend = await post(`${SESS}/${id}/audio`, { audioChunk: b64(16) }, H_OTHER);
+    expect(foreignAppend.status).toBe(404);
+    // Compared against a LITERAL body (both sides would move together if one
+    // route's refusal were compared with the other's); `details.sessionId`
+    // echoes the requested id, so it is excluded.
+    const foreign = await foreignAppend.json() as { error?: string; message?: string };
+    expect({ error: foreign.error, message: foreign.message }).toEqual(NOT_FOUND);
+    expect((await post(`${SESS}/${id}/commit`, {}, H_OTHER)).status).toBe(404);
+    // Positive control: the owner's session is intact and empty (the foreign
+    // chunk never landed), so the owner's commit is the empty-utterance 400.
+    const ownerCommit = await post(`${SESS}/${id}/commit`, {});
+    expect(ownerCommit.status).toBe(400);
+    expect(errorCodeOf(await ownerCommit.json())).toBe('invalid_request');
   });
 
   it('fails closed past the per-utterance audio budget (§F TDoS) — unit, below the body-parser limit', () => {
@@ -160,18 +207,18 @@ describe('ADR 0138 P2 — full-duplex: speak (TTS-out) + barge-in (§F)', () => 
     expect((await res.json() as { error?: string }).error).toBe('validation_error');
   });
 
-  it('barge-in emits voice.barge_in → voice.cancelled with NO synthesis_chunk after the cancel (§F no-partial-leak)', async () => {
+  it('barge-in emits voice.barge_in → voice.cancelled (reason barge_in) and cancels the in-flight reply turn', async () => {
     const id = await openSession();
-    await post(`${SESS}/${id}/speak`, { text: 'A long-winded answer the user cuts off…' });
+    const spoke = await (await post(`${SESS}/${id}/speak`, { text: 'A long-winded answer the user cuts off…' })).json() as { turnId: string };
     const res = await post(`${SESS}/${id}/barge-in`, { atMs: 500 });
     expect(res.status).toBe(200);
     const j = await res.json() as { events: VoiceEvent[]; cancelledTurn: string | null };
-    const types = j.events.map((e) => e.type);
-    expect(types).toEqual(['voice.barge_in', 'voice.cancelled']);
-    // No audio crosses the wire after the cancel.
-    expect(types).not.toContain('voice.synthesis_chunk');
+    // Exactly the two-event lifecycle (the response is fixed; see the header for
+    // why "no synthesis_chunk" is not asserted here).
+    expect(j.events.map((e) => e.type)).toEqual(['voice.barge_in', 'voice.cancelled']);
     expect(j.events.find((e) => e.type === 'voice.cancelled')?.payload.reason).toBe('barge_in');
-    expect(j.cancelledTurn).toBeTruthy();
+    // The turn cancelled is the reply that was in flight.
+    expect(j.cancelledTurn).toBe(spoke.turnId);
   });
 
   it('uses the per-agent voice (agentProfile.configParameters.voice.voiceId) for the spoken reply', async () => {
@@ -250,6 +297,12 @@ describe('ADR 0138 P2 — full-duplex: speak (TTS-out) + barge-in (§F)', () => 
 
   it('ADR 0304 P1: W6 holds per speaker — a client voiceId cannot override the named speaker’s configured voice', async () => {
     await setVoice('on');
+    // Self-contained (this used to rely on the previous case's profile).
+    await upsertAgentProfile('default', 'advisor-ada', {
+      roleKey: 'worker',
+      configParameters: { voice: { voiceId: 'ada-voice' } },
+      autonomy: { specLevel: 'draft-only' },
+    });
     const open = await (await post(SESS, {})).json() as { session: { sessionId: string } };
     const res = await post(`${SESS}/${open.session.sessionId}/speak`, { text: 'Hi.', agentId: 'advisor-ada', voiceId: 'client-voice' });
     expect(res.status).toBe(200);

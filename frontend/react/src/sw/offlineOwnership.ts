@@ -8,6 +8,7 @@
  * start_url, shape) fail the build itself (`scripts/gen-service-worker.mjs`).
  */
 import type { FrontendFeature } from '../features/registry.js';
+import type { FeatureOffline } from './offlineTypes.js';
 
 /** The literal part of a react-router path: the segments before the first `:param` or `*`. */
 export function staticPrefix(routePath: string): string {
@@ -30,6 +31,28 @@ export function navigationOwnershipErrors(feature: Pick<FrontendFeature, 'id' | 
     const owned = prefixes.some((p) => nav === p || nav.startsWith(`${p}/`))
       || (feature.publicRoutes ?? []).some((r) => r.match(nav));
     if (!owned) errors.push(`${feature.id}: navigation ${nav} is not under one of its own routes`);
+  }
+  return errors;
+}
+
+/** ADR 0873 D1 + P24 — error strings where the build's `offline.ts` declarations
+ *  (`fromFiles`) and the runtime `FrontendFeature.offline` values (`fromRuntime`)
+ *  disagree. A runtime value needs its file and must be that file's value. A file
+ *  may stay build-only (runtime unset) unless it sets `entitlement`, the only part
+ *  the runtime reads (`registry.ts` `featureRoutes`, `lastKnownEntitlementFeatureIds`). */
+export function declarationParityErrors(
+  fromFiles: ReadonlyMap<string, FeatureOffline>,
+  fromRuntime: ReadonlyMap<string, FeatureOffline>,
+): string[] {
+  const errors: string[] = [];
+  for (const id of fromRuntime.keys()) if (!fromFiles.has(id)) errors.push(`${id}: offline is set but the build reads no offline.ts`);
+  for (const [id, offline] of fromFiles) {
+    const runtime = fromRuntime.get(id);
+    if (runtime === undefined) {
+      if (offline.entitlement !== undefined) errors.push(`${id}: offline.ts sets entitlement, so FrontendFeature.offline must be set`);
+    } else if (runtime !== offline) {
+      errors.push(`${id}: FrontendFeature.offline is not the offline.ts value`);
+    }
   }
   return errors;
 }

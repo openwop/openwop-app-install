@@ -13,6 +13,7 @@ import { useConfirmDiscardUnsaved } from '../ui/useUnsavedChangesWarning.js';
 import type { TFunction } from 'i18next';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { checkAgent, deleteRosterEntry, updateRosterEntry, getAgentProfile } from './rosterClient.js';
+import { heartbeatReasonText } from './heartbeatReason.js';
 import { loadAgentView, statusMeta, relativeTime, type AgentView } from './agentViewModel.js';
 import { workflowName, roleThemeForAgent } from './roleTemplates.js';
 import { PlayIcon, ColumnsIcon, AlertIcon, PinIcon, CheckIcon, ChevronDownIcon, ArrowLeftIcon, PencilIcon } from '../ui/icons/index.js';
@@ -197,7 +198,9 @@ export function AgentWorkspacePage(): JSX.Element {
       const result = await checkAgent(view.entry.rosterId);
       setNotice(result.picked
         ? t('wsCheckPickedUp', { persona: view.entry.persona, title: result.cardTitle })
-        : t('wsNoEligible', { reason: result.reason ?? t('wsIdle') }));
+        : result.reason === 'held'
+          ? t('checkHeldNotice', { persona: view.entry.persona })
+          : t('wsNoEligible', { reason: heartbeatReasonText(t, result.reason, t('wsIdle')) }));
       await refresh();
       setBoardRefresh((n) => n + 1); // make the Board tab reflect the moved card immediately
       if (result.picked) setTab('board');

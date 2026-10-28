@@ -209,7 +209,68 @@
  *      record `createdBy`. The rows are the agency's per-client configuration and
  *      are kept; `createdBy` is tombstoned.
  */
+/*
+ *  +1 (2026-10-20, ADR 0953 P0):
+ *    + `eraseSocialPublishingSubject` — `social:post` records `createdBy` and
+ *      `approval.decidedBy`. A post is the client's content and is kept; both
+ *      people are tombstoned.
+
+ *  +1 (2026-10-20, ADR 0942 P0):
+ *    + `eraseAutonomyPolicySubject` — `autonomy:policy` (`createdBy`) and
+ *      `autonomy:binding` (`updatedBy`). The rows are the org's campaign
+ *      autonomy configuration and are kept; the actor is tombstoned.
+ *  +1 (2026-10-20, ADR 0949 P4):
+ *    + `eraseExperimentFirstExposures` — `experiments:first-exposure` rows are
+ *      keyed by a hash of the experiment salt and a unit key, and a unit key is a
+ *      subject key (session key, contact id). The row is recomputed and deleted.
+
+ *  +1 (2026-10-20, ADR 0952 D2 / P1):
+ *    + `eraseCampaignIntelSubject` — `campaign-intel:spend-cap` records `createdBy`.
+ *      A cap is the client's spend configuration and is kept; `createdBy` is
+ *      tombstoned.
+ *  Expanded (ADR 0956 P0/P1):
+ *    + `eraseCampaignIntelSubject` — `campaign-intel:utm-policy.updatedBy` and
+ *      `campaign-intel:utm-alias.createdBy`. The rows are a client org's UTM
+ *      configuration and are kept; the editor is tombstoned.
+ *    ADR 0956 P1 widens the same eraser to `campaign-intel:attribution-settings.updatedBy`.
+ *    Touch paths add NO eraser: they are computed from analytics events at read
+ *    time, so `eraseSubjectAnalytics` (already listed) is their eraser.
+ *  +1 (2026-10-20, ADR 0959 P0):
+ *    + `eraseCampaignPlaybooksSubject` — playbook drafts (`updatedBy`), versions
+ *      (`publishedBy`) and installations (`installedBy`, history `by`). The rows are the
+ *      agency's method and per-client configuration and are kept; the person is tombstoned.
+ *  +1 (2026-10-20, ADR 0946 P0):
+ *    + `eraseCampaignVariantSetSubject` — `campaign-orchestration:variantset`
+ *      version rows record `createdBy`. The rows are the org's creative record
+ *      (reviews and experiments bind to their hash) and are kept; `createdBy`
+ *      is tombstoned, which does not move the hash. The same eraser tombstones
+ *      `campaign-orchestration:campaign.createdBy`, which leaves the ADR 0464
+ *      actor-attribution debt ledger (the campaign is kept).
+ *  +1 (2026-10-20, ADR 0951 P0):
+ *    + `eraseSubjectReplays` — `analytics:replay` index rows name a visitor's
+ *      consented subject and session key, and each row points at masked blob
+ *      chunks of their visit. Both are deleted (blobs first). The same eraser runs
+ *      when the visitor withdraws `analytics.replay`.
+ *  +1 (2026-10-20, ADR 0958 P0):
+ *    + `eraseExternalCollaboratorSubject` — `extcollab:c` holds a collaborator's
+ *      email and name, bound to a canonical userId at accept. A person erased in
+ *      their HOME tenant loses every binding in every agency (read through the
+ *      cross-agency `extcollab:bound` index): the collaborator row is deleted and
+ *      its grants revoked. ADR 0958 P5 (2026-10-27) widens the SAME eraser (no
+ *      new id): the agency's own records for an email are erased too, and both
+ *      paths run the registered collaborator erase hooks first (campaign-ops:
+ *      intake rows redacted or deleted, invite link purged).
+ *  +1 (2026-10-26, ADR 0986 D6):
+ *    + `eraseArenaRaterSubject` — `evals:arena-match.raterSubject` names the
+ *      member who cast a verdict, and had no eraser. It is tombstoned to
+ *      `erased`; the verdict (workspace data about two models) is kept.
+ *  +1 (2026-10-26, ADR 0464 correction DSAR-DBL):
+ *    + `eraseManualTestRunsSubject` — `manual-tests:run` holds a tester's verdicts
+ *      and free-text notes under their subjectRef and had no eraser; the row is
+ *      deleted.
+ */
 export const EXPECTED_SUBJECT_ERASERS: ReadonlySet<string> = new Set([
+  'eraseExperimentFirstExposures',
   'commentsEraser',
   'consentSubjectEraser',
   'emailEraser',
@@ -218,14 +279,21 @@ export const EXPECTED_SUBJECT_ERASERS: ReadonlySet<string> = new Set([
   'eraseApprovalDelegations',
   'eraseApprovalHandoffSubject',
   'eraseApprovals',
+  'eraseAutonomyPolicySubject',
   'eraseAssistantSubject',
   'eraseBuilderPairSubject',
   'eraseBrandSubject',
   'eraseCalendarMcpForSubject',
   'eraseCampaignOpsSubject',
+  'eraseSocialPublishingSubject', // ADR 0953 P0
+
+  'eraseCampaignIntelSubject', // ADR 0952 D2
+  'eraseCampaignPlaybooksSubject',
   'eraseCdpCollectedEvents',
+  'eraseCampaignVariantSetSubject',
   'eraseClaudeCodeSubjectKey',
   'eraseDeveloperKeysForSubject',
+  'eraseExternalCollaboratorSubject',
   'eraseCmsSubject',
   'eraseCommerce',
   'eraseCommerceConnectSubject',
@@ -236,6 +304,7 @@ export const EXPECTED_SUBJECT_ERASERS: ReadonlySet<string> = new Set([
   'eraseConversationToolApprovalsSubject',
   'eraseCreatorSubject',
   'eraseCrmSubject',
+  'eraseLeadIntelSubject', // ADR0954 P4: frozen qualification text and visitor submissions on closed CRM primaries
   'eraseCrmTaskAssignees',
   'eraseCsmSubject',
   'eraseDashboard',
@@ -260,6 +329,8 @@ export const EXPECTED_SUBJECT_ERASERS: ReadonlySet<string> = new Set([
   'erasePromotions',
   'eraseReviewDecisions',
   'eraseSalesCommissionsSubject',
+  'eraseTopicOptOuts', // ADR 0905 D7 — consent topic opt-outs
+  'eraseClientChannelGrants', // ADR 0955 Q7 — per-client SMS consent grants
   'eraseScheduledChatsSubject',
   'eraseSharingSubject',
   'eraseSubjectAccessControl',
@@ -267,6 +338,7 @@ export const EXPECTED_SUBJECT_ERASERS: ReadonlySet<string> = new Set([
   'eraseSubjectOperatorActivations',
   'eraseSubjectAgentTwinLinks',
   'eraseSubjectAnalytics',
+  'eraseSubjectReplays', // ADR 0951 D4 — session recordings (blob chunks + index rows)
   'eraseSubjectAnswers',
   'eraseSubjectApplyGrants',
   'eraseSubjectAttestations',
@@ -296,6 +368,7 @@ export const EXPECTED_SUBJECT_ERASERS: ReadonlySet<string> = new Set([
   'eraseSubjectPendingPushes',
   'eraseSubjectPriorityMatrix',
   'eraseSubjectProjects',
+  'eraseSubjectPromptEntries',   // ADR 0993 D6 — prompt library (private entries deleted, attribution anonymized)
   'eraseSubjectProposalPolicies',
   'eraseSubjectProposals',
   'eraseSubjectReactions',
@@ -332,4 +405,8 @@ export const EXPECTED_SUBJECT_ERASERS: ReadonlySet<string> = new Set([
   'profileEraser',
   'userEraser',
   'eraseSubjectVoiceSessions',
+  // ADR 0986 D6 — the arena verdict's rater.
+  'eraseArenaRaterSubject',
+  // ADR 0464 correction 2026-10-26 (DSAR-DBL) — a manual-test run's verdicts + notes.
+  'eraseManualTestRunsSubject',
 ]);

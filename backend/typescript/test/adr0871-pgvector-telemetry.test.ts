@@ -7,6 +7,10 @@
  *     storage pool), overridable by OPENWOP_VECTOR_PG_STATEMENT_TIMEOUT_MS;
  *   - `readPgVectorStats` is null unless pgvector is selected, and maps the
  *     database's aggregate when it is.
+ *
+ * Tracker TST-BFC-5. Red when: the slow-query line carries the tenant; the
+ * threshold is ignored; the statement_timeout default or its env override is
+ * ignored; a re-registration leaves a stale stats probe.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -52,7 +56,7 @@ describe('vector_query_slow', () => {
   it('logs a slow query with no tenant or namespace', async () => {
     process.env.OPENWOP_VECTOR_QUERY_WARN_MS = '10';
     const { createPgVectorVector } = await load();
-    const v = createPgVectorVector({ tenantId: 'secret-tenant' } as never, { run: slowRunner(30), dim: 3 });
+    const v = createPgVectorVector({ tenantId: 'secret-tenant' }, { run: slowRunner(30), dim: 3 });
     await v.query({ namespace: 'secret-ns', vector: [1, 0, 0], topK: 5 });
     const lines = out.filter((l) => l.includes('vector_query_slow'));
     expect(lines).toHaveLength(1);
@@ -64,7 +68,7 @@ describe('vector_query_slow', () => {
   it('logs nothing under the threshold', async () => {
     process.env.OPENWOP_VECTOR_QUERY_WARN_MS = '5000';
     const { createPgVectorVector } = await load();
-    const v = createPgVectorVector({ tenantId: 't' } as never, { run: slowRunner(1), dim: 3 });
+    const v = createPgVectorVector({ tenantId: 't' }, { run: slowRunner(1), dim: 3 });
     await v.query({ namespace: 'n', vector: [1, 0, 0] });
     expect(out.some((l) => l.includes('vector_query_slow'))).toBe(false);
   });

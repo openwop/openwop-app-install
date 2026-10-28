@@ -224,8 +224,11 @@ for (const { file, lineNo, line } of lines) {
 // marker, which is reserved for the un-suppliable.
 // Scans EVERY steward doc, not just DATA-ASSESSMENT*: tracker hygiene is not
 // specific to data probes, and blocked checkboxes were found in CODEBASE-* too.
+// RECURSIVE: per-run trackers live in subdirectories (`workflows-assessment/`,
+// one file per /grade-workflows run since 2026-10-26), and a top-level-only read
+// let every one of them escape this rule.
 const blockedBoxes = [];
-for (const file of readdirSync(STEWARD).filter((f) => f.endsWith('.md'))) {
+for (const file of readdirSync(STEWARD, { recursive: true }).filter((f) => f.endsWith('.md'))) {
   const src = readFileSync(join(STEWARD, file), 'utf8').split('\n');
   src.forEach((line, i) => {
     if (/^\s*- \[ \]/.test(line) && line.includes('[BLOCKED')) {

@@ -14,7 +14,17 @@
  *   AEV-3/10  weight-0 criteria never reach the judge; judge failure is read from
  *        the typed `failure` field; the meter can refuse a call before it is made.
  *   EVD-3  zero paired tasks is `inconclusive`, never `unchanged`.
- *   m10  efficiency never fails a task.
+ * (m10, "efficiency never fails a task", is witnessed in `adr0889-runner-lifecycle.test.ts`.)
+ *
+ * (TST-BPA) Red when (each sabotage-witnessed, wave 65): an absent `onMiss` reads as
+ * live, `allowLive` is ignored, or the live path is never taken (B1); a consumed fixture
+ * serves again (M3); the interceptor ignores an aborted signal (WF-EV-2); a seed skips
+ * the secret scrub or loses its untrusted tag (B3); the judged output is not fenced, or
+ * disagreeing verdicts pick one (AEV-1); a weight-0 criterion is judged, the typed
+ * failure field is ignored, or the meter charges before its budget check (AEV-3/10);
+ * zero pairs reads `unchanged` (EVD-3). The lane guard's in-flight abandonment has no
+ * terminating sabotage (every one leaves the in-flight call pending), so it is held by
+ * this case's assertions without a probe.
  */
 import { describe, expect, it } from 'vitest';
 import { ephemeralMemory, fixtureInterceptor } from '../src/host/evals/agentEvalRun.js';
@@ -27,8 +37,8 @@ import type { EvalTaskDef } from '../src/host/evals/suiteStore.js';
 import type { ExecuteAgentTool } from '../src/host/agentDispatch.js';
 import { MEMORY_UNTRUSTED_TAG } from '../src/host/memoryTrust.js';
 
-function task(fixtures: Record<string, unknown> | undefined): EvalTaskDef {
-  return { taskId: 't', input: {}, expected: { kind: 'golden', match: { strategy: 'contains', value: 'x' } }, ...(fixtures ? { fixtures } : {}) } as EvalTaskDef;
+function task(fixtures: EvalTaskDef['fixtures']): EvalTaskDef {
+  return { taskId: 't', input: {}, expected: { kind: 'golden', match: { strategy: 'contains', value: 'x' } }, ...(fixtures ? { fixtures } : {}) };
 }
 
 function spyInner(): { inner: ExecuteAgentTool; calls: string[] } {
@@ -51,8 +61,10 @@ describe('B1 — a fixture miss never reaches a live tool unless a TENANT suite 
   it('absent onMiss ⇒ fail (the RFC SHOULD), even when live is allowed', async () => {
     const { inner, calls } = spyInner();
     const ic = fixtureInterceptor(task({ toolResponses: [] }), { allowLive: true, agentId: 'a' });
-    await ic.wrap(inner)(miss);
+    const out = await ic.wrap(inner)(miss);
     expect(calls).toEqual([]);
+    expect(out).toMatchObject({ isError: true, errorCode: 'fixture_miss' });
+    expect(ic.misses()).toBe(1);
   });
 
   it('a pack/fixture suite asking for live is coerced to fail (A10)', async () => {

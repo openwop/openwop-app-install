@@ -181,3 +181,36 @@ export async function getPlatformStatus(): Promise<PlatformStatus> {
   // An older backend: the ADR 0215 readers and the ADR 0297 sender.
   return { liveSync: body.liveSync ?? ['meta', 'google'], liveConversions: body.liveConversions ?? ['meta'] };
 }
+
+// ADR 0952 D6 (P7) — the product feed generated from the commerce catalog.
+export interface CatalogFeed {
+  enabled: boolean;
+  version: number;
+  contentLanguage: string;
+  feedLabel: string;
+  metaCatalogId?: string;
+  merchantAccountId?: string;
+  merchantDataSource?: string;
+  /** Present only while the feed is on. Signed; rotating replaces it. */
+  feedUrl?: string;
+  items: number;
+  excluded: Array<{ productId: string; reason: 'no_image' | 'no_price' | 'invalid_currency' }>;
+}
+export type CatalogPlatform = 'meta' | 'google';
+export type CatalogPushResult =
+  | { outcome: 'pushed'; sent: number; unchanged: number; removed: number; failed: number; failures: Array<{ id: string; op: 'upsert' | 'delete'; error: string }> }
+  | { outcome: 'unsupported' | 'no_connection' | 'disabled' }
+  | { outcome: 'not_configured'; missing: string };
+const feedPath = (orgId: string): string => `${base}/orgs/${encodeURIComponent(orgId)}/catalog-feed`;
+export async function getCatalogFeed(orgId: string): Promise<CatalogFeed> {
+  return asJson<CatalogFeed>(await fetch(feedPath(orgId), fetchOpts({ headers: authedHeaders() })), 'getCatalogFeed');
+}
+export async function saveCatalogFeed(orgId: string, input: { enabled?: boolean; metaCatalogId?: string | null; merchantAccountId?: string | null; merchantDataSource?: string | null; contentLanguage?: string; feedLabel?: string }): Promise<CatalogFeed> {
+  return asJson<CatalogFeed>(await fetch(feedPath(orgId), fetchOpts({ method: 'PUT', headers: jsonHeaders(), body: JSON.stringify(input) })), 'saveCatalogFeed');
+}
+export async function rotateCatalogFeed(orgId: string): Promise<CatalogFeed> {
+  return asJson<CatalogFeed>(await fetch(`${feedPath(orgId)}/rotate`, fetchOpts({ method: 'POST', headers: jsonHeaders() })), 'rotateCatalogFeed');
+}
+export async function pushCatalogFeed(orgId: string, platform: CatalogPlatform): Promise<CatalogPushResult> {
+  return asJson<CatalogPushResult>(await fetch(`${feedPath(orgId)}/push`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify({ platform }) })), 'pushCatalogFeed');
+}

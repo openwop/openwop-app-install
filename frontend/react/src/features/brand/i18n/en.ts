@@ -10,6 +10,7 @@ export const messages = {
   lede: 'Define how your workspace sounds — voice, formality, approved and banned phrases, positioning, and per-channel rules — then enforce it across every generated asset.',
   newBrand: 'New brand',
   loading: 'Loading brands…',
+  refreshFailedStale: 'The brand list could not be refreshed. Showing the last list that loaded.',
   loadFailed: 'Could not load brands.',
   emptyTitle: 'No brands yet',
   emptyBody: 'Define a brand once — its voice and guardrails ground every Campaign Studio asset, so campaign #2 takes minutes.',

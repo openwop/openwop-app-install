@@ -13,6 +13,17 @@
  *     never a webhook — with the durable twin as the positive control.
  *   - Registration refuses the ephemeral type and accepts the durable one.
  *   - Tenant isolation, with a positive control.
+ *
+ * Tenant isolation is a DOUBLE guard in `routes/webhooks.ts` `fanOutHostEvent`:
+ * the tenant-scoped `listWebhooks({ tenantId })` AND the in-loop
+ * `sub.tenantId !== tenantId` check. Only breaking both reds the webhook leg;
+ * the stream leg rests on `hostEventStream.ts`'s subscriber tenant filter.
+ *
+ * Tracker TST-BHE-3. Sabotage-witnessed (w62): red when the seam gate is
+ * removed, an ephemeral event is webhooked or framed with `id:`, the example
+ * types are advertised without the seams profile or the flag, registration
+ * admits an ephemeral type, or either tenant guard (both webhook guards, or the
+ * stream filter) is removed.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';
@@ -20,7 +31,7 @@ import type { AddressInfo } from 'node:net';
 import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import Ajv2020 from 'ajv/dist/2020.js';
+import { Ajv2020 } from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import type { Express } from 'express';
 import { createApp, type AppConfig } from '../src/index.js';
@@ -31,7 +42,7 @@ import type { HostEventEnvelope } from '../src/host/hostEventTypes.js';
 
 const V2 = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'schemas', 'v2');
 const AJV = new Ajv2020({ strict: false, allErrors: true });
-(addFormats as unknown as (x: unknown) => void)(AJV);
+addFormats(AJV);
 for (const f of readdirSync(V2)) {
   if (!f.endsWith('.json')) continue;
   try { AJV.addSchema(JSON.parse(readFileSync(join(V2, f), 'utf8')) as Record<string, unknown>, f); } catch { /* sibling's problem */ }
@@ -90,9 +101,12 @@ async function login(tenantId: string): Promise<string> {
   for (const c of getSetCookies(r.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) return m[1]!; }
   throw new Error('no session cookie');
 }
-async function emit(cookie: string, body: unknown, path = SEAM): Promise<{ status: number; json: any }> {
+interface EmitJson { eventId: string; error?: unknown }
+async function emit(cookie: string, body: unknown, path = SEAM): Promise<{ status: number; json: EmitJson }> {
   const r = await fetch(`${BASE}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', ...(path.startsWith('/host/') ? {} : { 'openwop-version': '2' }), cookie }, body: JSON.stringify(body) });
-  return { status: r.status, json: await r.json().catch(() => null) };
+  // A non-JSON body stays `null` (a later `.eventId` read then fails loudly).
+  const json: unknown = await r.json().catch(() => null);
+  return { status: r.status, json: json as EmitJson };
 }
 async function insertSub(id: string, tenantId: string, events: string[]): Promise<void> {
   await storage.insertWebhook({ subscriptionId: id, tenantId, url: `https://example.test/${id}`, events, secret: 's', createdAt: new Date().toISOString(), protocolMajor: 2 });
@@ -152,8 +166,12 @@ describe('RFC 0236 §G — the emit seam gate', () => {
 
   it('refuses an unadvertised type, and every type while hostEvents is not advertised', async () => {
     const cookie = await login(`org:seam-type-${n++}`);
-    expect((await emit(cookie, { type: 'example.not-advertised' })).status).toBe(400);
-    expect((await emit(cookie, { type: DURABLE, extra: 1 })).status).toBe(400);
+    const unadvertised = await emit(cookie, { type: 'example.not-advertised' });
+    expect(unadvertised.status).toBe(400);
+    expect(codeOf(unadvertised.json)).toBe('validation_error');
+    const extra = await emit(cookie, { type: DURABLE, extra: 1 });
+    expect(extra.status).toBe(400);
+    expect(codeOf(extra.json)).toBe('validation_error');
     delete process.env.OPENWOP_HOST_EVENTS_V2;
     const off = await emit(cookie, { type: DURABLE });
     expect(off.status).toBe(400);
@@ -162,7 +180,7 @@ describe('RFC 0236 §G — the emit seam gate', () => {
 });
 
 describe('RFC 0236 §G — the example.* types in the advertisement', () => {
-  const CONFIG = { serviceName: 'test', serviceVersion: '0.0.1' } as unknown as AppConfig;
+  const CONFIG: AppConfig = { port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false };
   const examples = (): Array<{ type: string; delivery: string }> =>
     ((buildV2Advertisement(CONFIG).hostEvents as { types?: Array<{ type: string; delivery: string }> } | undefined)?.types ?? [])
       .filter((t) => t.type.startsWith('example.'));

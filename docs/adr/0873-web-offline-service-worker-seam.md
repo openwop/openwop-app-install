@@ -93,6 +93,20 @@ so every rule below holds for every feature by construction.
 > A navigation is a **literal path that covers itself and everything below it**
 > (`/books` covers `/books/shelf`); params, globs, `/` and trailing slashes are
 > refused.
+>
+> > **Correction (2026-10-19, Book AI proposal P24) — a declaration may be
+> > build-only.** "The feature sets the same object on its `FrontendFeature`" is
+> > now required only when the file sets `entitlement`. The runtime reads
+> > `FrontendFeature.offline` for nothing else (`registry.ts` `featureRoutes`
+> > stamps `ownerOfflineEntitlement`; `lastKnownEntitlementFeatureIds`), and the
+> > build reads the file, so a fail-closed declaration with no `entitlement`
+> > behaves the same with the runtime field unset. Leaving it unset keeps the
+> > declaration out of the entry chunk, which matters to a distribution whose
+> > entry share is full (Book AI: 1,013 of 1,024 B). Pinned by
+> > `declarationParityErrors` (`src/sw/offlineOwnership.ts`): a runtime value
+> > still needs its file and must be that file's value, and a file with
+> > `entitlement` must be on the runtime. The ownership check (D4) takes the
+> > file's declaration when the runtime field is unset.
 
 **D2 — One worker, generated at build: `/sw.js`.**
 - **What it holds.** A Vite `generateBundle` step emits `sw.js`. It contains the push

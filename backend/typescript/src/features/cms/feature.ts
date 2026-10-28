@@ -9,6 +9,8 @@
  * (`requireOrgScope`); only the toggle gate is gone.
  */
 
+import { registerCmsExperimentSurface } from './experimentSurface.js';
+import { startLegacyCmsExperimentContract } from './pageExperimentsService.js';
 import type { BackendFeature } from '../types.js';
 import { registerCmsExperimentStampResolver } from './pageExperimentsService.js';
 import { registerCmsRoutes } from './routes.js';
@@ -20,6 +22,7 @@ import { buildCmsSurface } from './surface.js';
 import { registerContentApprovalGate } from './contentApproval.js';
 import { registerCmsAgentTools } from './agentTools.js';
 import { startCmsPublishSweep } from './publishSweep.js';
+import { registerCmsPlaybookContent } from './playbookContent.js';
 
 export const cmsFeature: BackendFeature = {
   id: 'cms',
@@ -43,6 +46,7 @@ export const cmsFeature: BackendFeature = {
     'vendor.openwop-app.cms.agents',
   ],
   registerRoutes: (deps) => {
+    registerCmsPlaybookContent(); // ADR 0959 D5 — this feature owns its playbook content kind
     // R3 (UX_UPGRADE-content known-open) — DSAR erasure; registered with the
     // routes (the documents/media precedent) so a tenant that used CMS is erasable.
     registerCmsErasure();
@@ -61,6 +65,10 @@ export const cmsFeature: BackendFeature = {
     // read (consent-gated), results project over stamped analytics events.
     registerPageExperimentRoutes(deps);
     registerCmsExperimentStampResolver(); // ANLWF-3 / ADR 0651 D3
+    registerCmsExperimentSurface(); // ADR 0949 P2a — the `cms.page` experiment adapter
+    // ADR 0949 P2c — the contract step: import never-read legacy page experiments
+    // and empty `cms:pageexperiment`. A no-op once it is empty.
+    startLegacyCmsExperimentContract();
     // ADR 0204 C2 — the scheduled-publish sweep (retention-daemon pattern;
     // idempotent start, minute tick, per-(page,time) idempotency claim).
     startCmsPublishSweep();

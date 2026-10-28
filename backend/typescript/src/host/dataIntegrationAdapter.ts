@@ -24,7 +24,7 @@
  * Failures THROW `{ code }`, the pack's own convention (`host_capability_missing`,
  * `variable_not_found`); the node fails with that code.
  */
-import jsonata from 'jsonata';
+import type jsonataT from 'jsonata';
 import { Kind, parse } from 'graphql';
 import { setRunVariable, snapshotRunVariables } from './variablesRuntime.js';
 import { getConnection } from '../features/connections/connectionsService.js';
@@ -119,7 +119,10 @@ export async function evaluateJsonata(expression: unknown, language: unknown, in
   const B = DATA_INTEGRATION_BUDGET;
   if (text.length > B.maxExpressionChars) fail('validation_error', `expression exceeds ${B.maxExpressionChars} characters`);
   if (byteSize(input) > B.maxInputBytes) fail('payload_too_large', `expression input exceeds ${B.maxInputBytes} bytes`);
-  let compiled: ReturnType<typeof jsonata>;
+  // Loaded on first evaluation, not at import: the executor imports this module,
+  // so every test file that boots the app paid for it (ADR 0863 D7).
+  const jsonata = (await import('jsonata')).default;
+  let compiled: ReturnType<typeof jsonataT>;
   try {
     compiled = jsonata(text, { timeout: B.timeoutMs, stack: B.stack, sequence: B.sequence });
   } catch (err) {

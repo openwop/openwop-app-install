@@ -5,10 +5,14 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { dispatchSubRun } from '../src/subruns/subRunDispatcher.js';
 
-function stubFetch(createBodyOut: { body?: unknown }): void {
+/** The slice of the POST /runs create body these cases read. */
+interface CreateBody { workflowId?: string; metadata?: Record<string, unknown> }
+
+function stubFetch(createBodyOut: { body?: CreateBody }): void {
   vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
     if (String(url).endsWith('/runs') && init?.method === 'POST') {
-      createBodyOut.body = JSON.parse(String(init.body));
+      const body: CreateBody = JSON.parse(String(init.body));
+      createBodyOut.body = body;
       return new Response(JSON.stringify({ runId: 'child-1', status: 'running' }), { status: 200 });
     }
     // snapshot poll → terminal completed immediately
@@ -26,16 +30,18 @@ afterEach(() => { vi.unstubAllGlobals(); });
 
 describe('dispatchSubRun parent linkage (ADR 0133 P1)', () => {
   it('stamps metadata.parentRunId + delegatedBy when provided', async () => {
-    const out: { body?: any } = {};
+    const out: { body?: CreateBody } = {};
     stubFetch(out);
     await dispatchSubRun({ workflowId: 'wf', inputs: {}, budgetMs: 1000, tenantId: 't', parentRunId: 'parent-9', delegatedBy: 'agent:a1' });
-    expect(out.body.metadata).toEqual({ parentRunId: 'parent-9', delegatedBy: 'agent:a1' });
+    expect(out.body?.workflowId).toBe('wf'); // the create POST was captured, not some other call
+    expect(out.body?.metadata).toEqual({ parentRunId: 'parent-9', delegatedBy: 'agent:a1' });
   });
 
   it('omits metadata entirely when no linkage is provided (unchanged create body)', async () => {
-    const out: { body?: any } = {};
+    const out: { body?: CreateBody } = {};
     stubFetch(out);
     await dispatchSubRun({ workflowId: 'wf', inputs: {}, budgetMs: 1000, tenantId: 't' });
-    expect(out.body.metadata).toBeUndefined();
+    expect(out.body?.workflowId).toBe('wf'); // captured, so `undefined` below is the body's, not a missing capture
+    expect(out.body?.metadata).toBeUndefined();
   });
 });

@@ -15,6 +15,12 @@ import { APP_MIGRATIONS } from '../src/host/appMigrations.js';
  * ADR 0722 A.7 — migration 21 re-keys the demo auto-ingest subscription from the
  * `:`-carrying id to the grammar-safe one, so the idempotent-by-id seed finds the
  * row instead of registering a SECOND demo subscription per tenant.
+ *
+ * Each case seeds its OWN tenant, so no case depends on another having run.
+ *
+ * Tracker TST-BGF-23. Red when `rekeySubscription` fails to write the new id or
+ * to delete the legacy one, when a second run disturbs the moved row, or when
+ * the legacy-id lister widens past the demo prefix.
  */
 describe('migration 21 — re-key demo auto-ingest subscription ids', () => {
   const storage = openSqliteStorage(':memory:');
@@ -27,8 +33,8 @@ describe('migration 21 — re-key demo auto-ingest subscription ids', () => {
   const m21 = found;
 
   it('exists (ADR 0789 added v22 above it)', () => {
+    // The NAME is what `runAppMigrations` records; a renamed v21 would re-run on every host.
     expect(m21.name).toBe('rekey-demo-auto-ingest-subscription-ids');
-    expect(Math.max(...APP_MIGRATIONS.map((m) => m.version))).toBeGreaterThanOrEqual(21);
   });
 
   it('moves a legacy row to the new id and keeps its fields; a re-seed then finds it', async () => {
@@ -49,12 +55,23 @@ describe('migration 21 — re-key demo auto-ingest subscription ids', () => {
   });
 
   it('is idempotent and never fatal — a second run finds nothing to do', async () => {
+    const tenantId = 'acme-idempotent';
+    await registerSubscription({
+      subscriptionId: `${LEGACY_DEMO_AUTO_INGEST_PREFIX}${tenantId}`, tenantId, source: 'webhook', label: 'idempotent demo row',
+    });
+    await m21.run(storage);
     await expect(m21.run(storage)).resolves.toBeUndefined();
+    // The second run left the moved row exactly where the first put it.
+    expect((await getSubscription(demoAutoIngestSubscriptionId(tenantId)))?.label).toBe('idempotent demo row');
+    expect(await getSubscription(`${LEGACY_DEMO_AUTO_INGEST_PREFIX}${tenantId}`)).toBeNull();
   });
 
   it('does NOT touch a subscription that is not the demo row', async () => {
-    const other = await registerSubscription({ subscriptionId: 'customer-sub-0123456789abcdef', tenantId: 'acme', source: 'webhook' });
+    const other = await registerSubscription({ subscriptionId: 'customer-sub-0123456789abcdef', tenantId: 'acme-other', source: 'webhook', label: 'customer row' });
     await m21.run(storage);
-    expect(await getSubscription(other.subscriptionId)).toBeDefined();
+    // `getSubscription` answers null for a missing row, so `toBeDefined()` could not fail.
+    const kept = await getSubscription(other.subscriptionId);
+    expect(kept?.subscriptionId).toBe('customer-sub-0123456789abcdef');
+    expect(kept?.label).toBe('customer row');
   });
 });

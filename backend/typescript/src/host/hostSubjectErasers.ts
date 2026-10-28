@@ -47,6 +47,7 @@ import { registerEmailPrefErasure } from './emailApprovalDelivery.js';
 import { registerWorkflowBudgetErasure } from './workflowBudgets.js';
 import { registerApplyGrantErasure } from './applyGrant.js';
 import { registerSubjectLinkErasure } from './auth/subjectLinkService.js';
+import { registerAutonomyPolicyErasure } from './autonomyPolicy/erasure.js';
 
 /** Register every host-owned store's DSAR subject-eraser (idempotent). */
 export function registerHostSubjectErasers(): void {
@@ -89,5 +90,6 @@ export function registerHostSubjectErasers(): void {
   registerEmailPrefErasure(); // ADR 0478 — email prefs DELETED (the row IS the subject's address)
   registerWorkflowBudgetErasure(); // ADR 0482 — budget attribution (`updatedBy` redacted)
   registerApplyGrantErasure(); // WF-CONS-2 — was the ONE host eraser registering at module scope, outside this list
+  registerAutonomyPolicyErasure(); // ADR 0942 — autonomy policy/binding attribution (`createdBy`/`updatedBy` redacted)
   registerSubjectLinkErasure(); // ADR 0464 §2.1 / RFC 0159 — the SCIM⟷SAML subject-link deny store (row IS the opaque externalId; DELETED)
 }

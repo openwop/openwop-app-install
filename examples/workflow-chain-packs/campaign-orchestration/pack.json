@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.workflows.campaign-orchestration",
-  "version": "1.1.0",
+  "version": "1.2.1",
   "kind": "workflow-chain",
   "description": "Campaign Studio orchestration spine (ADR 0158/RFC 0118), parallel channel fan-out shape — migrated from the deprecated builtin (ADR 0472 P4). chainId keeps the original id; the 5 channel children resolve by id at runtime via core.dispatch.",
   "keywords": [
@@ -12,7 +12,7 @@
   "chains": [
     {
       "chainId": "campaign-studio.campaign-orchestration",
-      "version": "1.1.0",
+      "version": "1.2.1",
       "label": "Campaign orchestration",
       "description": "Validate the brief → messaging kernel → approve → generate all five channels in parallel → consistency check → finalize.",
       "parameters": {
@@ -56,8 +56,9 @@
           },
           {
             "id": "kernel-approve",
-            "typeId": "core.approvalGate@1.0.0",
+            "typeId": "feature.campaign-orchestration.nodes.autonomy-gate@1.1.0",
             "config": {
+              "actionClass": "plan.approve",
               "prompt": "Review the messaging kernel — the foundation every channel echoes.",
               "title": "Approve the messaging kernel?"
             }
@@ -146,7 +147,7 @@
           },
           {
             "id": "finalize",
-            "typeId": "feature.campaign-orchestration.nodes.finalize@1.0.0",
+            "typeId": "feature.campaign-orchestration.nodes.finalize@1.1.0",
             "inputs": {
               "briefId": "{{params.briefId}}"
             }

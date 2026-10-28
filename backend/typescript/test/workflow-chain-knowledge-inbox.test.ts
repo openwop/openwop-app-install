@@ -243,7 +243,9 @@ function isConnectorWrite(node: { typeId: string; config?: Record<string, unknow
 
 describe('vendored packs — repo-wide conventions', () => {
   it('loads a non-trivial vendored catalog', () => {
-    expect(listChains().length).toBeGreaterThanOrEqual(30);
+    // Floor = the MEASURED in-tree count (grade-tests wave 64, 19d13e682: 244 chains
+    // across 70 packs, re-measured through listChains() at HEAD). The old floor of 30 let 214 chains vanish silently.
+    expect(listChains().length).toBeGreaterThanOrEqual(244);
   });
 
   // WF-EM-4 — a PRECONDITION, not the gating guarantee: `approvalGateCount`

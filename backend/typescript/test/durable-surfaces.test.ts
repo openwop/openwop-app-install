@@ -32,6 +32,26 @@ describe('Storage.kvCompareAndSwap (atomic primitive)', () => {
   });
 });
 
+describe('atomic conditional KV removal', () => {
+  it('a stale removal leaves a replacement and competing removals have one winner', async () => {
+    await storage.kvSet('cas:delete', 'old');
+    await storage.kvCompareAndSwap('cas:delete', 'old', 'new');
+    expect(await storage.kvCompareAndDelete('cas:delete', 'old')).toBe(false);
+    expect(await storage.kvGet('cas:delete')).toBe('new');
+    const results = await Promise.all([storage.kvCompareAndDelete('cas:delete', 'new'), storage.kvCompareAndDelete('cas:delete', 'new')]);
+    expect(results.filter(Boolean)).toHaveLength(1);
+    expect(await storage.kvGet('cas:delete')).toBeNull();
+  });
+
+  it('a missing or nonmatching value is never removed', async () => {
+    await storage.kvSet('cas:absent-delete', 'kept');
+    expect(await storage.kvCompareAndDelete('cas:absent-delete', 'other')).toBe(false);
+    expect(await storage.kvGet('cas:absent-delete')).toBe('kept');
+    expect(await storage.kvCompareAndDelete('cas:really-absent', 'other')).toBe(false);
+    expect(await storage.kvGet('cas:really-absent')).toBeNull();
+  });
+});
+
 describe('durable cache surface', () => {
   const cache: CacheSurface = createDurableCache({ tenantId: 'cache-t' });
 

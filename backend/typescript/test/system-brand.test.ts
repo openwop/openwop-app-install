@@ -33,10 +33,17 @@ describe('system brand (ADR 0170)', () => {
     expect(b.identity).toBeUndefined(); // SPA falls back to its build-time brand
   });
 
-  it('is idempotent — concurrent ensures converge on one record', async () => {
+  // Two guards hold this claim. The FIXED id (`SYSTEM_BRAND_ID`) keeps the row
+  // count at one; the run-once memo (`ensuring`) makes every caller share ONE
+  // ensure in flight. Ids and the row count alone cannot see the memo (probe
+  // 8fw3g3-sb-memo was vacuous on them), so the shared object is asserted too:
+  // without the memo each caller's own doEnsure builds its own record object.
+  it('is idempotent — concurrent ensures converge on one record (memo: one ensure in flight; fixed id: one row)', async () => {
     const [a, b, c] = await Promise.all([ensureSystemBrand(), ensureSystemBrand(), ensureSystemBrand()]);
-    expect(a.id).toBe(b.id);
-    expect(b.id).toBe(c.id);
+    expect(a).toBe(b);
+    expect(b).toBe(c);
+    expect(await ensureSystemBrand()).toBe(a); // a later call reuses the settled ensure
+    expect(a.id).toBe(SYSTEM_BRAND_ID);
     const all = await listBrands(SYSTEM_SITE_TENANT);
     expect(all.filter((x) => x.id === SYSTEM_BRAND_ID)).toHaveLength(1); // no duplicate
   });
@@ -44,6 +51,9 @@ describe('system brand (ADR 0170)', () => {
   it('is invisible to a normal tenant (reserved host: tenant)', async () => {
     await ensureSystemBrand();
     expect(await listBrands('user:alice')).toEqual([]); // tenant-prefixed scan excludes host:site
+    // Double guard: the getBrand key embeds the tenant, so its row re-check never
+    // decides here. The listBrands prefix scan above is the leg that can fail
+    // (probe 8fw3g3-sb-prefix).
     expect(await getBrand('user:alice', SYSTEM_BRAND_ID)).toBeNull();
   });
 

@@ -5,14 +5,22 @@
  * Before this, every peer read went to `${peer}/v1/host/openwop-app/…`. A peer
  * that has made the ADR 0669 cut answers that address `410`, so federation
  * would have stopped on the first peer's retirement day, not on ours.
+ *
+ * Tracker TST-BGF-2. Red when: `peerPortfolioUrls` orders the `/v1` twin first
+ * or stops stripping a trailing slash; `peerPortfolioGet` retries the twin after
+ * a real error; or it forgets the last `not-served` reason.
  */
 import { describe, expect, it } from 'vitest';
 import { peerPortfolioGet, peerPortfolioUrls, type PeerAttempt } from '../src/features/priority-matrix/federationService.js';
+import type { PortfolioItem } from '../src/features/priority-matrix/priorityMatrixService.js';
 
 const BASE = 'https://peer.example.test';
 const CANONICAL = `${BASE}/host/openwop-app/priority-matrix/portfolio?topN=5`;
 const TWIN = `${BASE}/v1/host/openwop-app/priority-matrix/portfolio?topN=5`;
-const ITEM = { id: 'i1' } as never;
+const ITEM: PortfolioItem = {
+  listId: 'l1', listName: 'Roadmap', votingMode: 'single', scoringModel: 'custom',
+  cardId: 'c1', title: 'Ship it', status: 'open', computedPriority: 3, inListRank: 1,
+};
 
 function scripted(answers: Record<string, PeerAttempt>): { attempt: (url: string) => Promise<PeerAttempt>; calls: string[] } {
   const calls: string[] = [];

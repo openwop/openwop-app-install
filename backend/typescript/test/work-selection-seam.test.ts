@@ -12,12 +12,30 @@
  * The permutation checks are not paranoia: the contract is ORDER, not filter, so
  * a compiler that drops a card would make work silently unreachable — the same
  * class of bug as the strand ADR 0535 fixes.
+ *
+ * Every rejected result (throw, drop, duplicate, unknown) must also return NO
+ * decisions for the run stamp. Since ADR 0963 D6 `rankWorkCandidates` RETURNS
+ * `{ cards, decisions }` (no module state; `lastPicks` and
+ * `workSelectionDecisionFor` are gone), and every rejection returns the shared
+ * `none` value with an empty map (`src/host/heartbeatService.ts:462`).
+ *
+ * Double guard (honest, by design): `rankWorkCandidates` checks the pick COUNT
+ * (`picks.length !== cards.length`, heartbeatService.ts:467) and then the pick
+ * SET (`seen.size` + every input present, :474). The set check alone catches a
+ * drop and a duplicate, so deleting only the count check stays green (wave 64
+ * probe 8fw5g2-ws-length-check, vacuous); deleting both reds the drop case
+ * (8fw5g2-ws-length-check-r4). Only the set check's `every` catches an UNKNOWN
+ * card (8fw5g2-ws-unknown-only-r4).
+ *
+ * Sabotage that turns it red: the throw caught into `[]`; both permutation
+ * checks removed; a rejection that returns the compiler's picks as decisions
+ * (8fw5g2-ws-reject-decisions-r4); the empty-list short-circuit removed; picks
+ * not mapped back.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   registerWorkSelectionCompiler,
-  orderWorkCandidates,
-  workSelectionDecisionFor,
+  rankWorkCandidates,
   type WorkSelectionPick,
 } from '../src/host/heartbeatService.js';
 import type { KanbanCard } from '../src/host/kanbanService.js';
@@ -33,7 +51,7 @@ function card(id: string, order: number): KanbanCard {
     order,
     createdAt: new Date(NOW).toISOString(),
     updatedAt: new Date(NOW).toISOString(),
-  } as KanbanCard;
+  };
 }
 
 const pick = (c: KanbanCard, rank: number): WorkSelectionPick => ({
@@ -45,7 +63,13 @@ const pick = (c: KanbanCard, rank: number): WorkSelectionPick => ({
 
 const ids = (cards: KanbanCard[]) => cards.map((c) => c.id);
 const T = 'ws-tenant-1';
-const order = (cards: KanbanCard[]) => orderWorkCandidates(cards, NOW, T);
+const order = async (cards: KanbanCard[]) => (await rankWorkCandidates(cards, NOW, T)).cards;
+/** A rejected ranking: insertion order AND no decisions at all. */
+async function expectRejected(input: KanbanCard[]): Promise<void> {
+  const ranked = await rankWorkCandidates(input, NOW, T);
+  expect(ids(ranked.cards)).toEqual(ids(input));
+  expect([...ranked.decisions.keys()], 'a rejected result returns no decision to stamp').toEqual([]);
+}
 
 afterEach(() => registerWorkSelectionCompiler(null));
 
@@ -69,23 +93,17 @@ describe('ADR 0534 P2 — fail open to the literal pre-0534 order', () => {
     // Dropping makes work unreachable with no error anywhere — the same silent
     // class as the ADR 0535 strand.
     registerWorkSelectionCompiler((cards) => [pick(cards[0]!, 1)]);
-    const input = [card('a', 0), card('b', 1)];
-
-    expect(ids(await order(input))).toEqual(['a', 'b']);
+    await expectRejected([card('a', 0), card('b', 1)]);
   });
 
   it('a compiler that returns a DUPLICATE ⇒ insertion order', async () => {
     registerWorkSelectionCompiler((cards) => [pick(cards[0]!, 1), pick(cards[0]!, 2)]);
-    const input = [card('a', 0), card('b', 1)];
-
-    expect(ids(await order(input))).toEqual(['a', 'b']);
+    await expectRejected([card('a', 0), card('b', 1)]);
   });
 
   it('a compiler that invents an UNKNOWN card ⇒ insertion order', async () => {
     registerWorkSelectionCompiler((cards) => [pick(cards[0]!, 1), pick(card('ghost', 9), 2)]);
-    const input = [card('a', 0), card('b', 1)];
-
-    expect(ids(await order(input))).toEqual(['a', 'b']);
+    await expectRejected([card('a', 0), card('b', 1)]);
   });
 
   it('an empty candidate list short-circuits without calling the compiler', async () => {
@@ -107,25 +125,24 @@ describe('ADR 0534 P2 — a healthy compiler ranks', () => {
     expect(ids(await order(input))).toEqual(['c', 'b', 'a']);
   });
 
-  it('exposes the decision for the run stamp, and clears it between passes', async () => {
+  it('returns the decision for the run stamp, and a pass with no compiler returns none', async () => {
     registerWorkSelectionCompiler((cards) => cards.map((c, i) => pick(c, i + 1)));
-    await order([card('a', 0)]);
+    const ranked = await rankWorkCandidates([card('a', 0)], NOW, T);
 
-    expect(workSelectionDecisionFor('a')?.rank).toBe(1);
+    expect(ranked.decisions.get('a')?.rank).toBe(1);
 
-    // A later pass with no compiler must not leave the previous pass's decision
-    // readable — a stale stamp would be attributed to the wrong run.
+    // ADR 0963 D6 — decisions are the pass's own, so a later pass cannot read an
+    // earlier one's: a stale stamp would be attributed to the wrong run.
     registerWorkSelectionCompiler(null);
-    await order([card('a', 0)]);
-    expect(workSelectionDecisionFor('a')).toBeUndefined();
+    expect((await rankWorkCandidates([card('a', 0)], NOW, T)).decisions.get('a')).toBeUndefined();
   });
 
   it('a rejected result leaves no decision behind', async () => {
     registerWorkSelectionCompiler(() => { throw new Error('bug'); });
-    await order([card('a', 0)]);
+    const ranked = await rankWorkCandidates([card('a', 0)], NOW, T);
 
     expect(
-      workSelectionDecisionFor('a'),
+      ranked.decisions.get('a'),
       'stamping a decision that did not order anything would be a lie in run.metadata',
     ).toBeUndefined();
   });

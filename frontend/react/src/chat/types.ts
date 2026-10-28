@@ -360,6 +360,9 @@ export interface ChatMessage {
     outputTokens?: number | undefined;
     /** ADR 0195 D1 — server-stamped when a human edit changed the content. */
     editedAt?: string | undefined;
+    /** ADR 0992 D9 — the row came from a conversation import (row meta
+     *  `source:'import'`); the bubble labels it and the feed notes the model never saw it. */
+    imported?: true | undefined;
     /** ADR 0195 D2 — tombstone markers; the FE detects deletion by
      *  `deletedAt`, never by parsing the content sentinel. */
     deletedAt?: string | undefined;

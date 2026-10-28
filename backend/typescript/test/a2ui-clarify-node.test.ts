@@ -8,9 +8,15 @@
  * the chat's `a2uiInterruptCard` bridge keys on + the renderer validates),
  * then resolves it with form values and asserts the run completes — covering
  * the producer → suspend → resume → completion path end to end.
+ *
+ * Tracker TST-BG1-14. Red when (probe-witnessed, wave 58): the producer stamps a
+ * catalog version other than 0.9.1, retargets the button's action off `resume`,
+ * or raises an interrupt kind other than `clarification`. The two settle polls
+ * are an honest real-clock ceiling (the run API has no hook to await); they use
+ * `vi.waitFor` instead of a fixed-length sleep.
  */
 
-import { describe, expect, it, beforeAll, afterAll } from 'vitest';
+import { describe, expect, it, beforeAll, afterAll, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
@@ -66,22 +72,21 @@ describe('openwop-app.a2ui-clarify (ADR 0051 Phase 3 producer)', () => {
     expect(create.status).toBe(201);
     const { runId } = create.body;
 
-    // Poll until the run suspends on an open interrupt.
-    let open: NonNullable<OpenInterruptBody['interrupts']> = [];
-    for (let i = 0; i < 40; i++) {
-      await new Promise((r) => setTimeout(r, 50));
+    // Wait until the run suspends on an open interrupt.
+    const open = await vi.waitFor(async () => {
       const list = await jsonFetch<OpenInterruptBody>(`/host/openwop-app/runs/${bareRunId(runId)}/interrupts`);
-      open = list.body.interrupts ?? [];
-      if (open.length > 0) break;
-    }
-    expect(open.length, 'run MUST suspend on a clarification interrupt').toBe(1);
+      const found = list.body.interrupts ?? [];
+      expect(found.length, 'run MUST suspend on a clarification interrupt').toBe(1);
+      return found;
+    }, { timeout: 5_000, interval: 50 });
     const it0 = open[0]!;
     expect(it0.kind).toBe('clarification');
 
     // The interrupt carries the A2UI surface the chat bridge keys on.
     const data = it0.data;
-    expect(isRecord(data)).toBe(true);
-    if (!isRecord(data)) return;
+    if (!isRecord(data)) throw new Error(`interrupt data is not an object: ${JSON.stringify(data)}`);
+    // The workflow's config reaches the interrupt (the free-text fallback).
+    expect(data.question).toBe('When should the kickoff be?');
     expect(data.catalogVersion).toBe('0.9.1');
     expect(isRecord(data.surface)).toBe(true);
     const surface = data.surface as Record<string, unknown>;
@@ -99,15 +104,13 @@ describe('openwop-app.a2ui-clarify (ADR 0051 Phase 3 producer)', () => {
       headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
       body: JSON.stringify({ resumeValue: { action: 'confirm', date: '2026-07-01', duration: '60', reminder: true } }),
     });
-    expect([200, 202, 204]).toContain(resolve.status);
+    expect(resolve.status).toBe(200);
 
-    let finalStatus = 'unknown';
-    for (let i = 0; i < 40; i++) {
-      await new Promise((r) => setTimeout(r, 50));
+    const finalStatus = await vi.waitFor(async () => {
       const snap = await jsonFetch<{ status: string }>(`/runs/${runId}`);
-      finalStatus = snap.body.status;
-      if (['completed', 'failed', 'cancelled'].includes(finalStatus)) break;
-    }
+      expect(['completed', 'failed', 'cancelled']).toContain(snap.body.status);
+      return snap.body.status;
+    }, { timeout: 5_000, interval: 50 });
     expect(finalStatus, 'run MUST complete after the surface is resolved').toBe('completed');
   });
 });

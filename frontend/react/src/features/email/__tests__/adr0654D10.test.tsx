@@ -48,12 +48,15 @@ const toasts = vi.hoisted(() => ({ error: vi.fn(), success: vi.fn(), info: vi.fn
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 vi.mock('../emailClient.js', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
+  // ADR 0955 D7 — the page's sending-health card (a healthy sender).
+  getSendingHealth: async () => ({ state: null, window: { sent: 0, hardBounces: 0, complaints: 0 }, thresholds: { minSends: 500, complaintRate: 0.001, hardBounceRate: 0.02 }, canResume: false }),
   listCampaigns: (...a: Parameters<typeof EC.listCampaigns>) => api.listCampaigns(...a),
   listTemplates: (...a: Parameters<typeof EC.listTemplates>) => api.listTemplates(...a),
   sendCampaign: (...a: Parameters<typeof EC.sendCampaign>) => api.sendCampaign(...a),
   listSends: (...a: Parameters<typeof EC.listSends>) => api.listSends(...a),
   getProviderStatus: (...a: Parameters<typeof EC.getProviderStatus>) => api.getProviderStatus(...a),
   listSegments: async () => [],
+  listTopics: async () => ({ topics: [], max: 20 }),
   getEmailSettings: async () => ({ senderAddress: 'news@acme.test', configured: true }),
   listOrgs: async () => [{ orgId: 'org:1', name: 'Acme' }],
 }));

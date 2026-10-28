@@ -13,6 +13,7 @@ import { hostExtStorage } from '../../host/hostExtPersistence.js';
 import { transcriptToMarkdown } from './transcriptRenderer.js';
 import { createDocument, addVersion } from '../documents/documentsService.js';
 import { OpenwopError } from '../../types.js';
+import { authorizeConversationRead, refuseUnlessSoleAuthor, refuseUnlessSoleOwner } from './access.js';
 
 export async function exportConversationAsDocument(
   tenantId: string,
@@ -21,12 +22,15 @@ export async function exportConversationAsDocument(
   sessionId: string,
   /** Optional deterministic idempotency (the agent-tool path passes a run-scoped
    *  key so an exact re-export reuses the same document + version instead of
-   *  minting a duplicate transcript). The HTTP route omits it. */
+   *  minting a duplicate transcript). The agent tool is the only caller today. */
   idempotency?: { documentId: string; idempotencyKey: string },
 ): Promise<{ documentId: string }> {
-  const session = await hostExtStorage().getChatSession(tenantId, sessionId);
-  if (!session) throw new OpenwopError('not_found', 'Conversation not found.', 404, { sessionId });
+  // ADR 0992 D8 — the helper re-checks read access and the sole-owner rule itself,
+  // so no future caller can write a Document the tool would have refused.
+  const { session, meta } = await authorizeConversationRead(tenantId, sessionId, actor);
   const messages = await hostExtStorage().listChatSessionMessages(sessionId);
+  const refusal = refuseUnlessSoleOwner(meta, actor, orgId) ?? refuseUnlessSoleAuthor(messages, actor);
+  if (refusal) throw new OpenwopError('forbidden', 'Only a conversation that is yours alone can be saved as a Document.', 403, { reason: refusal });
   const markdown = transcriptToMarkdown(session, [...messages]);
 
   const doc = await createDocument({

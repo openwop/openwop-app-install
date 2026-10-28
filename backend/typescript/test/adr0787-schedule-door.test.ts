@@ -19,6 +19,23 @@
  *     refuse-side witness for the widening)
  *   - Run now carries the job's inputs / actor and never moves `nextFireAt`
  *     (`SCTWF-10`)
+ *
+ * Tracker: TST-BSC-2 (docs/steward/TEST-ASSESSMENT.md). Red when: the
+ * active-tenant arm answers `write` to every member; POST skips
+ * `requireTenantWrite`; the gate stops comparing the job's tenant with the
+ * caller's; client metadata keeps reserved keys or REPLACES instead of merging;
+ * a retarget keeps the old actor; either feature-configured guard (PATCH
+ * retarget, explicit-id POST) is removed; an erased job can be re-enabled; the
+ * ownership arm is not confined to the personal tenant, or trusts a
+ * non-personal (SAML) tenant; `?owner=me` lists one spelling; the DSAR alias is
+ * dropped, works in any tenant, or aliases an ambiguous principal; Run now
+ * advances `nextFireAt`; the budget exemption ignores `configurable` or the
+ * clicker; a PATCH horizon refusal loses its code; one ticking revision is
+ * enough for the fleet blocker.
+ *
+ * DOUBLE GUARD (recorded): the D4 legacy job's PATCH is admitted by the
+ * ownership arm AND by the active-tenant arm (the personal tenant is active),
+ * so its listing (`?owner=me`) leg is the witness, not the PATCH.
  */
 
 import http from 'node:http';
@@ -27,7 +44,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { getSetCookies } from './headerCookies.js';
 import { createApp } from '../src/index.js';
 import { createMember, createWorkspace } from '../src/host/accessControlService.js';
-import { registerJob, getJob, eraseSubjectSchedules, ONE_SHOT_CRON } from '../src/host/schedulingService.js';
+import { registerJob, getJob, eraseSubjectSchedules, ONE_SHOT_CRON, type ScheduledJob } from '../src/host/schedulingService.js';
 import { eraseSubject } from '../src/host/subjectErasure.js';
 import { upsertFromPrincipal, userIdFor, legacyPrincipalOf, type User } from '../src/features/users/usersService.js';
 import { DurableCollection } from '../src/host/hostExtPersistence.js';
@@ -49,14 +66,45 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+/** Every body this door answers with, narrowed to the fields the cases read. */
+interface DoorBody {
+  jobId?: string;
+  tenantId?: string;
+  jobs?: ScheduledJob[];
+  user?: { userId: string };
+  runsFired?: number;
+  lastFiredTick?: number;
+  runId?: string;
+  skipped?: string;
+  error?: string;
+  message?: string;
+  details?: { field?: string; maxFutureHorizon?: string; requiredScope?: string };
+}
+interface Res { status: number; body: DoorBody }
 interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; patch: (p: string, b?: unknown) => Promise<Res>; del: (p: string) => Promise<Res> }
+
+/** The created job's id, or a failure that names the response. */
+function idOf(r: Res): string {
+  const id = r.body.jobId;
+  if (typeof id !== 'string') throw new Error(`no jobId in ${r.status} ${JSON.stringify(r.body)}`);
+  return id;
+}
+const idsOf = (r: Res): string[] => (r.body.jobs ?? []).map((j) => j.jobId);
+
+/** The write gate's refusal, by its exact code and message (never a status alone). */
+function expectForbidden(r: Res): void {
+  expect(r.status, JSON.stringify(r.body)).toBe(403);
+  expect(r.body.error).toBe('forbidden_scope');
+  expect(r.body.message).toBe('Missing required scope: workspace:write');
+}
+const FEATURE_MANAGED = 'This schedule is managed by its feature; change it there.';
+const ERASED_JOB = 'This schedule belonged to an erased account and cannot be re-enabled. Create a new one instead.';
 function client(): Client {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    const out = res.status === 204 ? {} : ((await res.json().catch(() => ({}))) as DoorBody);
     return { status: res.status, body: out };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b), del: (p) => call('DELETE', p) };
@@ -82,7 +130,7 @@ async function workspace() {
     await createMember({ orgId: tenantId, tenantId, displayName: role, subject: id, roles: [role] });
     const c = client();
     const login = await c.post('/host/openwop-app/test/login', { subject, tenantId, displayName: role, sharedWorkspace: true });
-    expect(login.body.user.userId).toBe(id);
+    expect(login.body.user?.userId).toBe(id);
     return { c, id };
   };
   const w = await member('admin');
@@ -96,16 +144,16 @@ async function workspace() {
 describe('ADR 0787 D3 — one write gate', () => {
   it('a Viewer cannot create, retarget, fire or delete; the writer can', async () => {
     const { writer, viewer } = await workspace();
-    expect((await viewer.post(S, { cronExpr: '0 9 * * *', workflowId: 'wf.a' })).status).toBe(403);
+    expectForbidden(await viewer.post(S, { cronExpr: '0 9 * * *', workflowId: 'wf.a' }));
     const created = await writer.post(S, { cronExpr: '0 9 * * *', workflowId: 'wf.a' });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
-    const id: string = created.body.jobId;
+    const id = idOf(created);
     // READ is still open to the Viewer…
-    expect(((await viewer.get(S)).body.jobs as { jobId: string }[]).map((j) => j.jobId)).toContain(id);
+    expect(idsOf(await viewer.get(S))).toContain(id);
     // …WRITE is not.
-    expect((await viewer.patch(`${S}/${id}`, { workflowId: 'wf.evil' })).status).toBe(403);
-    expect((await viewer.post(`${S}/${id}/trigger`)).status).toBe(403);
-    expect((await viewer.del(`${S}/${id}`)).status).toBe(403);
+    expectForbidden(await viewer.patch(`${S}/${id}`, { workflowId: 'wf.evil' }));
+    expectForbidden(await viewer.post(`${S}/${id}/trigger`));
+    expectForbidden(await viewer.del(`${S}/${id}`));
     expect((await getJob(id))?.workflowId).toBe('wf.a');
     // Positive control.
     expect((await writer.patch(`${S}/${id}`, { enabled: false })).status).toBe(200);
@@ -115,14 +163,18 @@ describe('ADR 0787 D3 — one write gate', () => {
   it('a caller from another tenant gets a uniform 404', async () => {
     const a = await workspace();
     const b = await workspace();
-    const id: string = (await a.writer.post(S, { cronExpr: '0 9 * * *', workflowId: 'wf.a' })).body.jobId;
-    expect((await b.writer.patch(`${S}/${id}`, { enabled: false })).status).toBe(404);
-    expect((await b.writer.del(`${S}/${id}`)).status).toBe(404);
+    const id = idOf(await a.writer.post(S, { cronExpr: '0 9 * * *', workflowId: 'wf.a' }));
+    for (const r of [await b.writer.patch(`${S}/${id}`, { enabled: false }), await b.writer.del(`${S}/${id}`)]) {
+      expect(r.status).toBe(404);
+      expect(r.body.error).toBe('not_found');
+    }
+    // The refusals changed nothing: the row exists and is still armed.
+    expect((await getJob(id))?.enabled).toBe(true);
   });
 
   it('PATCH metadata cannot set the actor; a label edit keeps the actor and unnamed keys', async () => {
     const { writer, writerId, writer2 } = await workspace();
-    const id: string = (await writer.post(S, { cronExpr: '0 9 * * *', workflowId: 'wf.a', metadata: { tool: 'recurring', label: 'old' } })).body.jobId;
+    const id = idOf(await writer.post(S, { cronExpr: '0 9 * * *', workflowId: 'wf.a', metadata: { note: 'kept', label: 'old' } }));
     expect((await getJob(id))?.metadata?.actingUserId).toBe(writerId);
     const patched = await writer2.patch(`${S}/${id}`, { metadata: { actingUserId: 'user:victim', assistantLoop: 'x', label: 'new' } });
     expect(patched.status, JSON.stringify(patched.body)).toBe(200);
@@ -130,12 +182,13 @@ describe('ADR 0787 D3 — one write gate', () => {
     expect(job?.metadata?.actingUserId, 'a client body never sets the actor').toBe(writerId);
     expect(job?.metadata?.assistantLoop).toBeUndefined();
     expect(job?.metadata?.label).toBe('new');
-    expect(job?.metadata?.tool, 'a key the edit did not name survives').toBe('recurring');
+    // `note`, not `tool`: since ADR 0985 `tool` is a server-owned key (the chat tools' caps count it).
+    expect(job?.metadata?.note, 'a key the edit did not name survives').toBe('kept');
   });
 
   it('a retarget makes the job act as the patcher, never as the colleague who defined it', async () => {
     const { writer, writerId, writer2, writer2Id } = await workspace();
-    const id: string = (await writer.post(S, { cronExpr: '0 9 * * *', workflowId: 'wf.a' })).body.jobId;
+    const id = idOf(await writer.post(S, { cronExpr: '0 9 * * *', workflowId: 'wf.a' }));
     // A WHEN/WHETHER edit keeps the actor…
     expect((await writer2.patch(`${S}/${id}`, { cronExpr: '0 10 * * *', enabled: false })).status).toBe(200);
     expect((await getJob(id))?.metadata?.actingUserId).toBe(writerId);
@@ -151,7 +204,9 @@ describe('ADR 0787 D3 — one write gate', () => {
     const r = await registerJob({ jobId: uniq('feat'), tenantId, cronExpr: '0 9 * * *', workflowId: 'wf.feature', configurable: { credentialRef: 'platform:managed' } });
     expect(r.ok).toBe(true);
     const id = r.ok ? r.job.jobId : '';
-    expect((await writer.patch(`${S}/${id}`, { workflowId: 'wf.mine' })).status).toBe(409);
+    const refused = await writer.patch(`${S}/${id}`, { workflowId: 'wf.mine' });
+    expect(refused.status).toBe(409);
+    expect(refused.body.message).toBe(FEATURE_MANAGED);
     expect((await getJob(id))?.workflowId).toBe('wf.feature');
     // Its schedule is still editable.
     expect((await writer.patch(`${S}/${id}`, { enabled: false })).status).toBe(200);
@@ -163,7 +218,9 @@ describe('ADR 0787 D3 — one write gate', () => {
     const id = r.ok ? r.job.jobId : '';
     await eraseSubjectSchedules(tenantId, 'user:gone');
     expect((await getJob(id))?.enabled).toBe(false);
-    expect((await writer.patch(`${S}/${id}`, { enabled: true })).status).toBe(409);
+    const refused = await writer.patch(`${S}/${id}`, { enabled: true });
+    expect(refused.status).toBe(409);
+    expect(refused.body.message).toBe(ERASED_JOB);
     expect((await getJob(id))?.enabled).toBe(false);
   });
 
@@ -171,7 +228,7 @@ describe('ADR 0787 D3 — one write gate', () => {
     const { tenantId, viewer, viewerId } = await workspace();
     const r = await registerJob({ jobId: uniq('kickbot'), tenantId, cronExpr: ONE_SHOT_CRON, firstFireAtMs: Date.now() + 3_600_000, workflowId: 'wf.convene', ownerSubject: { kind: 'user', id: viewerId } });
     const id = r.ok ? r.job.jobId : '';
-    expect((await viewer.patch(`${S}/${id}`, { workflowId: 'wf.anything' })).status).toBe(403);
+    expectForbidden(await viewer.patch(`${S}/${id}`, { workflowId: 'wf.anything' }));
     expect((await getJob(id))?.workflowId).toBe('wf.convene');
   });
 });
@@ -184,18 +241,20 @@ describe('ADR 0787 D4 — one identity', () => {
     // A personal job created now tells us the personal tenant.
     const mine = await me.post(S, { owner: 'me', cronExpr: '0 9 * * *', workflowId: 'wf.a' });
     expect(mine.status, JSON.stringify(mine.body)).toBe(201);
-    const personal: string = mine.body.tenantId;
+    const personal = mine.body.tenantId;
+    if (typeof personal !== 'string') throw new Error(`no tenantId in ${JSON.stringify(mine.body)}`);
     // The row a pre-ADR-0003 session wrote: owned by the PRINCIPAL spelling.
     const legacy = await registerJob({ jobId: uniq('legacy'), tenantId: personal, cronExpr: '0 8 * * *', workflowId: 'wf.old', ownerUserId: subject });
     const legacyId = legacy.ok ? legacy.job.jobId : '';
-    const listed = ((await me.get(`${S}?owner=me`)).body.jobs as { jobId: string }[]).map((j) => j.jobId);
+    const listed = idsOf(await me.get(`${S}?owner=me`));
     expect(listed).toContain(legacyId);
-    expect(listed).toContain(mine.body.jobId);
+    expect(listed).toContain(idOf(mine));
     expect((await me.patch(`${S}/${legacyId}`, { enabled: false })).status).toBe(200);
     // Refuse-side: another person's principal in the same shape is NOT mine.
     const other = await registerJob({ jobId: uniq('other'), tenantId: personal, cronExpr: '0 8 * * *', workflowId: 'wf.old', ownerUserId: 'oidc:someone-else' });
     const otherId = other.ok ? other.job.jobId : '';
-    expect(((await me.get(`${S}?owner=me`)).body.jobs as { jobId: string }[]).map((j) => j.jobId)).not.toContain(otherId);
+    expect(otherId).not.toBe('');
+    expect(idsOf(await me.get(`${S}?owner=me`))).not.toContain(otherId);
   });
 
   it('a DSAR of user:X disables X\'s oidc:-spelled HOME-tenant job, and never the same string in another tenant', async () => {
@@ -216,7 +275,7 @@ describe('ADR 0787 D4 — one identity', () => {
     await eraseSubject(home, user.userId);
     const erased = await getJob(homeJob);
     expect(erased?.enabled, 'the legacy-spelled loop must stop firing as the erased person').toBe(false);
-    expect(erased?.metadata?.actingUserId).not.toBe(principal);
+    expect(erased?.metadata?.actingUserId, 'the erasure sentinel (ERASED), as a literal').toBe('[erased]');
     // Refuse-side: principals are not issuer-qualified — in another tenant this
     // string may be somebody else, and erasure must never reach them.
     const untouched = await getJob(otherJob);
@@ -232,7 +291,7 @@ describe('ADR 0787 D5 — Run now fires what the schedule fires', () => {
     // recurring cadence usually lands on the same slot (so a recurring job hides
     // the defect) but for `'once'` DELETES `nextFireAt` — the click spent the
     // scheduled fire.
-    const id: string = (await writer.post(S, { cronExpr: 'once', firstFireAtMs: Date.now() + 3_600_000, workflowId: 'wf.unresolvable' })).body.jobId;
+    const id = idOf(await writer.post(S, { cronExpr: 'once', firstFireAtMs: Date.now() + 3_600_000, workflowId: 'wf.unresolvable' }));
     const before = (await getJob(id))?.nextFireAt;
     const fired = await writer.post(`${S}/${id}/trigger`);
     expect(fired.status).toBe(200);
@@ -264,7 +323,7 @@ describe('ADR 0787 D6 — the door refuses a cadence that cannot fire (400, neve
 
   it('PATCH: a bad zone is a 400, and the row is unchanged', async () => {
     const { writer } = await workspace();
-    const id: string = (await writer.post(S, { cronExpr: '0 9 * * *', workflowId: 'wf.a' })).body.jobId;
+    const id = idOf(await writer.post(S, { cronExpr: '0 9 * * *', workflowId: 'wf.a' }));
     const res = await writer.patch(`${S}/${id}`, { timezone: 'Nowhere/Land' });
     expect(res.status).toBe(400);
     expect((await getJob(id))?.timezone).toBeUndefined();
@@ -293,11 +352,12 @@ describe('ADR 0787 grade-code fixes (SCTCD-2/3/5/8/10)', () => {
     const id = r.ok ? r.job.jobId : '';
     const res = await writer.post(S, { jobId: id, cronExpr: '0 9 * * *', workflowId: 'wf.mine' });
     expect(res.status).toBe(409);
+    expect(res.body.message).toBe(FEATURE_MANAGED);
     const job = await getJob(id);
     expect(job?.workflowId).toBe('wf.feature');
     expect(job?.configurable).toEqual({ credentialRef: 'platform:managed' });
     // Positive control: an explicit-id upsert of a PLAIN job by a writer still works.
-    const plain: string = (await writer.post(S, { cronExpr: '0 9 * * *', workflowId: 'wf.a' })).body.jobId;
+    const plain = idOf(await writer.post(S, { cronExpr: '0 9 * * *', workflowId: 'wf.a' }));
     expect((await writer.post(S, { jobId: plain, cronExpr: '0 10 * * *', workflowId: 'wf.a' })).status).toBe(201);
   });
 
@@ -314,9 +374,9 @@ describe('ADR 0787 grade-code fixes (SCTCD-2/3/5/8/10)', () => {
     const r = await registerJob({ jobId: uniq('mine'), tenantId, cronExpr: '0 9 * * *', workflowId: 'wf.a', ownerUserId: id });
     const jobId = r.ok ? r.job.jobId : '';
     expect((await saml.get(S)).status).toBe(200);
-    expect((await saml.patch(`${S}/${jobId}`, { enabled: false })).status).toBe(403);
-    expect((await saml.del(`${S}/${jobId}`)).status).toBe(403);
-    expect((await saml.post(S, { owner: 'me', cronExpr: '0 9 * * *', workflowId: 'wf.a' })).status).toBe(403);
+    expectForbidden(await saml.patch(`${S}/${jobId}`, { enabled: false }));
+    expectForbidden(await saml.del(`${S}/${jobId}`));
+    expectForbidden(await saml.post(S, { owner: 'me', cronExpr: '0 9 * * *', workflowId: 'wf.a' }));
   });
 
   it('SCTCD-5 / D5: Run now spends the autonomous budget unless a human fires their OWN job with their OWN credentials', async () => {
@@ -325,7 +385,7 @@ describe('ADR 0787 grade-code fixes (SCTCD-2/3/5/8/10)', () => {
     // One autonomous run per window (0 means unlimited).
     process.env.OPENWOP_AUTONOMOUS_RUN_LIMIT = '1';
     try {
-      const own: string = (await writer.post(S, { cronExpr: '0 9 * * *', workflowId: 'wf.unresolvable' })).body.jobId;
+      const own = idOf(await writer.post(S, { cronExpr: '0 9 * * *', workflowId: 'wf.unresolvable' }));
       // The actor, own credentials: not the budget (the workflow simply does not resolve).
       expect((await writer.post(`${S}/${own}/trigger`)).body.skipped).toBe('workflow-unresolved');
       // The actor, again: still never the budget, however often.

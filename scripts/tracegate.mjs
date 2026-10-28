@@ -66,7 +66,9 @@ export const LEDGER = process.env.OPENWOP_TRACEGATE_LEDGER || path.join(COMMON, 
 // footprint's constant list is computed at ingest, so one ingested under the old
 // rule never lists them and would SKIP an edit to one: older footprints must not
 // be reused across that change.
-const FP_VERSION = 3;
+// v4 records opaque child processes. A v3 receipt cannot prove that its
+// subprocess inputs were absent, so it must not grant reuse after this repair.
+const FP_VERSION = 4;
 const KEEP_PER_TEST = 6; // footprints kept per test file (newest first)
 const HOST = (process.env.OPENWOP_TRACEGATE_HOST || os.hostname().split('.')[0] || 'host').replace(/[^A-Za-z0-9_-]/g, '_');
 export const ENTRY_BAR = { days: 14, observations: 20 };
@@ -119,6 +121,14 @@ function liveFetchListed(text, testFile) {
   return text.split('\n').map((l) => l.trim()).filter((l) => l.length > 0 && !l.startsWith('#'))
     .map((l) => (l.includes('#') ? l.slice(0, l.indexOf('#')).trim() : l)).includes(rel);
 }
+// ── replay (ADR 0968 P1): re-decide a past gate offline ─────────────────────
+// `replay` evaluates decide() at a past head AS OF that gate's clock, using only
+// footprints recorded before it, optionally with some changed paths removed or
+// the lock key ignored. It answers "what would this gate have run if <cause> were
+// narrowed?" exactly, where the reasons log only says which reason was FIRST.
+// It is read-only on the ledger and nothing on a gate path sets REPLAY.
+const REPLAY = { at: null, drop: null, ignoreLock: false };
+const nowMs = () => (REPLAY.at === null ? Date.now() : REPLAY.at);
 const showAt = (commit, p) => { try { return git('show', `${commit}:${p}`); } catch { return null; } };
 function lane(o) {
   const l = LANES[o.lane || 'backend'];
@@ -290,6 +300,8 @@ function readFps(ln, testFile) {
   let names; try { names = fs.readdirSync(d).filter((f) => f.endsWith('.json.gz')); } catch { return []; }
   const out = [];
   for (const n of names) { try { out.push(ungz(path.join(d, n))); } catch { /* torn write: ignore */ } }
+  // A replay sees only what the gate it replays could have seen.
+  if (REPLAY.at !== null) return out.filter((f) => Date.parse(f.recordedAt ?? '') <= REPLAY.at).sort((a, b) => (b.recordedAt ?? '').localeCompare(a.recordedAt ?? ''));
   return out.sort((a, b) => (b.recordedAt ?? '').localeCompare(a.recordedAt ?? ''));
 }
 function writeFp(ln, fp) {
@@ -302,6 +314,11 @@ function dropFps(ln, testFile) { try { fs.rmSync(testDir(ln, testFile), { recurs
 
 function args() {
   const a = process.argv.slice(3); const o = {};
+  for (let i = 0; i < a.length; i++) if (a[i].startsWith('--')) o[a[i].slice(2)] = a[i + 1]?.startsWith('--') || a[i + 1] === undefined ? true : a[++i];
+  return o;
+}
+function args4() {
+  const a = process.argv.slice(5); const o = {};
   for (let i = 0; i < a.length; i++) if (a[i].startsWith('--')) o[a[i].slice(2)] = a[i + 1]?.startsWith('--') || a[i + 1] === undefined ? true : a[++i];
   return o;
 }
@@ -347,11 +364,19 @@ export function ingest(o) {
   // 16+ min by the pre-cache ingest before this existed.
   const budgetMs = 1000 * Number(o['budget-s'] ?? process.env.OPENWOP_TRACEGATE_INGEST_BUDGET_S ?? 300);
   const t0 = Date.now();
+  const shadow = { booted: 0, reusable: 0, invalidated: 0, absorbable: 0, wouldSkip: 0, wouldSkipFailed: [], noDigest: 0, errors: 0 };
   for (const f of raws) {
     if (Date.now() - t0 > budgetMs) { overBudget++; continue; }
     let raw; try { raw = JSON.parse(fs.readFileSync(path.join(rawDir, f), 'utf8')); } catch { continue; }
     const verdict = results.get(raw.testFile);
     if (!verdict) { noVerdict++; continue; }
+    // ADR 0968 P2 shadow: judged against the footprints that existed BEFORE this
+    // run, and BEFORE a red drops them, because a would-skip that failed is the
+    // soundness signal. Never throws into ingest.
+    let bootFp = null;
+    if (raw.boot) {
+      try { bootFp = bootFields(ln, run, raw); shadowBoot(ln, raw, verdict, H, lock, bootFp, shadow); } catch { shadow.errors++; }
+    }
     if (verdict.status !== 'passed') { dropFps(ln.name, raw.testFile); dropped++; continue; } // a red file must run next time
     const keys = {}; const idents = new Set();
     for (const [file, ex] of Object.entries(raw.exec)) {
@@ -422,16 +447,126 @@ export function ingest(o) {
     }
     writeFp(ln.name, {
       ...(i18n ? { i18n } : {}),
+      // Older raw recorders could not observe a child's inputs. Unknown is
+      // opaque, never evidence that no subprocess was used.
+      subprocess: raw.subprocess !== false,
       v: FP_VERSION, lane: ln.name, testFile: raw.testFile, commit: H, node: raw.node, lock,
       loaded: putBlob(raw.loaded), reads: putBlob([...reads].sort()), unmapped: raw.unmapped,
       keys, consts: [...consts].sort(), durationMs: verdict.durationMs, recordedAt: new Date().toISOString(), host: HOST,
+      ...(bootFp ? { boot: bootFp } : {}),
     });
     recorded++;
   }
   const share = mapped + unmapped ? (100 * unmapped / (mapped + unmapped)).toFixed(1) : '0.0';
   console.log(`tracegate ingest (${ln.name}): ${recorded} footprint(s) at ${H.slice(0, 9)} in ${Math.round((Date.now() - t0) / 1000)} s; ${dropped} dropped (not green); ${noVerdict} without a verdict; unmapped modules ${share}%.`);
+  if (shadow.booted) writeBootShadow(ln, H, shadow);
   if (overBudget) console.log(`tracegate ingest (${ln.name}): time budget (${budgetMs / 1000} s) reached — ${overBudget} file(s) not recorded this run; they will simply run next time.`);
   if (Number(share) > 5) console.log(`\x1b[33mtracegate: ${share}% of loaded modules could not be mapped — the recorder's vitest seam may have moved (see scripts/lib/tracegate-recorder.mjs). Predictions stay safe (unmapped ⇒ run) but get coarse.\x1b[0m`);
+}
+
+// ── boot fields + shadow verdict (ADR 0968 P2) ───────────────────────────────
+// Keys executed per phase, mapped like `exec`; the boot-only part is what the
+// test touched only inside createApp. testConsts is the constant closure of the
+// TEST phase alone (the same rule as `consts`, seeded only by test-phase code
+// and the always-running text of loaded files). Stored as one blob; an additive
+// field that decide() never reads (FP_VERSION unchanged).
+function phaseKeys(ln, run, execObj, idents) {
+  const out = {};
+  for (const [file, ex] of Object.entries(execObj ?? {})) {
+    const startLines = Array.isArray(ex) ? ex : mapOffsets(run, ex);
+    if (!startLines) continue;
+    const fi = fileInfo(ln, file);
+    if (!fi) continue;
+    const ks = new Set();
+    for (const l of startLines) for (const k of fi.m.fnsStartingAt(l)) { ks.add(k); if (idents) for (const w of fi.spanIdents(k)) idents.add(w); }
+    out[file] = [...ks].sort();
+  }
+  return out;
+}
+function bootFields(ln, run, raw) {
+  const testIdents = new Set();
+  const testKeys = phaseKeys(ln, run, raw.boot.testExec, testIdents);
+  const bootKeys = phaseKeys(ln, run, raw.boot.exec, null);
+  // The IMPORT window (before the first boot mark; recorder, ADR 0968 correction
+  // 2026-10-27): app source evaluated on import is boot wiring, because this app's
+  // features register as their modules evaluate. A test file or test helper
+  // evaluated then is the test's own code. Absent in footprints recorded before the
+  // correction: those keep the old reading (import = test), which only absorbs less.
+  const isAppSrc = (p) => p.startsWith(ln.dir + '/src/') && !/\.(test|spec)\.tsx?$/.test(p) && !/(^|\/)(__tests__|test|tests)\//.test(p.slice(ln.dir.length + 5));
+  if (raw.boot.impExec) {
+    const impBoot = {}, impTest = {};
+    for (const [file, e] of Object.entries(raw.boot.impExec)) (isAppSrc(file) ? impBoot : impTest)[file] = e;
+    const merge = (into, from) => { for (const [file, ks] of Object.entries(from)) into[file] = [...new Set([...(into[file] ?? []), ...ks])].sort(); };
+    merge(bootKeys, phaseKeys(ln, run, impBoot, null));
+    merge(testKeys, phaseKeys(ln, run, impTest, testIdents));
+  }
+  const keys = {};
+  for (const [file, ks] of Object.entries(bootKeys)) {
+    const t = new Set(testKeys[file] ?? []);
+    const only = ks.filter((k) => !t.has(k));
+    if (only.length) keys[file] = only;
+  }
+  const testReads = new Set(raw.boot.testReads);
+  // Import-time reads of test fixtures stay test reads; the rest (manifests, schemas
+  // loaded as modules evaluate) are boot reads.
+  for (const r of raw.boot.impReads ?? []) if (/(^|\/)(__tests__|test|tests|fixtures)\//.test(r) || /\.(test|spec)\.tsx?$/.test(r)) testReads.add(r);
+  const bootReadsAll = [...new Set([...raw.boot.reads, ...(raw.boot.impReads ?? [])])];
+  const reads = bootReadsAll.filter((r) => !testReads.has(r)).sort();
+  const loaded = new Set(raw.loaded);
+  const defs = [];
+  for (const file of raw.loaded) { const fi = /\.tsx?$/.test(file) ? fileInfo(ln, file) : null; if (fi) for (const d of fi.defs) defs.push(d); }
+  const testConsts = new Set();
+  // A constant is test-used when a function the TEST PHASE ran names it (testIdents),
+  // or a loaded test file or test helper names it. ADR 0968 correction (2026-10-27):
+  // this used to count ANY loaded file, the defining module included, so every module
+  // with a constant was test-used and nothing could be boot-only. App source that
+  // names it from boot or import code is boot wiring, which the digest stands for.
+  const referenced = (name) => { if (testIdents.has(name)) return true; const fs_ = refFiles.get(name); if (fs_) for (const f of fs_) if (loaded.has(f) && !isAppSrc(f)) return true; return false; };
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const [file, name, initIdents] of defs) {
+      const id = `${file}::${name}`;
+      if (testConsts.has(id) || !referenced(name)) continue;
+      testConsts.add(id); grew = true;
+      for (const w of initIdents) testIdents.add(w);
+    }
+  }
+  const ds = raw.boot.digests ?? [];
+  const digest = !raw.boot.error && ds.length && ds.length === raw.boot.n && !ds.some((d) => d.startsWith('error:'))
+    ? crypto.createHash('sha256').update(ds.join('\n')).digest('hex').slice(0, 32) : null;
+  return { n: raw.boot.n, digest, only: putBlob({ keys, reads, testFiles: Object.keys(testKeys).sort(), testConsts: [...testConsts].sort() }) };
+}
+function shadowBoot(ln, raw, verdict, H, lock, bootFp, sh) {
+  sh.booted++;
+  const prev = readFps(ln.name, raw.testFile).filter((fp) => fp.commit !== H && fp.boot);
+  if (!prev.length) return;
+  if (prev.some((fp) => !invalidates(ln, raw.testFile, fp, H, raw.node, lock))) { sh.reusable++; return; }
+  sh.invalidated++;
+  let best = null;
+  for (const fp of prev) {
+    const why = invalidatesBoot(ln, raw.testFile, fp, H, raw.node, lock, bootFp.digest);
+    if (!why) { best = 'skip'; break; }
+    if (/^boot-only/.test(why)) best ??= why;
+  }
+  if (best === 'skip') {
+    sh.absorbable++; sh.wouldSkip++;
+    if (verdict.status !== 'passed') sh.wouldSkipFailed.push(raw.testFile);
+  } else if (best) {
+    sh.absorbable++;
+    if (/no boot digest/.test(best)) sh.noDigest++;
+  }
+}
+// One row per ingest that saw a boot, so growth is bounded by gates (like reasons-*);
+// rotated to .1 past BOOT_SHADOW_MAX_ROWS so it can never grow without bound.
+const BOOT_SHADOW_MAX_ROWS = 10_000;
+function writeBootShadow(ln, H, sh) {
+  fs.mkdirSync(LEDGER, { recursive: true });
+  const f = path.join(LEDGER, `boot-shadow-${HOST}.tsv`);
+  const HDR = 'at\tlane\thead\tbooted\treusable\tinvalidated\tboot_absorbable\twould_skip\twould_skip_failed\tno_digest\terrors\tfailed_files\n';
+  try { if (fs.existsSync(f) && fs.readFileSync(f, 'utf8').split('\n').length > BOOT_SHADOW_MAX_ROWS) fs.renameSync(f, `${f}.1`); } catch { /* best effort */ }
+  if (!fs.existsSync(f)) fs.writeFileSync(f, HDR);
+  fs.appendFileSync(f, [new Date().toISOString(), ln.name, H.slice(0, 12), sh.booted, sh.reusable, sh.invalidated, sh.absorbable, sh.wouldSkip, sh.wouldSkipFailed.length, sh.noDigest, sh.errors, JSON.stringify(sh.wouldSkipFailed.slice(0, 20))].join('\t') + '\n');
+  console.log(`tracegate (${ln.name}): boot shadow (ADR 0968, decides nothing) — of ${sh.invalidated} booting file(s) invalidated, ${sh.absorbable} were invalidated only through boot, and ${sh.wouldSkip} would skip on an unchanged boot digest (${sh.wouldSkipFailed.length} of those FAILED${sh.wouldSkipFailed.length ? ': ' + sh.wouldSkipFailed.slice(0, 5).join(', ') : ''}); ${sh.noDigest} had no digest; ${sh.errors} error(s).`);
 }
 
 // Per-file facts for one ingest: the tree is fixed (H101), so each file is read,
@@ -510,13 +645,14 @@ function loadResults(run) {
 // ── decide: may this file's verdict be reused on tree H? ─────────────────────
 const _changes = new Map();
 function changesSince(C, H) {
-  const ck = C + '..' + H;
+  const ck = C + '..' + H + (REPLAY.drop ? ' -' + REPLAY.drop.source : '');
   if (_changes.has(ck)) return _changes.get(ck);
   let res;
   try {
     git('cat-file', '-e', C + '^{commit}');
     res = git('diff', '--no-renames', '--name-status', C, H).trim().split('\n').filter(Boolean)
-      .map((l) => { const [st, p] = l.split('\t'); return { st, path: p, keys: null }; });
+      .map((l) => { const [st, p] = l.split('\t'); return { st, path: p, keys: null }; })
+      .filter((c) => !(REPLAY.drop && REPLAY.drop.test(c.path)));
   } catch { res = null; } // commit gone (a gc'd train) → unknown → run
   _changes.set(ck, res);
   return res;
@@ -581,23 +717,26 @@ function i18nVerdict(fp, p, c, H) {
 /** Is one footprint still valid on H? Returns null if valid, else the reason. */
 function invalidates(ln, testFile, fp, H, nodeVersion, lock) {
   if (fp.v !== FP_VERSION) return 'footprint format changed';
+  if (fp.subprocess !== false) return 'opaque subprocess input';
   if (fp.node !== nodeVersion) return `node ${fp.node} → ${nodeVersion}`;
-  if (fp.lock !== lock) return 'lockfile changed';
-  const ageH = (Date.now() - Date.parse(fp.recordedAt)) / 3_600_000;
+  if (fp.lock !== lock && !REPLAY.ignoreLock) return 'lockfile changed';
+  const ageH = (nowMs() - Date.parse(fp.recordedAt)) / 3_600_000;
   if (!(ageH <= MAX_AGE_HOURS)) return `footprint older than ${MAX_AGE_HOURS} h (time-dependent tests)`;
   if (fp.commit === H) return null;
   const ch = changesSince(fp.commit, H);
   if (!ch) return `footprint commit ${fp.commit.slice(0, 9)} unavailable`;
+  // Global inputs invalidate every footprint before per-file parsing or reads.
+  // A recorder change sorts after frontend catalog changes; checking it only
+  // inside the loop used hundreds of Git reads before reaching the same RUN.
+  // Test files under global directories are not setup inputs; their ordinary
+  // loaded-module/test-file checks below still apply.
+  const globalInput = ch.find(({ path: p }) => ln.global.test(p) && !/\.(test|spec)\.tsx?$/.test(p));
+  if (globalInput) return `global input ${globalInput.path}`;
   let loaded, reads;
   try { loaded = new Set(getBlob(fp.loaded)); reads = getBlob(fp.reads); } catch { return 'footprint blob missing'; }
   const consts = new Set(fp.consts);
   for (const c of ch) {
     const p = c.path;
-    // A test FILE under a global directory (src/test/__tests__/) is not a setup
-    // input: nothing loads it but itself, and if another test does load it, the
-    // loaded-module check below still catches it. Measured 2026-10-16: an edit to
-    // clockshift-armed.test.ts re-ran 971 of 1,037 frontend files.
-    if (ln.global.test(p) && !/\.(test|spec)\.tsx?$/.test(p)) return `global input ${p}`;
     if (p === testFile) return 'the test file changed';
     if (loaded.has(p)) {
       const isSrc = p.startsWith(ln.dir + '/src/') && /\.tsx?$/.test(p) && !/\.(test|spec)\.tsx?$/.test(p);
@@ -628,6 +767,98 @@ function invalidates(ln, testFile, fp, H, nodeVersion, lock) {
   return null;
 }
 
+// ── boot shadow (ADR 0968 P2): would a boot-outcome rule have skipped it? ───
+// SHADOW ONLY. Nothing that selects or reuses a verdict calls this; it runs at
+// ingest, for files that just ran, and only writes boot-shadow-<host>.tsv.
+// It is invalidates() with one difference: a change the test can have seen ONLY
+// through app boot (a function it executed only inside createApp, a file it read
+// only there, or a top-level statement/constant of a module none of whose
+// functions or constants its test phase touched) is ABSORBED instead of
+// returned, and absorption then requires the boot digest at the footprint's
+// commit to equal the one just recorded. Keep its non-boot branches identical
+// to invalidates(): the self-test runs every decide() case through both.
+export function invalidatesBoot(ln, testFile, fp, H, nodeVersion, lock, digestNow) {
+  if (fp.v !== FP_VERSION) return 'footprint format changed';
+  if (fp.subprocess !== false) return 'opaque subprocess input';
+  if (fp.node !== nodeVersion) return `node ${fp.node} → ${nodeVersion}`;
+  if (fp.lock !== lock) return 'lockfile changed';
+  const ageH = (Date.now() - Date.parse(fp.recordedAt)) / 3_600_000;
+  if (!(ageH <= MAX_AGE_HOURS)) return `footprint older than ${MAX_AGE_HOURS} h (time-dependent tests)`;
+  if (fp.commit === H) return null;
+  const ch = changesSince(fp.commit, H);
+  if (!ch) return `footprint commit ${fp.commit.slice(0, 9)} unavailable`;
+  let loaded, reads, boot = null;
+  try {
+    loaded = new Set(getBlob(fp.loaded)); reads = getBlob(fp.reads);
+    if (fp.boot?.only) { const b = getBlob(fp.boot.only); boot = { keys: b.keys, reads: new Set(b.reads), testFiles: new Set(b.testFiles), testConsts: new Set(b.testConsts) }; }
+  } catch { return 'footprint blob missing'; }
+  const consts = new Set(fp.consts);
+  let absorbed = null;
+  const absorb = (why) => { absorbed ??= why; };
+  for (const c of ch) {
+    const p = c.path;
+    if (ln.global.test(p) && !/\.(test|spec)\.tsx?$/.test(p)) return `global input ${p}`;
+    if (p === testFile) return 'the test file changed';
+    if (loaded.has(p)) {
+      const isSrc = p.startsWith(ln.dir + '/src/') && /\.tsx?$/.test(p) && !/\.(test|spec)\.tsx?$/.test(p);
+      if (!isSrc) return `loaded module ${p}`;
+      if (c.st === 'D') return `loaded module deleted ${p}`;
+      if ((fp.unmapped ?? []).includes(p)) return `unmapped module ${p}`;
+      if (ln.i18n && c.st === 'M') {
+        const why = i18nVerdict(fp, p, c, H);
+        if (why === null) continue;
+        if (why) return why;
+      }
+      const exec = fp.keys[p] ?? [];
+      // Module-level text is boot-only when the test phase used nothing of p.
+      const moduleBootOnly = boot && !boot.testFiles.has(p) && ![...boot.testConsts].some((id) => id.startsWith(p + '::'));
+      for (const k of changedKeys(fp.commit, H, c)) {
+        if (k === '<blank>' || k === '<import>') continue;
+        if (k === '<top>') { if (moduleBootOnly) { absorb(`top-level change in ${p}`); continue; } return `top-level change in ${p}`; }
+        if (k.startsWith('<const:')) {
+          const id = `${p}::${k.slice(7, -1)}`;
+          if (!consts.has(id)) continue;
+          if (boot && !boot.testConsts.has(id)) { absorb(`constant ${k.slice(7, -1)} in ${p}`); continue; }
+          return `constant ${k.slice(7, -1)} in ${p}`;
+        }
+        if (exec.includes(k)) {
+          if (boot && (boot.keys[p] ?? []).includes(k)) { absorb(`executed function ${k} in ${p}`); continue; }
+          return `executed function ${k} in ${p}`;
+        }
+      }
+      continue;
+    }
+    const proj = ln.projected?.[p];
+    if (proj && c.st === 'M' && reads.includes(p)) {
+      if (proj(testFile, showAt(fp.commit, p), showAt(H, p))) return `projected input ${p} (its answer for this test changed)`;
+      continue;
+    }
+    for (const r of reads) {
+      if (!(r === p || p.startsWith(r + '/'))) continue;
+      if (boot && boot.reads.has(r)) { absorb(`read input ${p}`); continue; }
+      return `read input ${p}`;
+    }
+  }
+  if (!absorbed) return null;
+  if (!fp.boot?.digest || !digestNow) return `boot-only (${absorbed}), but no boot digest to compare`;
+  if (fp.boot.digest !== digestNow) return `boot-only (${absorbed}), and the boot outcome changed`;
+  return null;
+}
+
+/** decide()'s shape over invalidatesBoot — for the self-test's parity rows only. */
+export function shadowDecide(testFile, H, nodeVersion, lock, laneName = 'backend', digestNow = null) {
+  const ln = lane({ lane: laneName });
+  const fps = readFps(ln.name, testFile);
+  if (!fps.length) return { run: true, reason: 'no footprint' };
+  let first = null;
+  for (const fp of fps) {
+    const why = invalidatesBoot(ln, testFile, fp, H, nodeVersion, lock, digestNow);
+    if (!why) return { run: false, reason: 'boot shadow: reusable' };
+    first ??= why;
+  }
+  return { run: true, reason: first };
+}
+
 export function decide(testFile, H, nodeVersion, lock, laneName = 'backend') {
   const ln = lane({ lane: laneName });
   const fps = readFps(ln.name, testFile);
@@ -655,8 +886,17 @@ function readTsv(prefix) {
 export function entryBar(laneName) {
   const obs = readTsv('shadow-').filter((r) => r.lane === laneName && (r.mode === 'shadow' || r.mode === 'enforce'));
   // A miss triaged as a flake (`tracegate.mjs triage <file> flake`) is a test
-  // problem, not a footprint hole: it does not suspend enforcement.
-  const flakes = new Set(readTsv('triage-').filter((t) => t.verdict === 'flake').map((t) => `${t.lane}\0${t.file}\0${t.head}`));
+  // problem, not a footprint hole: it does not suspend enforcement. A `hole` does.
+  // The LATEST verdict for a (lane, file, head) decides (ADR 0980 P1, as upstream):
+  // a Red Reader escalation (`escalations-`, written by `red annotate`) is a
+  // `hole` that comes after the gate's own recheck `flake`, and a person's later
+  // `triage --verdict flake` overrides it again. OPENWOP_TRACEGATE_RED_ESCALATE=off
+  // ignores escalations.
+  const escalations = process.env.OPENWOP_TRACEGATE_RED_ESCALATE === 'off' ? [] : readTsv('escalations-');
+  const verdicts = [...readTsv('triage-'), ...escalations].filter((t) => t.verdict === 'flake' || t.verdict === 'hole')
+    .sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
+  const last = new Map(); for (const t of verdicts) last.set(`${t.lane}\0${t.file}\0${t.head}`, t.verdict);
+  const flakes = new Set([...last].filter(([, v]) => v === 'flake').map(([k]) => k));
   const misses = readTsv('misses-').filter((r) => r.lane === laneName && !flakes.has(`${r.lane}\0${r.file}\0${r.head}`));
   const now = Date.now(), day = 86_400_000;
   const first = obs.length ? Math.min(...obs.map((r) => Date.parse(r.at))) : now;
@@ -756,6 +996,53 @@ export function select(o) {
   }
 }
 
+export function replay(o) {
+  const ln = lane(o);
+  if (!o.head || o.head === true) throw new Error('replay needs --head <commit>');
+  if (!o.at || o.at === true || Number.isNaN(Date.parse(o.at))) throw new Error('replay needs --at <iso time of the gate> (footprints recorded later are not used)');
+  const H = git('rev-parse', `${o.head}^{commit}`).trim();
+  Object.assign(REPLAY, { at: Date.parse(o.at), drop: o.drop && o.drop !== true ? new RegExp(o.drop) : null, ignoreLock: o['ignore-lock'] === true });
+  _changes.clear();
+  try { return replayAt(o, ln, H); } finally { Object.assign(REPLAY, { at: null, drop: null, ignoreLock: false }); _changes.clear(); }
+}
+function replayAt(o, ln, H) {
+  let lock = 'none';
+  try { lock = crypto.createHash('sha256').update(execFileSync('git', ['-C', ROOT, 'show', `${H}:${ln.dir}/package-lock.json`], { maxBuffer: 1 << 28 })).digest('hex').slice(0, 16); } catch { /* none, as lockHash */ }
+  // The test list at H, from the tree (the gate listed it with vitest at H).
+  const files = process.env.OPENWOP_TRACEGATE_TEST_LIST
+    ? process.env.OPENWOP_TRACEGATE_TEST_LIST.split('\n').filter(Boolean)
+    : git('ls-tree', '-r', '--name-only', H, '--', ln.dir).split('\n')
+      .filter((f) => /\.(test|spec)\.tsx?$/.test(f) && !f.includes('/node_modules/') && !f.startsWith(`${ln.dir}/e2e/`));
+  // The Node the gate ran is not logged; the newest footprint before it was
+  // recorded by an earlier gate on the same runtime, so take its node unless told.
+  let node = o.node && o.node !== true ? o.node : null;
+  if (!node) {
+    let best = null;
+    for (const f of files.slice(0, 200)) for (const fp of readFps(ln.name, f)) if (!best || fp.recordedAt > best.recordedAt) best = fp;
+    node = best?.node ?? process.version;
+  }
+  const why = new Map(); const selected = [];
+  // A file whose footprints were all recorded AFTER the gate (the ones the gate
+  // used were since replaced: KEEP_PER_TEST eviction, or dropped on a failure)
+  // replays as "no footprint" although the gate may have reused it. Count them,
+  // so a replay says how far it can be trusted: must-run is exact only when 0.
+  let evicted = 0;
+  for (const f of files) {
+    let d; try { d = decide(f, H, node, lock, ln.name); } catch (e) { d = { run: true, reason: `predictor error: ${e.message}` }; }
+    if (d.reason === 'no footprint') { const at = REPLAY.at; REPLAY.at = null; if (readFps(ln.name, f).length) evicted++; REPLAY.at = at; }
+    if (d.run) { selected.push(f); const k = reasonKey(d.reason); why.set(k, (why.get(k) ?? 0) + 1); }
+  }
+  const top = [...why].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).slice(0, REASONS_TOP);
+  const res = { lane: ln.name, head: H, at: o.at, drop: REPLAY.drop?.source ?? null, ignoreLock: REPLAY.ignoreLock, node, files: files.length, mustRun: selected.length, evicted, top, selected };
+  if (o.out && o.out !== true) fs.writeFileSync(o.out, JSON.stringify(res, null, 1));
+  console.log(`tracegate replay (${ln.name}) ${H.slice(0, 9)} at ${o.at}${res.drop ? ` without /${res.drop}/` : ''}${res.ignoreLock ? ', lock ignored' : ''}: must run ${selected.length} of ${files.length}${evicted ? ` — ${evicted} of those only because their footprints were replaced after the gate, so the true count may be up to ${evicted} lower` : ''}; node ${node}${o.node && o.node !== true ? '' : ' (from the newest earlier footprint)'}.`);
+  // A footprint DROPPED after a later failure leaves no trace at all, so even with
+  // 0 replaced a replay can read a file or two high: compare scenarios with each
+  // other, never one replay with a logged count. MEASURED 2026-10-23: +1..+2 on 4 gates.
+  for (const [k, n] of top.slice(0, 5)) console.log(`  ${String(n).padStart(5)}  ${k}`);
+  return res;
+}
+
 // ── report: prediction vs reality ────────────────────────────────────────────
 export function report(o) {
   const ln = lane(o);
@@ -819,8 +1106,8 @@ export function sync(o) {
     ok = rs('--ignore-existing', `${r}/${d}/`, `${LEDGER}/${d}/`) && ok; // theirs → ours
   }
   // Their logs (never our own name), then ours to them.
-  ok = rs(`--exclude=shadow-${HOST}.tsv`, `--exclude=misses-${HOST}.tsv`, `--exclude=triage-${HOST}.tsv`, `--exclude=reasons-${HOST}.tsv`, '--include=shadow-*.tsv', '--include=misses-*.tsv', '--include=triage-*.tsv', '--include=reasons-*.tsv', '--exclude=*', `${r}/`, `${LEDGER}/`) && ok;
-  const mine = [`shadow-${HOST}.tsv`, `misses-${HOST}.tsv`, `triage-${HOST}.tsv`, `reasons-${HOST}.tsv`].map((f) => path.join(LEDGER, f)).filter((f) => fs.existsSync(f));
+  ok = rs(`--exclude=shadow-${HOST}.tsv`, `--exclude=misses-${HOST}.tsv`, `--exclude=triage-${HOST}.tsv`, `--exclude=reasons-${HOST}.tsv`, `--exclude=escalations-${HOST}.tsv`, '--include=shadow-*.tsv', '--include=misses-*.tsv', '--include=triage-*.tsv', '--include=reasons-*.tsv', '--include=escalations-*.tsv', '--exclude=*', `${r}/`, `${LEDGER}/`) && ok;
+  const mine = [`shadow-${HOST}.tsv`, `misses-${HOST}.tsv`, `triage-${HOST}.tsv`, `reasons-${HOST}.tsv`, `escalations-${HOST}.tsv`].map((f) => path.join(LEDGER, f)).filter((f) => fs.existsSync(f));
   if (mine.length) ok = rs(...mine, `${r}/`) && ok;
   console.log(`tracegate sync: ${ok ? 'ledger exchanged with' : 'PARTIAL exchange with'} ${remote}`);
   if (!ok) process.exitCode = 1;
@@ -838,6 +1125,42 @@ export function triage(o) {
   if (!fs.existsSync(t)) fs.writeFileSync(t, 'at\tlane\tfile\thead\tverdict\n');
   for (const m of misses) fs.appendFileSync(t, [new Date().toISOString(), ln.name, m.file, m.head, o.verdict].join('\t') + '\n');
   console.log(`tracegate triage: ${misses.length} miss(es) for ${o.file} marked ${o.verdict}.`);
+}
+
+// ── red: Red Reader packets and escalate-only opinions (ADR 0980 P1) ─────────
+// The vendored tracegate-ci `red.mjs` does the work. Its context is pointed at
+// THIS repo's root, ledger and host before its first use, so its packets and its
+// `escalations-<host>.tsv` sit beside the logs this predictor reads.
+//   red write --lane <l> --run <dir> [--rechecks <file>] [--base <ref>]
+//   red list [--n 20] | red show <id> | red score
+//   red annotate <id> --verdict real|flake-suspect|infra|unclear --escalate true|false
+//                     --confidence 0..1 --reasons "<text>" [--by <who>]
+// An opinion can only ESCALATE: `real`, escalated, confidence >= 0.7, on a file that
+// was a MISS, writes an `escalations-` row the entry bar reads as `hole`. Nothing
+// lowers a verdict; a person's later `triage --verdict flake` has the last word.
+export async function redCmd(sub, o, id) {
+  process.env.TRACEGATE_ROOT = ROOT;
+  process.env.TRACEGATE_LEDGER = LEDGER;
+  process.env.TRACEGATE_HOST = HOST;
+  const red = await import('./vendor/tracegate-ci/src/red.mjs');
+  if (sub === 'write') {
+    if (!o.lane || !o.run) throw new Error('red write needs --lane <l> --run <dir>');
+    const rechecks = {};
+    if (o.rechecks) { try { for (const l of fs.readFileSync(o.rechecks, 'utf8').split('\n')) { const [f, v] = l.split('\t'); if (f && (v === 'passed' || v === 'failed')) rechecks[f] = v; } } catch { /* none */ } }
+    const p = red.writePacket({ lane: o.lane, run: o.run, base: o.base, rechecks });
+    console.log(`tracegate (${o.lane}): red packet ${p.id} — ${p.failedCount} failed file(s). An agent can read it with \`node scripts/tracegate.mjs red show ${p.id}\` and give an escalate-only opinion (scripts/vendor/tracegate-ci/agents/red-reader.md).`);
+    return p;
+  }
+  if (sub === 'annotate') {
+    const rec = red.annotate({ id, verdict: o.verdict, escalate: o.escalate === true || o.escalate === 'true' ? true : o.escalate === 'false' ? false : o.escalate,
+      confidence: Number(o.confidence), reasons: o.reasons, ...(o.owner ? { owner: o.owner } : {}), by: o.by ?? 'cli' });
+    console.log(`tracegate red: opinion on ${rec.id}: ${rec.verdict}${rec.escalate ? ' (escalate)' : ''}${rec.escalated.length ? ` — raised to HOLE: ${rec.escalated.join(', ')}` : ''}`);
+    return rec;
+  }
+  if (sub === 'list') { for (const r of red.listRed(Number(o.n ?? 20))) console.log(`${r.opinion?.escalate ? '!' : ' '} ${r.at}  ${r.id}  failed ${r.failed}, misses ${r.misses}${r.opinion ? `  → ${r.opinion.verdict} (${r.opinion.confidence}) by ${r.opinion.by}` : '  (no opinion)'}`); return; }
+  if (sub === 'show') { console.log(JSON.stringify(red.readPacket(id), null, 2)); return; }
+  if (sub === 'score') { console.log(JSON.stringify(red.score(), null, 2)); return; }
+  throw new Error('usage: tracegate.mjs red write|list|show <id>|annotate <id>|score');
 }
 
 function readConfig() { try { return JSON.parse(fs.readFileSync(path.join(LEDGER, 'config.json'), 'utf8')); } catch { return {}; } }
@@ -864,5 +1187,7 @@ if (isEntryModule(import.meta.url)) {
   else if (cmd === 'sync') sync(o);
   else if (cmd === 'triage') triage(o);
   else if (cmd === 'full-done') fullDone(o);
-  else { console.error('usage: tracegate.mjs mode|select|ingest|report --lane <backend|frontend> --run <dir>  |  status  |  sync --remote <host:path>  |  triage --lane <l> --file <f> --verdict flake|hole  |  full-done --lane <l>'); process.exit(2); }
+  else if (cmd === 'replay') replay(o);
+  else if (cmd === 'red') { const id = process.argv[4] && !process.argv[4].startsWith('--') ? process.argv[4] : undefined; await redCmd(process.argv[3], id ? args4() : o, id).catch((e) => { console.error(String(e.message ?? e)); process.exitCode = 1; }); }
+  else { console.error('usage: tracegate.mjs mode|select|ingest|report --lane <backend|frontend> --run <dir>  |  status  |  sync --remote <host:path>  |  triage --lane <l> --file <f> --verdict flake|hole  |  full-done --lane <l>  |  replay --lane <l> --head <commit> --at <iso> [--drop <regex>] [--ignore-lock] [--node <v>] [--out <json>]'); process.exit(2); }
 }

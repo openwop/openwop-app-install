@@ -327,13 +327,15 @@ describe('campaign-studio — orchestration workflow (the registered PARALLEL sp
 
 describe('campaign-studio — agent pack', () => {
   it('loads the Campaign Strategist with its registered tool-allowlist', () => {
-    // CFP-1: the strategist drives the orchestration through two REAL registered
-    // tools (status read + workflow igniter), not phantom node typeIds — the
-    // resolution tripwire is test/agent-allowlist-resolution.test.ts.
+    // CFP-1: the strategist drives the orchestration through four REAL registered
+    // tools (status read, the ADR 0942 P6 review-policy read, workflow igniter), not
+    // phantom node typeIds — the resolution tripwire is test/agent-allowlist-resolution.test.ts.
     const loaded = loadAgentsFromManifest(join(REPO_ROOT, 'packs', 'vendor.openwop-app.campaign-orchestration.agents'));
     expect(loaded.length).toBe(1);
     expect(loaded[0].agentId).toBe('vendor.openwop-app.campaign-orchestration.agents.campaign-strategist');
     expect([...(loaded[0].toolAllowlist ?? [])].sort()).toEqual([
+      'openwop:campaign-orchestration.get-autonomy',
+      'openwop:campaign-orchestration.get-campaign', // ADR 0941 P5 — read before plan
       'openwop:campaign-orchestration.run',
       'openwop:campaign-orchestration.status',
     ]);

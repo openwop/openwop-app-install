@@ -4,9 +4,26 @@
  * the adapterOnly governed-write posture, and the idempotent CRM ingest +
  * compute-on-read counts (both ingestion lanes converge on the same
  * deterministic-id activity).
+ *
+ * What is and is not tested (8f W4, round-2 ruling 9):
+ *  - Idempotency and the no-show suppression are asserted on the activity ROWS,
+ *    not only on the derived counts (counts dedupe by contact id, so the probes
+ *    wb-dedupe and wb-noshow-suppress were vacuous against counts alone). The
+ *    no-show rule is a DOUBLE guard: ingest refuses a late no-show AND
+ *    `countsFrom` subtracts attendees; each half now has its own witness.
+ *  - The feature's REAL lifecycle consumers (the two inline lambdas in
+ *    `features/webinars/feature.ts` registerRoutes) are driven in the last
+ *    describe, which boots the app so `registerRoutes` runs, then fires the real
+ *    seams (`fireFormDeleted`, `fireCrmRecordDeleted`). The `form-lifecycle` and
+ *    `contact-delete` describes above it test the SEAM and the HELPER, and say so
+ *    in their titles. The contact consumer's own effect is BLOCKED-ON-PRODUCT
+ *    (WEBINAR-CONTACT-PRUNE-1, pinned as it.fails below): a sibling CRM consumer
+ *    runs first and leaves it nothing to delete.
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import http from 'node:http';
+import { createApp } from '../src/index.js';
 import { createHmac } from 'node:crypto';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openStorage } from '../src/storage/index.js';
@@ -18,7 +35,13 @@ import { __clearWebinars, upsertMarketingEvent, bindFormToEvent, getFormBinding,
 import { onFormDeleted, fireFormDeleted, __resetFormLifecycleHooks } from '../src/host/formLifecycle.js';
 import { __resetCrmStore, findContactByEmail } from '../src/features/crm/contactsService.js';
 import { deleteActivitiesForContactByPrefix } from '../src/features/crm/entities/activities.js';
-import { __resetCrmEntities } from '../src/features/crm/crmEntitiesService.js';
+import { __resetCrmEntities, listActivitiesByIdPrefix } from '../src/features/crm/crmEntitiesService.js';
+import { fireCrmRecordDeleted } from '../src/host/crmRecordLifecycle.js';
+
+/** The activity ROWS behind one event, by phase suffix — counts are computed from
+ *  SETS of contact ids, so they cannot show a duplicated or a suppressed row. */
+const phasesOf = async (providerEventId: string): Promise<string[]> =>
+  (await listActivitiesByIdPrefix('t1', 'o1', `act:webinar:${providerEventId}:`)).map((a) => a.activityId.split(':').pop()!).sort();
 
 describe('webinars — provider + inbound wiring', () => {
   it('registers zoom-webinar as an adapterOnly governed-write provider', () => {
@@ -84,15 +107,25 @@ describe('webinars — idempotent CRM ingest + compute-on-read counts', () => {
 
   it('a re-ingested event is a no-op (deterministic activity id) and counts derive from the stream', async () => {
     const base = { provider: 'zoom', providerEventId: '77', participantEmail: 'a@x.test', participantName: 'Ann', title: 'Launch' } as const;
-    // Two lanes converge on the same registered event → one activity.
+    // Two lanes converge on the same registered event → one activity. The second
+    // carries a different occurredAt: a re-ingest that rewrote the row would move
+    // its createdAt. The deterministic id alone makes a DUPLICATE row impossible
+    // (one key), so "no-op" is witnessed by the row staying untouched.
+    // DOUBLE GUARD (named): ingest point-reads the id (webinarProcessor.ts:136)
+    // AND createActivity returns an existing id unchanged (activities.ts:152);
+    // either alone keeps the row. Probe wb-dedupe-r3 removes both.
     await ingestWebinarEvent('t1', 'o1', 'conn:1', { ...base, phase: 'registered' });
-    await ingestWebinarEvent('t1', 'o1', 'conn:1', { ...base, phase: 'registered' });
+    const firstAt = (await listActivitiesByIdPrefix('t1', 'o1', 'act:webinar:77:'))[0]!.createdAt;
+    await ingestWebinarEvent('t1', 'o1', 'conn:1', { ...base, phase: 'registered', occurredAt: '2020-01-01T00:00:00.000Z' });
+    expect((await listActivitiesByIdPrefix('t1', 'o1', 'act:webinar:77:')).map((a) => a.createdAt)).toEqual([firstAt]);
     // A second registrant + an attendee.
     await ingestWebinarEvent('t1', 'o1', 'conn:1', { ...base, phase: 'registered', participantEmail: 'b@x.test', participantName: 'Bob' });
     await ingestWebinarEvent('t1', 'o1', 'conn:1', { ...base, phase: 'attended' });
 
     const counts = await computeEventCounts('t1', 'o1', '77');
     expect(counts).toEqual({ registrantCount: 2, attendeeCount: 1, noShowCount: 0 });
+    // The ROWS: a-registered, b-registered, a-attended — the re-ingest wrote none.
+    expect(await phasesOf('77')).toEqual(['attended', 'registered', 'registered']);
   });
 
   it('attendance wins over a stale no-show (no double-count, no false no-show)', async () => {
@@ -106,6 +139,19 @@ describe('webinars — idempotent CRM ingest + compute-on-read counts', () => {
     const counts = await computeEventCounts('t1', 'o1', '55');
     expect(counts.attendeeCount).toBe(1);
     expect(counts.noShowCount).toBe(0); // stale no-show subtracted; the contact attended
+    // The early no-show row is kept (it shares its id with the late one, so the
+    // late ingest can only collide with it — that half is countsFrom's).
+    expect(await phasesOf('55')).toEqual(['attended', 'no-show', 'registered']);
+
+    // INGEST-side half on its own: attended FIRST, then a late no-show for a
+    // contact that never had one. Only the ingest guard keeps that row out
+    // (8f W4 r2: wb-noshow-suppress-r2 was vacuous against the event-55 fixture,
+    // where the late no-show's id equals the early one's).
+    const late = { provider: 'zoom', providerEventId: '56', participantEmail: 'a@x.test', title: 'Launch' } as const;
+    await ingestWebinarEvent('t1', 'o1', undefined, { ...late, phase: 'registered' });
+    await ingestWebinarEvent('t1', 'o1', undefined, { ...late, phase: 'attended' });
+    await ingestWebinarEvent('t1', 'o1', undefined, { ...late, phase: 'no-show' });
+    expect(await phasesOf('56')).toEqual(['attended', 'registered']);
   });
 
   it('isolates counts by tenant', async () => {
@@ -144,7 +190,7 @@ describe('webinars — form-lifecycle unbind (grade-data WEB-2)', () => {
     expect((await getMarketingEvent('t1', 'o1', 't1:zoom:77'))?.formId).toBeUndefined(); // no dangling pointer
   });
 
-  it('a deleted form fires the seam → a registered consumer prunes its binding', async () => {
+  it('the form-deleted SEAM calls a registered consumer with the deleted form id (the webinars consumer itself: last describe)', async () => {
     let pruned = '';
     onFormDeleted('test-unbind', async ({ formId }) => { pruned = formId; });
     const ran = await fireFormDeleted({ tenantId: 't1', orgId: 'o1', formId: 'form:9' });
@@ -181,7 +227,7 @@ describe('webinars — contact-delete activity unlink (grade-data WEB-1)', () =>
     await __clearWebinars();
   });
 
-  it('pruning a deleted contact\'s webinar activities stops count inflation', async () => {
+  it('the prune HELPER removes a deleted contact\'s webinar activities, so counts stop inflating (the real consumer: last describe)', async () => {
     const base = { provider: 'zoom', providerEventId: '77', title: 'Launch' } as const;
     await ingestWebinarEvent('t1', 'o1', undefined, { ...base, phase: 'registered', participantEmail: 'a@x.test' });
     await ingestWebinarEvent('t1', 'o1', undefined, { ...base, phase: 'registered', participantEmail: 'b@x.test' });
@@ -192,5 +238,68 @@ describe('webinars — contact-delete activity unlink (grade-data WEB-1)', () =>
     const removed = await deleteActivitiesForContactByPrefix('t1', a!.contactId, 'act:webinar:');
     expect(removed).toBe(1);
     expect((await computeEventCounts('t1', 'o1', '77')).registrantCount).toBe(1); // no dead-contact inflation
+  });
+});
+
+describe('webinars — the feature\'s REAL lifecycle consumers (booted app: registerRoutes runs)', () => {
+  let server: http.Server;
+  beforeAll(async () => {
+    process.env.OPENWOP_STORAGE_DSN = 'memory://';
+    process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
+    const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+    await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => res()); });
+  });
+  afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
+  beforeEach(async () => {
+    initHostExtPersistence(await openStorage('memory://'));
+    await __resetCrmStore();
+    await __resetCrmEntities();
+    await __clearWebinars();
+  });
+
+  it('a deleted bound form is unbound by the webinars consumer (binding gone, no dangling formId)', async () => {
+    await upsertMarketingEvent({ tenantId: 't1', orgId: 'o1', provider: 'zoom', providerEventId: 'R1', formId: 'form:R' });
+    await bindFormToEvent('t1', 'o1', 'form:R', 't1:zoom:R1');
+    expect(await getFormBinding('t1', 'form:R')).toBeTruthy(); // non-vacuous
+
+    // The consumer was registered by this describe's createApp (beforeAll runs at
+    // the describe's start, after any earlier describe's hook reset).
+    const ran = await fireFormDeleted({ tenantId: 't1', orgId: 'o1', formId: 'form:R' });
+    expect(ran, 'the webinars-form-unbind consumer must be registered').toBeGreaterThanOrEqual(1);
+    expect(await getFormBinding('t1', 'form:R')).toBeNull();
+    expect((await getMarketingEvent('t1', 'o1', 't1:zoom:R1'))?.formId).toBeUndefined();
+  });
+
+  it('a deleted contact stops counting through the real fan-out, and no webinar row still names it', async () => {
+    const base = { provider: 'zoom', providerEventId: 'C1', title: 'Launch' } as const;
+    await ingestWebinarEvent('t1', 'o1', undefined, { ...base, phase: 'registered', participantEmail: 'a@x.test' });
+    await ingestWebinarEvent('t1', 'o1', undefined, { ...base, phase: 'registered', participantEmail: 'b@x.test' });
+    expect((await computeEventCounts('t1', 'o1', 'C1')).registrantCount).toBe(2);
+
+    const a = await findContactByEmail('t1', 'a@x.test');
+    await fireCrmRecordDeleted({ tenantId: 't1', entity: 'contact', recordId: a!.contactId });
+    expect((await computeEventCounts('t1', 'o1', 'C1')).registrantCount).toBe(1);
+    const rows = await listActivitiesByIdPrefix('t1', 'o1', 'act:webinar:C1:');
+    expect(rows.filter((r) => r.contactId === a!.contactId)).toEqual([]);
+  });
+
+  /**
+   * WEBINAR-CONTACT-PRUNE-1 (BLOCKED-ON-PRODUCT). `features/webinars/feature.ts:44`
+   * registers `webinars-activity-unlink` to DELETE a deleted contact's webinar
+   * activities, but `features/crm/entities/activities.ts:63`
+   * (`activities-crm-unlink`, registered first, at import) runs before it and
+   * strips `contactId` from every activity, so the webinars consumer's
+   * `a.contactId === contactId` filter (`activities.ts:102`) matches nothing and
+   * the rows survive as contact-less husks. Counts are right (a row with no
+   * contact is not counted); the prune the feature promises never happens.
+   * Fix-probe: 8fw4g2-wb-contact-prune-fix-r2.
+   */
+  it.fails('the webinars consumer deletes the contact\'s webinar rows (WEBINAR-CONTACT-PRUNE-1)', async () => {
+    const base = { provider: 'zoom', providerEventId: 'C2', title: 'Launch' } as const;
+    await ingestWebinarEvent('t1', 'o1', undefined, { ...base, phase: 'registered', participantEmail: 'a@x.test' });
+    await ingestWebinarEvent('t1', 'o1', undefined, { ...base, phase: 'registered', participantEmail: 'b@x.test' });
+    const a = await findContactByEmail('t1', 'a@x.test');
+    await fireCrmRecordDeleted({ tenantId: 't1', entity: 'contact', recordId: a!.contactId });
+    expect(await phasesOf('C2')).toEqual(['registered']);
   });
 });

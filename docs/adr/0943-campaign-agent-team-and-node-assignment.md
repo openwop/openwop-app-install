@@ -1,6 +1,6 @@
 # ADR 0943 — Campaign agent team and per-node agent assignment
 
-Status: Proposed
+Status: Accepted (P0, P1, P4 implemented; P2, P3 wait on ADR 0942 P1)
 
 Date: 2026-10-19
 
@@ -108,12 +108,68 @@ planner beside the team. Tools a role needs that do not exist yet ship **in the
 owning feature's node pack** by the ADR that owns the capability (0945–0956),
 never in this pack. Allowlists are not added to the ADR 0315 default-on baseline.
 
+> **Correction (2026-10-20, P1 build, architect review).**
+> - **Allowlists hold only tools that exist today.** The "Capabilities" column
+>   names several tools that are not yet registered: ADR 0933 `check-content`,
+>   creative render, the `vendor.myndhyve.ads-*` nodes (nodes, not agent tools),
+>   experiments, journeys, kanban assign and handoff. An allowlist entry that no
+>   tool registers fails `agent-allowlist-resolution`. Each role starts with the
+>   registered tools of its families (pinned in
+>   `test/adr0943-team-pack-suites.test.ts`). The ADR that ships a missing tool
+>   adds it to the role's allowlist in the same PR, together with a suite task
+>   and that test's pin.
+> - **Labels.** The team is labelled "Campaign &lt;Role&gt;" (Campaign Creative
+>   Director, Campaign Copywriter and so on), because `ads-crew.creative-director`
+>   ("Creative Director"), `email.agents.copywriter` and
+>   `podcasts.agents.producer` already exist. The campaign Copywriter is not a
+>   second email agent: it writes for every channel and uses the same email
+>   tools. Retiring the MyndHyve persona stays Q1.
+> - **"Never allowlisted" binds the manifest, not the platform baseline.** Every
+>   agent also receives the ADR 0315 default-on draft tools (`documents.draft`,
+>   `email.draft`, `kanban.add-todo`, `notifications.notify-me`,
+>   `tasks.schedule-*`, `walkthroughs.register-draft`). None of them publishes,
+>   sends or spends, and each needs an acting user. A manifest cannot opt out
+>   without a new agent-manifest field, which is RFC 0003 wire, so none is
+>   added. Two things hold the line instead:
+>   1. Every suite forbids those tools for every role that does not hold them.
+>      A role that reaches for one fails its suite.
+>   2. A chain node that runs a read-only role confines it with `offerTools`
+>      (ADR 0458 P2). That obligation goes to P3 (`AGTWF-1`).
+> - **`modelClass`.** The values come from the closed RFC 0002 enum in
+>   `schemas/agent-manifest.schema.json`: `reasoning | writing | coding |
+>   research | classification | general`. CRO Analyst, Lead Qualifier and
+>   Compliance Reviewer use `reasoning`; the other five new roles use `general`.
+>   The Strategist and the Media Buyer keep their existing `research`. Changing a
+>   reused agent's class is out of P1 scope.
+>   - The host's `modelClassResolver` knows only `chat | reasoning | coding |
+>     extraction` and resolves any other value to its `chat` default. So
+>     `general` and `research` run on the chat-class model today, and only
+>     `reasoning` changes the model. That is pre-existing resolver behaviour.
+>   - *(Corrected the same day: the first draft of this note said "general is not
+>     a class" and set the roles to `chat`. `chat` is not in the wire enum, so
+>     those manifests were schema-invalid. Found while building P4; the pack test
+>     now checks every team manifest against the enum.)*
+
 ### D2 — Per-node binding: the pin is the default, the client override is frozen
 
 1. **Close F1.** `resolveParams` gains a last fallback: `ctx.nodeAgent?.agentId`.
    Order: `inputs` → frozen client binding (below) → `config.agentId` →
    `nodeAgent`. A chain node is therefore authored as
    `{ typeId: 'local.openwop-app.agent-runner', agent: { agentId: '<default>' } }`.
+
+   > **Correction (2026-10-20, P0 build):** that authoring shape holds for a
+   > builder or API definition only. `expandChain`
+   > (`host/workflowChainPackLoader.ts`) emits no node `agent` field, and a chain
+   > pack cannot author one until the RFC 0013 revision ADR 0941 D9 owns. Until
+   > then a **chain pack pins through `config.agentId`**. The run-start
+   > contributor treats `node.agent?.agentId ?? config.agentId` as the pin, so a
+   > binding works for both shapes. The runner order as built is `inputs` →
+   > frozen binding → `config` → `configurable` (the existing autonomous-dispatch
+   > rung) → `nodeAgent`. The binding's `model` takes the same position for
+   > `provider` / `model` / `credentialRef`. Only an explicit input outranks a
+   > client binding, so a chain that threads `agentId` through
+   > `{{params.agentId}}` inputs cannot be overridden by a client. Campaign chains
+   > must not do that.
 2. **Client override store** (campaign-ops owns client config, ADR 0921 D1):
    `DurableCollection('campaign-ops:agent-binding')`, key `tenant::orgId::bindingId`.
 
@@ -136,6 +192,59 @@ never in this pack. Allowlists are not added to the ADR 0315 default-on baseline
    { [nodeId]: { agentId, model? } }` for every agent-runner node in the
    definition. It contributes nothing when `derivedFromRun` (fork/replay reads
    the source's bindings verbatim). The runner reads only the frozen map.
+
+   > **Correction (2026-10-20, P0 build, architect review):**
+   > - **Which org.** ADR 0941 P0 (the `orgId` on the run tag) is not merged
+   >   yet. The contributor reads `campaignOrchestration.orgId` and falls back to
+   >   the ADR 0921 stamp `openwop-app.campaignOps.orgId`. When both are present
+   >   and name different clients, it binds nothing and logs
+   >   `agent_binding_wrong_client`. Both stamps are caller-stripped
+   >   (`CAMPAIGN_ATTRIBUTION_KEYS`). The stamp only selects which of this
+   >   tenant's bindings apply; it authorizes nothing.
+   > - **Contract.** The frozen map lives at `run.metadata['openwop-app.agentBindings']`
+   >   and is added to `RESERVED_RUN_METADATA_KEYS`. The reader is the host module
+   >   `host/runAgentBindings.ts`; the runner never imports the feature.
+   >   `RunStartContext` gains a read-only `definition`, which `insertRunWithStartContext`
+   >   forwards from every catalog-resolved start.
+   > - **Cost.** The contributor returns before any read when a run has no client
+   >   stamp or no pinned agent-runner node. The binding read is a bounded prefix
+   >   read of one client's slice.
+   > - **Missing agent.** A binding whose agent was uninstalled after the run
+>   started fails the node with the typed `agent_not_found`. The runner never
+>   falls back to the pin (witnessed).
+> - **Fail-closed reads.** If the runner cannot read its run, the node fails
+   >   retryable (`storage_unavailable`). Running the chain's default agent for a
+   >   client who replaced it would run the wrong agent. Contributors may not
+   >   fail run creation, so when the contributor cannot read the toggle (a
+   >   `blockedBy: 'unresolved'` fault) or the bindings, it freezes
+   >   `{ unresolved: true }` for each pinned node. The runner then refuses that
+   >   node with `agent_binding_unresolved`, which is not retryable. A fork copies
+   >   the marker and behaves as its source did.
+   > - **Key pairing.** A binding that pins a model also pins its key. The node's
+   >   own `credentialRef` is never paired with the binding's provider, since it
+   >   may be another vendor's key. A binding model with no key uses the run's
+   >   default for that provider (code-review finding, 2026-10-20).
+   > - **Node ids.** `expandChain` prefixes each node id per expansion
+   >   (`<chain slug>_<expansionId>_<id>`), so a node-narrowed binding names
+   >   the id the chain authored. The contributor matches either the expanded id
+   >   or that authored id (`/grade-workflows` `AGBWF-1`).
+   > - **Child runs (P0 limitation).** `subWorkflowDispatcher` does not copy the
+   >   parent's campaign stamp, so an agent-runner inside a child run uses its
+   >   default pin in P0. That fails safe: never the wrong client's agent.
+   >   Inheritance lands with delegation in P3 (D4).
+   > - **Lifecycle.** The store registers an ADR 0499 credential-ref consumer, so
+   >   deleting a key that a binding pins answers 409. The ADR 0464 eraser
+   >   re-attributes `updatedBy`. The demo agency seed's clear removes the
+   >   bindings of the clients it removes.
+
+> **D6 addendum (2026-10-20, P0 build, architect review): pinning a key needs
+> the BYOK predicate.** A binding that pins a stored, non-managed `credentialRef`
+> spends the agency's key. So beyond `workspace:write` on the client org, the
+> route requires `host:byok:manage` through ONE shared helper,
+> `requireByokManage` (`features/featureRoute.ts`). The BYOK routes
+> (`routes/byok.ts`) and the binding route both call it; it is not copied.
+> Otherwise any client-org editor could point agents at any agency key. A binding that pins only the agent, or
+> the agent plus a managed model, stays `workspace:write` (matrix row 8).
 
 ### D3 — Agents as assignable cards (Workfront "AI collaborator" parity)
 
@@ -178,12 +287,64 @@ Director. A pack bump that changes a prompt or model class is refused by the
 pack pipeline unless the suite's regression verdict is not `regressed` (ADR 0889
 §F sign test). Run-lane capture stays opt-in (ADR 0889 D9).
 
+> **Correction (2026-10-20, P1 build).** How each suite tests its role:
+> - Each suite has 10 tasks. They are replay-only (`onMiss:"fail"`) trajectory
+>   tasks: read-before-write order, gate respect (a fixture answers
+>   `awaiting_approval` and the agent must stop), refusals, typed tool errors,
+>   and prompt-injection in a fixture.
+> - A tool outside the role's allowlist is never offered, so it cannot be
+>   called. The forbidden lists therefore bite on the default-on writes (see the
+>   D1 correction).
+> - The mock-seam test proves each suite can fail: a scripted follower passes
+>   every task and a scripted violator fails every task.
+> - **"Every suite runs green on the managed tier" is OPEN.** It needs a host
+>   with a provider key (or a prod bearer token) for
+>   `backend/typescript/scripts/eval-agent-suite.mts --suite <ref> --agent <id>`,
+>   and this build environment has neither.
+> - The fixture responses are hand-written shapes. Once the roles run in chains,
+>   real runs should be promoted into the suites (ADR 0889 P7 "Add to eval
+>   suite").
+> - The D5 pack-pipeline refusal on a regressed verdict rides the ADR 0889 D10
+>   `--changed` hook. P1 adds no new pipeline.
+
 ### D6 — Model and BYOK
 
 `modelClass` per role (reasoning: Strategist, Media Buyer, CRO, Compliance;
 general elsewhere). A client binding may pin `{provider, model, credentialRef}`;
 the ref must already be a tenant secret (`chatByokConfig.ts` IDOR rule). Absent
 ⇒ managed tier. Per-client AI keys are not built (F5, Q4).
+
+> **P4 decisions (2026-10-20, architect review).**
+> - **Which agents are the team.** The team is every agent that ships an eval
+>   suite in one of three packs: `vendor.openwop-app.campaign-studio.agents`,
+>   `vendor.openwop-app.campaign-orchestration.agents` and
+>   `vendor.openwop-app.campaign-intel.agents` (`TEAM_PACKS`,
+>   `features/campaign-ops/teamService.ts`). Code names packs, never a role id.
+>   A role added to one of those packs with its suite appears without a code
+>   change, and `adr0943-team-ids-ratchet` stays honest. A pinned agent that a
+>   client has bound but that is not a team role still gets a row, so an
+>   override is never invisible. Rejected alternatives:
+>   - "agents the client's chains pin": no campaign chain pins an agent-runner
+>     node until P3, so the tab would be empty;
+>   - a `team.json` pack file: loader and pack-trust work for one list.
+> - **One read.** `GET …/campaign-ops/clients/:orgId/team` returns roles,
+>   bindings and scores in one call. A frontend fan-out per role would spend
+>   the per-IP read budget. The cost is about one indexed eval-history read per
+>   role plus one suite lookup per override.
+> - **Scores ride the ONE evals access predicate** (`agentEvalsRefusal`). When
+>   it refuses, the view says why once and shows no score. Scores are
+>   workspace-wide, and the copy says so.
+> - **`canEdit` comes from the server**, using the write predicate that the
+>   binding `PUT`/`DELETE` routes use.
+> - **Where it lives.** It is a lazy-loaded "Team" view of the Operations tab
+>   for the selected client, at `?view=team` (the hub owns `?tab=`). ADR 0941
+>   D5's `/campaign-studio/clients/:orgId/*` agency shell does not exist yet, and
+>   inventing it here would pre-empt 0941.
+> - **Q5 (refuse an override unless it passes the role's suite) is not built.**
+>   A pack suite is bound to its `targetAgentId`, and running it against another
+>   agent is refused (ADR 0889, #4847). Enforcing Q5 needs a "role suite, any
+>   agent" contract, which belongs to an ADR 0889 follow-up. Until then the
+>   Team view shows the replacement's own last check beside the role.
 
 ### D7 — Humans and agents in one workspace
 
@@ -228,6 +389,15 @@ scoped to a role; handoffs ride 0829; pending gates ride the 0926 inbox and the
 | P3 | Producer plan → `core.dispatch` | Unknown worker ⇒ typed failure; replay of a delegated run re-serves children |
 | P4 | Team tab UI + eval scores | `npm run build` green; 4-locale parity |
 
+## Implementation record
+
+| Phase | Commit / PR | Tests |
+|---|---|---|
+| P0 | #5054 (`feat/campaign-agent-binding-0943-p0`) | `test/adr0943-agent-bindings.test.ts` (23): runner pin fallback, binding precedence and key pairing, the bare and expanded node-id match, closed-world writes (unknown and paused agents, tools not covered, unknown key, BYOK-manage gate), client B never binds client A's run, the reserved key cannot be supplied through `POST /runs`, `:fork` keeps source bindings after the override changes and never gains them, a redrive-shaped derived run contributes nothing, a toggle or bindings fault is frozen as `unresolved` and the runner refuses it, the client-bound surface read, the runner dispatches the frozen replacement. Sabotage-witnessed (notes in the file header). `adr0499-credential-ref-integrity` names the new consumer. |
+| P1 | `feat/campaign-agent-team-0943-p1` (PR pending; stacked on P0 for this ADR file only) | `test/adr0943-team-pack-suites.test.ts` (30): each role's allowlist pinned and callable, no never-allowlisted tool, each suite closed-world valid with ≥10 tasks, replay-only, forbidding at least one OFFERED tool and never an allowed one; a follower passes and a violator fails every task through `POST /runs {mode:"eval"}`. `test/adr0943-team-ids-ratchet.test.ts` (3): no team agentId in `backend/typescript/src` outside one pinned, shrink-only allowance (the ADR 0158 Strategist fallback speaker). Sabotage-witnessed: a planted id and a stale allowance both go red. **OPEN:** the live managed-tier run (D5 correction). |
+
+| P4 | `feat/campaign-team-tab-0943-p4` (PR pending; stacked on P1) | `test/adr0943-team-tab.test.ts` (5): the team is every suite-carrying agent of the team packs; a client sees only its own override; a bound non-team pin gets a row; `canEdit` follows the write predicate (a client-org reader cannot edit, and another client is a 404); evals off ⇒ unavailable with null scores, evals on ⇒ the latest completed run. Sabotage-witnessed: `canEdit` from the read predicate goes red, and so does reading evals without the predicate. Frontend: `teamPanel.test.tsx` (8) and `operationsPage.test.tsx` (+1, the Team view loads on demand); `npm run build` green (entry chunk 128.5 kB, 475 B headroom); 4-locale parity; `/ux-review` fixes applied (`?view=` URL state, the danger chip for a failed check, a DESIGN.md §5 row). |
+
 ## Alternatives
 
 - **One generic "campaign agent" with a role parameter** — rejected: one eval
@@ -259,6 +429,8 @@ after expansion) needs the RFC 0013 revision for a node `agent` field that ADR
    agency keys, per-client model pin only.
 5. Should a client override be refused unless the replacement passes the role's
    eval suite? Recommended: warn in P0, enforce in P4.
+   **(2026-10-20, P0 build):** no suites exist until P1, so P0 emits no warning
+   and ships no empty `warnings` field. The warning lands with the P1 suites.
 
 ## Planning rows
 
@@ -272,3 +444,65 @@ after expansion) needs the RFC 0013 revision for a node `agent` field that ADR
   runner honours `nodes[].agent`; per-client agent/model overrides frozen at run
   start; agents assignable as kanban card owners; Producer plans dispatched
   through `core.dispatch`. No new toggle; no RFC."
+
+
+### Recovery correction — 2026-10-21 (nested client scope)
+
+Fresh subworkflow and canvas-invoke children project the parent campaign-ops stamp
+to `{orgId}` only. Approval IDs, change-set hashes and request authority are not
+delegated. The existing inherited-metadata registry now supports feature-owned
+projectors; existing identity registrations retain their behavior. Parent node-keyed
+agent bindings are never inherited: child contributors freeze their own definition's
+bindings, including when node IDs overlap. Malformed present client stamps refuse
+child creation; conflicting campaign/client stamps remain conflicting. Subworkflow
+ancestor reads also enforce the requested tenant. Fork copy semantics are unchanged.
+
+This depends on ADR 0941's canonical-campaign/inheritance prerequisite, now merged
+into this branch, and includes the narrow canvas copy formerly present only on the
+unsubmitted autonomy P2 branch. Actual-constructor witnesses are authored; execution
+pending the next serialized validation slot. Client-memory isolation is validated
+with ADR 0944 in the same integration component.
+
+
+### Recovery composition — 2026-10-25 (validation pending)
+
+The original P1/P4 histories are retained in the recovery candidate. The team
+continues to use the existing chat, role bindings, eval runner and key resolver.
+New role agents explicitly disable outside-agent exposure. The Strategist keeps
+the current campaign/status/autonomy read contract, the three existing safety
+eval tasks and the ten recovered tasks; its passing threshold remains 1.
+The Team panel binds chat links to both agent and selected client, ignores
+obsolete loads, and cancels a pending reset after that client unmounts.
+The recovered code is not qualified until focused checks and canonical CI pass.
+
+
+Recovery harness correction — 2026-10-25 (validation pending): the three
+existing Strategist safety cases are golden-output cases with exact tool
+arguments, and may forbid a generally offered run tool for a particular task.
+The recovered generic role harness now retains those expectations: it scripts
+exact arguments and golden text for the follower, and breaks an offered
+forbidden call or the golden output for the negative run. It rejects a task
+that both requires and forbids the same call, rather than rejecting legitimate
+context-specific refusal tests. All thirteen Strategist tasks and threshold1
+remain. The composed focused suite still must prove both sides.
+
+
+Recovery backend qualification — 2026-10-25: native typechecking and the
+18-file team/memory suite pass (279 cases). The real eval runner accepts the
+scripted follower and rejects the violating run for every recovered role suite,
+including all thirteen Strategist cases at threshold 1. The full canonical
+gate remains required before merge; no live vendor call was made.
+
+Recovery frontend qualification — 2026-10-25: lint, the canonical frontend
+build (token/CSS/branding/bundle gates), unit-test types, and ten focused suites
+(77 cases) pass. Entry gzip is 128.0 kB against the existing 129.0 kB budget
+(988 bytes of headroom). The full canonical gate remains required.
+
+
+Recovery suite-version correction — 2026-10-25: the first full canonical run
+found the older ADR 0942 P6 regression still requesting suite 1.0.0 after this
+change ships 1.1.0. It now resolves the installed pack suite. Its three original
+safety scripts and distinct negative axes stay explicit; the ten added tasks
+remain passing controls. The generic team-suite test separately discriminates
+every task. Both eval test files (33 cases) and native typechecking pass. The
+full gate must be repeated; the first run's three failures were not waived.

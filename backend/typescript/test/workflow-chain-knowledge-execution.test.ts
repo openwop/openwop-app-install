@@ -123,6 +123,15 @@
  *   2. "Conditioning only the gate edge leaves the sibling content edge
  *      completed" was a false dilemma — the cure REMOVES the sibling content
  *      edge. It re-parents it onto the gate, so there is no sibling left.
+ *
+ * Witnessed (wave 64 sabotage probes): the egress gates are held by
+ * 8fw5g2-kb-gate-condition (policy-qa reject + request-changes),
+ * 8fw5g2-kb-compliance-gate-condition (compliance-review reject + timeout) and
+ * 8fw5g2-kb-sched-false-condition-skips (the scheduler's ADR 0208 fold); the
+ * delivery ports by -kb-deliver-port, -kb-pass-port, -kb-summary-port,
+ * -kb-gate-artifact-port (the WF-KB-5 blank card) and -kb-rag-prompt-port
+ * (WF-KB-17). The file switches the GLOBAL `users`/`kb` toggles on and
+ * restores the stored rows in afterAll.
  */
 
 import http from 'node:http';
@@ -130,7 +139,8 @@ import type { AddressInfo } from 'node:net';
 import { getSetCookies } from './headerCookies.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
-import { saveConfig } from '../src/host/featureToggles/service.js';
+import { deleteConfig, getStoredConfig, saveConfig } from '../src/host/featureToggles/service.js';
+import type { ToggleConfig } from '../src/host/featureToggles/types.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { buildFeatureSurfaces } from '../src/host/featureSurfaces.js';
 import { getChain, expandChain } from '../src/host/workflowChainPackLoader.js';
@@ -156,6 +166,9 @@ let storage: Storage;
 /** REAL node implementations, loaded from the shipped packs. */
 const impls: Record<string, PackNode> = {};
 
+/** The stored toggle rows before this file switched `users`/`kb` on (restored in afterAll). */
+const savedToggles = new Map<string, ToggleConfig | null>();
+
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
@@ -164,10 +177,12 @@ beforeAll(async () => {
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   storage = app.locals.storage as Storage;
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
-  const users = getToggleDefault('users');
-  if (users) await saveConfig({ ...users, status: 'on' }, 'test');
-  const kb = getToggleDefault('kb');
-  if (kb) await saveConfig({ ...kb, status: 'on' }, 'test');
+  // `saveConfig` is GLOBAL (not tenant-scoped): snapshot and restore it.
+  for (const id of ['users', 'kb']) {
+    savedToggles.set(id, await getStoredConfig(id));
+    const def = getToggleDefault(id);
+    if (def) await saveConfig({ ...def, status: 'on' }, 'test');
+  }
 
   // `core.openwop.flow` + `core.openwop.ai` are ambiently declared in
   // `test/pack-modules.d.ts`; the other four are not, hence the directives.
@@ -189,22 +204,33 @@ beforeAll(async () => {
   impls['core.chat.approvalGate'] = chat.approvalGate;
   impls['core.ai.chatCompletion'] = ai.chatCompletion;
 });
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
+afterAll(async () => {
+  for (const [id, stored] of savedToggles) {
+    if (stored) await saveConfig(stored, 'test'); else await deleteConfig(id, 'test');
+  }
+  await new Promise<void>((res) => server.close(() => res()));
+});
 
 interface Res<T = unknown> { status: number; body: T }
-interface Client { get: (p: string) => Promise<Res<any>>; post: (p: string, b?: unknown) => Promise<Res<any>> }
+interface OrgBody { orgId: string }
+interface CollectionBody { collectionId: string }
+/** What `chat.emitCard` receives from the approval-gate node. */
+interface CapturedCard { payload: { artifact?: unknown; title?: unknown } }
+interface Client { post: <T = unknown>(p: string, b?: unknown) => Promise<Res<T>> }
 function client(): Client {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res<any>> => {
+  const call = async <T,>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
     for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    // The JSON boundary: the caller names the response shape (the repo's call<T> pattern).
+    const parsed: unknown = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    return { status: res.status, body: parsed as T };
   };
-  return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b) };
+  return { post: <T,>(p: string, b?: unknown) => call<T>('POST', p, b) };
 }
 
 let n = 0;
@@ -213,13 +239,15 @@ async function ownerOrgWithPolicyDoc(): Promise<{ tenantId: string; orgId: strin
   const owner = client();
   const r = await owner.post('/host/openwop-app/test/login', { email: `kbchain-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post<OrgBody>('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
-  const orgId = org.body.orgId as string;
+  const orgId = org.body.orgId;
+  expect(orgId).toMatch(/^.+$/);
 
-  const col = await owner.post(`/host/openwop-app/kb/orgs/${orgId}/collections`, { name: 'HR Policies' });
+  const col = await owner.post<CollectionBody>(`/host/openwop-app/kb/orgs/${orgId}/collections`, { name: 'HR Policies' });
   expect(col.status, JSON.stringify(col.body)).toBe(201);
-  const collectionId = col.body.collectionId as string;
+  const collectionId = col.body.collectionId;
+  expect(collectionId).toMatch(/^.+$/);
 
   const doc = await owner.post(`/host/openwop-app/kb/orgs/${orgId}/collections/${collectionId}/documents`, {
     title: 'PTO Policy',
@@ -378,7 +406,7 @@ describe('knowledge.policy-qa — the chain DELIVERS, it does not merely complet
     const runId = `run:kb-uncovered-${n++}`;
     const features = buildFeatureSurfaces({ tenantId, runId });
     const answerContent = 'The retrieved policies do not address parental leave. COVERED: no';
-    const cards: Array<Record<string, unknown>> = [];
+    const cards: CapturedCard[] = [];
     const slackCalls: Array<Record<string, unknown>> = [];
 
     const result = await walk(def, params, () => ({
@@ -386,7 +414,7 @@ describe('knowledge.policy-qa — the chain DELIVERS, it does not merely complet
       tenantId,
       features,
       callAI: async () => ({ content: answerContent }),
-      chat: { emitCard: async (c: Record<string, unknown>) => { cards.push(c); } },
+      chat: { emitCard: async (c: CapturedCard) => { cards.push(c); } },
       // The REAL UI resume payload — `{action}`, what `ApprovalCard.tsx` /
       // `defaultCards.tsx` / `routes/reviews.ts` all send (ADR 0582 §9).
       suspend: async () => ({ action: 'approve', decidedBy: 'user:hr', decidedAt: '2026-08-18T00:00:00.000Z' }),
@@ -402,8 +430,8 @@ describe('knowledge.policy-qa — the chain DELIVERS, it does not merely complet
     // human approved a BLANK card.
     expect(result.inputsByShortId.approveEscalation).toHaveProperty('artifact', answerContent);
     expect(cards).toHaveLength(1);
-    expect((cards[0]!.payload as Record<string, unknown>).artifact).toBe(answerContent);
-    expect((cards[0]!.payload as Record<string, unknown>).title)
+    expect(cards[0]!.payload.artifact).toBe(answerContent);
+    expect(cards[0]!.payload.title)
       .toBe('Approve escalating this uncovered policy question');
 
     // ── WF-KB-5, the Slack send ──
@@ -427,7 +455,7 @@ describe('knowledge.policy-qa — the chain DELIVERS, it does not merely complet
     const runId = `run:kb-uncovered-reject-${n++}`;
     const features = buildFeatureSurfaces({ tenantId, runId });
     const answerContent = 'The retrieved policies do not address parental leave. COVERED: no';
-    const cards: Array<Record<string, unknown>> = [];
+    const cards: CapturedCard[] = [];
     const slackCalls: Array<Record<string, unknown>> = [];
 
     const result = await walk(def, params, () => ({
@@ -435,7 +463,7 @@ describe('knowledge.policy-qa — the chain DELIVERS, it does not merely complet
       tenantId,
       features,
       callAI: async () => ({ content: answerContent }),
-      chat: { emitCard: async (c: Record<string, unknown>) => { cards.push(c); } },
+      chat: { emitCard: async (c: CapturedCard) => { cards.push(c); } },
       // The REAL Reject click. NOT `{approved:false}` — no shipped producer
       // sends that, and reading it would let a test pass on a payload the
       // product never emits.
@@ -446,7 +474,7 @@ describe('knowledge.policy-qa — the chain DELIVERS, it does not merely complet
     // The gate RAN and the reviewer really saw the answer…
     expect(result.stateByShortId.approveEscalation).toBe('completed');
     expect(result.outputsByShortId.approveEscalation).toMatchObject({ decision: 'reject', approved: false });
-    expect((cards[0]!.payload as Record<string, unknown>).artifact).toBe(answerContent);
+    expect(cards[0]!.payload.artifact).toBe(answerContent);
 
     // …and the gate returns `status:'success'` on a reject, so `escalate` would
     // fire on `all_success` if it had ANY unconditional incoming edge. It has
@@ -550,21 +578,21 @@ describe('knowledge.compliance-review — the review text reaches every leg', ()
 
     const runId = `run:kb-flagged-${n++}`;
     const reviewContent = 'Deviation: "100% uptime" conflicts with the SLA policy §4 (99.9%). Risk: contractual. FLAGS: 1';
-    const cards: Array<Record<string, unknown>> = [];
+    const cards: CapturedCard[] = [];
     const slackCalls: Array<Record<string, unknown>> = [];
     const result = await walk(def, params, () => ({
       runId,
       tenantId,
       features: buildFeatureSurfaces({ tenantId, runId }),
       callAI: async () => ({ content: reviewContent }),
-      chat: { emitCard: async (c: Record<string, unknown>) => { cards.push(c); } },
+      chat: { emitCard: async (c: CapturedCard) => { cards.push(c); } },
       suspend: async () => ({ action: 'approve', decidedAt: '2026-08-18T00:00:00.000Z' }),
       slack: { postMessage: async (a: Record<string, unknown>) => { slackCalls.push(a); return { sent: true, messageId: 'm4' }; } },
     }));
 
     expect(result.outputsByShortId.route!.branch).toBe('else');
     expect(result.stateByShortId.pass).toBe('skipped');
-    expect((cards[0]!.payload as Record<string, unknown>).artifact).toBe(reviewContent);
+    expect(cards[0]!.payload.artifact).toBe(reviewContent);
     expect(Object.keys(result.inputsByShortId.escalate!)).toEqual(['text']);
     expect(slackCalls).toHaveLength(1);
     expect(slackCalls[0]).toMatchObject({ channel: '#compliance', text: reviewContent });
@@ -584,21 +612,21 @@ describe('knowledge.compliance-review — the review text reaches every leg', ()
 
     const runId = `run:kb-flagged-reject-${n++}`;
     const reviewContent = 'Deviation: "100% uptime" conflicts with the SLA policy §4 (99.9%). Risk: contractual. FLAGS: 1';
-    const cards: Array<Record<string, unknown>> = [];
+    const cards: CapturedCard[] = [];
     const slackCalls: Array<Record<string, unknown>> = [];
     const result = await walk(def, params, () => ({
       runId,
       tenantId,
       features: buildFeatureSurfaces({ tenantId, runId }),
       callAI: async () => ({ content: reviewContent }),
-      chat: { emitCard: async (c: Record<string, unknown>) => { cards.push(c); } },
+      chat: { emitCard: async (c: CapturedCard) => { cards.push(c); } },
       suspend: async () => ({ action: 'reject', decidedAt: '2026-08-18T00:00:00.000Z' }),
       slack: { postMessage: async (a: Record<string, unknown>) => { slackCalls.push(a); return { sent: true, messageId: 'never' }; } },
     }));
 
     expect(result.stateByShortId.approveEscalation).toBe('completed');
     expect(result.outputsByShortId.approveEscalation).toMatchObject({ decision: 'reject', approved: false });
-    expect((cards[0]!.payload as Record<string, unknown>).artifact).toBe(reviewContent);
+    expect(cards[0]!.payload.artifact).toBe(reviewContent);
     expect(result.stateByShortId.escalate).toBe('skipped');
     expect(slackCalls, 'a rejected compliance review must post NOTHING').toHaveLength(0);
     expect(result.stateByShortId.pass).toBe('skipped');

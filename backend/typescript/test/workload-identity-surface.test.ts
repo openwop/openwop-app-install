@@ -44,7 +44,6 @@ const IDENTITY = { scheme: 'spiffe', subject: 'spiffe://example/dispatcher', iss
 
 let server: http.Server;
 let BASE: string;
-let storage: Storage;
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -62,7 +61,6 @@ beforeAll(async () => {
     serviceVersion: '0.0.1',
     enableConsoleTracer: false,
   });
-  storage = app.locals.storage as Storage;
   await new Promise<void>((res) => {
     server = app.listen(0, '127.0.0.1', () => {
       BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -135,7 +133,7 @@ describe('RFC 0154 §20 — the resolution seam drives the real resolver', () =>
 
   it('an identity for another audience is rejected with the closed reason', async () => {
     const r = await seam({ identity: { ...IDENTITY, audience: 'some-other-host' }, expectedAudience: HOST_AUDIENCE });
-    expect(r.status).toBeGreaterThanOrEqual(400);
+    expect(r.status).toBe(400); // every seam refusal is a 400 (`routes/workloadIdentitySeam.ts` `refuse`)
     expect(reasonOf(r.json)).toBe('audience_mismatch');
   });
 
@@ -151,14 +149,18 @@ describe('RFC 0154 §20 — the resolution seam drives the real resolver', () =>
         },
       },
     });
-    expect(r.status).toBeGreaterThanOrEqual(400);
+    expect(r.status).toBe(400); // every seam refusal is a 400 (`routes/workloadIdentitySeam.ts` `refuse`)
     expect(reasonOf(r.json)).toBe('delegation_expired');
   });
 
   it('a failure is NON-RETRIABLE and uses the closed reason vocabulary', async () => {
     const r = await seam({ identity: { scheme: 'spiffe', subject: 'spiffe://example/unknown' } });
+    expect(r.status).toBe(400);
     assertFlatErrorEnvelope(r.json, 'workload-identity refusal');
     expect(retriableOf(r.json)).toBe(false);
+    // The exact reason for THIS identity (no issuer, no audience) …
+    expect(reasonOf(r.json)).toBe('identity_unverified');
+    // … and it is drawn from the closed vocabulary.
     expect([
       'identity_unverified',
       'identity_unresolvable',
@@ -179,7 +181,7 @@ describe('RFC 0154 §20 — the resolution seam drives the real resolver', () =>
 
   it('the seam refuses an identity object carrying credential material', async () => {
     const r = await seam({ identity: { ...IDENTITY, audience: HOST_AUDIENCE, token: 'eyJhbGciOiJIUzI1NiJ9.x.y' } });
-    expect(r.status).toBeGreaterThanOrEqual(400);
+    expect(r.status).toBe(400); // every seam refusal is a 400 (`routes/workloadIdentitySeam.ts` `refuse`)
     expect(reasonOf(r.json)).toBe('identity_unverified');
   });
 });
@@ -207,8 +209,13 @@ describe('RFC 0154 §A — request binding fails closed', () => {
     // 200: a middleware that verified and then dropped the result would pass the
     // request above and record nothing.
     const seen: { principal?: string; ambient?: AuthorityFacts } = {};
-    const req = { get: (h: string) => (h === 'x-openwop-workload-identity' ? token : undefined) } as unknown as Request;
-    const res = { status: () => res, json: () => res } as unknown as Response;
+    // ONE documented cast each: the middleware reads only `req.get` on the
+    // success path and never touches `res`, so a full Express object would be
+    // noise. The fields it writes (`workloadPrincipal`) are read back below.
+    const reqStub: Pick<Request, 'get'> = { get: ((h: string) => (h === 'x-openwop-workload-identity' ? token : undefined)) as Request['get'] };
+    const req = reqStub as Request;
+    const resStub: Pick<Response, 'status' | 'json'> = { status: () => resStub as Response, json: () => resStub as Response };
+    const res = resStub as Response;
     await new Promise<void>((resolve) => {
       const next: NextFunction = () => {
         seen.principal = (req as Request).workloadPrincipal?.principalId;
@@ -306,8 +313,29 @@ describe('ADR 0556 P3 — the fork ROUTE narrows, end to end', () => {
    * recorded scopes verbatim — the pre-P3 behaviour — produces a fork holding
    * `artifacts:read` the forking caller does not have.
    */
+  // This block boots its OWN app, last: a later `createApp` in the same process
+  // takes over the run executor, so a run created on the file-level app after
+  // the "seam is gated" block's boot recorded no event and the fork 422'd
+  // (`fork_point_invalid`) under shuffle seeds 4242, 1 and 3.
+  let forkServer: http.Server;
+  let forkBase: string;
+  let forkStorage: Storage;
+  beforeAll(async () => {
+    const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+    forkStorage = app.locals.storage as Storage;
+    await new Promise<void>((res) => {
+      forkServer = app.listen(0, '127.0.0.1', () => {
+        forkBase = `http://127.0.0.1:${(forkServer.address() as AddressInfo).port}`;
+        res();
+      });
+    });
+  });
+  afterAll(async () => {
+    await new Promise<void>((res) => forkServer.close(() => res()));
+  });
+
   async function post(path: string, body: unknown, token?: string): Promise<{ status: number; json: Record<string, unknown> }> {
-    const res = await fetch(`${BASE}${path}`, {
+    const res = await fetch(`${forkBase}${path}`, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
@@ -320,7 +348,7 @@ describe('ADR 0556 P3 — the fork ROUTE narrows, end to end', () => {
   }
 
   it('a fork under a narrower workload credential does not inherit the wider recorded scopes', async () => {
-    const disco = (await (await fetch(`${BASE}/.well-known/openwop`)).json()) as { fixtures?: string[] };
+    const disco = (await (await fetch(`${forkBase}/.well-known/openwop`)).json()) as { fixtures?: string[] };
     const workflowId = disco.fixtures?.[0] ?? 'openwop-app.uppercase';
 
     const wide = await mintWorkloadCredential({
@@ -334,7 +362,7 @@ describe('ADR 0556 P3 — the fork ROUTE narrows, end to end', () => {
     expect(created.status, JSON.stringify(created.json)).toBe(201);
     const sourceRunId = String(created.json.runId);
 
-    const source = await storage.getRun(bareRunId(sourceRunId));
+    const source = await forkStorage.getRun(bareRunId(sourceRunId));
     // Vacuity guard: the source must actually have been stamped, or the
     // comparison below is between two absent things.
     const recordedScopes = readRecordedAuthority(source?.metadata)?.scopes;
@@ -346,7 +374,7 @@ describe('ADR 0556 P3 — the fork ROUTE narrows, end to end', () => {
 
     const fork = await post(`/runs/${sourceRunId}:fork`, { fromSeq: 0, mode: 'replay' }, narrow);
     expect(fork.status, JSON.stringify(fork.json)).toBe(201);
-    const forked = await storage.getRun(bareRunId(String(fork.json.runId)));
+    const forked = await forkStorage.getRun(bareRunId(String(fork.json.runId)));
     expect(readRecordedAuthority(forked?.metadata)?.scopes).toEqual(['runs:read']);
   });
 });
@@ -386,6 +414,9 @@ describe('RFC 0154 §20 — the seam is gated, in both directions', () => {
       body: JSON.stringify({ identity: { ...IDENTITY, audience: HOST_AUDIENCE } }),
     });
     expect(res.status).toBe(404);
+    // The seam's OWN 404 body, literally — a route-miss 404 from a different
+    // mount must not satisfy this (W3 lesson: compare against a literal).
+    expect(await res.json()).toEqual({ error: 'not_found', message: 'workload identity is not configured' });
     // ADR 0812 P3c-0 — the major-2 document: no `workload` lane.
     const doc = (await (await fetch(`${disabledBase}/.well-known/openwop`, { headers: { 'OpenWOP-Version': '2' } })).json()) as {
       auth?: { lanes?: Array<{ lane: string }> };

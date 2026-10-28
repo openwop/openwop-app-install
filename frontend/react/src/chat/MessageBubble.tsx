@@ -484,6 +484,11 @@ function MessageBubbleInner({ message, onRegenerate, onFeedback, onBranchFrom, b
         {message.meta?.editedAt && (
           <span className="msgbubble-edited muted" title={message.meta.editedAt}>{t('messageEdited')}</span>
         )}
+        {/* ADR 0992 D9 (architect H1) — every imported message says so, so an imported
+            "assistant" reply can never pass for one this app's agent wrote. */}
+        {message.meta?.imported && (
+          <span className="msgbubble-imported muted" title={t('importedLabelTitle')}>{t('importedLabel')}</span>
+        )}
         {/* VOXUX-1 — spoken turns (realtime voice transcripts) carry a quiet
             provenance marker: without it a mixed thread gives no way to tell
             what was said aloud vs typed (icon decorative; the LABEL carries it). */}

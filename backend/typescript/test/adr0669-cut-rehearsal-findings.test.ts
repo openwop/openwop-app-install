@@ -19,6 +19,13 @@
  * pre-cut state (and `OPENWOP_V1_RETIRED`), so the controls went with it; leg 3
  * keeps a same-host control instead (the bound form IS served), so its 400
  * cannot pass for a reason unrelated to the id's form.
+ *
+ * Tracker TST-BGF-1. Red when: `protocolVersion` is the v1 constant in
+ * `routes/discovery.ts` (leg 1); the served-major check in
+ * `middleware/protocolVersion.ts` is skipped (leg 2); or the bare-id branch of
+ * `middleware/v2Identity.ts` admits the id or changes its refusal (leg 3). The
+ * leg-3 refusals assert the bare-id MESSAGE, because a malformed `~` escape is
+ * ALSO `400 validation_error` with a different message.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';
@@ -75,16 +82,22 @@ describe('3. a bare run id in a major-2 path is refused (the overlap is over)', 
   }
   it('control: the bound form of the same run is served', async () => {
     const { bound } = await createdRun();
-    expect((await get(`/runs/${encodeURIComponent(bound)}`, { 'OpenWOP-Version': '2' })).status).toBe(200);
+    const r = await get(`/runs/${encodeURIComponent(bound)}`, { 'OpenWOP-Version': '2' });
+    expect(r.status).toBe(200);
+    expect(r.json.runId).toBe(bound);
   });
   it('retired: the bare form is refused 400 validation_error', async () => {
     const { bare } = await createdRun();
     const r = await get(`/runs/${encodeURIComponent(bare)}`, { 'OpenWOP-Version': '2' });
     expect(r.status).toBe(400);
     expect(r.json.error).toBe('validation_error');
+    expect(String(r.json.message)).toMatch(/the bare form is not admitted on a host that has retired 1\.x/);
   });
   it('retired: a double-projected segment (decodes to the bare-looking form) is refused 400, not 404', async () => {
     const r = await get('/runs/conformance-prod~7E2Ff5cfaa43-65e2-4ac1-9f55-193e7b724c1a', { 'OpenWOP-Version': '2' });
     expect(r.status).toBe(400);
+    expect(r.json.error).toBe('validation_error');
+    // The bare-id refusal, not the malformed-escape one (same status and code).
+    expect(String(r.json.message)).toMatch(/the bare form is not admitted on a host that has retired 1\.x/);
   });
 });

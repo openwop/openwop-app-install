@@ -1,0 +1,25 @@
+{
+  "$description": "This film's design system. Write only what the brand's sources define; every key left out inherits default-tokens.json (here: openwop-app's identity), and `npm run tokens` lists those keys.",
+  "brand": {
+    "name": "OpenWOP",
+    "sources": [],
+    "pronunciations": [
+      {
+        "written": "OpenWOP",
+        "spoken": "open wop"
+      },
+      {
+        "written": "openwop.dev",
+        "spoken": "open wop dot dev"
+      },
+      {
+        "written": "17 weeks",
+        "spoken": "seventeen weeks"
+      },
+      {
+        "written": "example.com",
+        "spoken": "example dot com"
+      }
+    ]
+  }
+}

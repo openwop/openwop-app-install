@@ -11,8 +11,21 @@
  * legitimately calls `executeRun` more than once on a run, or on a run that
  * already carries someone's lease. Each `it` below is one of the hazards the
  * design audit named, and each is sabotage-proved (see the ADR).
+ *
+ * Tracker TST-BAB-2. Red when (sabotage-witnessed, wave 60): the claim SQL loses
+ * its suspended-status arm, its expired-lease arm or its final-status filter, or
+ * gains an `OR dispatch_owner = @owner` arm; a missing run reads as `held`; the
+ * executor ignores `executionPreclaimed`; a throwing claim fails CLOSED; a
+ * resume is refused instead of waiting, or does not wait; the claim stamps an
+ * owner the heartbeat cannot renew as.
+ * DOUBLE GUARD ("fails OPEN"): a Storage WITHOUT `claimRunExecution` is caught
+ * by the `typeof` guard AND, if that guard is removed, by the `catch` around the
+ * call (a TypeError → unfenced). The `catch` is witnessed by the throwing leg.
+ * The two "concurrent" deliveries are refused by the claim whether or not they
+ * interleave (a sequential second delivery sees `held` or `not-runnable`), so
+ * that case does not depend on a forced race.
  */
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -71,10 +84,10 @@ const def = (typeId: string): WorkflowDefinition => ({
 let seq = 0;
 async function seedRun(patch: Partial<RunRecord> = {}): Promise<RunRecord> {
   const now = new Date().toISOString();
-  const run = {
+  const run: RunRecord = {
     runId: `run-adr0740-${++seq}`, workflowId: 'wf', tenantId: 'demo', status: 'pending',
     inputs: {}, metadata: {}, configurable: {}, createdAt: now, updatedAt: now, ...patch,
-  } as RunRecord;
+  };
   await storage.insertRun(run);
   return run;
 }
@@ -197,7 +210,7 @@ describe('ADR 0740 — executeRun under duplicate delivery', () => {
 
   it('HAZARD: a run never inserted (the shape 24 test files use) executes', async () => {
     const now = new Date().toISOString();
-    const ghost = { runId: `run-adr0740-ghost-${++seq}`, workflowId: 'wf', tenantId: 'demo', status: 'pending', inputs: {}, metadata: {}, configurable: {}, createdAt: now, updatedAt: now } as RunRecord;
+    const ghost: RunRecord = { runId: `run-adr0740-ghost-${++seq}`, workflowId: 'wf', tenantId: 'demo', status: 'pending', inputs: {}, metadata: {}, configurable: {}, createdAt: now, updatedAt: now };
     const r = await executeRun(storage, ghost, def('test.adr0740.counted'), {});
     expect(r.duplicateDelivery).toBeUndefined();
     expect(bodyRuns.get(ghost.runId)).toBe(1);
@@ -206,7 +219,8 @@ describe('ADR 0740 — executeRun under duplicate delivery', () => {
   it('the winner\'s heartbeat still owns the lease it claimed (ADR 0585 P0b renewal is unaffected)', async () => {
     const run = await seedRun();
     const p = executeRun(storage, run, def('test.adr0740.slow'), {});
-    await new Promise((r) => setTimeout(r, 120));
+    // Wait for the slow node's body to start (the claim is taken before it), not a fixed sleep.
+    await vi.waitFor(() => expect(bodyRuns.get(run.runId)).toBe(1));
     expect((await storage.getRun(run.runId))?.dispatchOwner).toBe(getInstanceId());
     expect(await storage.renewRunDispatchLeaseIfOwner(run.runId, getInstanceId(), FAR()), 'the claim stamped an owner the heartbeat cannot renew as').toBe(true);
     releaseSlow();

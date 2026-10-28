@@ -11,6 +11,11 @@
  *   2. SOURCE — every key in `ENFORCED_PLAN_LIMIT_KEYS` names a file that
  *      actually reads it, so adding a key to the list without enforcing it
  *      fails here. Adding an enforcement site = add its key AND its row below.
+ *
+ * Tracker TST-BUL-1. Sabotage-witnessed (w62): red when `publicPricingCatalog`
+ * or `displayablePlanLimits` stops filtering, when the entitlements route drops
+ * the helper, when a key joins ENFORCED_PLAN_LIMIT_KEYS without a site, or when
+ * an enforcement site stops reading its key.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';

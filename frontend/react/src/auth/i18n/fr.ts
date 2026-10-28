@@ -104,6 +104,7 @@ export const messages = {
 
   // TOTP multi-factor (ADR 0389 P1 — firebase.ts)
   errInvalidMfaCode: 'Ce code ne correspond pas — vérifiez votre application d’authentification et réessayez.',
+  errMfaFactorLimit: 'Ce compte a déjà une application d’authentification. Chaque compte n’en accepte qu’une : pour la remplacer ou ajouter un appareil de secours, supprimez-la et configurez-la à nouveau.',
   errRequiresRecentLogin: 'Cette modification nécessite une connexion récente. Déconnectez-vous, reconnectez-vous, puis réessayez.',
   mfaCodeRequired: 'Saisissez le code à 6 chiffres de votre application d’authentification pour terminer la connexion.',
   mfaCodeLabel: 'Code d’authentification',

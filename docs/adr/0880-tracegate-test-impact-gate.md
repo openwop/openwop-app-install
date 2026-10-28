@@ -271,6 +271,26 @@ behaviour. `scripts/test-merge-train-bisect.sh` is a behaviour test with a fake
 `gh` and a real throwaway origin; it was run against the previous
 `merge-train.sh` and goes red there (5 of 12), so it is not vacuous.
 
+#### Correction — pin PR heads at the merge boundary (2026-10-27)
+
+The original train captured each head before its gate but checked only main
+before requesting a merge. A push to a PR during the gate could therefore land
+untested code; the final tree check detected the problem only after the merge.
+No production occurrence is claimed here: the offline fixture demonstrates it.
+
+Before requesting any merge, re-read every car's state and head. If any has
+changed, stop so the current heads can be rebuilt and gated. Each GitHub merge
+also supplies `--match-head-commit` with the recorded SHA, including through
+the legacy helper, closing a push between that read and the API operation.
+This does not remove the separate main-movement race; retain the final tree
+comparison and existing rebuild/re-gate behavior.
+
+The expanded real-local-origin behavior fixture passes 25 checks; the same
+fixture against the previous production scripts fails six checks and shows
+untested heads landing. It covers a later car changing during the gate, a
+push at the API boundary, and forwarding through the isolated helper fixture.
+Full application gate and merge evidence are still required for this repair.
+
 ### D8 — Sync between machines (P4)
 
 `node scripts/tracegate.mjs sync --remote <[user@]host:/abs/.git/tracegate>`
@@ -525,9 +545,68 @@ record a footprint and cost seconds to "run".
 > included), 0 removed, and `@azure/core-rest-pipeline` is intact. The frontend's two tsc
 > passes run in the background and are not converted here.
 - [ ] Should conformance scenarios get footprints (their inputs are server-side)?
-- [ ] Narrow the boot-time `pack.json` reads (one pack edit re-runs ~1,200 backend files).
+- [x] Narrow the boot-time `pack.json` reads (one pack edit re-runs ~1,200 backend files).
       MEASURED 2026-10-15: confirmed (1,170–1,220 per description-only edit), but only 10% of merges touch one, and the dependence is real (every loader runs on every manifest at boot). Needs a 'boot outcome unchanged' design, not a diff rule. See the 2026-10-15 addendum.
+      > **CORRECTED 2026-10-23 (ADR 0968): answered NO — narrowing `pack.json` saves nothing.**
+      > Over a week of gates (119 backend heads) it was never the top must-run reason, and an exact
+      > counterfactual replay of the recent gates selected the same files with every `pack.json`
+      > change removed: a pack edit lands with the feature code that boots it, and that code
+      > invalidates the same files first. The real levers are boot wiring (`features/index.ts`,
+      > `feature.ts`, `bootstrap/`; a perfect oracle cuts 39–90 % in 4 of 5 boot-dominated gates)
+      > and, much less, the lockfile. ADR 0968 takes those up.
 - [x] Narrow i18n tables: 988 of 1,003 frontend footprints name `features/csm/i18n/en.ts::messages`
       (the bundle merges every feature's table), so one English-string edit re-runs the lane.
       Done 2026-10-14: key-level reads (D2 addendum above); a two-string probe selected 73/1,008, 49/49 reds inside.
 - [ ] Read the background-lane join waits off the first enforce gates (step 4).
+
+## Soundness correction — opaque child processes (2026-10-25 recovery)
+
+A real shadow MISS at candidateaf0ffc0ca reproduced alone:
+`test/steward/adr-status-not-stale.test.ts` reads `git log` through
+`execFileSync`. A newly merged implementing subject for ADR0970 changed its
+answer without changing the ADR file or any recorded filesystem input. The
+previous green at06d6726ca therefore was not reusable. The lane remains under
+its existing14-day MISS suspension; this is not a flake.
+
+Child-process stdout/stderr, Git history, environment and child file reads are
+opaque to this in-process recorder. Record whether the test spawned a process,
+and always run such a footprint, including on the same HEAD. Do not pretend the
+parent's filesystem reads cover the child. Sync calls and async/promisified
+calls must preserve their original return shapes. Bump the footprint format so
+older receipts that never recorded this fact cannot grant reuse. Boot-shadow
+prediction must obey the same conservative rule and cannot absorb it. Keep the
+existing ledger/logs and MISS evidence. Runtime capture and an empty-tree Git
+commit witness are required before relying on this repair.
+
+Focused repair validation:94self-test checks passed, including actual synchronous
+and promisified process capture, unchanged stdout/stderr, marker reset,
+empty-tree history invalidation, filesystem-only reuse and boot-shadow refusal.
+The reproduced ADR status file passed8cases and the Brand first-read file7cases.
+Full canonical composition validation remains required; no MISS suspension or
+historical ledger log was removed or reclassified.
+
+### Correction — check global invalidation before per-file parsing (2026-10-27)
+
+Train 247 on Davids-MacBook-Air spent 1,327.91 seconds (22 minutes 8 seconds)
+in frontend selection before starting Vitest. This is the interval from the
+prediction start timestamp to the completed prediction file's modification time,
+not a measured speedup of the repair. Its recorder change already invalidated every
+older footprint, but the selector encountered that path after frontend catalog
+changes and performed per-file Git reads first. In two read-only measurements
+against candidate `2d57948c9`, selection took 217 and 205 Git calls and 2.40 s
+and 2.11 s respectively; checking the existing global-input predicate first
+returned the same RUN reasons in 12 and 6 calls, taking 0.15 s and 0.07 s.
+These are two sampled decisions, not a measured whole-lane speedup.
+
+Apply the existing global-input rule before reading footprint blobs or parsing
+per-file changes. Keep the existing exception for test files under setup
+directories, the same-commit fast path, runtime/lock/age checks, and the search
+through older footprints. This changes which invalidation reason wins when
+several apply; it does not grant any new verdict reuse.
+
+The real-Git regression includes an unused source edit before the recorder path
+and requires RUN without per-file `git show` or hunk reads. The old implementation
+fails that check with three unnecessary reads. The complete selector self-test
+on base `9970a354d` passes 108 checks with the fix; reverting only the fix yields
+one failure and 107 passes. Full merge-gate validation remains pending. The
+running train was left untouched.

@@ -18,7 +18,8 @@
  * Both exception maps are EXACT: a new unreachable tool fails until it is reached
  * or listed, and a listed tool that becomes reachable fails until it is removed.
  * Sabotage-witnessed: dropping the three eval ids from the Agent Author pack reds
- * both the reach assertion and the eval pin below.
+ * both the reach assertion and the eval pin below (TST-BLT-4; re-witnessed in
+ * w65 by renaming `openwop:agent-evals.get-summary` in that pack.json).
  */
 import http from 'node:http';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';

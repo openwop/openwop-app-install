@@ -20,6 +20,14 @@
  *       of ANY approval (or a planted one) as the governing contract.
  *   D7  the agent's read carries the whole contract — `requireApproval` and the TTL
  *       were missing from `intent-ledger.get`.
+ *
+ * Tracker TST-BJB. Red when (probe-witnessed, w65): the decision drops the digest or
+ * the revision compare (the redraft case's same-fields PUT isolates the revision);
+ * an ownerless or owned conversation lets a non-decider decide; the workspace:write
+ * floor goes; `approved` is reachable from `rejected` or `/draft` replaces an approved
+ * mission; `intentLedgerApprovals` is not a reserved run-metadata key; a fork or the
+ * runless lane persists expiry; the reckoning credits pre-anchor events; the agent's
+ * read drops `requireApproval`.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -63,14 +71,27 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-type Res = { status: number; body: any };
+/** The wire shapes these routes answer (local: the routes export no response types). */
+interface LedgerWire extends IntentLedger { digest: string }
+interface ResBody {
+  ledger?: LedgerWire;
+  viewer?: { mayEdit: boolean; mayDecide: boolean };
+  reckoning?: { goal?: string; usedTools?: string[] } | null;
+  user?: { userId: string };
+  memberId?: string;
+  sessionId?: string;
+  error?: string;
+  message?: string;
+  details?: { required?: string[] };
+}
+type Res = { status: number; body: ResBody };
 function client() {
   let cookie = '';
   return async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     const h = res.headers as { getSetCookie?: () => string[] };
     for (const c of (typeof h.getSetCookie === 'function' ? h.getSetCookie() : [])) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]!; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    return { status: res.status, body: res.status === 204 ? {} : ((await res.json().catch(() => ({}))) as ResBody) };
   };
 }
 type Client = ReturnType<typeof client>;
@@ -85,21 +106,21 @@ async function login(c: Client, who: string): Promise<string> {
   T = `org:il896-${Date.now()}-${n++}`;
   const r = await c('POST', '/host/openwop-app/test/login', { email: `${who}-${n++}@il896.test`, tenantId: T });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  return r.body.user.userId as string;
+  return r.body.user!.userId;
 }
 /** A second person in the CURRENT tenant, with `role`. */
 async function member(owner: Client, role: 'editor' | 'viewer' | 'admin'): Promise<{ c: Client; userId: string; memberId: string }> {
   const c = client();
   const r = await c('POST', '/host/openwop-app/test/login', { email: `${role}-${n++}@il896.test`, tenantId: T });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  const userId = r.body.user.userId as string;
+  const userId = r.body.user!.userId;
   const add = await owner('POST', `/host/openwop-app/orgs/${encodeURIComponent(T)}/members`, { displayName: role, subject: userId, roles: [role] });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
-  return { c, userId, memberId: add.body.memberId as string };
+  return { c, userId, memberId: add.body.memberId! };
 }
 const version = (l: IntentLedger): { ledgerId: string; revision: number; digest: string } => ({ ledgerId: l.ledgerId, revision: l.revision ?? 0, digest: ledgerDigest(l) });
 async function ownedConversation(c: Client): Promise<string> {
-  return (await c('POST', '/host/openwop-app/chat/sessions', { title: 'mission' })).body.sessionId as string;
+  return (await c('POST', '/host/openwop-app/chat/sessions', { title: 'mission' })).body.sessionId!;
 }
 const draftTool = (input: Record<string, unknown>, actingUserId: string, conversationId: string) =>
   createAgentToolProvider({ tenantId: T, runId: `run-896-${n++}`, actingUserId, conversationId }).executeTool({ name: INTENT_LEDGER_DRAFT_TOOL_ID, input });
@@ -111,15 +132,17 @@ async function approvedMission(extra: Partial<IntentLedger> = {}): Promise<{ own
   const conv = await ownedConversation(owner);
   const d = await owner('POST', IL(conv, '/draft'), { goal: 'Research only', allowed: ['kb'], forbidden: ['openwop:email.send'], ...extra });
   expect(d.status, JSON.stringify(d.body)).toBe(200);
-  const a = await owner('POST', IL(conv, '/approve'), version(d.body.ledger));
+  const a = await owner('POST', IL(conv, '/approve'), version(d.body.ledger!));
   expect(a.status, JSON.stringify(a.body)).toBe(200);
-  expect(a.body.ledger.digest).toBe(ledgerDigest(a.body.ledger)); // decide responses carry it too
-  return { owner, ownerId, conv, ledger: a.body.ledger as IntentLedger };
+  expect(a.body.ledger!.digest).toBe(ledgerDigest(a.body.ledger!)); // decide responses carry it too
+  return { owner, ownerId, conv, ledger: a.body.ledger! };
 }
-const fakeRun = (metadata: Record<string, unknown>): RunRecord => ({
-  runId: `run-896-${n++}`, workflowId: 'wf', tenantId: T, status: 'running', inputs: null,
-  metadata, configurable: {}, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-} as unknown as RunRecord);
+/** A live run carrying `metadata` as stored (set AFTER `buildRunRecord`, whose
+ *  caller-metadata strip would otherwise drop the stamps these cases plant). */
+const fakeRun = (metadata: Record<string, unknown>): RunRecord => {
+  const run = buildRunRecord({ workflowId: 'wf', tenantId: T, runId: `run-896-${n++}` });
+  return { ...run, status: 'running', metadata };
+};
 const hoursAgo = (h: number): string => new Date(Date.now() - h * 3_600_000).toISOString();
 
 describe('D1 — approve what you saw', () => {
@@ -135,7 +158,7 @@ describe('D1 — approve what you saw', () => {
   it('the agent rewrites the draft while the owner reads it ⇒ the owner\'s approve is refused (409), not applied to the new text', async () => {
     const owner = client(); const ownerId = await login(owner, 'd1b');
     const conv = await ownedConversation(owner);
-    const seen = (await owner('POST', IL(conv, '/draft'), { goal: 'Summarise', forbidden: ['openwop:email.send'] })).body.ledger as IntentLedger;
+    const seen = (await owner('POST', IL(conv, '/draft'), { goal: 'Summarise', forbidden: ['openwop:email.send'] })).body.ledger!;
     // An injected instruction steers the chat agent to redraft without the prohibition.
     const tool = await draftTool({ goal: 'Summarise', forbidden: [] }, ownerId, conv);
     expect(tool.isError).toBeFalsy();
@@ -157,8 +180,8 @@ describe('D1 — approve what you saw', () => {
   it('the DIGEST binds the content: right id + revision but a different contract digest is refused (409)', async () => {
     const owner = client(); await login(owner, 'd1d');
     const conv = await ownedConversation(owner);
-    const seen = (await owner('POST', IL(conv, '/draft'), { goal: 'g', forbidden: ['openwop:email.send'] })).body.ledger as IntentLedger;
-    expect((seen as IntentLedger & { digest?: string }).digest).toBe(ledgerDigest(seen)); // the server hands the digest out with the row
+    const seen = (await owner('POST', IL(conv, '/draft'), { goal: 'g', forbidden: ['openwop:email.send'] })).body.ledger!;
+    expect(seen.digest).toBe(ledgerDigest(seen)); // the server hands the digest out with the row
     const wrong = ledgerDigest({ ...seen, forbidden: [] });
     expect((await owner('POST', IL(conv, '/approve'), { ...version(seen), digest: wrong })).status).toBe(409);
     expect((await getLedger(T, conv))?.status).toBe('draft');
@@ -167,7 +190,7 @@ describe('D1 — approve what you saw', () => {
   it('a decision missing the digest is a 400 that NAMES the fields an old client must send', async () => {
     const owner = client(); await login(owner, 'd1e');
     const conv = await ownedConversation(owner);
-    const seen = (await owner('POST', IL(conv, '/draft'), { goal: 'g' })).body.ledger as IntentLedger;
+    const seen = (await owner('POST', IL(conv, '/draft'), { goal: 'g' })).body.ledger!;
     const r = await owner('POST', IL(conv, '/approve'), { ledgerId: seen.ledgerId, revision: seen.revision });
     expect(r.status).toBe(400);
     expect(r.body.message).toMatch(/ledgerId.*revision.*digest/);
@@ -176,10 +199,10 @@ describe('D1 — approve what you saw', () => {
 
   it('only a draft can be approved: a revoked mission is not re-armed by a bare approve (409)', async () => {
     const { owner, conv } = await approvedMission();
-    const cur = (await owner('GET', IL(conv))).body.ledger as IntentLedger;
+    const cur = (await owner('GET', IL(conv))).body.ledger!;
     const r = await owner('POST', IL(conv, '/reject'), version(cur));
     expect(r.status, JSON.stringify(r.body)).toBe(200);
-    const again = await owner('POST', IL(conv, '/approve'), version(r.body.ledger));
+    const again = await owner('POST', IL(conv, '/approve'), version(r.body.ledger!));
     expect(again.status).toBe(409);
     expect((await getLedger(T, conv))?.status).toBe('rejected');
   });
@@ -187,10 +210,17 @@ describe('D1 — approve what you saw', () => {
   it('a REST redraft never reuses a revision a stale page could still hold (no A-B-A)', async () => {
     const owner = client(); await login(owner, 'd1c');
     const conv = await ownedConversation(owner);
-    const first = (await owner('POST', IL(conv, '/draft'), { goal: 'one' })).body.ledger as IntentLedger;
-    const second = (await owner('POST', IL(conv, '/draft'), { goal: 'two' })).body.ledger as IntentLedger;
+    const first = (await owner('POST', IL(conv, '/draft'), { goal: 'one' })).body.ledger!;
+    const second = (await owner('POST', IL(conv, '/draft'), { goal: 'two' })).body.ledger!;
     expect(second.revision ?? 0).toBeGreaterThan(first.revision ?? 0);
     expect((await owner('POST', IL(conv, '/approve'), version(first))).status).toBe(409);
+    // The REVISION alone binds too: a PUT of the SAME fields bumps the revision but
+    // leaves the digest equal, so only the revision compare can refuse the stale one.
+    const same = (await owner('PUT', IL(conv), { goal: 'two' })).body.ledger!;
+    expect(same.digest).toBe(second.digest);
+    expect(same.revision ?? 0).toBeGreaterThan(second.revision ?? 0);
+    expect((await owner('POST', IL(conv, '/approve'), version(second))).status).toBe(409);
+    expect((await getLedger(T, conv))?.status).toBe('draft');
   });
 
   it('review B1 — /draft cannot replace an APPROVED mission (revoke first)', async () => {
@@ -206,8 +236,8 @@ describe('D2 — who decides', () => {
     const owner = client(); await login(owner, 'd2a');
     const editor = await member(owner, 'editor');
     const conv = `il896-ownerless-${n++}`;
-    await ensureConversationMeta(T, conv, { type: 'direct' } as never);
-    await saveLedger({ ledgerId: 'il-x', tenantId: T, conversationId: conv, goal: 'g', allowed: [], forbidden: ['openwop:email.send'], requireApproval: [], successCriteria: [], status: 'approved', proposedBy: 'user', createdAt: hoursAgo(1), revision: 3 } as IntentLedger);
+    await ensureConversationMeta(T, conv, { type: 'agent' });
+    await saveLedger({ ledgerId: 'il-x', tenantId: T, conversationId: conv, goal: 'g', allowed: [], forbidden: ['openwop:email.send'], requireApproval: [], successCriteria: [], status: 'approved', proposedBy: 'user', createdAt: hoursAgo(1), revision: 3 });
     expect((await editor.c('GET', IL(conv))).body.viewer).toEqual({ mayEdit: true, mayDecide: false });
     const seen = version((await getLedger(T, conv))!);
     const r = await editor.c('POST', IL(conv, '/reject'), seen);
@@ -225,7 +255,7 @@ describe('D2 — who decides', () => {
     const g = await peer.c('GET', IL(conv));
     expect(g.status).toBe(200);
     expect(g.body.viewer).toEqual({ mayDecide: false, mayEdit: false });
-    expect((await peer.c('POST', IL(conv, '/reject'), version(g.body.ledger))).status).toBe(403);
+    expect((await peer.c('POST', IL(conv, '/reject'), version(g.body.ledger!))).status).toBe(403);
   });
 
   it('control — the owner may decide (viewer.mayDecide=true)', async () => {
@@ -249,12 +279,12 @@ describe('D2 — who decides', () => {
 
 describe('D3 — a caller cannot plant the mission stamp', () => {
   it('`intentLedger` in caller metadata does not survive into the run row', () => {
-    const run = buildRunRecord({ workflowId: 'wf', tenantId: T, metadata: { intentLedger: { conversationId: 'c', scope: { mode: 'agent-default' }, goal: 'planted', successCriteria: [], resolvedAt: '2999-01-01T00:00:00.000Z' }, mine: 1 } } as never);
+    const run = buildRunRecord({ workflowId: 'wf', tenantId: T, metadata: { intentLedger: { conversationId: 'c', scope: { mode: 'agent-default' }, goal: 'planted', successCriteria: [], resolvedAt: '2999-01-01T00:00:00.000Z' }, mine: 1 } });
     expect(run.metadata?.intentLedger).toBeUndefined();
     expect(run.metadata?.mine).toBe(1);
   });
   it('nor does `intentLedgerApprovals` — the key that actually carries the anchor (IL2CD-3)', () => {
-    const run = buildRunRecord({ workflowId: 'wf', tenantId: T, metadata: { intentLedgerApprovals: { 'il-x@t': { ledgerId: 'il-x', approvedAt: 't', conversationId: 'c', scope: { mode: 'agent-default' }, goal: 'planted', successCriteria: [], resolvedAt: '2999-01-01T00:00:00.000Z' } } } } as never);
+    const run = buildRunRecord({ workflowId: 'wf', tenantId: T, metadata: { intentLedgerApprovals: { 'il-x@t': { ledgerId: 'il-x', approvedAt: 't', conversationId: 'c', scope: { mode: 'agent-default' }, goal: 'planted', successCriteria: [], resolvedAt: '2999-01-01T00:00:00.000Z' } } } });
     expect(run.metadata?.intentLedgerApprovals).toBeUndefined();
   });
 });
@@ -281,10 +311,10 @@ describe('D4/D5 — the TTL anchor and who may end the mission', () => {
     const { owner, conv, ownerId, ledger: a } = await approvedMission({ expiresAtRelMs: 3_600_000 });
     const run = fakeRun({ actingUserId: ownerId, chatSessionId: conv });
     await resolveConversationToolGate({ tenantId: T, conversationKey: conv, ceiling: CEIL, approvals: [], run }); // turn under A
-    const revoked = (await owner('POST', IL(conv, '/reject'), version(a))).body.ledger as IntentLedger;
-    const d = (await owner('POST', IL(conv, '/draft'), { goal: 'B', allowed: ['kb'], expiresAtRelMs: 3_600_000 })).body.ledger as IntentLedger;
+    const revoked = (await owner('POST', IL(conv, '/reject'), version(a))).body.ledger!;
+    const d = (await owner('POST', IL(conv, '/draft'), { goal: 'B', allowed: ['kb'], expiresAtRelMs: 3_600_000 })).body.ledger!;
     expect(d.revision ?? 0).toBeGreaterThan(revoked.revision ?? 0);
-    const b = (await owner('POST', IL(conv, '/approve'), version(d))).body.ledger as IntentLedger;
+    const b = (await owner('POST', IL(conv, '/approve'), version(d))).body.ledger!;
     // A turn under B: not expired (B's anchor is now, not A's).
     const g1 = await resolveConversationToolGate({ tenantId: T, conversationKey: conv, ceiling: CEIL, approvals: [], run });
     expect(g1.scope?.enabled).toEqual(['kb.search']);
@@ -405,7 +435,7 @@ describe('D7b — the lifecycle writers keep the invariants', () => {
 
   it('the DSAR eraser writes through the CAS writer: the redaction bumps the revision (a stale page cannot approve over it)', async () => {
     const { owner, ownerId, conv, ledger } = await approvedMission();
-    const revoked = (await owner('POST', IL(conv, '/reject'), version(ledger))).body.ledger as IntentLedger;
+    const revoked = (await owner('POST', IL(conv, '/reject'), version(ledger))).body.ledger!;
     expect(revoked.rejectedBy).toBe(ownerId); // IL2CD-5: a revoke is attributed
     const { eraseIntentLedgerSubject } = await import('../src/features/intent-ledger/ledgerStore.js');
     await eraseIntentLedgerSubject(T, ownerId);
@@ -435,13 +465,13 @@ describe('floors — viewer and removed member', () => {
     for (const c of [owner, editor, viewer]) {
       const r = await c('POST', '/host/openwop-app/test/login', { email: `il896f-${n++}@acme.test`, tenantId });
       expect(r.status, JSON.stringify(r.body)).toBe(201);
-      ids.push(r.body.user.userId as string);
+      ids.push(r.body.user!.userId);
     }
     const [, editorId, viewerId] = ids as [string, string, string];
     const add = async (subject: string, role: string) => {
       const a = await owner('POST', `/host/openwop-app/orgs/${encodeURIComponent(tenantId)}/members`, { displayName: role, subject, roles: [role] });
       expect(a.status, JSON.stringify(a.body)).toBe(201);
-      return a.body.memberId as string;
+      return a.body.memberId!;
     };
     const editorMemberId = await add(editorId, 'editor');
     await add(viewerId, 'viewer');
@@ -452,7 +482,7 @@ describe('floors — viewer and removed member', () => {
     const w = await workspace();
     const s = await w.viewer('POST', '/host/openwop-app/chat/sessions', { title: 'v' });
     expect(s.status, JSON.stringify(s.body)).toBe(201); // a viewer CAN own a conversation…
-    const conv = s.body.sessionId as string;
+    const conv = s.body.sessionId!;
     const d = await w.viewer('POST', IL(conv, '/draft'), { goal: 'g' });
     expect(d.status, JSON.stringify(d.body)).toBe(403); // …but cannot draft its mission
     expect((await w.viewer('GET', IL(conv))).body.viewer).toEqual({ mayEdit: false, mayDecide: false });
@@ -460,14 +490,14 @@ describe('floors — viewer and removed member', () => {
 
   it('a REMOVED member can no longer revoke the mission on the conversation they still own', async () => {
     const w = await workspace();
-    const conv = (await w.editor('POST', '/host/openwop-app/chat/sessions', { title: 'e' })).body.sessionId as string;
+    const conv = (await w.editor('POST', '/host/openwop-app/chat/sessions', { title: 'e' })).body.sessionId!;
     const d = await w.editor('POST', IL(conv, '/draft'), { goal: 'g', forbidden: ['openwop:email.send'] });
     expect(d.status, JSON.stringify(d.body)).toBe(200);
-    const a = await w.editor('POST', IL(conv, '/approve'), version(d.body.ledger));
+    const a = await w.editor('POST', IL(conv, '/approve'), version(d.body.ledger!));
     expect(a.status, JSON.stringify(a.body)).toBe(200);
     const del = await w.owner('DELETE', `/host/openwop-app/orgs/${encodeURIComponent(w.tenantId)}/members/${encodeURIComponent(w.editorMemberId)}`);
     expect(del.status, JSON.stringify(del.body)).toBeLessThan(300);
-    const r = await w.editor('POST', IL(conv, '/reject'), version(a.body.ledger));
+    const r = await w.editor('POST', IL(conv, '/reject'), version(a.body.ledger!));
     expect(r.status).toBe(403); // the write floor, not an auth or visibility artefact
     expect((await getLedger(w.tenantId, conv))?.status).toBe('approved');
   });

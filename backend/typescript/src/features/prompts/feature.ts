@@ -13,12 +13,17 @@
 import type { BackendFeature } from '../types.js';
 import { registerPromptLibraryRoutes } from './routes.js';
 import { buildPromptSurface } from './promptSurface.js';
+import { eraseSubjectPromptEntries } from './promptLibraryService.js';
+import { registerSubjectEraser } from '../../host/subjectErasure.js';
 
 export const promptsFeature: BackendFeature = {
   id: 'prompts',
   requiredPacks: ['feature.prompts.nodes'], // NP-HOLE-PROMPTS-1
   registerRoutes: (deps) => {
     registerPromptLibraryRoutes(deps);
+    // ADR 0993 D6 — DSAR. Registered here (runs for every feature at boot) so a
+    // tenant's library is erasable whatever else is configured.
+    registerSubjectEraser(eraseSubjectPromptEntries);
   },
   // ADR 0116 Phase 4 — the ctx.features.prompts workflow surface (toggle-gated at the seam).
   surface: { id: 'prompts', build: buildPromptSurface },

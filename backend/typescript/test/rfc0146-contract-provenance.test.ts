@@ -23,6 +23,15 @@
  * retired with major 1. Legs 1–3 now assert the DERIVATION (`contractProvenance()`, what the
  * v1 root emitted) directly — the sabotage leg still proves it follows the stamp — and leg 1
  * pins that the v2 root does not carry it.
+ *
+ * DEAD SUBJECT (round-2 grade, row CP146-DEAD-1, filed for grade-code): since
+ * 4d6d53851 (ADR 0812 P4, "delete the v1 discovery builder") `contractProvenance()`
+ * has NO production caller in backend/typescript/src: nothing emits the field on
+ * any wire. Legs 2–4 pin a derivation no document carries; leg 1's v2-absence half
+ * is the only live wire claim. Kept by ruling (PROTECTED-LOW) together with its
+ * sibling `contract-provenance-image-fallback.test.ts` until the module, its
+ * `__resetContractProvenance` seam and both files are retired or re-wired at v2
+ * through an RFC.
  */
 import http from 'node:http';
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -88,11 +97,12 @@ describe('RFC 0146 — contractProvenance', () => {
     // The scenario soft-skips a silent host. Without this assertion a green conformance
     // run is compatible with the field never having been emitted once.
     __resetContractProvenance();
-    const p = contractProvenance() as unknown as Record<string, unknown>;
-    expect(typeof p.suiteVersion).toBe('string');
-    expect(typeof p.corpusCommit).toBe('string');
-    expect((p.suiteVersion as string).length).toBeGreaterThan(0);
-    expect((p.corpusCommit as string).length).toBeGreaterThan(0);
+    const p = contractProvenance();
+    expect(p).toBeDefined();
+    expect(typeof p?.suiteVersion).toBe('string');
+    expect(typeof p?.corpusCommit).toBe('string');
+    expect(p?.suiteVersion.length ?? 0).toBeGreaterThan(0);
+    expect(p?.corpusCommit?.length ?? 0).toBeGreaterThan(0);
 
     // …and it reports the INSTALLED package, which is requirement 2's whole content.
     const stampPath = corpusStampPath();
@@ -103,8 +113,8 @@ describe('RFC 0146 — contractProvenance', () => {
     // The assertion is unchanged in strength: the advertised value must still
     // equal what the INSTALLED stamp says, which is requirement 2's content.
     // Only the key it is read under widens.
-    expect(p.suiteVersion).toBe(stamp.suiteVersion ?? stamp.version);
-    expect(p.corpusCommit).toBe(stamp.corpusCommit);
+    expect(p?.suiteVersion).toBe(stamp.suiteVersion ?? stamp.version);
+    expect(p?.corpusCommit).toBe(stamp.corpusCommit);
   });
 
   it('leg 3 (SABOTAGE): point the derivation at a STALE stamp and the advertised value follows', async () => {
@@ -117,12 +127,11 @@ describe('RFC 0146 — contractProvenance', () => {
       }, null, 2));
       __resetContractProvenance();
 
-      const p = contractProvenance() as unknown as Record<string, unknown>;
+      const p = contractProvenance();
 
       // A constant would still report the real values here. Derivation reports the stale ones.
-      expect(p.suiteVersion).toBe('0.0.1-stale');
-      expect(p.corpusCommit).toBe('deadbeefdeadbeefdeadbeefdeadbeefdeadbeef');
-      expect(p.suiteVersion).not.toBe(real.suiteVersion);
+      expect(p).toEqual({ suiteVersion: '0.0.1-stale', corpusCommit: 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef' });
+      expect(p?.suiteVersion).not.toBe(real.suiteVersion);
     } finally {
       writeFileSync(stampPath, original);
       __resetContractProvenance();

@@ -8,6 +8,16 @@
  *    a guess), and is fail-open per store (one throwing store never stops the rest).
  *  - `deleteOrphanAgentRunActivity` (app-migration v3's engine): deletes exactly
  *    the attribution rows whose run is gone; idempotent on re-run.
+ *
+ * What breaks it (sabotage-witnessed, /grade-tests wave 61, 8fw3g1-ret-*): the
+ * TTL default / 0-disable / garbage fallback, the prune cutoff, the kv cutoff,
+ * either parse site (not-JSON, missing field), the per-store try, the ttl guard,
+ * the orphan join. The age-out case also pins the CONS-13 counters.
+ *
+ * DOUBLE GUARD (named): kvAgeOut's `if (!Number.isFinite(ts)) { …; continue }`
+ * is backed by `NaN < cutoff === false`, so removing only the `continue` still
+ * deletes nothing (8fw3g1-ret-kv-skipguard, vacuous by design). Skip-on-a-guess
+ * is witnessed through the two parse sites and the `skipped` counter instead.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -73,7 +83,10 @@ describe('kv age-out seam (ADR 0380 §3)', () => {
     await storage.kvSet('hostext:test-ledger:not-json', 'evt-not-json');
     await storage.kvSet('hostext:other:old', JSON.stringify({ processedAt: iso(45) })); // outside the prefix
 
-    await __runKvAgeOutOnce(storage, NOW);
+    const out = await __runKvAgeOutOnce(storage, NOW);
+    // CONS-13 counters for THIS store: 4 rows under the prefix, 1 deleted, the
+    // no-field and not-json rows SKIPPED (the fresh row is neither).
+    expect(out.find((r) => r.id === 'test:ledger')).toMatchObject({ scanned: 4, deleted: 1, skipped: 2, derived: 0 });
 
     const remaining = (await storage.kvList('hostext:test-ledger:')).map((r) => r.key).sort();
     // Only the aged, well-formed row is deleted; skip-on-a-guess for the rest.
@@ -108,7 +121,7 @@ describe('kv age-out seam (ADR 0380 §3)', () => {
     // a warn line — which is what made a mis-prefixed registration invisible.
     const out = await __runKvAgeOutOnce(wrapped, NOW);
     const byId = new Map(out.map((r) => [r.id, r]));
-    expect(byId.get('test:boom')?.error, 'the throwing store is REPORTED, not silently skipped').toBeTruthy();
+    expect(byId.get('test:boom')?.error, 'the throwing store is REPORTED, not silently skipped').toBe('store down');
     expect(byId.get('test:ok')?.deleted).toBe(1);
     expect(await storage.kvGet('hostext:ok:old')).toBeNull(); // the healthy store still swept
   });

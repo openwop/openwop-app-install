@@ -53,6 +53,7 @@ import { buildLiveDispatchLane } from '../liveDispatchLane.js';
 import { programMock } from '../../providers/dispatchMock.js';
 import type { Storage } from '../../storage/storage.js';
 import type { RunRecord } from '../../types.js';
+import { maybeRecordExactCalls, readFrozenFixtures } from './toolBoundary.js';
 import type { TypedEvalJudge } from '../workflowEvalJudge.js';
 import { gradeOutput } from './outputGrade.js';
 import { gradeTrajectory, observedFor, callMatches, type ObservedCall, type TrajectoryResult } from './trajectory.js';
@@ -60,9 +61,11 @@ import { summarizeTrials, suiteTrialStats, taskPassed, type TaskTrials } from '.
 import { rfc0246FieldsAvailable } from './evalCapability.js';
 import { countTrialEfficiency, meanEfficiency, type Efficiency } from './efficiency.js';
 import { pairedRegressionVerdict, type RegressionResult } from './regressionVerdict.js';
-import { MAX_COST_USD_PER_SUITE, type AgentEvalSuite, type EvalTaskDef } from './suiteStore.js';
+import { MAX_COST_USD_PER_SUITE, type AgentEvalSuite, type EvalTaskDef, type ToolResponseFixture } from './suiteStore.js';
 import { SCRIPTED_AGENT_ID } from './fixtureSuites.js';
 import { deriveToolErrorCode } from '../toolHooks.js';
+import { COUNTER_TOOL, runCounter } from './evalCounter.js';
+import { MEMORY_TOOL, runMemoryTool } from './evalMemoryTool.js';
 
 const log = createLogger('host.evals.agentEvalRun');
 
@@ -124,6 +127,35 @@ export interface AgentEvalMeta {
   lastProgressAt?: string;
   /** Host-internal reason a requested regression is `inconclusive` (EVD-3, AEV-2/4). */
   regressionReason?: RegressionReason;
+  /** RFC 0252 (ADR 0984) — the accepted `fixtureRuns` map, echoed on `eval.started`. */
+  fixtureRuns?: Record<string, string>;
+  /** RFC 0252 §D — each named task's fixtures, derived at create from its source run.
+   *  Suite content: never on the wire. A resume reads these, never the source again. */
+  recordedFixtures?: Record<string, ToolResponseFixture[]>;
+  /** ADR 0984 D7 — taskId → the source run (storage id) of a task whose fixtures
+   *  came from a live trial's as-executed record. The entries are frozen in the
+   *  governed tool-boundary store under that source (`readFrozenFixtures`), not
+   *  here, so the source's retention and erasure reach them. */
+  recordedFixturesStored?: Record<string, string>;
+}
+
+/** RFC 0252 §D — a task named in `fixtureRuns` runs on its derived fixtures, fail-closed.
+ *  The run is refused before any trial when a stored copy is gone (`frozenCopiesHeld`). */
+async function withRecordedFixtures(run: RunRecord, meta: AgentEvalMeta, task: EvalTaskDef): Promise<EvalTaskDef> {
+  const source = meta.recordedFixturesStored?.[task.taskId];
+  // A copy gone since the preflight (`frozenCopiesHeld`) leaves no entries: every call misses.
+  const recorded = source !== undefined
+    ? (await readFrozenFixtures(run.tenantId, source, run.runId, task.taskId)) ?? []
+    : meta.recordedFixtures?.[task.taskId];
+  return recorded ? { ...task, fixtures: { ...task.fixtures, toolResponses: recorded, onMiss: 'fail' } } : task;
+}
+
+/** ADR 0984 D7 — every task's frozen copy is still held. */
+async function frozenCopiesHeld(run: RunRecord, meta: AgentEvalMeta): Promise<boolean> {
+  for (const [taskId, source] of Object.entries(meta.recordedFixturesStored ?? {})) {
+    if ((await readFrozenFixtures(run.tenantId, source, run.runId, taskId)) === null) return false;
+  }
+  return true;
 }
 
 /** The instant the sweeper ages an orphaned eval run from (WF-EV-3). */
@@ -182,11 +214,19 @@ export interface EvalSummary {
  * as production would. A seed copied from production memory is not promoted to
  * trusted by being put in a suite.
  */
-export function ephemeralMemory(seed: ReadonlyArray<Record<string, unknown>> | undefined): AgentMemoryPort {
-  const rows: Array<{ scope: string | null; content: string; contentTrust: 'trusted' | 'untrusted' }> = (seed ?? []).map((m) => {
+/**
+ * The per-trial port, plus a host-internal read by entry id. ADR 0989: the
+ * reserved `conformance.eval:memory` tool answers from THIS store, so it
+ * observes the memory trials really use.
+ */
+export type EphemeralMemory = AgentMemoryPort & { get(id: string): { id: string; content: string } | undefined };
+
+export function ephemeralMemory(seed: ReadonlyArray<Record<string, unknown>> | undefined): EphemeralMemory {
+  const rows: Array<{ id?: string; scope: string | null; content: string; contentTrust: 'trusted' | 'untrusted' }> = (seed ?? []).map((m) => {
     const content = scrubSecretShaped(typeof m.content === 'string' ? m.content : JSON.stringify(m.value ?? m));
     const tags = Array.isArray(m.tags) ? m.tags.filter((t): t is string => typeof t === 'string') : [];
     return {
+      ...(typeof m.id === 'string' ? { id: m.id } : {}),
       scope: typeof m.scope === 'string' ? m.scope : null,
       content,
       contentTrust: isUntrustedMemoryRow(tags, content) ? 'untrusted' : 'trusted',
@@ -194,10 +234,18 @@ export function ephemeralMemory(seed: ReadonlyArray<Record<string, unknown>> | u
   });
   return {
     // A seeded entry with no scope is visible to every scope the agent reads.
-    read: async (scope) => rows.filter((r) => r.scope === null || r.scope === scope).map((r) => ({ content: r.content, contentTrust: r.contentTrust })),
+    // ADR 0989 — an entry's id is kept and returned (the port contract allows it).
+    read: async (scope) => rows.filter((r) => r.scope === null || r.scope === scope).map((r) => ({ content: r.content, contentTrust: r.contentTrust, ...(r.id ? { id: r.id } : {}) })),
     write: async (scope, entry) => {
       const content = scrubSecretShaped(entry.content);
-      rows.push({ scope, content, contentTrust: isUntrustedMemoryRow(entry.tags ?? [], content) ? 'untrusted' : 'trusted' });
+      const row = { ...(entry.id ? { id: entry.id } : {}), scope, content, contentTrust: isUntrustedMemoryRow(entry.tags ?? [], content) ? 'untrusted' as const : 'trusted' as const };
+      // The port contract: a write with an `id` upserts that entry.
+      const at = entry.id ? rows.findIndex((r) => r.id === entry.id) : -1;
+      if (at >= 0) rows[at] = row; else rows.push(row);
+    },
+    get: (id) => {
+      const r = rows.find((x) => x.id === id);
+      return r ? { id, content: r.content } : undefined;
     },
   };
 }
@@ -206,39 +254,63 @@ export function ephemeralMemory(seed: ReadonlyArray<Record<string, unknown>> | u
 
 export interface FixtureInterceptor {
   wrap: (inner: ExecuteAgentTool) => ExecuteAgentTool;
+  /** As `wrap`, plus how each call was answered (ADR 0977 D3/D4). */
+  wrapDetailed: (inner: ExecuteAgentTool) => (call: Parameters<ExecuteAgentTool>[0]) => Promise<InterceptedCall>;
   observed: ObservedCall[];
+  /** Every miss, live or fail-closed (`fixtureMissCount`). */
   misses: () => number;
+  /** Misses answered fail-closed: they never reached a live tool, and they fail the trial (D3). */
+  failClosedMisses: () => number;
 }
 
-export function fixtureInterceptor(task: EvalTaskDef, opts: { allowLive: boolean; agentId: string; signal?: AbortSignal }): FixtureInterceptor {
+/** One call through the interceptor: the tool result, and whether it was served or missed. */
+export interface InterceptedCall {
+  result: Awaited<ReturnType<ExecuteAgentTool>>;
+  /** The served entry's `response`, verbatim (D4). */
+  served?: { response: unknown };
+  miss?: 'live' | 'fail';
+}
+
+/**
+ * `allowLive` is either a blanket answer (tenant suites, ADR 0889 A10) or a
+ * per-tool predicate. ADR 0977 D2 uses the predicate so that a fixture suite
+ * reaches exactly one live tool, the reserved counter.
+ */
+export function fixtureInterceptor(task: EvalTaskDef, opts: { allowLive: boolean | ((tool: string) => boolean); agentId: string; signal?: AbortSignal }): FixtureInterceptor {
   const entries = (task.fixtures?.toolResponses ?? []).map((r) => ({ ...r, consumed: false }));
-  // A10 + the RFC SHOULD: absent `onMiss` ⇒ fail; `live` only for a tenant suite.
-  const onMiss = task.fixtures?.onMiss === 'live' && opts.allowLive ? 'live' : 'fail';
+  // A10 + the RFC SHOULD: absent `onMiss` ⇒ fail; `live` only where `allowLive` admits the tool.
+  const liveFor = (tool: string): boolean => task.fixtures?.onMiss === 'live'
+    && (typeof opts.allowLive === 'function' ? opts.allowLive(tool) : opts.allowLive);
   const observed: ObservedCall[] = [];
   let misses = 0;
+  let failClosed = 0;
+  const wrapDetailed = (inner: ExecuteAgentTool) => async (call: Parameters<ExecuteAgentTool>[0]): Promise<InterceptedCall> => {
+    // WF-EV-2 — a cancelled or timed-out run never starts another tool call,
+    // and above all never reaches a live one.
+    if (opts.signal?.aborted) throw opts.signal.reason;
+    observed.push({ tool: call.name, input: call.input, agentId: opts.agentId });
+    const hit = entries.find((e) => !e.consumed && callMatches({ tool: e.tool, args: e.args, argsMatch: e.argsMatch }, { tool: call.name, input: call.input }));
+    if (hit) {
+      hit.consumed = true;
+      const response = hit.response;
+      const content = typeof response === 'string' ? response : JSON.stringify(response ?? null);
+      // RFC 0245 §B — a recorded FAILURE is served as a tool error, exactly as a
+      // live failing call returns (the same code derivation as the live lane).
+      // It was served, so it is not a miss, and it never reaches a live tool.
+      if (hit.isError === true) return { result: { content, isError: true, errorCode: deriveToolErrorCode({ content }) } };
+      return { result: { content }, served: { response } };
+    }
+    misses += 1;
+    if (liveFor(call.name)) return { result: await inner(call), miss: 'live' };
+    failClosed += 1;
+    return { result: { content: `fixture_miss: no fixture response for ${call.name} with these arguments`, isError: true, errorCode: 'fixture_miss' }, miss: 'fail' };
+  };
   return {
     observed,
     misses: () => misses,
-    wrap: (inner) => async (call) => {
-      // WF-EV-2 — a cancelled or timed-out run never starts another tool call,
-      // and above all never reaches a live one.
-      if (opts.signal?.aborted) throw opts.signal.reason;
-      observed.push({ tool: call.name, input: call.input, agentId: opts.agentId });
-      const hit = entries.find((e) => !e.consumed && callMatches({ tool: e.tool, args: e.args, argsMatch: e.argsMatch }, { tool: call.name, input: call.input }));
-      if (hit) {
-        hit.consumed = true;
-        const response = hit.response;
-        const content = typeof response === 'string' ? response : JSON.stringify(response ?? null);
-        // RFC 0245 §B — a recorded FAILURE is served as a tool error, exactly as a
-        // live failing call returns (the same code derivation as the live lane).
-        // It was served, so it is not a miss, and it never reaches a live tool.
-        if (hit.isError === true) return { content, isError: true, errorCode: deriveToolErrorCode({ content }) };
-        return { content };
-      }
-      misses += 1;
-      if (onMiss === 'live') return inner(call);
-      return { content: `fixture_miss: no fixture response for ${call.name} with these arguments`, isError: true, errorCode: 'fixture_miss' };
-    },
+    failClosedMisses: () => failClosed,
+    wrapDetailed,
+    wrap: (inner) => async (call) => (await wrapDetailed(inner)(call)).result,
   };
 }
 
@@ -267,7 +339,7 @@ type TrialOutcome = TrialRecord & { unpriced?: boolean };
 
 /* ── stopping ─────────────────────────────────────────────────────────────── */
 
-type StopReason = 'cancelled' | 'lease_lost' | 'cost_ceiling' | 'cost_unpriced' | 'deadline' | 'mock_unscripted';
+type StopReason = 'cancelled' | 'lease_lost' | 'cost_ceiling' | 'cost_unpriced' | 'deadline' | 'mock_unscripted' | 'recorded_fixtures_gone';
 
 class EvalStop extends Error {
   constructor(readonly reason: StopReason) { super(reason); }
@@ -339,6 +411,13 @@ function judgeIdentityOf(judge: TypedEvalJudge, sink: { identity?: JudgeIdentity
   };
 }
 
+/** The short, fixed `error.message` on a scripted tool return: never the payload. */
+function errorMessageFor(code: string | undefined): string {
+  if (code === 'fixture_miss') return 'fixture miss';
+  if (code === 'invalid_counter_input' || code === 'counter_contention' || code === 'invalid_memory_input') return code.replace(/_/g, ' ');
+  return 'tool error (recorded fixture)';
+}
+
 /* ── one trial ─────────────────────────────────────────────────────────────── */
 
 /**
@@ -346,7 +425,14 @@ function judgeIdentityOf(judge: TypedEvalJudge, sink: { identity?: JudgeIdentity
  * the calls in `task.input.script`, in order, each through THIS host's eval tool
  * boundary (the §D interceptor when the task has `toolResponses`, else the host
  * answers with the call's own arguments), emits `agent.tool-called` with
- * `inputs`, then decides with `input.output`. No model, no live tool.
+ * `inputs`, then decides with `input.output`. No model.
+ *
+ * ADR 0977 D2: the one live tool a scripted call can reach is the reserved
+ * counter (`evalCounter.ts`), on a miss under `onMiss: "live"`, and only when
+ * the suite came from a conformance fixture. Under the conformance posture the
+ * scripted agent is public, so a TENANT suite can target it; that is why the
+ * door is keyed on `suiteSource` (from the reserved `metadata.eval`, which the
+ * caller cannot forge), not on the agent.
  */
 async function runScriptedTrial(ctx: AgentEvalContext, task: EvalTaskDef, trialIndex: number, guard: TrialGuard): Promise<TrialOutcome> {
   const { run, suite } = ctx;
@@ -354,13 +440,29 @@ async function runScriptedTrial(ctx: AgentEvalContext, task: EvalTaskDef, trialI
   const invocationId = `${run.runId}:${task.taskId}:${trialIndex}`;
   const input = (task.input ?? {}) as { script?: Array<{ tool?: unknown; arguments?: unknown }>; output?: unknown };
   const script = Array.isArray(input.script) ? input.script : [];
-  const interceptor = fixtureInterceptor(task, { allowLive: false, agentId, signal: guard.signal });
-  const hasFixtures = (task.fixtures?.toolResponses ?? []).length > 0;
+  const counterDoor = evalMeta(run).suiteSource === 'fixture';
+  const interceptor = fixtureInterceptor(task, { allowLive: (tool) => counterDoor && tool === COUNTER_TOOL, agentId, signal: guard.signal });
+  // RFC 0252 — a recorded task is intercepted even when its source made no calls:
+  // every call then misses, fail-closed.
+  const hasFixtures = (task.fixtures?.toolResponses ?? []).length > 0 || evalMeta(run).recordedFixtures?.[task.taskId] !== undefined
+    || evalMeta(run).recordedFixturesStored?.[task.taskId] !== undefined;
   const echo: ExecuteAgentTool = async (call) => ({ content: JSON.stringify(call.input ?? {}) });
-  const boundary = hasFixtures ? interceptor.wrap(echo) : async (call: { name: string; input: Record<string, unknown> }) => {
-    interceptor.observed.push({ tool: call.name, input: call.input, agentId });
-    return echo(call);
+  // The live value of the last counter call, for its `outcome` (D4).
+  let counterValue: unknown;
+  const inner: ExecuteAgentTool = async (call) => {
+    if (call.name !== COUNTER_TOOL) return echo(call);
+    const r = await runCounter(run, call.input);
+    if (!r.ok) return { content: JSON.stringify({ error: r.code, message: r.message }), isError: true, errorCode: r.code };
+    counterValue = r.value;
+    return { content: JSON.stringify(r.value) };
   };
+  const boundary = hasFixtures ? interceptor.wrapDetailed(inner) : async (call: { name: string; input: Record<string, unknown> }): Promise<InterceptedCall> => {
+    interceptor.observed.push({ tool: call.name, input: call.input, agentId });
+    return { result: await echo(call) };
+  };
+  // ADR 0989 — this trial's own eval memory, from the SAME factory the agent lane
+  // hands to dispatch. A new port per trial is the §B isolation the suite observes.
+  const memory = ephemeralMemory(task.fixtures?.memorySeed);
   const events: Array<{ type: string; payload?: unknown }> = [];
   const push = async (type: string, payload: Record<string, unknown>): Promise<void> => { events.push({ type, payload }); await emit(run.runId, type, payload); };
   await emit(run.runId, 'agent.invocation.started', { invocationId, agentId, source: 'run-api' });
@@ -373,16 +475,39 @@ async function runScriptedTrial(ctx: AgentEvalContext, task: EvalTaskDef, trialI
     const callId = `${invocationId}:${i}`;
     await push('agent.toolCalled', { agentId, toolName, callId, inputs });
     const t0 = Date.now();
-    const out = await boundary({ name: toolName, input: inputs });
+    counterValue = undefined;
+    // ADR 0989 — the reserved memory tool is answered from the trial's memory BEFORE
+    // the fixture interceptor: never served from `toolResponses`, never a miss. Same
+    // door as the counter: a fixture-sourced suite only.
+    let memoryValue: unknown;
+    let call: InterceptedCall;
+    if (counterDoor && toolName === MEMORY_TOOL) {
+      interceptor.observed.push({ tool: toolName, input: inputs, agentId });
+      const r = await runMemoryTool(memory, inputs);
+      if (r.ok) memoryValue = r.value;
+      call = { result: r.ok ? { content: JSON.stringify(r.value) } : { content: JSON.stringify({ error: r.code, message: r.message }), isError: true, errorCode: r.code } };
+    } else {
+      call = await boundary({ name: toolName, input: inputs });
+    }
+    const out = call.result;
     // RFC 0245 §B / §D — a served failure carries `error` (short fixed message,
     // never the payload) and no `outcome`. A success stays as it was: this host
     // never sets `outcome` on a tool return (WFAU-4; RFC 0064 §F optional), and
     // ADR 0929 D2 (a placeholder outcome for a judge) was rejected.
+    // CORRECTION (ADR 0977 D4): the one exception is the reserved counter, whose
+    // contract requires `outcome`: the live `{key, count}`, or a served entry's
+    // `response` verbatim. A counter error or a fail-mode miss still carries
+    // `error` and no `outcome`.
+    // ADR 0989 extends the same exception to the reserved memory tool: every memory
+    // call records its result (`{id}` for a write, `{id, content}` for a read).
+    const counterOutcome = toolName === COUNTER_TOOL && !out.isError
+      ? (call.served ? { outcome: call.served.response } : counterValue !== undefined ? { outcome: counterValue } : {})
+      : toolName === MEMORY_TOOL && memoryValue !== undefined ? { outcome: memoryValue } : {};
     await push('agent.toolReturned', {
       agentId, toolName, callId, durationMs: Date.now() - t0,
       ...(out.isError
-        ? { status: 'error', error: { code: out.errorCode ?? 'tool_execution_failed', message: out.errorCode === 'fixture_miss' ? 'fixture miss' : 'tool error (recorded fixture)' } }
-        : { status: 'ok' }),
+        ? { status: 'error', error: { code: out.errorCode ?? 'tool_execution_failed', message: errorMessageFor(out.errorCode) } }
+        : { status: 'ok', ...counterOutcome }),
     });
   }
   const output = typeof input.output === 'string' ? input.output : JSON.stringify(input.output ?? '');
@@ -404,8 +529,10 @@ async function runScriptedTrial(ctx: AgentEvalContext, task: EvalTaskDef, trialI
     score = out.score; passed = out.passed; scoreLabel = out.scoreLabel; evaluatorType = out.evaluatorType;
     if (trajectory && !trajectory.matched) { passed = false; if (scoreLabel === 'pass') scoreLabel = 'trajectory_mismatch'; }
   }
+  // ADR 0977 D3 — every miss is counted, but only a fail-closed miss fails the
+  // trial. A live counter miss ran against the live tool, which is the point.
   const fixtureMissCount = interceptor.misses();
-  if (fixtureMissCount > 0) { passed = false; score = 0; scoreLabel = 'fixture_miss'; }
+  if (interceptor.failClosedMisses() > 0) { passed = false; score = 0; scoreLabel = 'fixture_miss'; }
   return {
     score, passed, scoreLabel, evaluatorType, costUsd: judgeMeter.usd, latencyMs,
     ...(judgeMeter.usd > 0 ? { judgeCostUsd: judgeMeter.usd } : {}),
@@ -418,6 +545,7 @@ async function runScriptedTrial(ctx: AgentEvalContext, task: EvalTaskDef, trialI
 }
 
 async function runTrial(ctx: AgentEvalContext, task: EvalTaskDef, trialIndex: number, guard: TrialGuard): Promise<TrialOutcome> {
+  task = await withRecordedFixtures(ctx.run, evalMeta(ctx.run), task);
   const { run, suite } = ctx;
   const meta = evalMeta(run);
   if (meta.agentId === SCRIPTED_AGENT_ID) return runScriptedTrial(ctx, task, trialIndex, guard);
@@ -434,6 +562,12 @@ async function runTrial(ctx: AgentEvalContext, task: EvalTaskDef, trialIndex: nu
   // H2 — a pinned model id prices the mock's usage (the cost-ceiling test); unpinned, `mock` is unpriced-exempt.
   const modelOptions = rounds ? { provider: 'mock', model: meta.model?.model ?? UNPRICED_MOCK_MODEL } : meta.model?.provider ? { provider: meta.model.provider, ...(meta.model.model ? { model: meta.model.model } : {}) } : undefined;
   const judgeMeter = { usd: 0 };
+  // ADR 0984 D7 — with capture ON, record each call as the agent received it
+  // (outside the interceptor), so this run can be an RFC 0252 fixture source.
+  // Never a trial that serves fixtures: its record would be a copy of another
+  // run's content with no link to that source, outliving its retention.
+  const servesFixtures = task.fixtures?.toolResponses !== undefined;
+  const recordExact = servesFixtures ? null : await maybeRecordExactCalls({ tenantId, runId: run.runId, agentId: meta.agentId });
 
   const lane = await buildLiveDispatchLane({
     tenantId,
@@ -457,7 +591,7 @@ async function runTrial(ctx: AgentEvalContext, task: EvalTaskDef, trialIndex: nu
       return { eventId: ev.eventId, sequence: ev.sequence };
     },
     memory: ephemeralMemory(task.fixtures?.memorySeed),
-    wrapExecuteTool: interceptor.wrap,
+    wrapExecuteTool: recordExact ? (inner) => recordExact(interceptor.wrap(inner)) : interceptor.wrap,
     // A6 — the eval run's FROZEN decision, not a runless re-resolution.
     compaction: readCompactionDecision(run.metadata ?? {}),
     ...(modelOptions ? { modelOptions } : {}),
@@ -657,6 +791,7 @@ export async function runAgentEval(ctx: AgentEvalContext, opts: { resume?: boole
         modes: suite.modes,
         ...(meta.baselineRunId ? { baselineRunId: meta.baselineRunId } : {}),
         ...(meta.rfc0244Wire && trialCount > 1 ? { trialCount } : {}),
+        ...(meta.fixtureRuns ? { fixtureRuns: meta.fixtureRuns } : {}),
       });
     }
     // A scripted mock with no rounds for a task would send that task to the agent's
@@ -664,6 +799,9 @@ export async function runAgentEval(ctx: AgentEvalContext, opts: { resume?: boole
     if (meta.mock && meta.agentId !== SCRIPTED_AGENT_ID && suite.tasks.some((t) => !meta.mock!.rounds[t.taskId])) {
       throw new EvalStop('mock_unscripted');
     }
+    // RFC 0252 Security — a replay or resume whose frozen copy is gone (its source's
+    // record was erased, purged or deleted) is refused: never re-derived, never run live.
+    if (!(await frozenCopiesHeld(run, meta))) throw new EvalStop('recorded_fixtures_gone');
     let spentUsd = Object.values(progress).flatMap((t) => Object.values(t)).reduce((s, t) => s + t.costUsd, 0);
     const scoredEvent = (taskId: string, trial: number, rec: TrialRecord) => emit(runId, 'eval.scored', {
       taskId,
@@ -761,6 +899,8 @@ function stopError(reason: StopReason): { code: string; message: string } {
       return { code: 'eval_cost_unpriced', message: 'A trial used a model this host cannot price, so the eval run cannot be held to its cost ceiling. Pin a catalog model.' };
     case 'mock_unscripted':
       return { code: 'eval_mock_unscripted', message: 'configurable.mockProvider scripts no rounds for at least one task; an unscripted task would reach a real model.' };
+    case 'recorded_fixtures_gone':
+      return { code: 'eval_recorded_fixtures_gone', message: 'A task’s fixtures from a recorded run are no longer held (the source’s record was erased or aged out), so the run was refused.' };
     default:
       return { code: 'eval_run_failed', message: `eval run stopped (${reason})` };
   }
@@ -966,9 +1106,13 @@ async function buildSummary(
     // No verdict field on this wire: a bare `scoreDelta: 0` would read "no change". Omit it.
     return { summary, regressionReason: reason };
   }
+  // ADR 0983 D4 — `scoreDelta` is `aggregateScore` minus the baseline's (the schema
+  // and RFC 0251 §D). It was the paired-task mean difference, which reads 0 when
+  // the runs hold different tasks. Pairing still decides the verdict (RFC 0244 §F).
+  const scoreDelta = baseSummary ? Math.max(-1, Math.min(1, aggregateScore - baseSummary.aggregateScore)) : r.scoreDelta;
   summary.regression = {
     baselineRunId: meta.baselineRunId,
-    scoreDelta: r.scoreDelta,
+    scoreDelta,
     ...(meta.rfc0244Wire ? { verdict: r.verdict, method: r.method, alpha: r.alpha, pairedTaskCount: r.pairedTaskCount } : {}),
   };
   return { summary, ...(reason ? { regressionReason: reason } : {}) };

@@ -14,7 +14,8 @@ import { Handle, NodeToolbar, Position, type NodeProps } from '@xyflow/react';
 import { useTranslation } from 'react-i18next';
 import { catalogEntry } from '../../palette/catalogRegistry.js';
 import { formatUsd } from '../../../i18n/format.js';
-import { useBuilderStore, type NodeRunStatus } from '../../store/builderStore.js';
+import type { NodeRunStatus } from '../../store/builderStore.js';
+import { useCanvasStore, useCanvasStoreApi } from '../../store/canvasStore.js';
 import { CircleIcon, CheckIcon, XIcon, PauseIcon, AlertIcon, LinkIcon, PinIcon, MessageCircleIcon } from '../../../ui/icons/index.js';
 import { usePairStore } from '../../pair/pairStore.js';
 import { QuickAsk } from '../../pair/QuickAsk.js';
@@ -352,7 +353,7 @@ function ClientOnlyNode({ nodeId, selected, accent, badge }: {
   badge: string;
 }) {
   const { t } = useTranslation('builder');
-  const node = useBuilderStore((s) => s.nodes.find((n) => n.id === nodeId) ?? null);
+  const node = useCanvasStore((s) => s.nodes.find((n) => n.id === nodeId) ?? null);
   if (!node) return null;
   const content = (node.config['content'] as string | undefined) ?? '';
   return (
@@ -377,8 +378,12 @@ function ClientOnlyNode({ nodeId, selected, accent, badge }: {
 // from firing keystrokes meant for the input.
 function EditableTitle({ nodeId, name }: { nodeId: string; name: string }) {
   const { t } = useTranslation('builder');
+  const canvasStore = useCanvasStoreApi();
+  const readOnly = useCanvasStore((s) => s.readOnly);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(name);
+  // ADR 0960 D3 — a run view shows the title; it never offers a rename.
+  if (readOnly) return <span className="builder-node-title">{name}</span>;
   if (!editing) {
     return (
       <span
@@ -396,7 +401,7 @@ function EditableTitle({ nodeId, name }: { nodeId: string; name: string }) {
   }
   const commit = (): void => {
     const trimmed = draft.trim();
-    if (trimmed && trimmed !== name) useBuilderStore.getState().updateNode(nodeId, { name: trimmed });
+    if (trimmed && trimmed !== name) canvasStore.getState().updateNode(nodeId, { name: trimmed });
     setEditing(false);
   };
   return (

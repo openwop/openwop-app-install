@@ -30,7 +30,12 @@ import { config } from '../../client/config.js';
 
 export type ConsentRegime = 'opt-in' | 'opt-out';
 export type ConsentDecision = 'allowed' | 'denied' | 'unknown';
-interface StoredChoice { token?: string; analytics: boolean; at: string }
+/** `replay` (ADR 0951 D1) is the separate session-recording choice: absent until
+ *  the visitor answers it, and only ever asked on a site that offers it. */
+interface StoredChoice { token?: string; analytics: boolean; replay?: boolean; at: string }
+
+/** ADR 0951 D1 — the strict session-recording category on the consent lane. */
+export const REPLAY_CATEGORY = 'analytics.replay';
 
 const CHOICES_KEY = 'owp:consent';
 const LEGACY_VK = 'owp:vk';
@@ -40,6 +45,8 @@ const LANE = (orgId: string): string => `${config.baseUrl}/host/openwop-app/publ
 const memChoices = new Map<string, StoredChoice>();
 const postures = new Map<string, Promise<ConsentRegime | null>>();
 const regimes = new Map<string, ConsentRegime | null>();
+/** ADR 0951 D1 — the optional choices the posture said this site offers. */
+const offered = new Map<string, readonly string[]>();
 const listeners = new Set<() => void>();
 let version = 0;
 
@@ -84,8 +91,9 @@ export function loadPosture(orgId: string): Promise<ConsentRegime | null> {
       let regime: ConsentRegime | null = null;
       try {
         const r = await fetch(`${LANE(orgId)}/posture`);
-        const body = r.ok ? ((await r.json()) as { regime?: unknown }) : {};
+        const body = r.ok ? ((await r.json()) as { regime?: unknown; choices?: unknown }) : {};
         if (body.regime === 'opt-in' || body.regime === 'opt-out') regime = body.regime;
+        if (regime && Array.isArray(body.choices)) offered.set(orgId, body.choices.filter((c): c is string => typeof c === 'string'));
       } catch { /* unknown */ }
       regimes.set(orgId, regime);
       emit();
@@ -94,6 +102,20 @@ export function loadPosture(orgId: string): Promise<ConsentRegime | null> {
     postures.set(orgId, p);
   }
   return p;
+}
+
+/** ADR 0951 D1 — whether this site asks about session recording. Only what the
+ *  server said it offers; unknown ⇒ not offered. */
+export function replayOfferedFor(orgId: string): boolean {
+  return offered.get(orgId)?.includes(REPLAY_CATEGORY) ?? false;
+}
+
+/** ADR 0951 D1 — recording may load only on an EXPLICIT stored yes that reached the
+ *  server (a token exists): the category is strict there, so a tokenless yes would
+ *  be refused anyway. Never inferred from the analytics choice or the regime. */
+export function replayAllowedFor(orgId: string): boolean {
+  const c = storedChoice(orgId);
+  return Boolean(c && c.replay === true && c.token && replayOfferedFor(orgId));
 }
 
 export function regimeFor(orgId: string): ConsentRegime | null | undefined {
@@ -142,11 +164,14 @@ export function consentTokenFor(orgId: string): string | undefined {
   return storedChoice(orgId)?.token;
 }
 
-async function postChoice(orgId: string, analytics: boolean, token: string | undefined): Promise<Response> {
+async function postChoice(orgId: string, analytics: boolean, replay: boolean | undefined, token: string | undefined): Promise<Response> {
   return fetch(LANE(orgId), {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ categories: { analytics }, ...(token ? { subjectToken: token } : {}) }),
+    body: JSON.stringify({
+      categories: { analytics, ...(replay !== undefined ? { [REPLAY_CATEGORY]: replay } : {}) },
+      ...(token ? { subjectToken: token } : {}),
+    }),
   });
 }
 
@@ -156,21 +181,40 @@ async function postChoice(orgId: string, analytics: boolean, token: string | und
  * but the failure still throws so the banner can say so. A grant that fails is NOT
  * remembered: no token means the server would refuse anyway.
  */
-export async function recordChoice(orgId: string, analytics: boolean): Promise<void> {
+export async function recordChoice(orgId: string, analytics: boolean, opts: { replay?: boolean } = {}): Promise<void> {
   const at = new Date().toISOString();
+  // ADR 0951 — an unanswered recording question keeps whatever was stored; the
+  // POST names the category only when the visitor answered it.
+  const prior = storedChoice(orgId);
+  const replay = opts.replay;
+  const keepReplay = replay !== undefined ? { replay } : (prior?.replay !== undefined ? { replay: prior.replay } : {});
   try {
-    let token = storedChoice(orgId)?.token;
-    let r = await postChoice(orgId, analytics, token);
+    let token = prior?.token;
+    let r = await postChoice(orgId, analytics, replay, token);
     // A token the server no longer accepts (a rotated secret) is discarded and a
-    // fresh one minted; the 400 names exactly that exit (consent/routes.ts).
-    if (r.status === 400 && token) { token = undefined; r = await postChoice(orgId, analytics, undefined); }
+    // fresh one minted; the 400 names exactly that exit (consent/routes.ts). A
+    // fresh identity has no stored recording grant, so a remembered yes is re-sent.
+    if (r.status === 400 && token) {
+      token = undefined;
+      r = await postChoice(orgId, analytics, replay ?? prior?.replay, undefined);
+    }
     if (!r.ok) throw new Error(String(r.status));
     const body = (await r.json()) as { subjectToken?: unknown };
     const minted = typeof body.subjectToken === 'string' ? body.subjectToken : token;
-    writeChoice(orgId, { ...(minted ? { token: minted } : {}), analytics, at });
+    writeChoice(orgId, { ...(minted ? { token: minted } : {}), analytics, ...keepReplay, at });
   } catch (err) {
-    const kept = storedChoice(orgId)?.token;
-    if (!analytics) writeChoice(orgId, { ...(kept ? { token: kept } : {}), analytics: false, at });
+    // Fail closed: a refusal of either purpose is remembered even when it did not
+    // reach the server; a grant that failed is not.
+    const kept = prior?.token;
+    if (!analytics || replay === false) {
+      const replayAfter = replay === false ? false : prior?.replay;
+      writeChoice(orgId, {
+        ...(kept ? { token: kept } : {}),
+        analytics: analytics ? prior?.analytics === true : false,
+        ...(replayAfter !== undefined ? { replay: replayAfter } : {}),
+        at,
+      });
+    }
     throw err;
   } finally {
     getVisitorKey(orgId); // apply: mint on allow, remove on deny
@@ -196,8 +240,8 @@ export async function repairConsentTokenFrom(orgId: string, res: Response): Prom
     if (field !== 'consentToken') return;
   } catch { return; }
   repaired.add(orgId);
-  writeChoice(orgId, { analytics: c.analytics, at: c.at });
-  try { await recordChoice(orgId, c.analytics); } catch { /* stays tokenless; the server decides by region */ }
+  writeChoice(orgId, { analytics: c.analytics, ...(c.replay !== undefined ? { replay: c.replay } : {}), at: c.at });
+  try { await recordChoice(orgId, c.analytics, c.replay !== undefined ? { replay: c.replay } : {}); } catch { /* stays tokenless; the server decides by region */ }
 }
 
 export function subscribeVisitorConsent(fn: () => void): () => void {
@@ -215,5 +259,5 @@ export function useVisitorConsent(orgId: string): { decision: ConsentDecision; r
 
 /** Test seam — module state is per page load. */
 export function __resetVisitorConsentForTests(): void {
-  memChoices.clear(); postures.clear(); regimes.clear(); repaired.clear(); emit();
+  memChoices.clear(); postures.clear(); regimes.clear(); offered.clear(); repaired.clear(); emit();
 }

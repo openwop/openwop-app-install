@@ -23,10 +23,32 @@
 import { createHash } from 'node:crypto';
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
 import { listJobsForSubject, registerJob, MAX_FUTURE_HORIZON_MS, MAX_FUTURE_HORIZON_DAYS, ONE_SHOT_CRON } from '../../host/schedulingService.js';
-import { parseCron, computeNextFire } from '../../host/cronSchedule.js';
-import { SCHEDULED_CHAT_TURN_WORKFLOW_ID } from './scheduledChatTurnWorkflow.js';
-import { SCHEDULED_AGENT_CHATS_TOGGLE } from './scheduledChatService.js';
+import { parseCron, computeNextFire, isValidTimeZone } from '../../host/cronSchedule.js';
+import { SCHEDULED_CHAT_TURN_WORKFLOW_ID, SCHEDULED_CHAT_CREDENTIAL_REF } from './scheduledChatTurnWorkflow.js';
+import { SCHEDULED_AGENT_CHATS_TOGGLE, cadenceRefusal } from './scheduledChatService.js';
 import { resolveOne } from '../../host/featureToggles/service.js';
+import { hasWorkflowScope } from '../../host/workflowWriteAuthority.js';
+import { isAnonTenantId } from '../../host/requestSubject.js';
+
+/**
+ * ADR 0985 D6 — who may arm standing autonomous work from chat. A scheduled job is
+ * a workspace write, so the person needs `workspace:write` where it will run (a
+ * Viewer writes nothing, ADR 0879); their own personal workspace passes through the
+ * implicit-owner shortcut. An anonymous sandbox is refused: it is ephemeral and the
+ * Scheduled chats page lists no anonymous jobs, so the schedule would be invisible.
+ * `null` when allowed, else the tool error to return.
+ */
+async function schedulingRefusal(scope: { tenantId: string; actingUserId?: string | undefined; personalTenant?: string | undefined }, noun: string): Promise<{ content: string; isError: true } | null> {
+  if (!scope.actingUserId) return null; // the caller's own acting-user check answers this
+  if (scope.actingUserId.startsWith('anon:') || isAnonTenantId(scope.tenantId)) {
+    return toolError('sign_in_required', `${noun} need a signed-in user — tell the user to sign in to schedule this.`);
+  }
+  if (!(await hasWorkflowScope({ tenantId: scope.tenantId, actingUserId: scope.actingUserId, personalTenant: scope.personalTenant }, 'workspace:write'))) {
+    return toolError('forbidden_scope', `${noun} need edit access to this workspace — tell the user, and do the work in this turn instead if it can be done now.`);
+  }
+  return null;
+}
+const SCHEDULED_CHATS_PAGE = 'the Scheduled chats page';
 
 /** ADR 0820 §8.2 — the feature's ACCESS gate for both tools (toggle + plan, via
  *  `resolveOne`), the same answer its HTTP routes give. Fail-closed: an
@@ -49,18 +71,10 @@ export const MAX_ACTIVE_RECURRING_PER_USER = 5;
 const TASK_MAX = 2_000;
 /** A follow-up must be at least this far out — "in one minute" is a normal turn. */
 const MIN_LEAD_MS = 60_000;
-/** The tightest recurring cadence allowed — hourly, matching the product's offered
- *  cadences (hourly/daily/weekdays/weekly). A finer cron (every minute / every 30m) is
- *  an autonomous-cost runaway, so it is refused (the "safe subset" — the recurring
- *  analogue of the one-shot's MIN_LEAD_MS). */
-const MIN_RECURRING_INTERVAL_MS = 3_600_000;
-
-/** True when `tz` is a resolvable IANA timezone. A cron with no zone fires against
- *  server-local (UTC) wall-clock, so a bad/absent zone would fire the user's "9am" at
- *  the wrong moment silently — the recurring analogue of the GC-R3 one-shot fix. */
-function isValidTimeZone(tz: string): boolean {
-  try { new Intl.DateTimeFormat('en-US', { timeZone: tz }); return true; } catch { return false; }
-}
+// The tightest recurring cadence is `cadenceRefusal`'s (ADR 0985 D2, the service).
+// A timezone must resolve (`isValidTimeZone`, cronSchedule.ts): a cron with no zone
+// fires against server-local (UTC) wall-clock, so a bad/absent zone would fire the
+// user's "9am" at the wrong moment silently — the recurring analogue of GC-R3.
 
 function toolError(error: string, message: string): { content: string; isError: true } {
   return { content: JSON.stringify({ error, message }), isError: true };
@@ -101,6 +115,8 @@ export function registerScheduledFollowupTool(): void {
       if (!agentId) {
         return toolError('agent_required', 'Follow-ups need a specific agent to run as — this turn has none.');
       }
+      const refusedFollowup = await schedulingRefusal(scope, 'Follow-ups');
+      if (refusedFollowup) return refusedFollowup;
       const task = typeof input.task === 'string' ? input.task.trim() : '';
       if (!task) return toolError('validation_error', '`task` is required.');
       if (task.length > TASK_MAX) return toolError('validation_error', `\`task\` must be at most ${TASK_MAX} characters.`);
@@ -123,7 +139,7 @@ export function registerScheduledFollowupTool(): void {
       const mine = await listJobsForSubject(scope.tenantId, { kind: 'user', id: actingUserId });
       const pending = mine.filter((j) => j.metadata?.['tool'] === SCHEDULE_FOLLOWUP_TOOL_ID && typeof j.nextFireAt === 'number');
       if (pending.length >= MAX_PENDING_FOLLOWUPS_PER_USER) {
-        return toolError('too_many_followups', `The user already has ${pending.length} pending follow-ups — ask them to clear some (their Schedules list) before adding more.`);
+        return toolError('too_many_followups', `The user already has ${pending.length} pending follow-ups — ask them to clear some (${SCHEDULED_CHATS_PAGE}) before adding more.`);
       }
 
       // Deterministic id: an identical retried call re-puts the same row (never
@@ -143,13 +159,16 @@ export function registerScheduledFollowupTool(): void {
         metadata: {
           tool: SCHEDULE_FOLLOWUP_TOOL_ID,
           actingUserId, // flows onto the fired run — same tool scope there (ADR 0308)
+          // ADR 0985 (architect M2) — the personal-tenant shortcut the fire gate and
+          // the run's write gate read, as a request would carry it.
+          ...(scope.personalTenant ? { personalTenant: scope.personalTenant } : {}),
           ...(scope.runId ? { sourceRunId: scope.runId } : {}),
         },
         configurable: {
           agentId,
           task,
           conversationId,
-          credentialRef: 'managed:openwop-free', // scheduled-chat parity — no BYOK at fire
+          credentialRef: SCHEDULED_CHAT_CREDENTIAL_REF, // scheduled-chat parity — no BYOK at fire
         },
       }, now);
       if (!result.ok) {
@@ -161,7 +180,7 @@ export function registerScheduledFollowupTool(): void {
           jobId: result.job.jobId,
           runAt: new Date(runAtMs).toISOString(),
           deliversTo: 'this conversation',
-          note: 'Follow-up scheduled. You may now promise it — state the exact time back to the user. They can cancel it from their Schedules list.',
+          note: 'Follow-up scheduled. You may now promise it — state the exact time back to the user. They can see and cancel it on the Scheduled chats page.',
         }),
       };
     },
@@ -222,6 +241,8 @@ export function registerScheduledRecurringTool(): void {
       if (!agentId) {
         return toolError('agent_required', 'Recurring chats need a specific agent to run as — this turn has none.');
       }
+      const refusedRecurring = await schedulingRefusal(scope, 'Recurring chats');
+      if (refusedRecurring) return refusedRecurring;
       const task = typeof input.task === 'string' ? input.task.trim() : '';
       if (!task) return toolError('validation_error', '`task` is required.');
       if (task.length > TASK_MAX) return toolError('validation_error', `\`task\` must be at most ${TASK_MAX} characters.`);
@@ -245,18 +266,10 @@ export function registerScheduledRecurringTool(): void {
       if (firstFire === null) {
         return toolError('validation_error', `\`cronExpr\` has no fire time within the ${MAX_FUTURE_HORIZON_DAYS}-day horizon — pick a real recurring cadence.`);
       }
-      // Walk the fire sequence across a >24h probe window and reject if ANY
-      // adjacent pair is closer than the floor. Checking only the first pair is
-      // evadable by an intra-window cluster cron (e.g. `0,30 9 * * *` invoked
-      // between the clustered fires — Phase-5 review MEDIUM-1).
-      let prevFire = firstFire;
-      for (let i = 0; i < 25; i++) {
-        const nextFire = computeNextFire(cronExpr, prevFire, timezone);
-        if (nextFire === null) break;
-        if (nextFire - prevFire < MIN_RECURRING_INTERVAL_MS) {
-          return toolError('cadence_too_frequent', 'Recurring chats can fire at most once an hour — use a coarser schedule (e.g. hourly, daily, weekly).');
-        }
-        prevFire = nextFire;
+      // ADR 0985 D2 — the ONE cadence floor (shared with create, the scheduler
+      // route and the fire gate), not a copy of it.
+      if (cadenceRefusal(cronExpr, timezone, now) !== null) {
+        return toolError('cadence_too_frequent', 'Recurring chats can fire at most once an hour — use a coarser schedule (e.g. hourly, daily, weekly).');
       }
 
       // Accumulation guard: ACTIVE recurring chats for THIS user (a recurring job never
@@ -264,7 +277,7 @@ export function registerScheduledRecurringTool(): void {
       const mine = await listJobsForSubject(scope.tenantId, { kind: 'user', id: actingUserId });
       const active = mine.filter((j) => j.metadata?.['tool'] === SCHEDULE_RECURRING_TOOL_ID && j.enabled !== false);
       if (active.length >= MAX_ACTIVE_RECURRING_PER_USER) {
-        return toolError('too_many_recurring', `The user already has ${active.length} recurring chats — ask them to pause or remove some (their Schedules list) before adding more.`);
+        return toolError('too_many_recurring', `The user already has ${active.length} recurring chats — ask them to pause or remove some (${SCHEDULED_CHATS_PAGE}) before adding more.`);
       }
 
       // Deterministic id: an identical retried call re-puts the same row (never
@@ -284,13 +297,14 @@ export function registerScheduledRecurringTool(): void {
         metadata: {
           tool: SCHEDULE_RECURRING_TOOL_ID,
           actingUserId, // flows onto each fired run — same tool scope there (ADR 0308)
+          ...(scope.personalTenant ? { personalTenant: scope.personalTenant } : {}), // ADR 0985 (architect M2)
           ...(scope.runId ? { sourceRunId: scope.runId } : {}),
         },
         configurable: {
           agentId,
           task,
           conversationId,
-          credentialRef: 'managed:openwop-free', // scheduled-chat parity — no BYOK at fire
+          credentialRef: SCHEDULED_CHAT_CREDENTIAL_REF, // scheduled-chat parity — no BYOK at fire
         },
       }, now);
       if (!result.ok) {
@@ -304,7 +318,7 @@ export function registerScheduledRecurringTool(): void {
           timezone,
           nextRunAt: result.job.nextFireAt ? new Date(result.job.nextFireAt).toISOString() : null,
           deliversTo: 'this conversation',
-          note: 'Recurring chat scheduled. You may now confirm it — state the cadence back to the user. They can pause or cancel it from their Schedules list.',
+          note: 'Recurring chat scheduled. You may now confirm it — state the cadence back to the user. They can see, pause or cancel it on the Scheduled chats page.',
         }),
       };
     },

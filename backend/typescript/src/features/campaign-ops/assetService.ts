@@ -9,6 +9,7 @@ import { randomUUID } from 'node:crypto';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { cleanString } from '../../host/boundedStrings.js';
 import { OpenwopError } from '../../types.js';
+import { assertCampaignRef } from '../../host/campaignRefs.js';
 import { adapterFor } from './adapters/registry.js';
 import { getClient } from './clientService.js';
 import { DESTINATION_KINDS, type AssetLocator, type CampaignAsset, type DestinationKind } from './types.js';
@@ -26,7 +27,8 @@ const claims = new DurableCollection<AssetClaim>('campaign-ops:asset-claim', (c)
 
 const MAX_EDITABLE_FIELDS = 50;
 const nowIso = (): string => new Date().toISOString();
-const claimKeyOf = (destination: DestinationKind, locator: AssetLocator): string => `${destination}|${locator.pageId}`;
+const claimKeyOf = (destination: DestinationKind, locator: AssetLocator): string =>
+  `${destination}|${'pageId' in locator ? locator.pageId : locator.templateId}`;
 
 /** The uniform not-found every wrong-client or missing read collapses to. */
 function notFound(assetId?: string): OpenwopError {
@@ -34,9 +36,17 @@ function notFound(assetId?: string): OpenwopError {
 }
 
 function parseLocator(destination: DestinationKind, raw: unknown): AssetLocator {
-  const pageId = raw && typeof raw === 'object' ? (raw as { pageId?: unknown }).pageId : undefined;
-  if (destination === 'openwop.cms.page' && typeof pageId === 'string' && pageId.length > 0 && pageId.length <= 200) return { pageId };
-  throw new OpenwopError('validation_error', 'A CMS page asset needs `locator.pageId`.', 400, { field: 'locator' });
+  const o = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
+  const id = (v: unknown): v is string => typeof v === 'string' && v.length > 0 && v.length <= 200;
+  if (destination === 'openwop.cms.page') {
+    if (id(o.pageId)) return { pageId: o.pageId };
+    throw new OpenwopError('validation_error', 'A CMS page asset needs `locator.pageId`.', 400, { field: 'locator' });
+  }
+  if (!id(o.templateId)) throw new OpenwopError('validation_error', 'An email asset needs `locator.templateId`.', 400, { field: 'locator' });
+  if (o.campaignIds !== undefined && !(Array.isArray(o.campaignIds) && o.campaignIds.length <= 20 && o.campaignIds.every(id))) {
+    throw new OpenwopError('validation_error', '`locator.campaignIds` must be up to 20 campaign ids.', 400, { field: 'locator' });
+  }
+  return { templateId: o.templateId, ...(Array.isArray(o.campaignIds) && o.campaignIds.length > 0 ? { campaignIds: [...new Set(o.campaignIds as string[])] } : {}) };
 }
 
 /** Load an asset of THIS client. A row of another client is the same 404 as none. */
@@ -74,10 +84,12 @@ export async function addAsset(input: {
   const locator = parseLocator(destination, input.locator);
   const label = cleanString(input.label, 120, '').trim();
   if (!label) throw new OpenwopError('validation_error', 'An asset needs a label.', 400, { field: 'label' });
+  // ADR 0941 P2 — the campaign must exist in THIS client org (uniform 404 otherwise).
+  const campaignId = input.campaignId ? (await assertCampaignRef(input.tenantId, input.orgId, input.campaignId)).campaignId : undefined;
 
   // The adapter reads IN THIS CLIENT ORG; another client's page reads as null.
   const snap = await adapter.read({ orgId: input.orgId, locator }, { tenantId: input.tenantId });
-  if (!snap) throw new OpenwopError('not_found', 'That page was not found in this client.', 404, { reason: 'wrong_client_or_missing' });
+  if (!snap) throw new OpenwopError('not_found', destination === 'openwop.cms.page' ? 'That page was not found in this client.' : 'That email template was not found in this client.', 404, { reason: 'wrong_client_or_missing' });
 
   if (!Array.isArray(input.editableFields) || input.editableFields.length === 0 || input.editableFields.length > MAX_EDITABLE_FIELDS) {
     throw new OpenwopError('validation_error', `Pick 1–${MAX_EDITABLE_FIELDS} editable fields.`, 400, { field: 'editableFields' });
@@ -85,7 +97,7 @@ export async function addAsset(input: {
   const editableFields = [...new Set(input.editableFields.map(String))];
   const unknown = editableFields.filter((f) => !(f in snap.fields));
   if (unknown.length > 0) {
-    throw new OpenwopError('validation_error', 'Some editable fields do not exist on this page.', 400, { field: 'editableFields', unknown });
+    throw new OpenwopError('validation_error', `Some editable fields do not exist on this ${destination === 'openwop.cms.page' ? 'page' : 'template'}.`, 400, { field: 'editableFields', unknown });
   }
 
   const now = nowIso();
@@ -93,7 +105,7 @@ export async function addAsset(input: {
     tenantId: input.tenantId,
     orgId: input.orgId,
     assetId: `ast:${randomUUID()}`,
-    ...(input.campaignId ? { campaignId: cleanString(input.campaignId, 200, '') } : {}),
+    ...(campaignId ? { campaignId } : {}),
     destination,
     locator,
     label,
@@ -106,7 +118,7 @@ export async function addAsset(input: {
   };
   const claim: AssetClaim = { tenantId: input.tenantId, claimKey: claimKeyOf(destination, locator), orgId: input.orgId, assetId: asset.assetId };
   if (!(await claims.compareAndSwap(null, claim))) {
-    throw new OpenwopError('conflict', 'This page is already registered as an asset.', 409, { reason: 'asset_already_registered' });
+    throw new OpenwopError('conflict', `This ${destination === 'openwop.cms.page' ? 'page' : 'template'} is already registered as an asset.`, 409, { reason: 'asset_already_registered' });
   }
   await assets.put(asset);
   return asset;

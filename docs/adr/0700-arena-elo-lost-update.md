@@ -2,6 +2,12 @@
 
 Status: **implemented** (status corrected 2026-09-17 — see § Status correction)
 
+> **Superseded in part by ADR 0986 (2026-10-26).** D1's per-model rating rows and their
+> compare-and-swap loop are retired. Arena standings are now a Bradley–Terry fit over the
+> match ledger, so no running total exists to lose an update, and `arena-elo-lost-update.test.ts`
+> is deleted with the rows it guarded. Verdicts are bound to two real runs, and a pair counts
+> once. The decision recorded here was correct for the design it fixed.
+
 Feature loop 2026-09, iteration 38 — Evals leaderboard (`FEATURES.md` ordinal 206,
 ADR 0123). Graded at `origin/main` `5a846c3d1`. Ids continue the 2026-08-27 pass
 (`EVC-`/`EVWF-`).

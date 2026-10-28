@@ -8,8 +8,15 @@
  * by itself). /architect A1 also caught the first draft's placement: a check in
  * the loader's `execute` wrapper is never reached on the ISOLATED lane, which goes
  * straight to the adapter — so this file runs the revoked node in BOTH placements.
+ * The cross-instance case drives the product's own refresh `setInterval` with
+ * fake timers (no wall-clock wait); the run-settle polls in `runEcho` remain an
+ * honest ceiling (no hook to await a run's terminal state).
+ *
+ * Tracker TST-BMK-3. Sabotage-witnessed (w62): red when dispatch ignores a
+ * revoked origin, the agent registry or chain gallery keeps a revoked pack, the
+ * refresh tick stops reloading, or a reload stops notifying the trust cache.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createHash } from 'node:crypto';
@@ -144,17 +151,16 @@ describe('ADR 0826 D5 — a revocation written ELSEWHERE reaches this instance w
     expect(isPackRevoked(PACK, '1.0.0')).toBe(false);
     __stopPackRevocationRefresh();
     process.env.OPENWOP_PACK_REVOCATION_REFRESH_MS = '1000';
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
     try {
       startPackRevocationRefresh();
-      let seen = false;
-      for (let i = 0; i < 40 && !seen; i++) {
-        await new Promise((r) => setTimeout(r, 100));
-        seen = isPackRevoked(PACK, '1.0.0');
-      }
-      expect(seen, 'the poll delivered the other instance’s revocation').toBe(true);
+      expect(isPackRevoked(PACK, '1.0.0'), 'nothing before the first tick').toBe(false);
+      await vi.advanceTimersByTimeAsync(1000); // one refresh tick
+      await vi.waitFor(() => expect(isPackRevoked(PACK, '1.0.0'), 'the poll delivered the other instance’s revocation').toBe(true));
       expect(classifyPackDir(packDir).tier, 'no cached verdict outlived the change').toBe('revoked');
     } finally {
       __stopPackRevocationRefresh();
+      vi.useRealTimers();
       delete process.env.OPENWOP_PACK_REVOCATION_REFRESH_MS;
       await unrevokePack(PACK, '1.0.0');
       await loadPackRevocations();

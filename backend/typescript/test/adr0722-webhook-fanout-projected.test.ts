@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { locateRepoSchemasDir } from '../src/host/_repoPath.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import type { Express } from 'express';
@@ -21,6 +21,9 @@ import type { Storage } from '../src/storage/storage.js';
  * (`principal`, `principalKind`) went out on the v2 wire, and seven webhook
  * scenarios — none validating payload shape — never noticed. This is the host
  * witness the suite does not have.
+ *
+ * Tracker TST-BGF-25. Red when the major-2 fan-out forwards the raw payload
+ * (`projectV2Payload` skipped) or drops the envelope's `schemaVersion` stamp.
  */
 let app: Express; let server: Server; let base = '';
 beforeAll(async () => {
@@ -63,13 +66,13 @@ async function deliveredPayload(storage: Storage, subscriptionId: string): Promi
   // (`default/<opaque>`, ADR 0723) while storage keys rows by the bare opaque —
   // the same seam `middleware/v2Identity.ts` crosses on the accept path.
   const storageId = subscriptionId.includes('/') ? subscriptionId.slice(subscriptionId.indexOf('/') + 1) : subscriptionId;
-  // The fan-out is fire-and-forget off the append; give it a tick.
-  for (let i = 0; i < 20; i += 1) {
+  // The fan-out is fire-and-forget off the append: wait for the enqueued row itself.
+  const payload = await vi.waitFor(async () => {
     const rows = await storage.listWebhookDeliveries({ subscriptionIds: [storageId], limit: 5 });
-    if (rows.length > 0) return JSON.parse(rows[0]!.payload) as Record<string, unknown>;
-    await new Promise((r) => setTimeout(r, 25));
-  }
-  throw new Error('no delivery was enqueued for the subscription');
+    expect(rows.length, 'no delivery was enqueued for the subscription').toBeGreaterThan(0);
+    return rows[0]!.payload;
+  }, { timeout: 2_000, interval: 10 });
+  return JSON.parse(payload) as Record<string, unknown>;
 }
 
 describe('ADR 0722 — the webhook fan-out is a projected major-2 egress channel', () => {
@@ -78,7 +81,9 @@ describe('ADR 0722 — the webhook fan-out is a projected major-2 egress channel
     const subId = await subscribe();
     await startRunWithV1Owner(storage, 'run-adr0722-major2-000001');
     const body = await deliveredPayload(storage, subId);
-    const event = (body['event'] ?? body) as { type?: string; payload?: { owner?: Record<string, unknown> } };
+    // The major-2 delivery is the `{ runId, event }` envelope; no fallback to a bare event.
+    expect(body).toHaveProperty('event');
+    const event = body['event'] as { type?: string; payload?: { owner?: Record<string, unknown> } };
     expect(event.type, 'v2 spelling of the type').toBe('run.started');
     const owner = event.payload?.owner ?? {};
     expect(Object.keys(owner).sort(), 'ONLY the keys the v2 def declares').toEqual(['subject', 'tenant']);

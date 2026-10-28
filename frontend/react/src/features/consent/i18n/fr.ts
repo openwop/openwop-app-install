@@ -54,6 +54,7 @@ export const messages = {
   lookupFailedBody: 'La lecture de \u00ab {{subjectKey}} \u00bb a \u00e9chou\u00e9 : rien n\u2019est encore connu \u00e0 son sujet. Ce n\u2019est pas la m\u00eame chose que l\u2019absence d\u2019enregistrement de consentement \u2014 relancez avant de conclure quoi que ce soit.',
   // Category chips
   categoryAnalytics: 'analytique',
+  categorySessionReplay: 'enregistrement de session',
   categoryMarketing: 'marketing',
   categoryNecessaryOnly: 'strictement nécessaire',
 

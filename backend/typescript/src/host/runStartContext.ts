@@ -15,6 +15,7 @@
  */
 
 import { createLogger } from '../observability/logger.js';
+import type { WorkflowDefinition } from '../executor/types.js';
 
 const log = createLogger('host.runStartContext');
 
@@ -46,12 +47,36 @@ export interface RunStartContext {
    */
   derivedFromRun?: boolean;
   /**
+   * ADR 0942 D4 — the run this one descends from: the parent of a sub-workflow
+   * child, or the source of a `:fork` (then `forkMode` is set too). A child's
+   * registered host stamps are already inherited verbatim
+   * (`host/inheritedRunMetadata.ts`), so a per-run-decision contributor
+   * contributes nothing for a child, exactly as for a `derivedFromRun` copy.
+   */
+  parentRunId?: string;
+  /** ADR 0942 D10.4 — set only on a `:fork` (`replay` or `branch`). Host-written by the fork route. */
+  forkMode?: 'replay' | 'branch';
+  /**
    * ADR 0831 P2 — the metadata being stamped, READ-ONLY. A contributor that
    * derives a decision from host-written blocks (the `kanban` / `schedule`
    * attribution) reads them here. Caller-supplied keys can sit in this object
    * too, so a contributor MUST NOT treat any key here as authorization.
    */
   metadata?: Readonly<Record<string, unknown>>;
+  /**
+   * ADR 0943 D2 — the definition the run was created against, READ-ONLY, when
+   * the run constructor passed one (every catalog-resolved start does; a
+   * `:fork` does not, and its contributors return `{}` on `derivedFromRun`
+   * anyway). A contributor that freezes a per-NODE decision reads node ids and
+   * pins here. Absent ⇒ that contributor contributes nothing.
+   */
+  definition?: Readonly<WorkflowDefinition>;
+  /**
+   * ADR 0959 D8 — the run's workflow id, when there is a run (absent for the runless
+   * decision lane). A contributor keyed on WHICH workflow runs reads a host-written index
+   * by this id; it must never trust the definition's own metadata, which the builder edits.
+   */
+  workflowId?: string;
 }
 
 /**

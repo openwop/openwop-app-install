@@ -21,6 +21,7 @@
  * exchange/* module imports this file).
  */
 
+import { clientRunStamp } from './runClientOrg.js';
 import { ManagedProviderError } from '../providers/managedProvider.js';
 import { notifyHumanChatMessage } from './humanChatMessageObservers.js';
 import { getEventLog } from '../executor/eventLog.js';
@@ -52,6 +53,7 @@ import { resolvePersonaNames } from './agentIdentity.js';
 import { loadTurns } from './exchange/loadTurns.js';
 import { applyCouncilTurn, councilTurnOf, gateRosterOf } from './exchange/councilTurn.js';
 import { dispatchReply, turnsToMessages, maybeStampModelRoute, resolveModelProvenance, type ByokBudgetNotice, type DeepRunBudgetNotice, type ExchangeNotice } from './exchange/dispatchTurn.js';
+import { recordTurnAttribution, type ServedModel } from './turnAttribution.js';
 import { persistExchangedPair, mirrorTurnToChannel, autotitleAfterExchange, maybeExtractMemoryOnClose } from './exchange/persistExchange.js';
 import { buildRunDispatchTurns, appendRunTurnDirect, type TurnRunDispatch } from './turnRunDispatch.js';
 
@@ -111,6 +113,9 @@ export interface ConversationHostDeps {
     model?: string;
     credentialRef?: string;
     metadata?: Record<string, unknown>;
+    /** ADR 0944 D2 — the speaker, as the run's causing member (ADR 0832 D3), so
+     *  the run lane re-checks a client-bound conversation's client for them. */
+    orgScopeSubject?: string;
   }) => Promise<string | null>;
 }
 
@@ -480,7 +485,16 @@ export async function handleConversationResolve(
         ...(deepTarget.provider ? { provider: deepTarget.provider } : {}),
         ...(deepTarget.model && deepTarget.model !== 'unknown' ? { model: deepTarget.model } : {}),
         ...(typeof inputs.credentialRef === 'string' ? { credentialRef: inputs.credentialRef } : {}),
-        metadata: { conversationId, parentRunId: interrupt.runId, mentionedAgentId: answeringId },
+        // ADR 0944 D2 — a client-bound conversation's deep run is a client run:
+        // stamped with that client and caused by the speaker, so the run lane
+        // recalls and writes the client's memory only if the speaker may read it
+        // (and the sentinel otherwise). Unstamped, an `agent`-scoped agent would
+        // write client-A turns into its shared scope.
+        metadata: {
+          conversationId, parentRunId: interrupt.runId, mentionedAgentId: answeringId,
+          ...(convMeta?.client ? clientRunStamp(convMeta.client.orgId) : {}),
+        },
+        ...(convMeta?.client && typeof actingUserId0 === 'string' && actingUserId0.length > 0 ? { orgScopeSubject: actingUserId0 } : {}),
       });
     } catch (err) {
       if (exchangeKey) await releaseExchange(run.tenantId, conversationId, exchangeKey);
@@ -630,6 +644,8 @@ export async function handleConversationResolve(
     // the bubble can neither collide with the user turn nor go missing from
     // `turns`. See `host/turnRunDispatch.ts`.
     let runDispatches: readonly TurnRunDispatch[] = [];
+    // ADR 0986 D1 — what ANSWERED this turn, as the dispatching branch reports it.
+    let served: ServedModel | undefined;
     try {
       // ADR 0089 — tool-bearing agent: run the observe→act loop. A `null` return
       // (managed tier / non-tool provider / no resolvable tool / missing key)
@@ -673,6 +689,7 @@ export async function handleConversationResolve(
           }
           runDispatches = toolTurn.runDispatches ?? [];
           toolText = toolTurn.text;
+          served = toolTurn.served;
           // The tool path has no token streaming (callAIWithTools is non-stream);
           // emit the settled answer once so subscribers render it before the turn.
           await onDelta(toolText);
@@ -680,6 +697,7 @@ export async function handleConversationResolve(
       }
       const reply = toolText != null ? { completion: toolText } : await dispatchReply(run, messages, onDelta, exchangeWebSearch, exchangeModelOverride, modelTier);
       completion = sanitizeFreeText(reply.completion);
+      if ('served' in reply && reply.served) served = reply.served;
       if ('budgetWarning' in reply && reply.budgetWarning) budgetNotice = reply.budgetWarning; // ADR 0178
     } catch (err) {
       // Nothing was persisted (dispatch-first), so the turn is cleanly retryable.
@@ -735,6 +753,17 @@ export async function handleConversationResolve(
     // as the user/agent turns (the collision fix) and persisted in the SAME
     // call, so there is one writer and one atomic append.
     const runTurns = buildRunDispatchTurns(conversationId, runDispatches, agentIndex + 1);
+    // ADR 0986 D1 — record what answered BEFORE the turn becomes visible (EV2CD-11):
+    // written after it, a rating landing in between found no row, was marked
+    // checked, and never counted. A turn that produced nothing is not a reply to
+    // rank. Awaited, never throws. If the persist below then fails, the row names a
+    // turn that never appeared; nothing can rate it, and it ages out.
+    if (served && !noContribution) {
+      await recordTurnAttribution({
+        tenantId: run.tenantId, wireMessageId: agentTurn.messageId, runId: interrupt.runId,
+        ...(chatSessionId ? { chatSessionId } : {}), served,
+      });
+    }
     await persistExchangedPair({
       runId: interrupt.runId, nodeId: interrupt.nodeId, conversationId,
       entries: [[nextIndex, userTurn], [agentIndex, agentTurn], ...runTurns.map((t) => [t.turnIndex, t] as [number, ConversationTurn])],

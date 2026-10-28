@@ -29,10 +29,9 @@ export const messages = {
   removeMemory: 'Eliminar memoria',
   // MemoryInspectorPage — header
   eyebrow: 'Memoria',
-  inspectorTitle: 'Inspector de memoria',
-  inspectorLedePrefix:
-    'Explore el registro de memoria del tenant. Las entradas se escriben de forma interna en el host: el ejecutor escribe un resumen de la ejecución al completarse. Las lecturas y eliminaciones se limitan a su credencial en el servidor; el inspector no puede ver la memoria de otro tenant.',
-  inspectorLedeShowing: 'Mostrando',
+  inspectorTitle: 'Resúmenes de ejecuciones',
+  inspectorLede: 'Resúmenes breves que se escriben cuando termina una ejecución de un flujo de trabajo, además de notas que guardó un paso del flujo. Los agentes no leen esta lista: los recuerdos de un agente están en su pestaña Memoria.',
+  inspectorOwnRunsOnly: 'Ves las ejecuciones que iniciaste; los administradores del espacio de trabajo ven todas.',
   // MemoryInspectorPage — redaction
   redactedBadge: 'redactado',
   redactedTitle: 'Contiene material secreto redactado por el host (SR-1)',
@@ -72,11 +71,11 @@ export const messages = {
   emptyNoEntriesTitle: 'Aún no hay entradas de memoria',
   emptyNoMatchBody: 'Ninguna entrada coincide con la búsqueda o el filtro de etiquetas actual. Borre los filtros para ver el registro completo.',
   clearFilters: 'Limpiar filtros',
-  emptyNoEntriesBody: 'Las entradas se escriben de forma interna en el host: el ejecutor escribe un resumen de la ejecución al completarse. Ejecute un flujo de trabajo para poblar el registro.',
+  emptyNoEntriesBody: 'Aquí aparece un resumen cuando termina una ejecución de un flujo de trabajo. Las ejecuciones que usaron resultados de demostración o de marcador de posición no escriben ninguno.',
   // memoryClient — errors
   getEntryError: 'getMemoryEntry ha devuelto {{status}}',
   deleteEntryRequestError: 'deleteMemoryEntry ha devuelto {{status}}',
-  removeMemoryConfirmBody: '¿Eliminar esta memoria? El agente ya no la recordará.',
+  removeMemoryConfirmBody: '¿Eliminar esta memoria? Ya no se recordará.',
   storedUnknown: "Memorias guardadas: desconocido",
   loadFailedTitle: "No se pudieron cargar estas memorias",
   loadFailedBody: "Es una lectura fallida, no una memoria vacía: lo que esté guardado sigue ahí.",

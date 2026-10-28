@@ -16,6 +16,19 @@ import { resolveModelRoute } from '../src/features/model-router/resolveRoute.js'
 import { registerToggleDefault } from '../src/host/featureToggles/registry.js';
 import { modelRouterFeature } from '../src/features/model-router/feature.js';
 
+// Every routable provider is vision-capable since MiniMax stopped being a user BYOK
+// provider (ADR 0990 D6), so the product can no longer persist a text-only target.
+// The ADR 0714 refusal still guards a future text-only provider; to witness it, the
+// capability probe reports `openai` as text-only in this file only.
+vi.mock('../src/host/modelCapabilityProbe.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/host/modelCapabilityProbe.js')>();
+  return {
+    ...actual,
+    probeProviderCapabilities: (provider: string) =>
+      provider === 'openai' ? [] : actual.probeProviderCapabilities(provider),
+  };
+});
+
 const T = 'mrr-tenant';
 const ORG = 'org-mrr';
 const T2 = 'mrr-tenant-nonvision';
@@ -53,11 +66,11 @@ describe('resolveModelRoute', () => {
   // indistinguishable from a silent downgrade.
   it('an ATTACHMENT turn is REFUSED (null) when the stored fallback is not vision-capable, and the refusal is REPORTED', async () => {
     const nonVision = {
-      rules: [{ when: { kind: 'tokensOver', threshold: 5000 }, target: { provider: 'minimax', model: 'text' } }],
-      // `minimax` is in CHAT_BYOK_PROVIDERS, so `asTarget` ACCEPTS it as a fallback,
-      // but it has no PROVIDER_CAPABILITIES entry — this config is persistable through
-      // the product's own admin editor, not a synthetic one.
-      fallback: { provider: 'minimax', model: 'text-only' },
+      rules: [{ when: { kind: 'tokensOver', threshold: 5000 }, target: { provider: 'openai', model: 'text' } }],
+      // `openai` is routable, so `asTarget` ACCEPTS it as a fallback; the mocked probe
+      // above makes it text-only, so the config is persisted through the product's
+      // own write path, not injected.
+      fallback: { provider: 'openai', model: 'text-only' },
     };
     await setRouterConfig(T2, ORG, 'u1', nonVision);
     await setRouterEnabled(T2, ORG, 'u1', true);
@@ -83,12 +96,12 @@ describe('resolveModelRoute', () => {
   it('CONTROL — the SAME stored config routes normally without an attachment', async () => {
     // Without this, a resolver that returned null unconditionally would pass the leg above.
     await setRouterConfig(T2, ORG, 'u1', {
-      rules: [{ when: { kind: 'always' }, target: { provider: 'minimax', model: 'text' } }],
-      fallback: { provider: 'minimax', model: 'text-only' },
+      rules: [{ when: { kind: 'always' }, target: { provider: 'openai', model: 'text' } }],
+      fallback: { provider: 'openai', model: 'text-only' },
     });
     await setRouterEnabled(T2, ORG, 'u1', true);
     const d = await resolveModelRoute(T2, ORG, { tokenEstimate: 100 }, 0);
-    expect(d?.target).toMatchObject({ provider: 'minimax', model: 'text' });
+    expect(d?.target).toMatchObject({ provider: 'openai', model: 'text' });
   });
 
   it('routes via routeTurn when enabled', async () => {

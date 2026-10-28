@@ -289,3 +289,13 @@ complete. Implementation status does not stand in for those receipts.
    > reads in the database. The vector half of this question was already
    > answered: pgvector ranks inside Postgres; only the `durable` vector
    > fallback scans.
+
+## Connection-budget correction after ADR 0904 P3 (2026-10-25)
+
+The pgvector runner can also be opened for configured lexical maintenance and
+teardown after selecting a different vector backend. Deploy Gate 5 therefore
+counts that one pool when pgvector is selected OR a non-empty
+`OPENWOP_VECTOR_PG_DSN` binding is configured, including a secret reference.
+Selection plus configuration still counts one pool; an empty unselected DSN
+opens none. The runtime pool and its cap are unchanged. Deploy-gate fixtures
+cover plaintext and secret-bound configuration, the empty case, and deduplication.

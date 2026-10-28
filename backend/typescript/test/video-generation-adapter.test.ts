@@ -44,10 +44,13 @@ describe('ctx.callVideoGenerator', () => {
   });
 
   it('clamps duration + dimensions to the host bounds', async () => {
+    // Exact bounds (by hand from the request): duration caps at 30 s, a side at
+    // 2160 px, and a non-positive side floors at 1 — a wrong TIGHTER cap would
+    // have passed the old `<=` checks (probe 8fw4g4-vid-width-wrong-cap).
     const r = await adapter.callVideoGenerator!({ prompt: 'x', provider: 'mock', durationSeconds: 999, width: 99999, height: -5 });
-    expect(r.video.durationSeconds).toBeLessThanOrEqual(30);
-    expect(r.video.width).toBeLessThanOrEqual(2160);
-    expect(r.video.height).toBeGreaterThanOrEqual(1);
+    expect(r.video.durationSeconds).toBe(30);
+    expect(r.video.width).toBe(2160);
+    expect(r.video.height).toBe(1);
   });
 
   it('fails honest (host_capability_missing) for a real provider with no BYOK credential', async () => {
@@ -55,7 +58,12 @@ describe('ctx.callVideoGenerator', () => {
   });
 
   it('rejects an unsupported provider as host_capability_missing', async () => {
-    await expect(adapter.callVideoGenerator!({ prompt: 'x', provider: 'runway' })).rejects.toMatchObject({ code: 'host_capability_missing' });
+    // The provider-list refusal's OWN message: the later `provider !== 'replicate'`
+    // branch throws the same code, so the code alone could not tell which guard fired
+    // (probe 8fw4g4-vid-provider-list, vacuous).
+    await expect(adapter.callVideoGenerator!({ prompt: 'x', provider: 'runway' })).rejects.toMatchObject({
+      code: 'host_capability_missing', message: 'Video generation not supported for provider "runway".',
+    });
   });
 
   it('rejects a prompt over the host character cap (content_too_long)', async () => {

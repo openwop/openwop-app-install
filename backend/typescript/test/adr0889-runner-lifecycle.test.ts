@@ -28,6 +28,28 @@
  *   B3           an eval trial never writes the agent's real memory.
  *   m7 / m10     eval.* payloads carry no content; efficiency never fails a task.
  *   m8           a captured tool result is cut at MAX_RESULT_CHARS (16 000).
+ *
+ * (TST-BPA) Red when (each sabotage-witnessed, wave 65): the trajectory constraint is
+ * dropped (EVAL-1); a fail-closed trial keeps its output score (RFC 0244 §D); the
+ * unscripted-task check passes a partly scripted mock (AEV-15); `persistTrial` writes
+ * without the lease, or replaces stored progress instead of merging (WF-EV-7); a
+ * recorded trial is dispatched again (M9); the run-duration breach event is skipped
+ * (WF-EV-1); gated scores ignore constraint labels (RFC 0246); the model-class or judge
+ * comparison is skipped (AEV-4 / AEV-2); `:pause` stops refusing an eval run (M5); the
+ * judge ceiling check is skipped (EVAL-5); an `eval.scored` payload carries the trial
+ * detail (m7); a failed run skips the spend fold (ADR 0482); the capture cut is removed
+ * (m8); resume skips its toggle or digest refusal (M12); the trial guard's signal stops
+ * carrying the run's abort, or the lane loses the signal (WF-EV-2, below).
+ *
+ * DOUBLE GUARD (recorded, WF-EV-2 tool half): a tool call after cancel is refused twice,
+ * by the lane's `guardWithSignal` (`host/liveDispatchLane.ts`) and, inside it, by the
+ * fixture interceptor's own abort check (`fixtureInterceptor` in `agentEvalRun.ts`), so
+ * dropping the interceptor check alone stays green (`adr0889-runner-units` witnesses it
+ * alone). Both read ONE signal, the trial guard's `AbortSignal.any([runSignal, …])`;
+ * cutting the run signal out of it reds this case, and so does removing the lane's
+ * signal (the model half has only the lane guard). The M12 runs carry a scripted
+ * mock for every task, so a resume that wrongly proceeds reaches the mock, never a real
+ * provider.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Server } from 'node:http';
@@ -52,6 +74,9 @@ import { listRunBoundary, maybeCaptureExecuteTool, MAX_RESULT_CHARS, setCaptureS
 import type { Storage } from '../src/storage/storage.js';
 import type { TypedEvalJudge } from '../src/host/workflowEvalJudge.js';
 import { getTodaySpendUsd } from '../src/host/workflowBudgets.js';
+import { createHostAdapterSuite } from '../src/host/index.js';
+import type { AgentEvalContext } from '../src/host/evals/agentEvalRun.js';
+import type { LiveDispatchDeps, AgentDispatchResult, ExecuteAgentTool } from '../src/host/agentDispatch.js';
 import { ManagedProviderError } from '../src/providers/managedProvider.js';
 
 let server: Server;
@@ -93,7 +118,7 @@ const REC = (over: Partial<TrialRecord> = {}): TrialRecord => ({
 
 async function evalRun(suite: AgentEvalSuite, meta: Partial<AgentEvalMeta> = {}, over: Partial<RunRecord> = {}): Promise<RunRecord> {
   const ref = `${suite.suiteId}@${suite.version}`;
-  const run = buildRunRecord({ workflowId: evalWorkflowId(ref), tenantId: TENANT, inputs: {}, metadata: {}, configurable: {}, now: new Date().toISOString() } as never);
+  const run = buildRunRecord({ workflowId: evalWorkflowId(ref), tenantId: TENANT, inputs: {}, metadata: {}, configurable: {}, now: new Date().toISOString() });
   run.runId = `${run.runId}-${seq += 1}`;
   run.metadata = { mode: 'eval', eval: { kind: AGENT_SUITE_KIND, suiteRef: ref, suiteSource: 'tenant', agentId: AGENT, rfc0244Wire: true, ...meta } };
   Object.assign(run, over);
@@ -102,15 +127,19 @@ async function evalRun(suite: AgentEvalSuite, meta: Partial<AgentEvalMeta> = {},
 }
 
 /** The fake agent: runs `body` against the REAL lane deps (interceptor, guard, memory), then answers. */
-function agent(body: (deps: Record<string, unknown>) => Promise<unknown> = async () => 'ok', status: 'completed' | 'failed' = 'completed') {
+type Dispatch = NonNullable<AgentEvalContext['dispatch']>;
+const answer = (result: unknown, status: AgentDispatchResult['status'] = 'completed'): AgentDispatchResult =>
+  ({ agentId: AGENT, persona: 'p', modelClass: 'research', status, toolSurface: [], confidence: 1, threshold: 0, events: [], result });
+function agent(body: (deps: LiveDispatchDeps) => Promise<unknown> = async () => 'ok', status: 'completed' | 'failed' = 'completed') {
   let calls = 0;
-  const dispatch = (async (_req: unknown, deps: Record<string, unknown>) => {
+  const dispatch: Dispatch = async (_req, deps) => {
     calls += 1;
-    const result = await body(deps);
-    return { agentId: AGENT, persona: 'p', modelClass: 'research', status, toolSurface: [], confidence: 1, threshold: 0, events: [], result };
-  }) as never;
+    return answer(await body(deps), status);
+  };
   return { dispatch, calls: () => calls };
 }
+/** The lane's real tool executor (the fixture interceptor + run guard). */
+const tool = (deps: LiveDispatchDeps, name: string) => deps.executeTool!({ name, input: {} });
 
 async function events(runId: string): Promise<Array<{ type: string; payload?: unknown; sequence: number }>> {
   return [...await getEventLog().list(runId, { limit: 1000 })];
@@ -132,7 +161,7 @@ describe('EVAL-1 / M2 — a right answer on the wrong path fails the trial and t
       fixtures: { toolResponses: [{ tool: 'web:search', response: { hits: 0 } }], onMiss: 'fail' },
     })]);
     const run = await evalRun(suite);
-    const a = agent(async (deps) => { await (deps.executeTool as (c: unknown) => Promise<unknown>)({ name: 'web:search', input: {} }); return 'ok'; });
+    const a = agent(async (deps) => { await tool(deps, 'web:search'); return 'ok'; });
     const summary = await runAgentEval({ storage, run, suite, dispatch: a.dispatch });
     expect(summary).toMatchObject({ aggregateScore: 1, passed: false, passedCount: 0 });
     expect(metaOf(await fresh(run.runId)).progress?.t?.['0']).toMatchObject({ score: 1, passed: false, scoreLabel: 'trajectory_mismatch' });
@@ -145,7 +174,7 @@ describe('EVAL-1 / M2 — a right answer on the wrong path fails the trial and t
     })]);
     const run = await evalRun(suite);
     const a = agent(async (deps) => {
-      for (let i = 0; i < 6; i += 1) await (deps.executeTool as (c: unknown) => Promise<unknown>)({ name: 'crm:lookup', input: {} });
+      for (let i = 0; i < 6; i += 1) await tool(deps, 'crm:lookup');
       return 'ok';
     });
     const summary = await runAgentEval({ storage, run, suite, dispatch: a.dispatch });
@@ -159,7 +188,7 @@ describe('EVAL-1 / M2 — a right answer on the wrong path fails the trial and t
 describe('RFC 0246 — a trajectory-failed trial cannot carry a task or the suite to a pass', () => {
   const PATH = { match: 'in-order', calls: [{ tool: 'crm:lookup' }], forbidden: ['web:search'] };
   const FIX = { toolResponses: Array.from({ length: 4 }, (_, i) => ({ tool: i % 2 ? 'web:search' : 'crm:lookup', response: { ok: true } })), onMiss: 'fail' };
-  const call = (deps: Record<string, unknown>, name: string) => (deps.executeTool as (c: unknown) => Promise<unknown>)({ name, input: {} });
+  const call = tool;
 
   it('§B mean: every trial right but forbidden ⇒ meanScore 1, gatedScore 0, task and suite fail', async () => {
     const suite = suiteOf('g246mean', [GOLDEN('t', { expected: { kind: 'golden', match: { strategy: 'contains', value: 'ok' }, trajectory: PATH }, fixtures: FIX })],
@@ -199,7 +228,7 @@ describe('RFC 0246 — a trajectory-failed trial cannot carry a task or the suit
 describe('WF-EV-1 — the run-duration ceiling holds for an eval run', () => {
   it('a trial past the deadline ends cap.breached{run-duration} then run.failed{run_timeout}', async () => {
     const suite = suiteOf('deadline', [GOLDEN('t'), GOLDEN('u')]);
-    const run = await evalRun(suite, {}, { configurable: { runTimeoutMs: 60 } } as Partial<RunRecord>);
+    const run = await evalRun(suite, {}, { configurable: { runTimeoutMs: 60 } });
     const a = agent(async () => { await new Promise((r) => setTimeout(r, 150)); return 'ok'; });
     expect(await runAgentEval({ storage, run, suite, dispatch: a.dispatch })).toBeNull();
     const evs = await events(run.runId);
@@ -222,12 +251,12 @@ describe('WF-EV-2 — cancel stops the in-flight trial', () => {
     const run = await evalRun(suite);
     const after: string[] = [];
     const a = agent(async (deps) => {
-      const exec = deps.executeTool as (c: unknown) => Promise<unknown>;
+      const exec = (c: Parameters<ExecuteAgentTool>[0]) => deps.executeTool!(c);
       await exec({ name: 'email:send', input: {} });
       expect(await cancelRunAndCascade(storage, await fresh(run.runId), 'user cancelled')).toBe('cancelled');
       // Refused BY THE RUN'S ABORT (its reason), not by some unrelated failure.
       await exec({ name: 'email:send', input: {} }).catch((e: Error) => after.push(`tool: ${e.message}`));
-      await (deps.callAIWithTools as (r: unknown) => Promise<unknown>)({}).catch((e: Error) => after.push(`model: ${e.message}`));
+      await deps.callAIWithTools!({ provider: 'mock', model: 'mock', messages: [{ role: 'user', content: 'x' }], tools: [] }).catch((e: Error) => after.push(`model: ${e.message}`));
       return 'ok';
     });
     expect(await runAgentEval({ storage, run, suite, dispatch: a.dispatch })).toBeNull();
@@ -365,7 +394,7 @@ describe('B2 / WF-EV-3 — the sweeper resumes an orphaned eval run in the eval 
 
   it('a run that recorded a trial recently resumes (not abandoned), runs only the missing trial', async () => {
     const run = await orphan('sweep', new Date().toISOString());
-    await sweepOrphanedRuns({ storage, hostSuite: {} as never }, getInstanceId(), Date.now());
+    await sweepOrphanedRuns({ storage, hostSuite: createHostAdapterSuite({ storage }) }, getInstanceId(), Date.now());
     const r = await settle(run.runId);
     expect(r.status).toBe('completed');
     expect(await count(run.runId, 'agent.invocation.started')).toBe(1);
@@ -374,7 +403,7 @@ describe('B2 / WF-EV-3 — the sweeper resumes an orphaned eval run in the eval 
 
   it('a crash loop with no recorded progress for an hour is abandoned by the same ceiling', async () => {
     const run = await orphan('sweepstale', twoHoursAgo());
-    await sweepOrphanedRuns({ storage, hostSuite: {} as never }, getInstanceId(), Date.now());
+    await sweepOrphanedRuns({ storage, hostSuite: createHostAdapterSuite({ storage }) }, getInstanceId(), Date.now());
     const r = await settle(run.runId);
     expect(r.error?.code).toMatch(/dispatch_abandoned$/);
     expect(await count(run.runId, 'agent.invocation.started')).toBe(0);
@@ -384,10 +413,12 @@ describe('B2 / WF-EV-3 — the sweeper resumes an orphaned eval run in the eval 
 /* ── M12 ──────────────────────────────────────────────────────────────────── */
 
 describe('M12 — resume refuses honestly', () => {
+  /** Every task is scripted, so a resume that should have refused reaches the mock only. */
+  const SCRIPTED = { rounds: { t: [{ content: 'ok' }] } };
   it('toggle off ⇒ eval_feature_disabled, nothing dispatched', async () => {
     const suite = suiteOf('m12off', [GOLDEN('t')]);
     await putEvalSuite(TENANT, suite, 'user:owner');
-    const run = await evalRun(suite, {}, { status: 'running' });
+    const run = await evalRun(suite, { mock: SCRIPTED }, { status: 'running' });
     const d = getToggleDefault('evals')!;
     await saveConfig({ ...d, status: 'off' }, 'test');
     try { await resumeAgentEvalRun(storage, run); } finally { await saveConfig(d, 'test'); }
@@ -398,9 +429,10 @@ describe('M12 — resume refuses honestly', () => {
   it('a suite whose content changed since the run started ⇒ eval_suite_unavailable', async () => {
     const suite = suiteOf('m12digest', [GOLDEN('t')]);
     await putEvalSuite(TENANT, suite, 'user:owner');
-    const run = await evalRun(suite, { suiteDigest: suiteDigest(suiteOf('m12digest', [GOLDEN('t'), GOLDEN('u')])) }, { status: 'running' });
+    const run = await evalRun(suite, { mock: SCRIPTED, suiteDigest: suiteDigest(suiteOf('m12digest', [GOLDEN('t'), GOLDEN('u')])) }, { status: 'running' });
     await resumeAgentEvalRun(storage, run);
     expect((await fresh(run.runId)).error?.code).toMatch(/eval_suite_unavailable$/);
+    expect(await count(run.runId, 'agent.invocation.started')).toBe(0);
   });
 
   it('a deleted suite ⇒ eval_suite_unavailable', async () => {
@@ -506,9 +538,9 @@ describe('B3 — an eval trial never writes the agent\'s real memory', () => {
     const run = await evalRun(suite);
     let seen: string[] = [];
     const a = agent(async (deps) => {
-      const mem = deps.memory as { read: (s: string) => Promise<Array<{ content: string }>>; write: (s: string, e: { content: string }) => Promise<void> };
-      await mem.write(deps.memoryScope as string, { content: 'written during the trial' });
-      seen = (await mem.read(deps.memoryScope as string)).map((r) => r.content);
+      const mem = deps.memory!;
+      await mem.write(deps.memoryScope!, { content: 'written during the trial' });
+      seen = (await mem.read(deps.memoryScope!)).map((r) => r.content);
       return 'ok';
     });
     await runAgentEval({ storage, run, suite, dispatch: a.dispatch });
@@ -549,8 +581,9 @@ describe('m8 — a captured tool result is size-capped', () => {
   it('a 40 000-char result is stored at MAX_RESULT_CHARS', async () => {
     await setCaptureSetting(TENANT, AGENT, true);
     const big = 'y'.repeat(40_000);
-    const exec = await maybeCaptureExecuteTool((async () => ({ content: big })) as never, { tenantId: TENANT, runId: 'r-m8', agentId: AGENT });
-    expect((await exec({ name: 'kb:read', input: {} } as never)).content).toHaveLength(40_000);
+    const bigResult: ExecuteAgentTool = async () => ({ content: big });
+    const exec = await maybeCaptureExecuteTool(bigResult, { tenantId: TENANT, runId: 'r-m8', agentId: AGENT });
+    expect((await exec({ name: 'kb:read', input: {} })).content).toHaveLength(40_000);
     const rows = await listRunBoundary(TENANT, 'r-m8');
     expect(MAX_RESULT_CHARS).toBe(16_000);
     expect(rows[0]!.result).toHaveLength(MAX_RESULT_CHARS);
@@ -577,11 +610,11 @@ describe('ADR 0482 — eval spend reaches the spend-day counter', () => {
     const suite = suiteOf('foldfail', [RUBRIC('t', ['a']), GOLDEN('u')]);
     const run = await evalRun(suite);
     let n = 0;
-    const dispatch = (async () => {
+    const dispatch: Dispatch = async () => {
       n += 1;
       if (n > 1) throw new Error('provider exploded');
-      return { agentId: AGENT, persona: 'p', modelClass: 'research', status: 'completed', toolSurface: [], confidence: 1, threshold: 0, events: [], result: 'ok' };
-    }) as never;
+      return answer('ok');
+    };
     expect(await runAgentEval({ storage, run, suite, judge: stubJudge().judge, dispatch })).toBeNull();
     const r = await fresh(run.runId);
     expect(r.error?.code).toMatch(/eval_run_failed$/);
@@ -597,9 +630,9 @@ describe('ADR 0482 — eval spend reaches the spend-day counter', () => {
     // its hard cap by ADR 0482 §5). A capped dispatch must end the run failed + typed.
     const suite = suiteOf('capped', [RUBRIC('t', ['a'])]);
     const run = await evalRun(suite);
-    const dispatch = (async () => {
+    const dispatch: Dispatch = async () => {
       throw new ManagedProviderError('daily_limit_reached', 'Daily free-tier limit reached.');
-    }) as never;
+    };
     expect(await runAgentEval({ storage, run, suite, judge: stubJudge().judge, dispatch })).toBeNull();
     const r = await fresh(run.runId);
     expect(r.status).toBe('failed');
@@ -615,7 +648,7 @@ describe('RFC 0244 §D — a fail-closed trial scores 0', () => {
   it('a fixture miss zeroes the trial and task score even when the output matched', async () => {
     const suite = suiteOf('failclosed', [GOLDEN('t', { fixtures: { toolResponses: [], onMiss: 'fail' } })]);
     const run = await evalRun(suite);
-    const a = agent(async (deps) => { await (deps.executeTool as (c: unknown) => Promise<unknown>)({ name: 'crm:lookup', input: {} }); return 'ok'; });
+    const a = agent(async (deps) => { await tool(deps, 'crm:lookup'); return 'ok'; });
     const summary = await runAgentEval({ storage, run, suite, dispatch: a.dispatch });
     expect(metaOf(await fresh(run.runId)).progress?.t?.['0']).toMatchObject({ score: 0, passed: false, scoreLabel: 'fixture_miss' });
     expect(summary).toMatchObject({ aggregateScore: 0, passed: false });

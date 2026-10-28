@@ -78,7 +78,13 @@ describe('teardown-debt assistant hook — commitment indexes are teardown-reach
   });
 
   it('feature.ts wires the hook (deleting the registration must fail this test)', () => {
-    const featureSrc = readFileSync(join(__dirname, '..', 'src', 'features', 'assistant', 'feature.ts'), 'utf8');
+    // Strip line-comments before matching: a commented-out registration still
+    // carries the literal string (probe 8fw3g3-tda-wire-comment was vacuous on the
+    // raw source). Same rule as teardown-debt-connections-hook's wiring case.
+    const featureSrc = readFileSync(join(__dirname, '..', 'src', 'features', 'assistant', 'feature.ts'), 'utf8')
+      .split('\n')
+      .map((line) => line.replace(/\/\/.*$/, ''))
+      .join('\n');
     expect(featureSrc).toMatch(/registerTenantPurgeHook\(\s*['"]assistant['"]\s*,\s*purgeTenantAssistantIndexes\s*\)/);
   });
 });

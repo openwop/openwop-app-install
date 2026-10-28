@@ -3,8 +3,15 @@
  * actually fail. Before the fix the spend was a sum of `costEstimateUsd`, which
  * the rate tables never produced for current catalog models (Claude 5, GPT-5.x,
  * Gemini 3.x), and judge calls were never counted, so every suite ran uncapped.
+ *
+ * Tracker TST-BHG-1. Red when (sabotage-witnessed, wave 62): the ceiling constant is
+ * lifted, an unpriced usage event stops failing closed, or the judge meter stops
+ * charging. DOUBLE GUARD (recorded): the ceiling is enforced twice in
+ * `host/evals/agentEvalRun.ts` — inside a trial (before the next call) and between
+ * trials — so removing either one alone stays green; lifting the shared constant
+ * `MAX_COST_USD_PER_SUITE` (suiteStore.ts) breaks both and reds the case.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import { createApp } from '../src/index.js';
@@ -39,12 +46,11 @@ async function send(method: string, path: string, body?: unknown): Promise<{ sta
 }
 
 async function settle(runId: string): Promise<Record<string, unknown>> {
-  for (let i = 0; i < 200; i += 1) {
+  return vi.waitFor(async () => {
     const r = await send('GET', `/runs/${runId}`);
-    if (['completed', 'failed', 'cancelled'].includes(String(r.json['status']))) return r.json;
-    await new Promise((res) => setTimeout(res, 25));
-  }
-  throw new Error(`run ${runId} never settled`);
+    expect(['completed', 'failed', 'cancelled']).toContain(String(r.json['status']));
+    return r.json;
+  }, { timeout: 10_000, interval: 25 });
 }
 
 const TASK = (taskId: string) => ({ taskId, input: { q: taskId }, expected: { kind: 'golden', match: { strategy: 'contains', value: 'ok' } } });
@@ -65,7 +71,12 @@ async function runSuite(ref: string, tasks: string[], model: string): Promise<Re
 
 describe('ADR 0889 H2 — the eval cost ceiling can fail', () => {
   it('the catalog prices current models (providers.json is the SSoT)', () => {
-    expect(computeCostUsd('claude-opus-5-5', 0, 1000)).toBeCloseTo(0.02, 6);
+    // The claim is THAT a current model is priced, not the price (which the catalog
+    // refresh moves): a positive, finite cost for 1K output tokens.
+    const usd = computeCostUsd('claude-opus-5-5', 0, 1000);
+    expect(typeof usd).toBe('number');
+    expect(Number.isFinite(usd)).toBe(true);
+    expect(usd ?? 0).toBeGreaterThan(0);
   });
 
   it('a suite whose spend crosses the ceiling stops with eval_cost_ceiling_exceeded', async () => {

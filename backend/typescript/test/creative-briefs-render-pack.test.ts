@@ -74,11 +74,17 @@ describe('creative-briefs render pack pins (ADR 0399 P3)', () => {
 });
 
 describe('replay pinning (ADR 0399 P4)', () => {
-  it('render nodes are role:action — recorded results, read verbatim on replay', () => {
-    for (const id of ['render', 'render-variants', 'list-render-templates']) {
-      const n = manifest.nodes.find((x) => x.typeId === `feature.creative-briefs.nodes.${id}`) as { role?: string } | undefined;
-      expect(n?.role, id).toBe('action');
+  // ADR 0945 D8 (G5) — `role:action` was NOT replay-safe: the executor serves a
+  // recorded output on a fork only for side-effect nodes, so a forked render
+  // minted a second render row and media asset. The writing renders are now
+  // side-effect; the template catalog (a pure read) stays action.
+  it('the writing render nodes are side-effect (served on a fork); the catalog read stays action', () => {
+    const roleOf = (id: string) => manifest.nodes.find((x) => x.typeId === `feature.creative-briefs.nodes.${id}`) as { role?: string; capabilities?: string[] } | undefined;
+    for (const id of ['render', 'render-variants']) {
+      expect(roleOf(id)?.role, id).toBe('side-effect');
+      expect(roleOf(id)?.capabilities, id).toContain('side-effectful');
     }
+    expect(roleOf('list-render-templates')?.role).toBe('action');
   });
 
   it('RENDERER_VERSION pins the EXACT @resvg/resvg-js dependency version', () => {

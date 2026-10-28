@@ -143,3 +143,28 @@ revision and records the result here.
 - [ ] The hourly dip itself (D2 only avoids stacking a boot on it): spread or bound the hourly scheduled jobs.
 - [ ] The app-side version of D1 (an instance that learns it is superseded stops its daemons).
 - [x] Database tier — moved to `db-custom-1-3840` at 20:17Z (operator's decision); the overlap is harmless on it.
+
+
+### Verification diagnostic correction — 2026-10-28
+
+The standalone `verify-deploy.sh` branch still advised deleting a superseded
+revision even though its `--after-deploy` branch already honored D1's correction.
+Its test also required the obsolete delete command. The standalone output and
+its behavioral assertion now preserve the rollback target and require timestamp
+comparison plus current `container/instance_count` evidence. The existing failure
+threshold is unchanged: historical entries still flag an unresolved check; they
+no longer assert that old code is currently executing.
+
+Measured during the `e88758306` deployment: the standalone 60-minute lookback
+flagged three `01065-gd4` schedule events at 01:30:21Z and 02:00:21Z, all before
+the next deployment began at 02:02:52Z. Independent Monitoring at 02:23:46Z
+explicitly reported old `01065-gd4` at zero and serving `01066-x6w` at one.
+No revision was deleted. The final failure guidance now directs the operator to
+the failed check and a fresh main/production comparison, rather than prescribing
+a redeploy for every kind of failure.
+
+Qualification: the three corrected diagnostic assertions fail against the
+original output, with the other 303 deploy-tooling assertions passing. After
+the repair, all 306 assertions pass. The
+initial attempt before installing dependencies had additional wire-check failures
+and is not counted as product evidence. Full merge-gate qualification is separate.

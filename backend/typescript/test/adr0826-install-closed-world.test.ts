@@ -10,6 +10,14 @@
  * declared.
  *
  * Real installer, real `tar`, real loader; only `fetch` is stubbed (the registry).
+ * The `../` traversal case accepts refuse-OR-contain by design (it pins this
+ * box's tar); the filesystem is its assertion (honest ceiling).
+ *
+ * Tracker TST-BMK-1. Sabotage-witnessed (w62): red when symlinks or hardlinks are
+ * admitted, a path-shaped key id is accepted, the whole-tree digest is skipped or
+ * not written, an unexpected top-level entry is admitted, a legacy marker is not
+ * labelled, a reinstall keeps the cached verdict, or the agent loader follows a
+ * link out of the pack by real path.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createHash, generateKeyPairSync, sign as edSign } from 'node:crypto';
@@ -58,9 +66,9 @@ function serveTarball(populate: (src: string) => string[], opts: { keyId?: strin
 function serveBytes(tgz: Buffer, signed: Buffer, keyId: string): void {
   const sig = edSign(null, signed, privateKey);
   const integrity = `sha256-${createHash('sha256').update(tgz).digest('base64')}`;
-  globalThis.fetch = (async (url: string | URL) => {
-    const u = String(url);
-    const ok = (b: string | Uint8Array, t = 'application/json') => new Response(b as unknown as string, { status: 200, headers: { 'content-type': t } });
+  const stub: typeof globalThis.fetch = async (input) => {
+    const u = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+    const ok = (b: string | Uint8Array, t = 'application/json') => new Response(typeof b === 'string' ? b : new Blob([new Uint8Array(b)]), { status: 200, headers: { 'content-type': t } });
     if (u.endsWith('.json') && u.includes('/t1/packs/')) return ok(JSON.stringify({ name: NAME, version: '1.0.0', integrity, signing: { method: 'ed25519', publicKeyRef: keyId } }));
     if (u.endsWith('.tgz')) return ok(new Uint8Array(tgz), 'application/gzip');
     if (u.endsWith('.sig')) return ok(new Uint8Array(sig), 'application/octet-stream');
@@ -70,7 +78,8 @@ function serveBytes(tgz: Buffer, signed: Buffer, keyId: string): void {
       endpoints: { publicKey: '/keys/{keyId}.pub', v1: { versionManifest: '/t1/packs/{name}/-/{version}.json', versionTarball: '/t1/packs/{name}/-/{version}.tgz', versionSignature: '/t1/packs/{name}/-/{version}.sig' } },
     }));
     throw new Error(`unstubbed fetch: ${u}`);
-  }) as typeof globalThis.fetch;
+  };
+  globalThis.fetch = stub;
 }
 
 const install = () => installPackFromRegistry({ name: NAME, version: '1.0.0' }, { packDir, registry: REGISTRY });

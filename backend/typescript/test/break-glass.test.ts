@@ -29,7 +29,7 @@ let BASE: string;
 const PATH = '/host/openwop-app/auth/break-glass';
 const TENANT = 'ws:breakglass-test';
 const TOKEN = 'a-very-long-break-glass-token-1234567890';
-const ENV_KEYS = ['OPENWOP_STORAGE_DSN', 'OPENWOP_SESSION_SECRET', 'OPENWOP_BREAKGLASS_ENABLED', 'OPENWOP_BREAKGLASS_TOKEN_HASH', 'OPENWOP_BREAKGLASS_TENANT', 'OPENWOP_SUPERADMIN_TENANTS'] as const;
+const ENV_KEYS = ['OPENWOP_STORAGE_DSN', 'OPENWOP_SESSION_SECRET', 'OPENWOP_BREAKGLASS_ENABLED', 'OPENWOP_BREAKGLASS_TOKEN_HASH', 'OPENWOP_BREAKGLASS_TENANT', 'OPENWOP_SUPERADMIN_TENANTS', 'OPENWOP_SUPERADMIN_REQUIRE_MFA'] as const;
 const SAVED_ENV = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
 
 function post(body: unknown, headers: Record<string, string> = {}): Promise<Response> {
@@ -59,6 +59,7 @@ afterEach(() => {
   delete process.env.OPENWOP_BREAKGLASS_TOKEN_HASH;
   delete process.env.OPENWOP_BREAKGLASS_TENANT;
   delete process.env.OPENWOP_SUPERADMIN_TENANTS;
+  delete process.env.OPENWOP_SUPERADMIN_REQUIRE_MFA;
 });
 
 afterAll(async () => {
@@ -152,6 +153,19 @@ describe('ADR 0389 P3 — break-glass', () => {
     expect(held).not.toBeNull();
     expect(held!.exp).toBeLessThanOrEqual(original!.exp);
     expect(held!.exp - held!.iat).toBeLessThanOrEqual(600);
+  });
+
+  // ADR 0981 P3 no-lockout: with the superadmin second factor REQUIRED (the strict
+  // profile's D2 row 8), break-glass still reaches a superadmin surface. It is the
+  // recovery door for a superadmin who cannot produce a factor.
+  it('with OPENWOP_SUPERADMIN_REQUIRE_MFA=true, a break-glass session still reaches a superadmin route', async () => {
+    arm();
+    process.env.OPENWOP_SUPERADMIN_REQUIRE_MFA = 'true';
+    const res = await post({ token: TOKEN });
+    expect(res.status).toBe(200);
+    const cookie = /__session=([^;]+)/.exec(res.headers.get('set-cookie') ?? '')?.[1] ?? '';
+    const admin = await fetch(`${BASE}/host/openwop-app/operations/profile-census`, { headers: { cookie: `__session=${cookie}` } });
+    expect(admin.status, await admin.clone().text()).toBe(200);
   });
 
   it('per-IP window ⇒ 429 after repeated attempts', async () => {

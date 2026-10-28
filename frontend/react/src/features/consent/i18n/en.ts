@@ -60,6 +60,7 @@ export const messages = {
   lookupFailedBody: 'The read for \u201c{{subjectKey}}\u201d failed, so nothing is known about them yet. That is not the same as having no consent record \u2014 retry before concluding anything.',
   // Category chips
   categoryAnalytics: 'analytics',
+  categorySessionReplay: 'session recording',
   categoryMarketing: 'marketing',
   categoryNecessaryOnly: 'necessary only',
 

@@ -62,6 +62,15 @@ Each phase: **`/architect` before** · **`/code-review` after**; `/ux-review` on
 1. **Consistency-check inputs.** Drafts aren't persisted; the node scores what the agent passes (or returns neutral in the workflow path). Decided: accept `{ briefId, drafts? }`, score vs the brief's kernel, neutral when absent.
 2. **Finalize idempotency.** Re-finalizing a brief updates the existing campaign (keyed by briefId) rather than duplicating. Decided: one campaign per brief (upsert on briefId).
 
+   > **Corrected 2026-10-20 (ADR 0941 D2 / P0).** "One campaign per brief" still
+   > holds, but the campaign is now **created at ignition, updated at finalize**.
+   > `ensureDraftCampaign` writes a `draft` row with the deterministic id
+   > `cmp_`+base32(sha256(tenant, briefId)) before the orchestration run starts,
+   > so the run can carry the campaign in its run tag. `finalizeFromBrief` updates
+   > that row (version stays 1 on the first finalize). The upsert-on-briefId scan
+   > (`getCampaignByBrief`, a TOCTOU that could make two campaigns for one brief)
+   > is replaced by the `campaign-orchestration:brief-index` point lookup.
+
 ## Consequences
 
 - Completes the MVP composable workflow (ADR 0155–0158). Unblocks 0159/0160 (connectors + intelligence over the campaign).

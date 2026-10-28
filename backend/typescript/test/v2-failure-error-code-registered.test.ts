@@ -45,8 +45,12 @@ const ORGS = new Set(Object.keys((JSON.parse(readFileSync(existsSync(declaration
 const accepted = (code: string): boolean => REGISTERED.has(code) || (VENDOR.test(code) && ORGS.has(code.split('.')[0] ?? ''));
 
 /**
- * old → new, the whole remap. `aliased` rows move onto a REGISTERED code and
- * keep the host's code in `details.hostCode`; the rest are namespaced.
+ * old → new, the whole remap EXCEPT the two RFC 0228 host-service rows
+ * (`path_outside_sandbox`, `table_schema_violation`), which carry `details.service`
+ * and are pinned by `rfc0228-host-service-codes.test.ts`. `aliased` rows move onto a
+ * REGISTERED code and keep the host's code in `details.hostCode`; the rest are
+ * namespaced. These are LITERALS on purpose: the expected code is never computed by
+ * `v2EventErrorCode`, the function under test (wave 43).
  */
 const TABLE: ReadonlyArray<{ old: string; next: string; aliased: boolean }> = [
   // onto a registered row that means the same failure
@@ -147,7 +151,11 @@ describe('openwop#1698 — a REAL failed run, read on both majors', () => {
       const v2 = failures(await storage.listEvents(run.runId, { contract: 2 }));
       expect(v2.map((f) => f.type).sort()).toEqual(['node.failed', 'run.failed']);
       for (const f of v2) expect(accepted(f.code ?? ''), `${f.type} carried ${f.code} on v2`).toBe(true);
-      expect(v2.every((f) => f.code === v2EventErrorCode(code))).toBe(true);
+      // The expectation comes from the pinned TABLE, never from v2EventErrorCode (the
+      // function under test): round-1 probe 8fw4g1-ec-alias-run stayed green here because
+      // the oracle moved with the sabotage.
+      const expected = TABLE.find((r) => r.old === code)!.next;
+      expect(v2.map((f) => f.code)).toEqual([expected, expected]);
 
       // The v1 wire and the stored row keep the host's code — nothing rewritten.
       const v1 = failures(await storage.listEvents(run.runId, { contract: 1 }));
@@ -157,7 +165,7 @@ describe('openwop#1698 — a REAL failed run, read on both majors', () => {
       expect((stored.error as { code?: string } | undefined)?.code).toBe(code);
       const snap = closeV2Snapshot({ runId: stored.runId, status: stored.status, error: stored.error }) as { error?: { code?: string } };
       expect(accepted(snap.error?.code ?? ''), `snapshot carried ${snap.error?.code}`).toBe(true);
-      expect(snap.error?.code).toBe(v2EventErrorCode(code));
+      expect(snap.error?.code).toBe(expected);
     });
   }
 });

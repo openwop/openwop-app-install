@@ -1,6 +1,13 @@
 /**
  * Persona-preservation scaffold (fix: agents confusing the user with a prior
- * agent and impersonating other agents in a shared chat thread).
+ * agent and impersonating other agents in a shared chat thread), with the
+ * ADR 0320 preferred-address name and the ADR 0079 Phase 5 strategy block.
+ *
+ * TST-BLS-1. Red when: the multi-word name is addressed in full, an explicit
+ * `addressName` is ignored, the role clause is dropped from the re-anchor, the
+ * strategy block moves or is not trimmed, or `promptDateStamp` reads the local
+ * zone (both an early- and a late-UTC instant are pinned, so a zone on EITHER
+ * side of UTC shows it).
  */
 import { describe, expect, it } from 'vitest';
 import { composeAgentSystemPrompt } from '../src/host/agentPromptScaffold.js';
@@ -36,8 +43,10 @@ describe('composeAgentSystemPrompt', () => {
 
   it('promptDateStamp formats weekday + ISO date + zone deterministically (injected clock)', () => {
     expect(promptDateStamp(new Date('2026-07-15T09:30:00.000Z'))).toBe('Wednesday, 2026-07-15 (UTC)');
-    // A late-UTC instant keeps the UTC calendar date (never drifts to local).
+    // A late-UTC instant keeps the UTC weekday (a zone east of UTC would say Friday).
     expect(promptDateStamp(new Date('2026-12-31T23:59:59.000Z'))).toBe('Thursday, 2026-12-31 (UTC)');
+    // An early-UTC instant too (a zone west of UTC, e.g. every US zone, would say Tuesday).
+    expect(promptDateStamp(new Date('2026-07-15T01:30:00.000Z'))).toBe('Wednesday, 2026-07-15 (UTC)');
   });
 
   it('addresses a multi-word display name by its first token by default (ADR 0320)', () => {
@@ -71,8 +80,10 @@ describe('composeAgentSystemPrompt', () => {
   });
 
   it('omits the strategy block entirely when absent/empty', () => {
-    expect(composeAgentSystemPrompt({ persona: 'Iris', systemPrompt: IRIS, userName: 'David' })).not.toContain('STRATEGIC CONTEXT');
-    expect(composeAgentSystemPrompt({ persona: 'Iris', systemPrompt: IRIS, userName: 'David', injectedContextBlock: '   ' })).not.toContain('STRATEGIC CONTEXT');
+    const absent = composeAgentSystemPrompt({ persona: 'Iris', systemPrompt: IRIS, userName: 'David' });
+    expect(absent).not.toContain('STRATEGIC CONTEXT');
+    // A whitespace-only block yields exactly the no-block prompt (no stray line).
+    expect(composeAgentSystemPrompt({ persona: 'Iris', systemPrompt: IRIS, userName: 'David', injectedContextBlock: '   ' })).toBe(absent);
   });
 
   it('treats empty/whitespace userName as anonymous', () => {

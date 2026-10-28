@@ -9,13 +9,21 @@
  *  - a configuration change whose revision is at 0 % traffic is reported as
  *    NOT live, and the posture shown is the SERVING revision's, never the
  *    template's (ADR 0631: a config update lands at 0 % when traffic is pinned).
+ *
+ * Tracker TST-BAB-3. Red when (sabotage-witnessed, wave 60): the validator
+ * admits extra keys; the pending revision is never reported; a split with no
+ * serving revision reads as settled; `cpuIdle` is ignored; the cost month moves;
+ * traffic shifts `--to-latest`; the GET drops `requireSuperadmin`; the audit
+ * action is renamed; the 403 hint offers (or withholds) the wildcard-key door
+ * regardless of config. Every route case counts audit rows by DELTA, so the file
+ * passes in any order.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
 import type { Storage } from '../src/storage/storage.js';
-import { changeCommands, derivePosture, revisionPosture, validateChangeRequest } from '../src/features/runtime-posture/service.js';
+import { ChangeRequestInvalidError, changeCommands, derivePosture, revisionPosture, validateChangeRequest } from '../src/features/runtime-posture/service.js';
 import { superadminHint } from '../src/host/superadmin.js';
 
 const rev = (name: string, min: number, cpuIdle: boolean) => ({
@@ -37,7 +45,7 @@ describe('validateChangeRequest — exactly { warm: boolean }', () => {
   });
   it('refuses any extra field, a wrong type, an empty body, an array', () => {
     for (const bad of [{ warm: true, image: 'gcr.io/evil' }, { warm: true, env: { A: '1' } }, { warm: true, maxInstances: 99 }, {}, { warm: 'yes' }, [true], null, 'warm']) {
-      expect(() => validateChangeRequest(bad), JSON.stringify(bad)).toThrow();
+      expect(() => validateChangeRequest(bad), JSON.stringify(bad)).toThrow(ChangeRequestInvalidError);
     }
   });
 });
@@ -58,7 +66,9 @@ describe('derivePosture — the serving revision, never a 0 %-traffic one', () =
     expect(p.serving?.posture).toBe('warm');
   });
   it('split traffic has no serving revision and is never "settled"', () => {
-    const svc = { ...pinnedService, trafficStatuses: [{ revision: 'rev-1', percent: 50 }, { revision: 'rev-2', percent: 50 }] };
+    // No `latestCreatedRevision`: nothing is pending, so ONLY the missing serving
+    // revision can make this "not-live".
+    const svc = { latestReadyRevision: pinnedService.latestReadyRevision, trafficStatuses: [{ revision: 'rev-1', percent: 50 }, { revision: 'rev-2', percent: 50 }] };
     expect(derivePosture({ service: svc, servingRevision: null, serviceName: 'svc', project: 'p', region: 'us-central1', now: new Date(0) }).rollout).toBe('not-live');
   });
   it('maps the named postures, and anything else is custom', () => {
@@ -113,7 +123,7 @@ describe('routes (superadmin, HTTP)', () => {
   /** Cloud Run as seen from inside: metadata server + Admin API v2, pinned to rev-1. */
   function stubCloudRun(): void {
     process.env.K_SERVICE = 'svc';
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: any, init?: any) => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
       const json = (b: unknown) => new Response(JSON.stringify(b), { status: 200 });
       if (url.endsWith('/project/project-id')) return new Response('p');
@@ -126,7 +136,11 @@ describe('routes (superadmin, HTTP)', () => {
   }
 
   it('denies a non-superadmin (anon session) — 403', async () => {
-    expect((await realFetch(`${BASE}${PATH}`)).status).toBe(403);
+    const res = await realFetch(`${BASE}${PATH}`);
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error?: string; message?: string };
+    expect(body.error).toBe('forbidden');
+    expect(body.message).toContain('requires a superadmin principal');
   });
 
   it('off Cloud Run: GET says unavailable (never an invented posture), POST issues nothing (409)', async () => {
@@ -138,9 +152,11 @@ describe('routes (superadmin, HTTP)', () => {
 
   it('an EXTRA FIELD is refused 400 even when the posture is readable (nothing passes through)', async () => {
     stubCloudRun();
+    const before = (await storage.listAudit({ actionPrefix: 'runtime_posture.' })).length;
     const p = await realFetch(`${BASE}${PATH}/change-requests`, { method: 'POST', headers: admin, body: JSON.stringify({ warm: true, image: 'gcr.io/evil/x' }) });
     expect(p.status).toBe(400);
-    expect((await storage.listAudit({ actionPrefix: 'runtime_posture.' })).length, 'a refused request writes no audit row').toBe(0);
+    expect(((await p.json()) as { error?: string }).error).toBe('validation_error');
+    expect((await storage.listAudit({ actionPrefix: 'runtime_posture.' })).length, 'a refused request writes no audit row').toBe(before);
   });
 
   it('GET reports a 0 %-traffic config change as NOT live, with the serving revision’s posture', async () => {
@@ -153,16 +169,19 @@ describe('routes (superadmin, HTTP)', () => {
     stubCloudRun();
     const calls: string[] = [];
     const spy = vi.mocked(globalThis.fetch);
+    const auditBefore = (await storage.listAudit({ actionPrefix: 'runtime_posture.' })).length;
     const p = await realFetch(`${BASE}${PATH}/change-requests`, { method: 'POST', headers: admin, body: JSON.stringify({ warm: true }) });
     expect(p.status).toBe(201);
     const body = (await p.json()) as { commands: string[] };
     expect(body).toMatchObject({ from: 'cold', to: 'warm', servingRevision: 'rev-1' });
     expect(body.commands.join('\n')).toContain('--min-instances 1 --no-cpu-throttling');
-    for (const c of spy.mock.calls) calls.push(`${(c[1] as any)?.method ?? 'GET'} ${String(c[0])}`);
+    for (const c of spy.mock.calls) calls.push(`${c[1]?.method ?? 'GET'} ${String(c[0])}`);
     expect(calls.filter((c) => c.includes('run.googleapis.com') && !c.startsWith('GET')), 'no write ever reaches Cloud Run').toEqual([]);
     const audit = await storage.listAudit({ actionPrefix: 'runtime_posture.' });
-    expect(audit[0]).toMatchObject({ action: 'runtime_posture.change_requested', resource: 'p/us-central1/svc' });
-    expect(audit[0]!.payload).toMatchObject({ from: 'cold', to: 'warm', servingRevision: 'rev-1', pendingRevision: 'rev-2' });
+    expect(audit.length, 'exactly one audit row for this request').toBe(auditBefore + 1);
+    const row = audit.find((a) => a.action === 'runtime_posture.change_requested');
+    expect(row).toMatchObject({ action: 'runtime_posture.change_requested', resource: 'p/us-central1/svc' });
+    expect(row?.payload).toMatchObject({ from: 'cold', to: 'warm', servingRevision: 'rev-1', pendingRevision: 'rev-2' });
   });
 });
 

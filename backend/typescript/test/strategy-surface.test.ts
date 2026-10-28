@@ -50,8 +50,14 @@ describe('strategy surface (ctx.features.strategy)', () => {
   });
 
   it('is tenant-isolated — another tenant sees nothing', async () => {
-    await createStrategy(TENANT, 'org-1', 'u1', { title: 'A', scope: 'org' });
+    const a = await createStrategy(TENANT, 'org-1', 'u1', { title: 'A', scope: 'org' });
+    // Positive control: the owning tenant's surface lists AND reads it.
+    const own = buildStrategySurface({ tenantId: TENANT });
+    expect(as<ListOut>(await own.listStrategies({})).strategies.map((s) => s.id)).toEqual([a.id]);
+    expect(as<GetOut>(await own.getStrategy({ id: a.id })).strategy?.title).toBe('A');
     const other = buildStrategySurface({ tenantId: 'tenant-other' });
     expect(as<ListOut>(await other.listStrategies({})).strategies).toHaveLength(0);
+    // A KNOWN id from another tenant is not readable by id either.
+    expect(as<GetOut>(await other.getStrategy({ id: a.id })).strategy).toBeNull();
   });
 });

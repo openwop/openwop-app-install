@@ -110,7 +110,11 @@ import {
   ingestUrl,
   ingestMediaCollection,
   setEnrichmentMode,
+  setReranker,
+  type RerankerKind,
   listCollections,
+  getQuality,
+  type CollectionQuality,
   listDocuments,
   getDocument,
   listOrgs,
@@ -415,6 +419,15 @@ export function KnowledgeBasePage(): JSX.Element {
   }, []);
 
   useEffect(() => { if (orgId) void loadCollections(orgId); }, [orgId, loadCollections]);
+  // ADR 0904 D7 — the enrichment cost estimate and "your AI key is unavailable" state come
+  // from the quality report; re-read with the collection list. Best-effort: absent on failure.
+  const [quality, setQuality] = useState<Map<string, CollectionQuality>>(new Map());
+  useEffect(() => {
+    if (!orgId || collections === null) return;
+    let live = true;
+    getQuality(orgId).then((q) => { if (live) setQuality(new Map(q.map((c) => [c.collectionId, c]))); }).catch(() => { if (live) setQuality(new Map()); });
+    return () => { live = false; };
+  }, [orgId, collections]);
   // Load the selected collection's docs whenever the selection changes — incl.
   // a ?collection= deep-link resolving once the collections list arrives.
   useEffect(() => { setSearchState({ kind: 'idle' }); setDocQuery(''); reloadDocs(); }, [reloadDocs]);
@@ -529,16 +542,16 @@ export function KnowledgeBasePage(): JSX.Element {
    * PATCH can fail, dropping the optimistic value in `finally` is what makes a
    * failed change revert honestly instead of persisting a lie.
    */
-  const [cfgPending, setCfgPending] = useState<{ mode?: RetrievalMode; embedder?: EmbedderMode; enrichment?: EnrichmentMode }>({});
+  const [cfgPending, setCfgPending] = useState<{ mode?: RetrievalMode; embedder?: EmbedderMode; enrichment?: EnrichmentMode; rerank?: RerankerKind }>({});
   // A different collection's config is not this one's optimistic value.
   useEffect(() => { setCfgPending({}); }, [selectedId]);
 
   const changeCfg = useCallback(async (
-    patch: { mode?: RetrievalMode; embedder?: EmbedderMode; enrichment?: EnrichmentMode },
+    patch: { mode?: RetrievalMode; embedder?: EmbedderMode; enrichment?: EnrichmentMode; rerank?: RerankerKind },
     apply: () => Promise<unknown>,
   ): Promise<void> => {
     if (!selected) return;
-    const key = Object.keys(patch)[0] as 'mode' | 'embedder' | 'enrichment';
+    const key = Object.keys(patch)[0] as 'mode' | 'embedder' | 'enrichment' | 'rerank';
     setCfgPending((p) => ({ ...p, ...patch }));
     try {
       await apply();
@@ -550,6 +563,10 @@ export function KnowledgeBasePage(): JSX.Element {
       setCfgPending((p) => { const n = { ...p }; delete n[key]; return n; });
     }
   }, [orgId, selected, loadCollections, t]);
+
+  const changeReranker = useCallback((rerank: RerankerKind) => (
+    changeCfg({ rerank }, () => setReranker(orgId, selected!.collectionId, rerank))
+  ), [orgId, selected, changeCfg]);
 
   const changeEnrichment = useCallback((enrichment: EnrichmentMode) => (
     changeCfg({ enrichment }, () => setEnrichmentMode(orgId, selected!.collectionId, enrichment))
@@ -813,7 +830,7 @@ export function KnowledgeBasePage(): JSX.Element {
                     <label className="field u-flex u-items-center u-gap-2">
                       <span className="field-label u-m-0">{t('retrievalModeLabel')}</span>
                       <select
-                        value={cfgPending.mode ?? selected.retrievalConfig?.mode ?? 'dense'}
+                        value={cfgPending.mode ?? selected.retrievalConfig?.mode ?? quality.get(selected.collectionId)?.retrievalMode ?? 'hybrid'}
                         onChange={(e) => void changeRetrievalMode(e.target.value as RetrievalMode)}
                         className="u-w-auto"
                         disabled={accessPending || cfgPending.mode !== undefined}
@@ -823,6 +840,23 @@ export function KnowledgeBasePage(): JSX.Element {
                         <option value="hybrid+rerank">{t('retrievalModeRerank')}</option>
                       </select>
                     </label>
+                    {(cfgPending.mode ?? selected.retrievalConfig?.mode ?? quality.get(selected.collectionId)?.retrievalMode) === 'hybrid+rerank' ? (
+                      <label className="field u-flex u-items-center u-gap-2">
+                        <span className="field-label u-m-0">{t('rerankerLabel')}</span>
+                        <select
+                          value={cfgPending.rerank ?? selected.retrievalConfig?.rerank?.kind ?? 'local'}
+                          onChange={(e) => void changeReranker(e.target.value as RerankerKind)}
+                          className="u-w-auto"
+                          disabled={accessPending || cfgPending.rerank !== undefined}
+                        >
+                          {(['local', 'connection', 'vertex'] as const).filter(kind => kind === 'local'
+                            || quality.get(selected.collectionId)?.availableRerankers?.includes(kind)
+                            || selected.retrievalConfig?.rerank?.kind === kind).map(kind => (
+                            <option key={kind} value={kind} disabled={kind !== 'local' && !quality.get(selected.collectionId)?.availableRerankers?.includes(kind)}>{t(`reranker_${kind}`)}</option>
+                          ))}
+                        </select>
+                      </label>
+                    ) : null}
                     {/* ADR 0351 — embedder: local hash vs the tenant's provider
                         embeddings (degrades to lexical-only when unresolvable).
                         CS-UX-12: the hint rides a keyboard-discoverable InfoTip,
@@ -830,16 +864,34 @@ export function KnowledgeBasePage(): JSX.Element {
                     <label className="field u-flex u-items-center u-gap-2">
                       <span className="field-label u-m-0">{t('embedderLabel')}</span>
                       <select
-                        value={cfgPending.embedder ?? selected.retrievalConfig?.embedder ?? 'local'}
+                        value={cfgPending.embedder ?? selected.retrievalConfig?.embedder ?? 'default'}
                         onChange={(e) => void changeEmbedder(e.target.value as EmbedderMode)}
                         className="u-w-auto"
                         disabled={accessPending || cfgPending.embedder !== undefined}
                       >
+                        <option value="default">{t('embedderDefault')}</option>
                         <option value="local">{t('embedderLocal')}</option>
                         <option value="provider">{t('embedderProvider')}</option>
                       </select>
                     </label>
                     <InfoTip label={t('embedderLabel')} text={t('embedderHint')} />
+                    {/* ADR 0904 — provenance: who embeds this collection, and whether the
+                        index on disk matches. Vertex and BYOK Gemini share a model id, so
+                        the funding is named, not just the model. */}
+                    {(() => {
+                      const q = quality.get(selected.collectionId);
+                      if (!q) return null;
+                      return (
+                        <>
+                          <span className={q.embedder.available ? 'chip' : 'chip chip--muted'}>
+                            {q.embedder.available
+                              ? t(`embedderProvenance_${q.embedder.funding}`, { provider: q.embedder.provider, model: q.embedder.model })
+                              : t('embedderUnavailable')}
+                          </span>
+                          {q.indexState !== 'current' ? <span className="chip chip--muted">{t(`indexState_${q.indexState}`)}</span> : null}
+                        </>
+                      );
+                    })()}
                     <label className="field u-flex u-items-center u-gap-2">
                       <span className="field-label u-m-0">{t('enrichmentLabel')}</span>
                       <select
@@ -850,9 +902,21 @@ export function KnowledgeBasePage(): JSX.Element {
                       >
                         <option value="off">{t('enrichmentOff')}</option>
                         <option value="heading-path">{t('enrichmentHeadingPath')}</option>
+                        <option value="llm">{t('enrichmentLlm')}</option>
                       </select>
                     </label>
                     <InfoTip label={t('enrichmentLabel')} text={t('enrichmentHint')} />
+                    {/* ADR 0904 D7 — the per-chunk cost on the tenant's own key is shown BEFORE
+                        enabling, and an unavailable key is said, not silently degraded. */}
+                    {(() => {
+                      const q = quality.get(selected.collectionId);
+                      if (!q) return null;
+                      if (q.enrichmentUnavailable) return <span className="chip chip--muted">{t('enrichmentUnavailable')}</span>;
+                      if (typeof q.enrichmentEstimateTokens === 'number' && q.enrichmentEstimateTokens > 0) {
+                        return <span className="u-label-sm">{t('enrichmentLlmEstimate', { tokens: formatNumber(q.enrichmentEstimateTokens) })}</span>;
+                      }
+                      return null;
+                    })()}
                   </div>
                 )}
                 {/* KB-UX-1 — the states, in the order that keeps each honest.
@@ -887,8 +951,10 @@ export function KnowledgeBasePage(): JSX.Element {
                             {/* KB-UX-14 — `h.score ?? 0` rendered an ABSENT score
                                 as a confident `0.000`, i.e. "we scored this and it
                                 matched nothing". An em-dash says what is true. */}
-                            {typeof h.score === 'number' ? (
-                              <span className="chip" title={t('cosineScoreTooltip')}>{formatNumber(h.score, { minimumFractionDigits: 3, maximumFractionDigits: 3 })}</span>
+                            {/* ADR 0904 D4 — the calibrated 0–1 relevance; `score` is on the
+                                mode's own scale (RRF ≈0.03 under hybrid) and read as "cosine". */}
+                            {typeof (h.relevance ?? h.score) === 'number' ? (
+                              <span className="chip" title={t('relevanceScoreTooltip')}>{formatNumber(h.relevance ?? h.score, { minimumFractionDigits: 3, maximumFractionDigits: 3 })}</span>
                             ) : (
                               <span className="chip chip--muted" title={t('scoreUnavailableTooltip')}>—<span className="sr-only"> {t('scoreUnavailableTooltip')}</span></span>
                             )}

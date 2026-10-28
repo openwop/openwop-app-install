@@ -5,10 +5,17 @@
  *           LOGGED (a silent fail-closed under-populates the Library with no trail).
  *   ART-4 — the O(n·m) revision diff has a reachable size ceiling (was dead code at 2 MB, the
  *           exact max combined size; lowered to 1.5 MB so a pair of near-max docs 422s).
+ *
+ * Breaks it (round-1 probes, witnessed): `allSettled`→`all` (8fw2g2-raa-allsettled),
+ * the log key renamed (raa-log), an unset `canRead` entry read as allow
+ * (raa-failclosed), the cap raised back to 2 MB (raa-cap). The small-pair
+ * positive control asserts the actual line diff, so a cap that refused or
+ * no-op'd every diff cannot pass it (8fw2g2-raa-diff-r2).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
+import type { EffectiveAccess } from '../src/host/accessControlService.js';
 
 // Partial mock: keep the real module (createDocument uses resolveOwnerSubject etc.) but make
 // the per-org access resolver THROW for one org so we can exercise the rejection path.
@@ -16,9 +23,10 @@ vi.mock('../src/host/accessControlService.js', async (orig) => {
   const actual = await orig<typeof import('../src/host/accessControlService.js')>();
   return {
     ...actual,
-    resolveEffectiveAccess: vi.fn(async (_tenantId: string, opts: { orgId: string }) => {
+    resolveEffectiveAccess: vi.fn<typeof actual.resolveEffectiveAccess>(async (_tenantId, opts = {}) => {
       if (opts.orgId === 'org-bad') throw new Error('access resolver down');
-      return { roles: ['owner'], scopes: ['workspace:read'], basis: 'tenant-owner' };
+      const granted: EffectiveAccess = { roles: ['owner'], scopes: ['workspace:read'], basis: 'tenant-owner' };
+      return granted;
     }),
   };
 });
@@ -68,7 +76,7 @@ describe('ART-4 — diff size ceiling is reachable', () => {
 
     // combined 1.6 MB > MAX_DIFF_CHARS (1.5 MB) ⇒ a 422, not a gigabyte LCS matrix.
     await expect(diffArtifact('t', 'u', `document:${doc.documentId}`, v1.versionId, v2.versionId))
-      .rejects.toThrow(/too large to diff/);
+      .rejects.toThrow('artifact revisions are too large to diff (> 1500000 chars combined).');
   });
 
   it('diffs a normal pair of small revisions without tripping the cap', async () => {
@@ -76,6 +84,16 @@ describe('ART-4 — diff size ceiling is reachable', () => {
     const v1 = await addVersion('t', 't', doc.documentId, { content: 'line one\nline two', producedBy: { kind: 'user', id: 'u' } });
     const v2 = await addVersion('t', 't', doc.documentId, { content: 'line one\nline TWO', producedBy: { kind: 'user', id: 'u' } });
     const res = await diffArtifact('t', 'u', `document:${doc.documentId}`, v1.versionId, v2.versionId);
-    expect(res?.diff.format).toBe('text');
+    // The real line diff (not merely "a text diff came back"): one line kept, one changed.
+    expect(res?.diff).toEqual({
+      format: 'text',
+      lines: [
+        { op: 'equal', fromLine: 1, toLine: 1, text: 'line one' },
+        { op: 'remove', fromLine: 2, text: 'line two' },
+        { op: 'add', toLine: 2, text: 'line TWO' },
+      ],
+      added: 1,
+      removed: 1,
+    });
   });
 });

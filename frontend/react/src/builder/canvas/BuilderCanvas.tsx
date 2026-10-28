@@ -31,7 +31,7 @@ import {
   type FinalConnectionState,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { useBuilderStore } from '../store/builderStore.js';
+import { useCanvasStore, useCanvasStoreApi } from '../store/canvasStore.js';
 import { catalogEntry, useCatalog } from '../palette/catalogRegistry.js';
 import { isPortCompatible } from './portCompatibility.js';
 import type { PortType } from '../schema/workflow.js';
@@ -73,25 +73,27 @@ function BuilderCanvasInner({ pairEnabled }: { pairEnabled: boolean }) {
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const { screenToFlowPosition } = useReactFlow();
 
-  const builderNodes = useBuilderStore((s) => s.nodes);
-  const builderEdges = useBuilderStore((s) => s.edges);
-  const selectedNodeIds = useBuilderStore((s) => s.selectedNodeIds);
-  const selectedEdgeId = useBuilderStore((s) => s.selectedEdgeId);
-  const overlay = useBuilderStore((s) => s.overlay);
-  const debugSession = useBuilderStore((s) => s.debugSession);
-  const failureHeat = useBuilderStore((s) => s.failureHeat);
-  const failureHeatMode = useBuilderStore((s) => s.failureHeatMode);
-  const collabPeers = useBuilderStore((s) => s.collabPeers);
-  const addNode = useBuilderStore((s) => s.addNode);
-  const moveNodes = useBuilderStore((s) => s.moveNodes);
-  const removeNodes = useBuilderStore((s) => s.removeNodes);
-  const addEdge = useBuilderStore((s) => s.addEdge);
-  const removeEdge = useBuilderStore((s) => s.removeEdge);
-  const setSelection = useBuilderStore((s) => s.setSelection);
+  const canvasStore = useCanvasStoreApi();
+  const readOnly = useCanvasStore((s) => s.readOnly);
+  const builderNodes = useCanvasStore((s) => s.nodes);
+  const builderEdges = useCanvasStore((s) => s.edges);
+  const selectedNodeIds = useCanvasStore((s) => s.selectedNodeIds);
+  const selectedEdgeId = useCanvasStore((s) => s.selectedEdgeId);
+  const overlay = useCanvasStore((s) => s.overlay);
+  const debugSession = useCanvasStore((s) => s.debugSession);
+  const failureHeat = useCanvasStore((s) => s.failureHeat);
+  const failureHeatMode = useCanvasStore((s) => s.failureHeatMode);
+  const collabPeers = useCanvasStore((s) => s.collabPeers);
+  const addNode = useCanvasStore((s) => s.addNode);
+  const moveNodes = useCanvasStore((s) => s.moveNodes);
+  const removeNodes = useCanvasStore((s) => s.removeNodes);
+  const addEdge = useCanvasStore((s) => s.addEdge);
+  const removeEdge = useCanvasStore((s) => s.removeEdge);
+  const setSelection = useCanvasStore((s) => s.setSelection);
   const selectedSet = useMemo(() => new Set(selectedNodeIds), [selectedNodeIds]);
 
   // ADR 0773 D5 — the suggestion's ghost layer, projected against the LIVE graph.
-  const workflowId = useBuilderStore((s) => s.workflowId);
+  const workflowId = useCanvasStore((s) => s.workflowId);
   const suggestion = usePairStore((s) => s.suggestion);
   const opState = usePairStore((s) => s.opState);
   const focusedOp = usePairStore((s) => s.focusedOp);
@@ -197,7 +199,7 @@ function BuilderCanvasInner({ pairEnabled }: { pairEnabled: boolean }) {
     if (!targetEl?.classList.contains('react-flow__pane')) return; // only empty canvas
     const client = 'changedTouches' in event ? event.changedTouches[0] : event;
     if (!client) return;
-    const sourceNode = useBuilderStore.getState().nodes.find((n) => n.id === state.fromNode?.id);
+    const sourceNode = canvasStore.getState().nodes.find((n) => n.id === state.fromNode?.id);
     const sourceEntry = sourceNode ? catalogEntry(sourceNode.kind) : undefined;
     const portName = state.fromHandle.id ?? sourceEntry?.outputs[0]?.name ?? '';
     const sourceType = sourceEntry?.outputs.find((p) => p.name === portName)?.type;
@@ -212,7 +214,7 @@ function BuilderCanvasInner({ pairEnabled }: { pairEnabled: boolean }) {
       sourceType,
       query: '',
     });
-  }, [screenToFlowPosition]);
+  }, [screenToFlowPosition, canvasStore]);
   const pickerMatches = useMemo(() => {
     if (!dropPicker) return [];
     const q = dropPicker.query.trim().toLowerCase();
@@ -244,7 +246,7 @@ function BuilderCanvasInner({ pairEnabled }: { pairEnabled: boolean }) {
 
   const pickKind = useCallback((kind: string) => {
     if (!dropPicker) return;
-    const st = useBuilderStore.getState();
+    const st = canvasStore.getState();
     const targetEntry = catalogEntry(kind);
     const targetPort = targetEntry?.inputs.find((p) => isPortCompatible(dropPicker.sourceType, p.type))?.name;
     // One gesture = ONE undo entry: the atomic create wires node + edge in a
@@ -252,7 +254,7 @@ function BuilderCanvasInner({ pairEnabled }: { pairEnabled: boolean }) {
     if (targetPort) st.addConnectedNode(kind, dropPicker.flow, { source: dropPicker.sourceId, sourcePort: dropPicker.sourcePort, targetPort });
     else st.addNode(kind, dropPicker.flow);
     setDropPicker(null);
-  }, [dropPicker]);
+  }, [dropPicker, canvasStore]);
 
   // Measured node dimensions, captured from xyflow's `dimensions` changes (see
   // onNodesChange). We feed these back onto the controlled nodes as width/height
@@ -447,7 +449,7 @@ function BuilderCanvasInner({ pairEnabled }: { pairEnabled: boolean }) {
     [removeEdge],
   );
 
-  const selectEdge = useBuilderStore((s) => s.selectEdge);
+  const selectEdge = useCanvasStore((s) => s.selectEdge);
   const onEdgeClick = useCallback(
     (_e: React.MouseEvent, edge: Edge) => {
       if (isGhostEdgeId(edge.id)) {
@@ -541,16 +543,18 @@ function BuilderCanvasInner({ pairEnabled }: { pairEnabled: boolean }) {
         <Notice variant="info">{t('canvasMobileHint')}</Notice>
       </div>
       {/* RUN-3 — a discoverable keyboard-shortcut affordance. */}
-      <span className="builder-canvas-help" title={t('canvasShortcuts')}>
-        <InfoIcon size={13} aria-hidden /> {t('canvasKeyboardShortcuts')}
-      </span>
+      {readOnly ? null : (
+        <span className="builder-canvas-help" title={t('canvasShortcuts')}>
+          <InfoIcon size={13} aria-hidden /> {t('canvasKeyboardShortcuts')}
+        </span>
+      )}
       {/* E.1 — selected-node affordance for the BLD-1 keyboard-connect path:
           scrolls + focuses the Inspector's Connections form (store nonce). */}
-      {selectedNodeIds.length === 1 && (
+      {!readOnly && selectedNodeIds.length === 1 && (
         <button
           type="button"
           className="builder-canvas-help builder-canvas-connect"
-          onClick={() => useBuilderStore.getState().requestConnectionsFocus()}
+          onClick={() => canvasStore.getState().requestConnectionsFocus()}
         >
           {t('canvasConnectHint')}
         </button>
@@ -573,6 +577,11 @@ function BuilderCanvasInner({ pairEnabled }: { pairEnabled: boolean }) {
         onConnect={onConnect}
         onConnectEnd={onConnectEnd}
         isValidConnection={isValidConnection}
+        // ADR 0960 D3 — a read-only instance (a run view) can be panned, zoomed
+        // and selected, never edited (its graph actions are no-ops too).
+        nodesDraggable={!readOnly}
+        nodesConnectable={!readOnly}
+        {...(readOnly ? { deleteKeyCode: null } : {})}
         fitView
         // G-10a visual pass: a first fit onto ONE node (a template ghost) must not
         // zoom to the 2x ceiling and blow the card up; cap the fit at 1x.

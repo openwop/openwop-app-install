@@ -55,30 +55,70 @@ export function isDurableStorageDsn(dsn: string): boolean {
   return dsn.startsWith('postgres://') || dsn.startsWith('postgresql://');
 }
 
+/** DUR-5 row: the auth posture without NODE_ENV=production, unless accepted. */
+function insecureAuthPostureError(): string | null {
+  if (process.env.NODE_ENV === 'production' || allowInsecureAuthPosture()) return null;
+  return (
+    'OPENWOP_DEPLOY_POSTURE=auth requires NODE_ENV=production — without it the ' +
+    'session-secret guard, Secure cookie flag, and dev-token withdrawal are all ' +
+    'silently OFF. Set NODE_ENV=production, or accept the risk explicitly with ' +
+    'OPENWOP_ALLOW_INSECURE_AUTH_POSTURE=true.'
+  );
+}
+
+/** DUR-1 row: the auth posture on an ephemeral control-plane DSN, unless accepted. */
+function ephemeralStorageError(storageDsn: string): string | null {
+  if (isDurableStorageDsn(storageDsn) || allowEphemeralStorage()) return null;
+  return (
+    `OPENWOP_DEPLOY_POSTURE=auth requires a durable control-plane store, but ` +
+    `OPENWOP_STORAGE_DSN is '${storageDsn.split('://')[0]}://…' — runs, chat, BYOK ` +
+    `secrets, and approvals would be lost on restart/scale (and the 'durable' host ` +
+    `surfaces ride this same store). Point OPENWOP_STORAGE_DSN at Postgres, or accept ` +
+    `the risk explicitly with OPENWOP_ALLOW_EPHEMERAL_STORAGE=true.`
+  );
+}
+
+/** BYOK row: the same condition `createApp` throws on (`bootstrapKmsFromEnv`
+ *  returns false exactly when the key is unset). No escape hatch. */
+function missingKmsKeyError(): string | null {
+  if (process.env.OPENWOP_BYOK_KMS_KEY) return null;
+  return (
+    'OPENWOP_DEPLOY_POSTURE=auth requires BYOK secret encryption: set OPENWOP_BYOK_KMS_KEY ' +
+    '(KMS envelope key). Signed-in tenant secrets would otherwise use the ephemeral in-memory store.'
+  );
+}
+
 /**
- * Server-start guard (DUR-1 + DUR-5). Returns the fatal misconfiguration
+ * Server-start guard (DUR-1 + DUR-5). Returns the first fatal misconfiguration
  * message, or null when the deployment posture is coherent. Called from
  * `main()` only — never `createApp()` (Testability: in-process test apps run
  * NODE_ENV=test + memory:// by design).
  */
 export function enterprisePostureStartupError(storageDsn: string): string | null {
   if (!enterprisePosture()) return null;
-  if (process.env.NODE_ENV !== 'production' && !allowInsecureAuthPosture()) {
-    return (
-      'OPENWOP_DEPLOY_POSTURE=auth requires NODE_ENV=production — without it the ' +
-      'session-secret guard, Secure cookie flag, and dev-token withdrawal are all ' +
-      'silently OFF. Set NODE_ENV=production, or accept the risk explicitly with ' +
-      'OPENWOP_ALLOW_INSECURE_AUTH_POSTURE=true.'
-    );
-  }
-  if (!isDurableStorageDsn(storageDsn) && !allowEphemeralStorage()) {
-    return (
-      `OPENWOP_DEPLOY_POSTURE=auth requires a durable control-plane store, but ` +
-      `OPENWOP_STORAGE_DSN is '${storageDsn.split('://')[0]}://…' — runs, chat, BYOK ` +
-      `secrets, and approvals would be lost on restart/scale (and the 'durable' host ` +
-      `surfaces ride this same store). Point OPENWOP_STORAGE_DSN at Postgres, or accept ` +
-      `the risk explicitly with OPENWOP_ALLOW_EPHEMERAL_STORAGE=true.`
-    );
-  }
-  return null;
+  return insecureAuthPostureError() ?? ephemeralStorageError(storageDsn);
+}
+
+/**
+ * ADR 0981 D1 — the profile a deploy runs. `auth` is the strict production
+ * profile; the other postures are evaluation profiles and say so.
+ */
+export type DeployProfile = 'strict' | 'evaluation';
+
+export function deployProfile(): DeployProfile {
+  return enterprisePosture() ? 'strict' : 'evaluation';
+}
+
+/**
+ * ADR 0981 D3 — EVERY strict-profile row this process can check before
+ * `createApp()`, not the first one. An operator missing three controls fixes
+ * them in one boot instead of three. The rows stay the rules above; this only
+ * collects them. Durable surfaces are not here: their adapters register inside
+ * `createApp()`, so `assertDurableSurfacesInEnterprise` still reports them there.
+ */
+export function productionProfileStartupErrors(storageDsn: string): string[] {
+  if (!enterprisePosture()) return [];
+  return [insecureAuthPostureError(), ephemeralStorageError(storageDsn), missingKmsKeyError()].filter(
+    (e): e is string => e !== null,
+  );
 }

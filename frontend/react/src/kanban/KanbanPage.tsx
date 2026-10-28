@@ -23,6 +23,7 @@
 import { Button } from '../ui/Button.js';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { humanNote } from './restoreNote.js';
 import { confirm } from '../ui/confirm.js';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { listRoster, type RosterEntry } from '../agents/rosterClient.js';
@@ -357,7 +358,8 @@ export function KanbanPage(): JSX.Element {
           ...(card.priority ? { priority: card.priority } : {}),
           ...(card.dueAt ? { dueAt: card.dueAt } : {}),
           ...(card.assignmentReason ? { assignmentReason: card.assignmentReason } : {}),
-          ...(card.blockerNote ? { blockerNote: card.blockerNote } : {}),
+          // ADR 0963 — a copy is new work: it does not inherit the loop's hold.
+          ...(humanNote(card.blockerNote) ? { blockerNote: humanNote(card.blockerNote) } : {}),
         });
       }
       setNotice(t('duplicatedNotice', { name: activeBoard.name }));
@@ -451,6 +453,12 @@ export function KanbanPage(): JSX.Element {
       await refreshBoards();
       setNotice(t('cardUpdatedNotice', { title: patch.title ?? card?.title ?? '' }));
     } catch (err) {
+      // ADR 0963 — a conditional note write lost to a newer change: reload and say so.
+      if ((err as { status?: unknown }).status === 409) {
+        await openBoard(activeBoard.id);
+        setError(t('cardChangedReload'));
+        return;
+      }
       setError((() => { const c = classifyHttpError(err); return `${c.title} — ${c.detail}`; })());
     }
   };

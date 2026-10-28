@@ -16,7 +16,7 @@
 
 import { useMediaQuery } from '../ui/useMediaQuery.js';
 import { Button } from '../ui/Button.js';
-import { lazy, Suspense, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { ComboboxWiring } from './lib/comboboxWiring.js';
 import { useTranslation } from 'react-i18next';
 import { useAudioRecorder, blobToBase64, type RecordedAudio } from './hooks/useAudioRecorder.js';
@@ -29,7 +29,7 @@ import { toRunInputs } from '../ui/RunInputsForm.js';
 import { refreshWorkflowMentionCache } from './lib/workflowMentions.js';
 import { voicePhaseKey } from './lib/voicePhaseWords.js';
 import { voiceCtxBlockLabels } from './voiceCtxLabels.js';
-import { subscribeLiveComposer, takeStagedComposerDraft } from './composerSeed.js';
+import { forgetSubmittingComposer, markSubmittingComposer, subscribeLiveComposer, takeStagedComposerDraft } from './composerSeed.js';
 import { AgentMentionAutocomplete } from './AgentMentionAutocomplete.js';
 import type { AgentMentionEntry } from './lib/agentMentions.js';
 import { BoardMentionAutocomplete } from './BoardMentionAutocomplete.js';
@@ -277,11 +277,17 @@ export function ChatInput({
     });
   }, [seed]);
 
-  useEffect(() => subscribeLiveComposer((seeded) => {
+  // The live sink, also handed to `markSubmittingComposer` on submit (ADR 0993 D1)
+  // so a command's inserted text reaches THIS composer, not the first mounted one.
+  const liveSink = useCallback((seeded: string): boolean => {
     setText((cur) => (cur.trim() ? `${cur.replace(/\s+$/, '')}\n\n${seeded}` : seeded));
     taRef.current?.focus();
     return true;
-  }), []);
+  }, []);
+  useEffect(() => {
+    const off = subscribeLiveComposer(liveSink);
+    return () => { off(); forgetSubmittingComposer(liveSink); };
+  }, [liveSink]);
 
   // Mirror the live text to localStorage (debounced) so a refresh / crash
   // restores it. No-op when no key is supplied (ephemeral embeds).
@@ -371,6 +377,7 @@ export function ChatInput({
       return;
     }
     if (slashInputs) stageSlashInputs(slashInputs.slug, toRunInputs(slashInputs.variables, slashInputs.values));
+    markSubmittingComposer(liveSink);
     onSend(text.trim(), attachments.length > 0 ? attachments : undefined);
     setText('');
     // A sent message is no longer a draft — drop it immediately so a refresh

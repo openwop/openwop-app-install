@@ -20,7 +20,6 @@
  * `{ sent:false, error }` (the adapter's graceful posture).
  */
 
-import nodemailer from 'nodemailer';
 import type { EmailAdapterDeps, EmailSendArgs, EmailSendResult } from './emailAdapter.js';
 import { listUnsubscribeHeaders } from './emailAdapter.js'; // ADR 0848 D7 — call-time use only (the two modules import each other)
 import { assertSmtpDialAllowed } from './smtpEgress.js';
@@ -90,9 +89,18 @@ export interface SmtpMessage {
 export interface SmtpTransport { sendMail(msg: SmtpMessage): Promise<{ messageId?: string }>; }
 export type SmtpTransportFactory = (opts: SmtpDialOptions) => SmtpTransport;
 
+// `nodemailer` is loaded on the first real send, not at import: this module sits
+// on the app's import graph, and every test file that boots the app paid for it
+// (ADR 0863 D7).
 const defaultTransportFactory: SmtpTransportFactory = (opts) => {
-  const transporter = nodemailer.createTransport(opts);
-  return { sendMail: (msg) => transporter.sendMail(msg).then((info) => ({ messageId: info.messageId })) };
+  let transporter: Promise<import('nodemailer').Transporter> | undefined;
+  return {
+    sendMail: async (msg) => {
+      transporter ??= import('nodemailer').then((m) => m.default.createTransport(opts));
+      const info = await (await transporter).sendMail(msg);
+      return { messageId: info.messageId };
+    },
+  };
 };
 
 /**

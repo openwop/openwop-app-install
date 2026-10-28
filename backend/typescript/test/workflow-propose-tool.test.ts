@@ -5,15 +5,26 @@
  *  - claim approves → the run starts via the shared recipe, runId attached,
  *    the approve response echoes it;
  *  - approve-what-you-see: a builder edit after propose ⇒ 409 `proposal_stale`
- *    and the approval REOPENS (pending again) — including an edit landing in
- *    the pre-check→CAS window; a mismatched client `expectedDefinitionHash`
- *    refuses the same way;
+ *    and the approval REOPENS (pending again); a mismatched client
+ *    `expectedDefinitionHash` refuses the same way. (CORRECTED wave 64: this
+ *    line also claimed "an edit landing in the pre-check→CAS window"; no case
+ *    forces that window, so the claim is withdrawn. The post-CAS hash check
+ *    that guards it is witnessed by 8fw5g2-wpt-stale through the plain edit.)
  *  - expired proposals refuse the claim (`proposal_expired`), nothing runs;
- *  - concurrent claims: exactly one winner (the CAS lock);
+ *  - concurrent claims: exactly one winner (the CAS lock). The two claims are
+ *    NOT forced to interleave, but they do: deleting the post-CAS `lock.changed`
+ *    check reds the case (8fw5g2-wpt-concurrent, witnessed);
  *  - reject archives the draft (resolvable, catalog-hidden) + keeps the note;
  *  - the transient cap and the shared validation/refusal pipeline apply.
+ *
+ * Double guard (honest, by design): "no policy ⇒ pending" is held twice in
+ * `tryAutoApproveProposal` — the `!policy` return AND the fail-safe catch
+ * (a null policy throws inside `policyDeciderRef`, and the catch maps every
+ * error back to pending). Deleting the return alone stays green
+ * (8fw5g2-wpt-no-policy, vacuous); a FORGED policy that throws nothing reds
+ * it (8fw5g2-wpt-no-policy-r2).
  */
-import { describe, it, expect, beforeAll, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import { createHostAdapterSuite } from '../src/host/index.js';
 import type { Storage } from '../src/storage/storage.js';
@@ -84,6 +95,14 @@ afterEach(async () => {
 const NODES = [{ nodeId: 'a', typeId: 'core.noop' }];
 const parse = (r: { content: string }) => JSON.parse(r.content) as Record<string, unknown>;
 
+/** Wait for the REAL condition the expiry check reads (`expiresAt < now`),
+ *  not a fixed sleep: a near-zero TTL still lands in the same millisecond. */
+async function untilExpired(approvalId: string): Promise<void> {
+  const exp = (await getApproval(approvalId))?.composedWorkflow?.expiresAt;
+  if (!exp) throw new Error(`approval ${approvalId} carries no composedWorkflow.expiresAt`);
+  await vi.waitFor(() => { if (Date.now() <= Date.parse(exp)) throw new Error(`not yet past ${exp}`); }, { timeout: 2_000, interval: 1 });
+}
+
 /** Propose a trivial workflow; return {workflowId, approvalId}. */
 async function propose(extra: Record<string, unknown> = {}): Promise<{ workflowId: string; approvalId: string }> {
   const r = await runTool({ definition: { nodes: NODES }, summary: 'test proposal', ...extra });
@@ -142,6 +161,7 @@ describe('workflows.propose (ADR 0473 Phase 1)', () => {
   it('an INVALID definition stores nothing (shared pipeline)', async () => {
     const r = await runTool({ definition: { workflowId: 'agent-bad-p1', nodes: 'nope' } });
     expect(r.isError).toBe(true);
+    expect(parse(r).error).toBe('validation_error');
     expect(getRegisteredWorkflow('agent-bad-p1')).toBeUndefined();
   });
 
@@ -165,7 +185,7 @@ describe('workflows.propose (ADR 0473 Phase 1)', () => {
     const { workflowId, approvalId } = await propose();
     // Simulate a builder edit: re-register the draft with an extra node.
     const def = getRegisteredWorkflow(workflowId)!;
-    const edited: WorkflowDefinition = { ...def, nodes: [...def.nodes, { nodeId: 'b', typeId: 'core.noop' }] } as WorkflowDefinition;
+    const edited: WorkflowDefinition = { ...def, nodes: [...def.nodes, { nodeId: 'b', typeId: 'core.noop' }] };
     registerWorkflow(edited);
 
     await expect(claimApproval(deps, ctx, approvalId)).rejects.toMatchObject({ details: { reason: 'proposal_stale' } });
@@ -202,7 +222,7 @@ describe('workflows.propose (ADR 0473 Phase 1)', () => {
       delete process.env.OPENWOP_WORKFLOW_PROPOSAL_TTL_DAYS;
     }
     // `expiresAt` is millisecond-precision; make "past" strict.
-    await new Promise((res) => setTimeout(res, 10));
+    await untilExpired(held.approvalId);
     await expect(claimApproval(deps, ctx, held.approvalId)).rejects.toMatchObject({ details: { reason: 'proposal_expired' } });
     expect((await getApproval(held.approvalId))?.status).toBe('pending');
     expect(await storage.hasRunForWorkflow(held.workflowId)).toBe(false);
@@ -218,7 +238,10 @@ describe('workflows.propose (ADR 0473 Phase 1)', () => {
     const losses = results.filter((r) => r.status === 'rejected');
     expect(wins.length).toBe(1);
     expect(losses.length).toBe(1);
-    expect((losses[0] as PromiseRejectedResult).reason).toBeInstanceOf(OpenwopError);
+    const loss = losses[0];
+    if (loss?.status !== 'rejected') throw new Error('expected one rejected claim');
+    expect(loss.reason).toBeInstanceOf(OpenwopError);
+    expect(loss.reason).toMatchObject({ code: 'conflict', message: 'Approval already approved.' });
   });
 
   it('reject archives the draft (still resolvable) and keeps the note', async () => {
@@ -247,7 +270,7 @@ describe('workflows.propose (ADR 0473 Phase 1)', () => {
   it('approve-what-you-see (F1): an edited draft APPROVES when the client hash matches the LIVE definition', async () => {
     const { workflowId, approvalId } = await propose();
     const def = getRegisteredWorkflow(workflowId)!;
-    const edited: WorkflowDefinition = { ...def, nodes: [...def.nodes, { nodeId: 'b', typeId: 'core.noop' }] } as WorkflowDefinition;
+    const edited: WorkflowDefinition = { ...def, nodes: [...def.nodes, { nodeId: 'b', typeId: 'core.noop' }] };
     registerWorkflow(edited);
     // The card re-rendered the edited draft; the reviewer approved WHAT THEY SAW.
     const result = await claimApproval(deps, { ...ctx, expectedDefinitionHash: definitionHashOf(edited) }, approvalId);
@@ -264,7 +287,9 @@ describe('workflows.propose (ADR 0473 Phase 1)', () => {
 
   it('approve without an attributed decider is refused (F4)', async () => {
     const { workflowId, approvalId } = await propose();
-    await expect(claimApproval(deps, { tenantId: TENANT }, approvalId)).rejects.toMatchObject({ code: 'forbidden' });
+    // `forbidden` is also thrown by the quorum/eligibility checks: pin THIS refusal's message.
+    await expect(claimApproval(deps, { tenantId: TENANT }, approvalId))
+      .rejects.toMatchObject({ code: 'forbidden', message: 'An attributed decider is required to approve a composed workflow.' });
     expect((await getApproval(approvalId))?.status).toBe('pending');
     expect(await storage.hasRunForWorkflow(workflowId)).toBe(false);
   });
@@ -277,7 +302,8 @@ describe('workflows.propose (ADR 0473 Phase 1)', () => {
     } finally {
       delete process.env.OPENWOP_WORKFLOW_PROPOSAL_TTL_DAYS;
     }
-    await new Promise((res) => setTimeout(res, 10));
+    await untilExpired(held.approvalId);
+    // `swept` also counts other cases' expired rows; this row's own state is the claim.
     const { swept } = await sweepExpiredWorkflowProposals();
     expect(swept).toBeGreaterThanOrEqual(1);
     const approval = await getApproval(held.approvalId);
@@ -354,7 +380,7 @@ describe('workflows.propose (ADR 0473 Phase 1)', () => {
 
     // Builder edit → the projection flags it and the live hash moves.
     const def = getRegisteredWorkflow(workflowId)!;
-    const edited: WorkflowDefinition = { ...def, nodes: [...def.nodes, { nodeId: 'b', typeId: 'core.noop' }] } as WorkflowDefinition;
+    const edited: WorkflowDefinition = { ...def, nodes: [...def.nodes, { nodeId: 'b', typeId: 'core.noop' }] };
     registerWorkflow(edited);
     const after = (await getApproval(approvalId))!;
     review = await withComposedLiveView(approvalToReview(after), after);
@@ -370,7 +396,7 @@ describe('workflows.propose (ADR 0473 Phase 1)', () => {
     } finally {
       delete process.env.OPENWOP_WORKFLOW_PROPOSAL_TTL_DAYS;
     }
-    await new Promise((res) => setTimeout(res, 10));
+    await untilExpired(held.approvalId);
     const expiredRow = (await getApproval(held.approvalId))!;
     const review = await withComposedLiveView(approvalToReview(expiredRow), expiredRow);
     expect(review.status).toBe('expired');

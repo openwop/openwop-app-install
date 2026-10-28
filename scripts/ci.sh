@@ -28,11 +28,40 @@
 #
 # Usage:  npm run ci         (or: bash scripts/ci.sh)
 #         npm run ci:full    (forces e2e + live adapters)
+#         npm run ci:quick   (ADR 0976: the static checks, typechecks, lint and
+#                             builds only, then STOP. Not a gate: no test suite
+#                             runs and nothing is recorded as gated. It is the
+#                             per-merge check of a batch branch, scripts/batch.sh)
 # Bypass on push: git push --no-verify
 #
 set -euo pipefail
+# ADR 0991 — nothing the gate runs may publish to the cross-machine release bus
+# (the train that RUNS this gate publishes for it, outside this process).
+export OPENWOP_RELEASE_BUS=off
+
+# A git hook runs with GIT_DIR (and in a linked worktree GIT_INDEX_FILE etc.)
+# exported. Every fixture below that does `git init`/`git config` in a temp dir
+# would then act on THIS repository instead: MEASURED 2026-10-26 from the
+# pre-push hook of a linked worktree, it set core.bare=true and a fixture
+# user.email on the real .git/config and failed 7 gate-tooling tests that pass
+# when run by hand. The gate resolves the repo from its own path, so drop them.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# ADR 0976 — quick mode runs no suite, so it neither queues behind a running gate
+# nor registers with the broker as one.
+QUICK="${OPENWOP_CI_QUICK:-0}"
+
+# ADR 0974 — register this gate with the Tracegate broker in OBSERVE mode: it
+# waits for nothing and changes nothing; it records what the broker would have
+# done. A gate inside a train is already registered by the train.
+# P2: registered BEFORE the preflight wait, so a WAITING gate already makes the
+# daemon's lease yield (I11). The observer watches $$, and the `exec` below keeps
+# this PID; the exported OPENWOP_BROKER_OBSERVED stops a second registration
+# when preflight execs back into this script.
+# shellcheck source=lib/broker-observe.sh
+# (Guarded: a test fixture may copy this script without the helper.)
+if [ "$QUICK" != 1 ] && [ -f "$ROOT/scripts/lib/broker-observe.sh" ]; then . "$ROOT/scripts/lib/broker-observe.sh"; broker_observe gate gate "gate $(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null)"; fi
 
 # Contention FIRST, before anything else runs. Since 2026-09-28 this gate WAITS
 # by default behind any live suite from another checkout of this repo, under an
@@ -43,6 +72,10 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # so another session's detector — this version or the previous one — cannot
 # mistake a WAITING gate for a running suite. The first version waited inside
 # this script and two waiting gates deadlocked on each other's argv.
+# ADR 0976 — quick mode runs no suite, so it never queues behind one. Kept
+# OUTSIDE the block below: scripts/test-preflight-suite.sh extracts that block
+# by its exact first line and runs it as a mini gate.
+if [ "$QUICK" = 1 ]; then OPENWOP_CI_PREFLIGHT_DONE=quick; fi
 if [ -z "${OPENWOP_CI_PREFLIGHT_DONE:-}" ]; then
   # The gate's path travels in the ENVIRONMENT, not argv: an argv holding
   # `…/scripts/ci.sh` would match the detector's pattern all over again.
@@ -401,11 +434,14 @@ node "$ROOT/scripts/check-entry-guard.mjs"
 # prunes an optionalDependency's transitive deps (Azure KMS goes
 # present-but-unloadable). This gate carries a REQUIRED-paths floor so a glob that
 # stops matching fails loudly instead of printing a clean scan of nothing.
-step "build configs: `npm ci`, never `npm install` (zero gate)"
+step 'build configs: `npm ci`, never `npm install` (zero gate)'
 node "$ROOT/scripts/check-build-installs.mjs"
 
 step "feature-dependency map: docs/FEATURE-DEPENDENCIES.md is current (ADR 0446)"
 node "$ROOT/scripts/gen-feature-deps.mjs" --check
+
+step "content-rules tables: every pack's generated copy matches the host table (ADR 0946 D3)"
+node "$ROOT/scripts/gen-content-rules.mjs" --check
 
 # ADR 0555 P0 — `steward` trust is attested by a COMMITTED digest per vendored
 # pack, never by "it was in the packs dir" (which two env vars can redefine).
@@ -415,8 +451,14 @@ node "$ROOT/scripts/gen-feature-deps.mjs" --check
 step "steward manifest: packs/.steward-manifest.json matches the vendored packs (ADR 0555 P0)"
 node "$ROOT/scripts/gen-steward-manifest.mjs" --check
 
-step "agent-skill mirror: .agents/skills matches .claude/skills"
-node "$ROOT/scripts/check-agent-skill-mirror.mjs"
+# The bundle strips .claude/ and .agents/ with the steward lane; the rule for
+# when this skips lives in scripts/lib/steward-lane.sh (skill_mirror_lane).
+if [ "$(skill_mirror_lane "$ROOT" "$STEWARD_LANE_MODE")" = take ]; then
+  step "agent-skill mirror: .agents/skills matches .claude/skills"
+  node "$ROOT/scripts/check-agent-skill-mirror.mjs"
+else
+  step "agent-skill mirror: SKIPPED — .claude/skills and .agents/skills absent (adopter bundle; stripped by build-whitelabel-zip.sh)"
+fi
 
 step "root docs: only adopter deliverables at the repo root (steward reports live in docs/steward/)"
 node "$ROOT/scripts/check-root-docs.mjs"
@@ -445,6 +487,7 @@ step "gate tooling: the gate's own port/process helpers (GATE-5)"
 # not run" as an improvement — and every one passed `bash -n` and review. They were
 # found only by running the failure case, so those probes are assertions now.
 bash "$ROOT/scripts/test-gate-tooling.sh"
+node --test "$ROOT/scripts/test-ci-e2e-evidence.mjs"
 
 step "custom-domain edge script: plan/apply/verify against a stub gcloud (ADR 0906 P3)"
 # Pure shell, no network: the real gcloud is never reached. `apply` creates billable
@@ -480,14 +523,32 @@ run_selftests() {
   echo "▶ guard: the contention detector actually fires (preflight-suite)"
   bash "$ROOT/scripts/test-preflight-suite.sh"
   echo
+  echo "▶ machine-wide train markers: another repo's train holds --wait-foreign and the daemon (2026-10-26)"
+  bash "$ROOT/scripts/test-ci-claims.sh"
+  echo
   echo "▶ Tracegate: the predictor reuses only what it may, and runs what it must (ADR 0880)"
   node "$ROOT/scripts/test-tracegate.mjs"
   echo
   echo "▶ payload ratchet: a subset run never judges an admission stale (ADR 0702 × ADR 0880)"
   node --test "$ROOT/scripts/test-audit-event-payloads.mjs"
   echo
+  echo "▶ e2e ledger: required and advisory results are reported separately (ADR 0509)"
+  node --test "$ROOT/scripts/test-e2e-ledger-report.mjs"
+  echo
+  echo "▶ adaptive width: shadow changes nothing, a broken tool narrows nothing (ADR 0971)"
+  node --test --test-concurrency=1 "$ROOT/scripts/test-ci-width.mjs"
+  echo
+  echo "▶ broker observe: vendored bytes match, never blocks, never double-registers (ADR 0974)"
+  node --test --test-concurrency=1 "$ROOT/scripts/test-broker-observe.mjs"
+  echo
   echo "▶ merge-train: a red train bisects itself and lands the green PRs (ADR 0880 P0)"
   bash "$ROOT/scripts/test-merge-train-bisect.sh"
+  echo
+  echo "▶ release bus: advisory, never blocks, never changes a train's exit (ADR 0991; fake gcloud, offline)"
+  bash "$ROOT/scripts/test-release-bus.sh"
+  echo
+  echo "▶ batch branches: quick-checked merges, one gate at close, a red close bisects and reverts (ADR 0976)"
+  bash "$ROOT/scripts/test-batch.sh"
   echo
   echo "▶ /qualify-live runner: outcomes stay honest and keys rotate (loopback fake host, no key, no spend)"
   # build-whitelabel-zip.sh strips .claude/ (steward meta) but ships this script, so a white-label tree has no skill to test.
@@ -497,7 +558,8 @@ run_selftests() {
     echo "qualify-live selftest skipped: .claude/ not in this tree (white-label bundle)"
   fi
 }
-bg_lane_start selftests run_selftests
+# ADR 0976: quick mode skips the gate's own tooling tests; the batch's closing gate runs them.
+[ "$QUICK" = 1 ] || bg_lane_start selftests run_selftests
 
 step "frontend: lint + build + unit-test types — BACKGROUND, joined before backend vitest (ADR 0863 D7)"
 # ADR 0863 D7 — the backend preamble below (typecheck, distributions, esbuild
@@ -610,6 +672,17 @@ bash "$ROOT/scripts/test-cli-route-coverage.sh"
 step "frontend: lint + build + unit-test types — background result (ADR 0863 D7)"
 bg_lane_join frontend-static
 
+# ── ADR 0976 — quick mode stops here ────────────────────────────────────────
+# Everything above is static: checks, typechecks, lint and builds. Nothing below
+# this line has run, and nothing has been recorded (no e2e ledger row, no
+# Tracegate footprint, no full-run marker), so a quick pass can never be read
+# later as a gated commit.
+if [ "$QUICK" = 1 ]; then
+  printf '\n\033[1;32m✓ quick checks green\033[0m in %ss — statics, typechecks, lint and builds.\n' "$(( $(date +%s) - CI_T0 ))"
+  printf '\033[33m  This is NOT the gate: no test suite ran. A batch branch is gated once, at close (scripts/batch.sh close).\033[0m\n'
+  exit 0
+fi
+
 # ── ADR 0880 — Tracegate: run only the test files a change can affect ────────
 # Every recorded run deposits per-file FOOTPRINTS (functions executed, modules
 # loaded, repo files read) in a ledger shared by every worktree. A file whose
@@ -639,9 +712,17 @@ tg_begin() { # tg_begin <lane> → TG_LANE TG_MODE TG_RUN TG_ARGS
     while IFS= read -r f; do [ -n "$f" ] && TG_ARGS+=("$f"); done < "$TG_RUN/selected.txt"
   fi
 }
-tg_end() { # report now (cheap, prints in place); ingest in the BACKGROUND
+TG_RED_RUN="" # a red lane's predict/results/misses, kept for its Red Reader packet (ADR 0980 P1)
+tg_end() { # tg_end [lane rc] — report now (cheap, prints in place); ingest in the BACKGROUND
   [ -n "$TG_RUN" ] || return 0
   node "$TG" report --lane "$TG_LANE" --run "$TG_RUN" || echo "tracegate: report failed (ignored)"
+  # The background ingest deletes the run dir, so a RED lane's three small files
+  # are copied aside first; tg_red_packet turns them into the packet and removes them.
+  TG_RED_RUN=""
+  if [ "${1:-0}" != 0 ]; then
+    TG_RED_RUN="$(mktemp -d "${TMPDIR:-/tmp}/owp-tracegate-red-$TG_LANE.XXXXXX")"
+    for f in predict.json results.json misses.txt; do [ -f "$TG_RUN/$f" ] && cp "$TG_RUN/$f" "$TG_RED_RUN/"; done
+  fi
   # Mapping and hashing thousands of footprints takes minutes (55 s for the
   # frontend's 999 files) and nothing downstream needs it, so it is joined at the
   # very end. It never fails the gate. If the gate goes red first, the EXIT trap
@@ -680,23 +761,78 @@ tg_recheck_misses() { # tg_recheck_misses <lane> <lane dir> [VAR=value…] — a
     log="$(mktemp "${TMPDIR:-/tmp}/owp-tg-recheck.XXXXXX")"
     if ( cd "$ROOT/$dir" && env ${@+"$@"} npm run test -- "$rel" ) > "$log" 2>&1; then
       node "$TG" triage --lane "$ln" --file "$f" --head "$h" --verdict flake || true
+      [ -n "$TG_RED_RUN" ] && printf '%s\tpassed\n' "$f" >> "$TG_RED_RUN/rechecks.tsv"
       echo "tracegate ($ln): $rel PASSED alone at this tree, so it was a flake, not a footprint hole; it does not suspend the lane. The gate is still red: fix or quarantine the flake."
     else
       printf '\033[31mtracegate (%s): %s FAILS alone at this tree too, so it is a real MISS (a recorder hole, P0). The lane stays suspended. Log: %s\033[0m\n' "$ln" "$rel" "$log"
+      [ -n "$TG_RED_RUN" ] && printf '%s\tfailed\n' "$f" >> "$TG_RED_RUN/rechecks.tsv"
     fi
   done
   TG_MISSES=()
 }
+# ADR 0980 P1 — every red lane leaves a Red Reader packet in the ledger: each
+# failing file's text, its prediction, whether it was a MISS and how its recheck
+# went, its history, and the change. An agent session reads it and may ESCALATE a
+# miss the recheck called a flake (`node scripts/tracegate.mjs red …`). Never fails
+# the gate, which is already red.
+tg_red_packet() { # tg_red_packet <lane> — after tg_recheck_misses, lane red
+  [ -n "$TG_RED_RUN" ] || return 0
+  local rc_file=()
+  [ -f "$TG_RED_RUN/rechecks.tsv" ] && rc_file=(--rechecks "$TG_RED_RUN/rechecks.tsv")
+  node "$TG" red write --lane "$1" --run "$TG_RED_RUN" ${rc_file[@]+"${rc_file[@]}"} || echo "tracegate: red packet failed (ignored)"
+  rm -rf "$TG_RED_RUN"; TG_RED_RUN=""
+  return 0
+}
+# ADR 0971 — adaptive Vitest width. Before a lane, scripts/ci-width.mjs reads THIS
+# machine (busy cores that are not the lane's, available memory, memory pressure,
+# swap, a thermal limit) and says how many workers fit. OPENWOP_CI_ADAPTIVE=on
+# (the default since P2) runs the lane at that width and records it with the
+# lane's outcome and measured peak memory; `shadow` records it and runs the old
+# width; `off` skips all of it. A failure in the tool leaves the width alone.
+CW_SUG="-"; CW_APPLY="-"; CW_USED="-"; CW_WHY="-"; CW_PEAK=""; CW_T0=0; CW_ENV=()
+cw_begin() { # cw_begin <lane> [VAR=value…] → CW_*; a VITEST_MAX_WORKERS=N among the args is the gate's own cap
+  local lane="$1" cap="${VITEST_MAX_WORKERS:-}" a out; shift
+  CW_SUG="-"; CW_APPLY="-"; CW_USED="-"; CW_WHY="-"; CW_PEAK=""; CW_T0=$(date +%s); CW_ENV=()
+  [ "${OPENWOP_CI_ADAPTIVE:-on}" = off ] && return 0
+  for a in "$@"; do case "$a" in VITEST_MAX_WORKERS=*) cap="${a#VITEST_MAX_WORKERS=}" ;; esac; done
+  out="$(node "$ROOT/scripts/ci-width.mjs" decide --lane "$lane" ${cap:+--cap "$cap"} || echo '- - - -')"
+  read -r CW_SUG CW_APPLY CW_USED CW_WHY <<< "$out"
+  case "$CW_APPLY" in ''|*[!0-9]*|0) ;; *) CW_ENV=(VITEST_MAX_WORKERS="$CW_APPLY") ;; esac # only a real width
+  [ "$CW_SUG" = "-" ] || CW_PEAK="$(mktemp "${TMPDIR:-/tmp}/owp-ci-width-peak.XXXXXX")"
+}
+cw_end() { # cw_end <lane> <rc> — record the decision beside what happened
+  [ -n "$CW_PEAK" ] || return 0
+  node "$ROOT/scripts/ci-width.mjs" record --lane "$1" --suggested "$CW_SUG" --used "$CW_USED" --rc "$2" \
+    --secs "$(( $(date +%s) - CW_T0 ))" --peak-file "$CW_PEAK" --why "$CW_WHY" || true
+  rm -f "$CW_PEAK"; CW_PEAK=""
+}
+cw_watch() { # inside a lane's subshell: measure that subshell's process tree (exits with it)
+  [ -n "$CW_PEAK" ] || return 0
+  node "$ROOT/scripts/ci-width.mjs" watch --parent --out "$CW_PEAK" </dev/null >/dev/null 2>&1 &
+}
 # Run a lane's vitest under Tracegate. bash 3.2 (macOS) + `set -u` rejects an
 # empty "${arr[@]}", hence the ${arr[@]+…} form.
 tg_vitest() { # tg_vitest <lane dir> [VAR=value…] — runs `npm run test` with the selection
-  local dir="$1"; shift
+  local dir="$1" rc=0; shift
   if [ "$TG_MODE" = enforce ] && [ "${#TG_ARGS[@]}" -eq 0 ]; then
     echo "tracegate: every $TG_LANE verdict is reusable at this tree — no file needs to run."
     return 0
   fi
-  ( cd "$ROOT/$dir" && env "$@" OPENWOP_TRACEGATE_RECORD="$TG_RUN" npm run test -- ${TG_ARGS[@]+"${TG_ARGS[@]}"} )
+  cw_begin "$TG_LANE" "$@"
+  # The adaptive width goes LAST, so under `on` it wins over a cap among "$@".
+  ( cd "$ROOT/$dir" && cw_watch && env "$@" ${CW_ENV[@]+"${CW_ENV[@]}"} OPENWOP_TRACEGATE_RECORD="$TG_RUN" npm run test -- ${TG_ARGS[@]+"${TG_ARGS[@]}"} ) || rc=$?
+  cw_end "$TG_LANE" "$rc"
+  return "$rc"
 }
+
+step "vendored runtime: CPython-WASI for the sandbox escape suite (WASI-GATE-1)"
+# Without the asset the ADR 0146 escape suite (test/wasi-sandbox.test.ts) and the
+# WASI arm of test/code-exec-agent-tool.test.ts SKIP, and until this step the gate
+# never synced it, so the security gate ran only in the Docker build. The tests
+# now fail instead of skipping when OPENWOP_REQUIRE_WASI=1 and the asset is
+# missing, so a failed sync cannot turn back into a quiet skip.
+bash "$ROOT/scripts/sync-pythonwasm.sh"
+export OPENWOP_REQUIRE_WASI=1
 
 step "backend: vitest (OPENWOP_SKIP_TESTCONTAINERS=1, as in CI)"
 # ADR 0702 — the event-payload recorder rides ALONG with this run. The samples
@@ -719,8 +855,8 @@ tg_begin backend
 BE_TG_MODE="$TG_MODE"
 be_rc=0
 tg_vitest backend/typescript OPENWOP_SKIP_TESTCONTAINERS=1 OPENWOP_PAYLOAD_AUDIT="$OPENWOP_PAYLOAD_AUDIT_DIR" || be_rc=$?
-tg_end
-[ "$be_rc" -eq 0 ] || { tg_recheck_misses backend backend/typescript OPENWOP_SKIP_TESTCONTAINERS=1; echo "backend vitest FAILED (exit $be_rc)"; exit "$be_rc"; }
+tg_end "$be_rc"
+[ "$be_rc" -eq 0 ] || { tg_recheck_misses backend backend/typescript OPENWOP_SKIP_TESTCONTAINERS=1; tg_red_packet backend; echo "backend vitest FAILED (exit $be_rc)"; exit "$be_rc"; }
 
 step "deploy gates + contention detector: background result (ADR 0863 D6)"
 bg_lane_join selftests
@@ -814,8 +950,8 @@ FE_T0=$(date +%s)
 tg_vitest frontend/react OPENWOP_LIVE_FETCH_AUDIT="$LIVE_FETCH_AUDIT" ${FE_CAP[@]+"${FE_CAP[@]}"} || fe_rc=$?
 FE_SECS=$(( $(date +%s) - FE_T0 ))
 echo "  (frontend vitest ran ${FE_SECS}s${FE_BG_LIVE:+ with a worker cap, beside: $FE_BG_LIVE})"
-tg_end
-[ "$fe_rc" -eq 0 ] || { tg_recheck_misses frontend frontend/react; echo "frontend vitest FAILED (exit $fe_rc)"; exit "$fe_rc"; }
+tg_end "$fe_rc"
+[ "$fe_rc" -eq 0 ] || { tg_recheck_misses frontend frontend/react; tg_red_packet frontend; echo "frontend vitest FAILED (exit $fe_rc)"; exit "$fe_rc"; }
 
 step "frontend: live-fetch allowlist has no STALE entries (ADR 0661 phase 2)"
 if [ "$FE_TG_MODE" = enforce ]; then
@@ -1077,11 +1213,11 @@ if [ "$e2e_run" = "1" ]; then
     exit 1
   fi
   e2e_rc=0
-  # TWO PASSES (ADR 0509 Phase 2). The parallel pass excludes `@serial`; the serial
-  # pass runs those at --workers=1. `collab.spec.ts` is the only member: it passes
-  # alone and fails under load because it drives two live WebSocket clients. It is
-  # QUARANTINED, NOT SKIPPED — a quarantine that stops a test executing is
-  # indistinguishable from deleting it a few months later.
+  # TWO PASSES (ADR 0509 Phase 2). The required pass excludes @serial/@advisory;
+  # the separate pass runs those at --workers=1 and records its own outcome.
+  # Correction 2026-10-27: collab's undo corruption also reproduces synchronously
+  # without a browser or network. It is not established correct by isolation.
+  # See docs/steward/COLLAB-UNDO-INVESTIGATION.md for the red reproducer.
   # The proxy target names the transient backend; the browser stays on SAME-ORIGIN
   # `/api`. That lets the test-login cookie ride from `page.request` to the SPA.
   # An absolute backend URL makes the app cross-origin and silently splits the
@@ -1091,32 +1227,36 @@ if [ "$e2e_run" = "1" ]; then
          OPENWOP_DEV_PROXY_TARGET="http://localhost:$E2E_PORT_BE" \
          VITE_OPENWOP_BASE_URL="/api" \
          VITE_OPENWOP_SSE_BASE_URL="http://localhost:$E2E_PORT_BE" \
-         npm run test:e2e ) || e2e_rc=$?
+         npm run test:e2e -- --output=test-results/required ) || e2e_rc=$?
   # The @serial/@advisory pass is ADVISORY — it runs, it is reported, it does NOT
   # fail the gate.
   #
-  # TWO MEMBERSHIPS, TWO DIFFERENT REASONS, and conflating them would rot the
-  # lane. `@serial` = "correct, but needs the machine to itself" (collab drives
-  # two live WebSocket clients). `@advisory` = a visual contract that still runs
-  # and reports while it earns promotion stability evidence. `/builder` now uses
+  # @serial describes scheduling, not correctness. Collab remains advisory
+  # under ADR 0509; its known undo defect still needs repair. @advisory includes
+  # a visual contract that runs while it earns promotion stability evidence.
+  # `/builder` now uses
   # its own pinned chain-pack fixture, so an intentional layout or fixture change
   # may re-record its baseline after visual review; it must never be re-recorded
-  # merely to erase an unexplained red. `collab.spec.ts` remains advisory because
-  # it fails deterministically under load (measured around load average ~130 with
-  # peer suites running), not because retries could absorb a flake. A merge gate
-  # runs precisely when the machine is busy, so blocking on it would redden the
-  # gate for everyone exactly when they are working.
+  # merely to erase an unexplained red. The original load-only rationale was
+  # retracted in ADR 0509's 2026-08-02 correction and disproved for the reproduced
+  # undo failure on 2026-10-27. This comment correction does not change policy.
   #
   # It still EXECUTES, and its outcome is ledgered, so "is collab actually passing?"
   # stays a decidable question rather than quietly rotting. What it is not, is a
   # promise the gate enforces.
   e2e_serial_rc=0
+  # Each Playwright invocation clears its outputDir. Separate sibling paths keep
+  # required failures intact when the advisory pass starts (train 258, ADR 0509).
+  # An interrupted required pass must proceed directly to owned cleanup, not
+  # start another browser while the resource monitor is shutting the gate down.
+  if [ "$e2e_rc" != "130" ] && [ "$e2e_rc" != "143" ]; then
   ( cd "$ROOT/frontend/react" \
       && OPENWOP_E2E_PORT="$E2E_PORT_FE" \
          OPENWOP_DEV_PROXY_TARGET="http://localhost:$E2E_PORT_BE" \
          VITE_OPENWOP_BASE_URL="/api" \
          VITE_OPENWOP_SSE_BASE_URL="http://localhost:$E2E_PORT_BE" \
-         npm run test:e2e:serial ) || e2e_serial_rc=$?
+         npm run test:e2e:serial -- --output=test-results/advisory ) || e2e_serial_rc=$?
+  fi
   if [ "$e2e_serial_rc" != "0" ]; then
     printf '\n\033[33m⚠ advisory: the @serial/@advisory e2e pass (collab, builder-snapshot) FAILED — not failing THIS step.\033[0m\n'
     printf '  Deliberately non-fatal here. It is NOT a promise about the whole gate —\n'
@@ -1300,7 +1440,9 @@ elif [ "$FE_TG_MODE" = enforce ]; then
 fi
 if [ "$FE_TG_MODE" = enforce ] && [ "${#SWEEP_ARGS[@]}" -eq 0 ]; then
   :
-elif ! ( cd "$ROOT/frontend/react" && OPENWOP_CI_CLOCKSHIFT=1 npm run test -- --reporter=default --reporter=json --outputFile="$SWEEP_JSON" ${SWEEP_ARGS[@]+"${SWEEP_ARGS[@]}"} ); then
+elif ! { cw_begin sweep; sweep_rc=0
+         ( cd "$ROOT/frontend/react" && cw_watch && env ${CW_ENV[@]+"${CW_ENV[@]}"} OPENWOP_CI_CLOCKSHIFT=1 npm run test -- --reporter=default --reporter=json --outputFile="$SWEEP_JSON" ${SWEEP_ARGS[@]+"${SWEEP_ARGS[@]}"} ) || sweep_rc=$?
+         cw_end sweep "$sweep_rc"; [ "$sweep_rc" -eq 0 ]; }; then
   sweep_failed="$(node -e '
     const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
     const root = process.argv[2] + "/";

@@ -10,6 +10,11 @@
  * not advertise. Both now read `subWorkflowInputMappingHonoured()`; the legs
  * below parameterise that one fact and assert the advert and the refusal move
  * together in both directions.
+ *
+ * Tracker TST-BFA-8. Red when: the registration refusal or the advert stops
+ * reading `subWorkflowInputMappingHonoured()`; an EMPTY mapping is refused;
+ * dataResidency is advertised with no regions or with duplicates; the
+ * authorization record is projected with enforcement off.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { readdirSync, readFileSync } from 'node:fs';
@@ -25,7 +30,7 @@ import { OpenwopError } from '../src/types.js';
 import { BUILT_IN_ROLE_IDS } from '../src/host/accessControlService.js';
 
 type Rec = Record<string, unknown>;
-const CONFIG = { serviceName: 'test', serviceVersion: '0.0.1' } as unknown as AppConfig;
+const CONFIG: AppConfig = { port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false };
 const V2 = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'schemas', 'v2');
 const doc = (): Rec => buildV2Advertisement(CONFIG) as Rec;
 
@@ -48,7 +53,11 @@ const allOn = (): void => {
   process.env.OPENWOP_AUTHORIZATION_ENFORCEMENT = 'true';
 };
 
-const mappingDef = () => ({
+interface MappingDef {
+  workflowId: string;
+  nodes: Array<{ nodeId: string; typeId: string; config: { workflowId: string; inputMapping: Record<string, string> } }>;
+}
+const mappingDef = (): MappingDef => ({
   workflowId: 'wf.adr0858.subworkflow-mapping',
   nodes: [{ nodeId: 'child', typeId: 'core.subWorkflow', config: { workflowId: 'wf.child', inputMapping: { receivedPrdId: 'currentPrdId' } } }],
 });
@@ -81,7 +90,7 @@ describe('ADR 0858 slice 3 — subWorkflow: the advert and the refusal read ONE 
   it('an EMPTY inputMapping is never refused, whatever the fact', () => {
     setCapabilityOverlay('subWorkflow.inputMapping', false);
     const def = mappingDef();
-    def.nodes[0]!.config.inputMapping = {} as never;
+    def.nodes[0]!.config.inputMapping = {};
     expect(() => validateWorkflowDefinition(def)).not.toThrow();
   });
 });
@@ -120,7 +129,7 @@ describe('ADR 0858 slice 3 — the three operator-gated families', () => {
   it('gates ON: the whole v2 document still validates against the v2 schema', () => {
     allOn();
     const ajv = new Ajv2020({ strict: false, allErrors: true });
-    (addFormats as unknown as (a: unknown) => void)(ajv);
+    addFormats(ajv);
     for (const f of readdirSync(V2)) {
       if (!f.endsWith('.json')) continue;
       try { ajv.addSchema(JSON.parse(readFileSync(join(V2, f), 'utf8')) as Rec, f); } catch { /* sibling's problem */ }

@@ -7,7 +7,7 @@
  * surface once a brief is APPROVED (backend-gated).
  */
 import { Button } from '../../ui/Button.js';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Notice, PageHeader, StateCard, Skeleton } from '../../ui/index.js';
@@ -28,6 +28,8 @@ import {
   type CreativeBrief, type CreativeBriefVersion, type CreativeDirection, type Org,
 } from './creativeBriefsClient.js';
 import { RendersSection } from './RendersSection.js';
+// ADR 0945 Q1 — the client's edit-mode opt-in, only when product-grounded creative is on.
+const GroundingSettingsPanel = lazy(() => import('./GroundingSettingsPanel.js'));
 
 /** A direction row carries a stable client key so a mid-list remove doesn't
  *  steal focus from the wrong input (index keys reorder on splice). */
@@ -42,6 +44,7 @@ function statusChip(status: CreativeBrief['status']): string {
 export function CreativeBriefsPage(): JSX.Element {
   const { t } = useTranslation('creative-briefs');
   const access = useFeatureAccess('creative-briefs');
+  const grounded = useFeatureAccess('creative-briefs.product-grounded');
   const [orgs, setOrgs] = useState<Org[] | null>(null);
   const [orgId, setOrgId] = useState('');
   const [briefs, setBriefs] = useState<CreativeBrief[]>([]);
@@ -165,6 +168,7 @@ export function CreativeBriefsPage(): JSX.Element {
           <Button variant="accent-solid" disabled={!orgId || creating} onClick={() => void createNew()}><PlusIcon size={14} aria-hidden /> {t('newBrief')}</Button>
         </>
       } />
+      {grounded.enabled && orgId ? <Suspense fallback={null}><GroundingSettingsPanel orgId={orgId} /></Suspense> : null}
       {error ? <Notice variant="error">{error}</Notice> : null}
       {deepLinkError ? <Notice variant="error">{deepLinkError}</Notice> : null}
 

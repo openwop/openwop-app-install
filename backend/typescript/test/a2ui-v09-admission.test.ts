@@ -6,11 +6,22 @@
  * driven through the SAME functions the v2 emit seam and the interrupt resolve
  * choke point call. The HTTP legs are witnessed by the corpus scenario
  * `v2-a2ui-v09-surface` on the major-2 conformance lane.
+ *
+ * Tracker TST-BG1-17. Red when (probe-witnessed, wave 58): the acceptor
+ * validates against the union or invents a branch for version 3; the floor stops
+ * refusing above-floor (or below-floor under strict); an absent schemaVersion is
+ * not read as 0; either §A.2 cross-field rule is dropped; the §C.9 fold admits a
+ * second createSurface or a message on a dead surface; taint stops being sticky
+ * or misses an unbound untrusted update; a v0.9 body under a version-1 stamp
+ * skips the fold; a recorded correlationId is re-appended; the per-run
+ * serialisation is removed; the admitted envelope loses its contentTrust; the
+ * v2 advert reachability stops following the seam flag.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { acceptEnvelope } from '../src/host/envelopeAcceptor.js';
 import {
   admitA2uiSurface,
+  a2uiV2AdmissionReachable,
   crossFieldViolation,
   foldGuardViolation,
   nodeHasUntrustedSurface,
@@ -32,6 +43,7 @@ const data = (sid: string): Json => ({ version: 'v0.9', updateDataModel: { surfa
 const del = (sid: string): Json => ({ version: 'v0.9', deleteSurface: { surfaceId: sid } });
 const v2 = (sid: string, messages: Json[]): Json => ({ version: 'v0.9', catalogId: A2UI_V09_CATALOG_ID, surfaceId: sid, messages });
 const V1_BODY = { catalogVersion: '0.9.1', surface: { components: [{ component: 'text', text: 'hi' }] } };
+const FAILED = "payload for kind 'ui.a2ui-surface' failed validation";
 let n = 0;
 function env(schemaVersion: number, payload: unknown, over: Json = {}): Json {
   n += 1;
@@ -41,15 +53,18 @@ function env(schemaVersion: number, payload: unknown, over: Json = {}): Json {
 describe('acceptEnvelope — the schema version selects ONE branch (RFC 0209 §A.1)', () => {
   it('a version-2 body is admitted at version 2 and refused at version 1', () => {
     expect(acceptEnvelope(env(2, v2('s', [create('s')]))).status).toBe('accepted');
-    expect(acceptEnvelope(env(1, v2('s', [create('s')]))).status).toBe('invalid');
+    expect(acceptEnvelope(env(1, v2('s', [create('s')])))).toMatchObject({ status: 'invalid', reason: FAILED });
   });
   it('a version-1 body is admitted at version 1 (and 0) and refused at version 2 — never the union', () => {
     expect(acceptEnvelope(env(1, V1_BODY)).status).toBe('accepted');
     expect(acceptEnvelope(env(0, V1_BODY)).status).toBe('accepted');
-    expect(acceptEnvelope(env(2, V1_BODY)).status).toBe('invalid');
+    expect(acceptEnvelope(env(2, V1_BODY))).toMatchObject({ status: 'invalid', reason: FAILED });
   });
   it('a version with no branch fails closed', () => {
-    expect(acceptEnvelope(env(3, v2('s', [create('s')]))).status).toBe('invalid');
+    expect(acceptEnvelope(env(3, v2('s', [create('s')])))).toMatchObject({
+      status: 'invalid',
+      reason: "payload for kind 'ui.a2ui-surface' has no schema branch for schemaVersion 3",
+    });
   });
   it('the floor is read BEFORE the payload: above it is unknown_schema_version, not a payload failure', () => {
     const r = acceptEnvelope(env(3, v2('s', [create('s')])), { schemaVersionFloor: { 'ui.a2ui-surface': 2 } });
@@ -143,6 +158,9 @@ describe('admission records the envelope; taint is sticky (RFC 0209 §C.11, §C.
     expect(await nodeHasUntrustedSurface(runId, 'gate')).toBe(true);
   });
 
+  // The race is NOT forced (two `Promise.all` admissions), but it is witnessed:
+  // removing the per-run serialisation reds this case (wave 58 `v9-serial`),
+  // because both admissions await the run-log read before either appends.
   it('concurrent admissions for one surface cannot both create it', async () => {
     const runId = `run-race-${Date.now()}`;
     const [a, b] = await Promise.all([
@@ -178,8 +196,7 @@ describe('the envelope catalog edges', () => {
     const r = acceptEnvelope(e, { schemaVersionFloor: { 'ui.a2ui-surface': 2 }, envelopeStrictness: 'strict' });
     expect(r.status === 'invalid' && r.reason.startsWith('unknown_schema_version')).toBe(true);
   });
-  it('the v2 catalog advert is absent where nothing admits the kind', async () => {
-    const { a2uiV2AdmissionReachable } = await import('../src/host/a2uiSurfaceAdmission.js');
+  it('the v2 catalog advert is absent where nothing admits the kind', () => {
     const prior = process.env.OPENWOP_TEST_SEAM_ENABLED;
     try {
       delete process.env.OPENWOP_TEST_SEAM_ENABLED;

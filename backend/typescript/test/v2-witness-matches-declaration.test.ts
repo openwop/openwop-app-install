@@ -4,13 +4,17 @@
  * disagreed (MEASURED 2026-10-03) while every advert-validation test passed,
  * because the schema admits any of the five witness values; only the
  * declaration says which one is TRUE.
+ *
+ * The fix stamps the witness from the declaration at assembly
+ * (`routes/discovery.ts` `stampDeclaredWitness`). Sabotage: 8fw4g1-wt-stamp (stamp a
+ * constant) and 8fw4g1-wt-off (skip the stamp) both turn this red.
  */
 import { describe, expect, it } from 'vitest';
 import { buildV2Advertisement } from '../src/routes/discovery.js';
 import { declaration } from '../src/host/specDeclaration.js';
 import type { AppConfig } from '../src/index.js';
 
-const CONFIG = { serviceName: 'test', serviceVersion: '0.0.1' } as unknown as AppConfig;
+const CONFIG: AppConfig = { port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false };
 
 describe('v2 family witness = the declaration', () => {
   it('every advertised family that the declaration lists carries the declared witness', () => {

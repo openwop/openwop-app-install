@@ -92,6 +92,13 @@ const HOLD_CONSULT: Record<string, Consult> = {
   // itself, so it must never run except under a lane that already asserted.
   [HOSTEXT_PURGE]: { mode: `inherits-from:${ACCOUNT_TEARDOWN}` },
 
+  // ── ADR 0958 P5 — client-org teardown of external collaboration. The ONE
+  // entry checks the hold (`getRetentionHold`, nothing deleted under one); the
+  // seam runner and the portal purge are reached only through it.
+  'features/campaign-ops/erasure.ts#purgeCollaborationForOrg': { mode: 'asserts' },
+  'host/externalCollaborators.ts#purgeCollaboratorsForOrg': { mode: `inherits-from:${'features/campaign-ops/erasure.ts#purgeCollaborationForOrg'}` },
+  'features/campaign-ops/portal.ts#purgePortalForOrg': { mode: `inherits-from:${'features/campaign-ops/erasure.ts#purgeCollaborationForOrg'}` },
+
   // ── the DSAR doors ───────────────────────────────────────────────────────
   'features/consent/consentService.ts#deleteSubject': { mode: 'asserts' },
   [USERS_ERASE]: { mode: 'asserts' },
@@ -114,6 +121,9 @@ const HOLD_CONSULT: Record<string, Consult> = {
   // called was an enumerated primitive — so a lane that deletes boards, schedules, approvals,
   // profiles and notes had been invisible to this census all along. That is the census
   // earning its keep on a lane its author did not anticipate.
+  // ADR 0944 D8 — client off-boarding: `assertNoRetentionHold` is its first statement after
+  // the argument check, before any of the three stores is touched.
+  'features/campaign-ops/clientMemory.ts#purgeClientMemory': { mode: 'asserts' },
   'host/rosterCascade.ts#deleteRosterMemberCascade': {
     mode: 'exempt-unpinned',
     reason: 'GAP: asserts NO retention hold, and neither does its route (`routes/roster.ts:281-289`). Deleting one agent '
@@ -212,6 +222,7 @@ const HOLD_CONSULT: Record<string, Consult> = {
   'host/emailSentLedger.ts#sweepExpiredEmailSent': { mode: 'exempt', reason: 'accepted-send dedupe ledger; no PII fields declared', pin: { kind: 'no-pii-declared', namespaces: ['email:sent'] } },
   'host/canvasSurface.ts#sweepExpiredCanvasIdem': { mode: 'exempt', reason: 'retry-window idempotency rows; no PII fields declared (subject rows go through `eraseSubjectCanvas`)', pin: { kind: 'no-pii-declared', namespaces: ['canvas:idem'] } },
   'host/kanbanService.ts#sweepExpiredKanbanOperationReceipts': { mode: 'asserts' },
+  'features/analytics/replayStore.ts#sweepExpiredReplays': { mode: 'asserts' }, // ADR 0951 D3 — per-row `getRetentionHold` before any recording is deleted
   'host/inMemorySurfaces.ts#sweepExpiredMediaAssets': { mode: 'exempt', reason: '1h TTL of model-facing media bytes; no PII fields declared on `media:bytes`', pin: { kind: 'no-pii-declared', namespaces: ['media:bytes'] } },
   'features/connections/oauthFlow.ts#sweepExpiredPendingAuth': { mode: 'exempt', reason: 'abandoned OAuth state rows (PKCE material); no PII fields declared', pin: { kind: 'no-pii-declared', namespaces: ['connections:pendingAuth'] } },
   'features/analytics/visitorIdentity.ts#sweepExpiredSalts': { mode: 'exempt', reason: 'host-global daily salt rotation — no tenant to hold', pin: { kind: 'host-global-ageout', id: 'analytics:visitor-salt' } },
@@ -264,6 +275,9 @@ const SEAMS: Record<string, string> = {
   // ADR 0664 D1 — the namespace-scoped sibling. The census DERIVES this set from source and
   // refused to let the new seam go uncensused, which is what it is for.
   registerVectorNamespacePurger: 'host/vector/vectorTenantPurge.ts#purgeNamespaceVectors',
+  // ADR 0958 P5 — client-org teardown of external collaboration: features
+  // register the rows that name a collaborator, deleted with its org.
+  registerCollaboratorPurgeHook: 'host/externalCollaborators.ts#purgeCollaboratorsForOrg',
 };
 const SEAM_NAME_RE = /^register\w*(Eraser|Purger|AgeOut|PurgeHook)$/;
 

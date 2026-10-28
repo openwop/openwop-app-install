@@ -71,14 +71,24 @@ describe('RFC 0090 — verifier-gating seam', () => {
   it('emits content-free agent.verified (verifier-no-content-leak)', async () => {
     const body = await (await post({ simulateVerdict: 'pass', task: 'SENSITIVE-PROMPT-12345' })).json() as VerifyResp;
     const verified = (body.events ?? []).find((e) => e.type === 'agent.verified');
+    // The event must EXIST first: `expect(undefined).not.toContain` throws, so a missing
+    // event would go red for the wrong reason (wave 48).
+    expect(verified, 'agent.verified was emitted').toBeDefined();
     expect(JSON.stringify(verified)).not.toContain('SENSITIVE-PROMPT-12345');
     expect(JSON.stringify(verified)).not.toContain('candidate result');
   });
 
   it('404s (soft-skip) when the verifier is not advertised', async () => {
+    const prev = process.env.OPENWOP_AGENT_VERIFIER_GATING;
     delete process.env.OPENWOP_AGENT_VERIFIER_GATING;
-    const res = await post({ simulateVerdict: 'pass' });
-    expect(res.status).toBe(404);
-    process.env.OPENWOP_AGENT_VERIFIER_GATING = 'true'; // restore for any later tests
+    try {
+      const res = await post({ simulateVerdict: 'pass' });
+      expect(res.status).toBe(404);
+      expect(((await res.json()) as { error?: string; message?: string })).toMatchObject({ error: 'not_found', message: expect.stringContaining('verifier gating disabled') });
+    } finally {
+      // Restored in finally so a red here cannot leak into the other cases under shuffle.
+      if (prev === undefined) delete process.env.OPENWOP_AGENT_VERIFIER_GATING;
+      else process.env.OPENWOP_AGENT_VERIFIER_GATING = prev;
+    }
   });
 });

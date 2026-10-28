@@ -4,6 +4,13 @@
  * tenant A's cachePrefixId produces DIFFERENT prefix bytes → Anthropic's
  * content-addressed cache structurally misses (B's first use → cacheReadTokens==0).
  * Same (tenant, cachePrefixId) → identical bytes → a real hit.
+ *
+ * Overlap (noted, both kept, round-2 ruling): the ephemeral-breakpoint and the
+ * absent-system halves are also pinned by `context-economy-caching.test.ts`
+ * › "on → returns a single cache-marked text block" / "absent/empty system".
+ * What breaks this file: dropping `tenant=` from the scope marker, skipping the
+ * marker when a scope is given, wrapping the caching-off string, or dropping the
+ * ephemeral `cache_control` (probes 8fw2g1-pc-*, all witnessed in round 1).
  */
 import { describe, expect, it } from 'vitest';
 import {
@@ -44,8 +51,16 @@ describe('RFC 0116 — cross-tenant prefix isolation', () => {
 
   it('the cached block still carries the ephemeral cache_control breakpoint', () => {
     const out = cacheableAnthropicSystem(SYSTEM, true, { tenant: 't', cachePrefixId: 'X' });
-    expect(Array.isArray(out)).toBe(true);
-    if (Array.isArray(out)) expect(out[out.length - 1]!.cache_control).toEqual({ type: 'ephemeral' });
+    // The exact block: one text block, the literal scope marker + newline + the
+    // system prompt, and the ephemeral breakpoint. Pins the scoped TEXT too, which
+    // the inequality cases above only compare with each other.
+    expect(out).toEqual([
+      {
+        type: 'text',
+        text: `[openwop-cache-scope tenant=t prefix=X]\n${SYSTEM}`,
+        cache_control: { type: 'ephemeral' },
+      },
+    ]);
   });
 
   it('backward-compat: no scope → single cached block (unchanged); caching off → plain string', () => {

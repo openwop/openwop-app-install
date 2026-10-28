@@ -22,6 +22,7 @@ const ACTION_LABEL_KEYS: Record<string, string> = {
   'commerce.ucp-buyer.placed': 'actionViewPurchase',
   'commerce.ucp-buyer.status': 'actionViewPurchase',
   'campaign.pacing':           'actionViewCampaign',
+  'campaign.spend-cap':        'actionViewCampaign', // ADR 0952 D2
   'comment.added':             'actionViewComment',
   'comment.reply':             'actionViewComment',
   'comment.mention':           'actionViewComment',

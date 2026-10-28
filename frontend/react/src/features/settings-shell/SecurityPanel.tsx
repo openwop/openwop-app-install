@@ -7,8 +7,13 @@
  * the session (`GET /users/me/security`). SSO-provisioned accounts (saml/scim)
  * manage MFA at their IdP — this panel says so instead of offering enrollment.
  *
- * QR: v1 ships the base32 secret + copy + `otpauth://` deep link (no QR-encoder
- * dependency — recorded in the ADR); authenticator apps accept manual entry.
+ * QR (ADR 0389 § QR correction, superseded): the `otpauth://` URI is encoded to
+ * a `data:` PNG IN THE BROWSER by the lazily imported `qrcode` package (already a
+ * dependency, CanvasPresentPage) — no QR service, no image URL, no request. The
+ * URI carries the TOTP secret, so the QR lives only in component state beside
+ * it, is never logged or stored, and is dropped on finish, cancel and unmount.
+ * The base32 secret + copy + deep link stay as the manual-entry fallback,
+ * collapsed behind "Can't scan?" unless the QR could not be drawn.
  */
 import { Button } from '../../ui/Button.js';
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -34,6 +39,9 @@ import { loadErrorMessage } from '../../client/loadErrorMessage.js';
 
 interface PendingEnroll { secretKey: string; otpauthUrl: string }
 
+/** `null` while encoding, `'unavailable'` when the QR library failed to load. */
+type EnrollQr = string | 'unavailable' | null;
+
 export function SecurityPanel(): JSX.Element {
   const { t } = useTranslation('settings-shell');
   const [security, setSecurity] = useState<MySecurity | null>(null);
@@ -45,7 +53,29 @@ export function SecurityPanel(): JSX.Element {
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState<PendingEnroll | null>(null);
   const [code, setCode] = useState('');
+  /** The person's own label for this authenticator, so two factors can be told apart. */
+  const [factorName, setFactorName] = useState('');
+  const [qr, setQr] = useState<EnrollQr>(null);
+  /** Bumped on every start/finish/cancel/unmount, so a late QR encode for an
+   *  abandoned enrollment can never repaint its secret. */
+  const qrGeneration = useRef(0);
   const firebaseUser = getCurrentUser();
+
+  const clearQr = (): void => {
+    qrGeneration.current += 1;
+    setQr(null);
+  };
+
+  const encodeQr = async (otpauthUrl: string, generation: number): Promise<void> => {
+    try {
+      const qrcode = await import('qrcode');
+      const dataUrl = await qrcode.toDataURL(otpauthUrl, { margin: 1, width: 200, errorCorrectionLevel: 'M' });
+      if (qrGeneration.current === generation) setQr(dataUrl);
+    } catch {
+      // Say so rather than degrade silently; the manual key below still works.
+      if (qrGeneration.current === generation) setQr('unavailable');
+    }
+  };
 
   const refresh = useCallback(async (): Promise<void> => {
     // UX-SET-1 — on a SECURITY surface a swallowed read is not a cosmetic
@@ -68,15 +98,22 @@ export function SecurityPanel(): JSX.Element {
 
   useEffect(() => {
     void refresh().finally(() => setLoaded(true));
-    // Drop an un-finalized enrollment secret when the panel unmounts.
-    return () => cancelTotpEnrollment();
+    // Drop an un-finalized enrollment secret (and any QR still encoding it)
+    // when the panel unmounts.
+    return () => { qrGeneration.current += 1; cancelTotpEnrollment(); };
   }, [refresh]);
 
   const startEnroll = async (): Promise<void> => {
     setBusy(true); setError(null);
     try {
-      setPending(await startTotpEnrollment());
+      const next = await startTotpEnrollment();
+      clearQr();
+      const generation = qrGeneration.current;
+      setPending(next);
       setCode('');
+      setFactorName('');
+      // Not awaited: a slow encode must never hold the panel busy.
+      void encodeQr(next.otpauthUrl, generation);
     } catch (e) {
       // `auth/operation-not-allowed` = the Firebase project hasn't been upgraded
       // to Identity Platform with TOTP enabled — an operator task, say so.
@@ -89,9 +126,11 @@ export function SecurityPanel(): JSX.Element {
     e.preventDefault();
     setBusy(true); setError(null);
     try {
-      await completeTotpEnrollment(code.trim(), t('mfaFactorDefaultName'));
+      await completeTotpEnrollment(code.trim(), factorName.trim() || t('mfaFactorDefaultName'));
+      clearQr();
       setPending(null);
       setCode('');
+      setFactorName('');
       toast.success(t('mfaEnrolled'));
       await refresh();
       // NIST 800-63B-4 §4.1.2.1 — notify the subscriber on every bind.
@@ -103,8 +142,10 @@ export function SecurityPanel(): JSX.Element {
 
   const cancelEnroll = (): void => {
     cancelTotpEnrollment();
+    clearQr();
     setPending(null);
     setCode('');
+    setFactorName('');
     setError(null);
   };
 
@@ -172,6 +213,7 @@ export function SecurityPanel(): JSX.Element {
   if (!loaded) return <StateCard loading title={t('loading')} />;
 
   const ssoManaged = security?.source === 'saml' || security?.source === 'scim';
+  const hasTotp = factors?.some((f) => f.factorId === 'totp') ?? false;
 
   return (
     <div className="u-grid u-gap-3">
@@ -236,10 +278,11 @@ export function SecurityPanel(): JSX.Element {
           ) : (
             <p className="muted">{t('mfaNoFactors')}</p>
           )}
-          {/* ADR 0389 §3(a) promised "a second enrolled factor is the recovery
-              path — surfaced in copy"; the § Correction makes it real. Identity
-              Platform ships NO second-factor recovery, so a backup authenticator
-              is the only self-service way out of a lost device. */}
+          {/* ADR 0389 § Correction 2026-10-24 — Identity Platform ships NO
+              second-factor recovery AND holds only one TOTP factor per account,
+              so the self-service backup is the same authenticator on a second
+              device, captured at enrollment. Never prompt for a second factor
+              the platform will refuse. */}
           {/* `factors === null` = we don't know the count, so neither the
               "add a backup" prompt nor the "you're covered" reassurance may
               fire — the second would be an outright false assurance. */}
@@ -253,15 +296,37 @@ export function SecurityPanel(): JSX.Element {
           {pending ? (
             <form className="u-grid u-gap-3" onSubmit={(e) => void finishEnroll(e)}>
               <p>{t('mfaEnrollStep1')}</p>
-              <div className="action-bar">
-                {/* Grouped for manual entry (authenticator apps ignore spaces);
-                    the Copy button carries the RAW key. */}
-                <code className="u-break-all">{pending.secretKey.replace(/(.{4})/g, '$1 ').trim()}</code>
-                <Button variant="quiet" onClick={() => void copySecret()}>
-                  {t('mfaCopySecret')}
-                </Button>
-                <a className="btn-ghost" href={pending.otpauthUrl}>{t('mfaOpenAuthenticator')}</a>
-              </div>
+              <Notice variant="info">{t('mfaEnrollBackupTip')}</Notice>
+              {/* The alt names the action, never the secret the image encodes. */}
+              {qr === 'unavailable' ? (
+                <p className="muted">{t('mfaQrUnavailable')}</p>
+              ) : qr ? (
+                <img src={qr} alt={t('mfaQrAlt')} width={200} height={200} />
+              ) : null}
+              {/* The key is collapsed by default: with a QR on screen most people
+                  never need it, and a visible secret is one screenshot away from
+                  leaking. It opens itself when the QR could not be drawn. */}
+              <details open={qr === 'unavailable' || undefined}>
+                <summary>{t('mfaCantScan')}</summary>
+                <p className="muted">{t('mfaManualEntry')}</p>
+                <div className="action-bar">
+                  {/* Grouped for manual entry (authenticator apps ignore spaces);
+                      the Copy button carries the RAW key. */}
+                  <code className="u-break-all">{pending.secretKey.replace(/(.{4})/g, '$1 ').trim()}</code>
+                  <Button variant="quiet" onClick={() => void copySecret()}>
+                    {t('mfaCopySecret')}
+                  </Button>
+                  <a className="btn-ghost" href={pending.otpauthUrl}>{t('mfaOpenAuthenticator')}</a>
+                </div>
+              </details>
+              <TextField
+                label={t('mfaFactorNameLabel')}
+                maxLength={40}
+                placeholder={t('mfaFactorDefaultName')}
+                value={factorName}
+                onChange={(e) => setFactorName(e.target.value)}
+                help={t('mfaFactorNameHelp')}
+              />
               <TextField
                 label={t('mfaVerifyCodeLabel')}
                 required
@@ -281,6 +346,11 @@ export function SecurityPanel(): JSX.Element {
                 </Button>
               </div>
             </form>
+          ) : hasTotp ? (
+            // One TOTP per account: a second "Set up" would only fail with
+            // auth/maximum-second-factor-count-exceeded. With exactly one factor
+            // the backup prompt above already says how to re-enroll.
+            factors?.length === 1 ? null : <p className="muted u-fs-12">{t('mfaTotpLimitHint')}</p>
           ) : (
             <div className="action-bar">
               <Button variant="primary" disabled={busy} aria-busy={busy || undefined} onClick={() => void startEnroll()}>

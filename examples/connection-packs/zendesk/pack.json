@@ -4,7 +4,7 @@
   "kind": "connection",
   "description": "Zendesk connection pack (RFC 0095) — OAuth2 (authorization-code, per-subdomain) provider for the Zendesk Ticketing REST API. ADR 0033 DEPLOY-GATED. Endpoints are per-tenant (https://{subdomain}.zendesk.com/oauth/…), so the pack carries an instanceUrlTemplate and no fixed endpoints — the host resolves them from the connected subdomain (the NetSuite precedent). Reach is `openapi` against Zendesk's documented Ticketing API: no first-party hosted MCP server, so the documented REST surface is the honest day-1 reach (ADR 0033 §4). Zendesk was the top helpdesk absence vs the market-standard app surface in the ADR 0190 template research. Carries NO secret; the operator supplies the OAuth client id/secret host-side (ADR 0024 §7).",
   "license": "Apache-2.0",
-  "engines": { "openwop": ">=1.0.0" },
+  "engines": { "openwop": ">=1.0.0 <3.0.0" },
   "provider": {
     "id": "zendesk",
     "displayName": "Zendesk",

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/feature.crm.nodes/1.11.0/complete-task.output.json",
+  "$id": "https://packs.openwop.dev/feature.crm.nodes/1.15.0/complete-task.output.json",
   "title": "CrmCompleteTaskOutput",
   "description": "The task after the status write (`done`). A refusal at the surface (tenant guard, link validation, cap, tombstone) is a TYPED node failure, never a success with an empty entity.",
   "type": "object",

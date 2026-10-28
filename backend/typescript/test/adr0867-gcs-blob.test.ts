@@ -13,10 +13,16 @@
  *     `{found:false}`;
  *   - the metadata token is fetched once and reused;
  *   - the boot round trip (put/get/list/presign-fetch/delete) passes and cleans up.
+ *
+ * Tracker TST-BFB-3. Red when: the object name drops the tenant root; the TTL
+ * is not clamped; presign of an absent object throws; a 404 delete throws; the
+ * boot check skips its cleanup; the string to sign or the credential scope
+ * changes. The signature is checked against a string to sign built HERE from
+ * literals (the GCS V4 recipe), not by the module's own `gcsV4StringToSign`.
  */
 import { describe, expect, it } from 'vitest';
-import { createPublicKey, generateKeyPairSync, sign, verify } from 'node:crypto';
-import { createGcsBlob, gcsV4StringToSign, verifyGcsBlobBackend, type GcsConfig } from '../src/host/blob/gcsBlob.js';
+import { createHash, createPublicKey, generateKeyPairSync, sign, verify } from 'node:crypto';
+import { createGcsBlob, verifyGcsBlobBackend, type GcsConfig } from '../src/host/blob/gcsBlob.js';
 
 const BUCKET = 'bkt';
 const CFG: GcsConfig = { bucket: BUCKET, keyPrefix: 'p/', presignTtlSeconds: 300, signerEmail: 'svc@proj.iam.gserviceaccount.com' };
@@ -27,18 +33,20 @@ function fakeGcs() {
   const store = new Map<string, { body: Buffer; type: string }>();
   const calls: string[] = [];
   let tokenFetches = 0;
-  const fetchFn = (async (url: string | URL, init: RequestInit = {}) => {
-    const u = new URL(String(url));
+  const headerOf = (init: RequestInit, name: string): string | undefined => new Headers(init.headers).get(name) ?? undefined;
+  const fetchFn: typeof fetch = async (input, init = {}) => {
+    const u = new URL(input instanceof Request ? input.url : String(input));
     const method = (init.method ?? 'GET').toUpperCase();
     calls.push(`${method} ${u.pathname}`);
     if (u.hostname === 'metadata.google.internal') {
       tokenFetches++;
       return new Response(JSON.stringify({ access_token: 'tok', expires_in: 3600 }), { status: 200 });
     }
-    const authed = (init.headers as Record<string, string> | undefined)?.['authorization'] === 'Bearer tok';
+    const authed = headerOf(init, 'authorization') === 'Bearer tok';
     if (u.pathname === `/upload/storage/v1/b/${BUCKET}/o`) {
       expect(authed).toBe(true);
-      store.set(u.searchParams.get('name')!, { body: Buffer.from(init.body as Buffer), type: String((init.headers as Record<string, string>)['content-type']) });
+      if (!(init.body instanceof Uint8Array)) throw new Error('fake GCS: upload body must be bytes');
+      store.set(u.searchParams.get('name')!, { body: Buffer.from(init.body), type: String(headerOf(init, 'content-type')) });
       return new Response('{}', { status: 200 });
     }
     if (u.pathname === `/storage/v1/b/${BUCKET}/o`) {
@@ -69,7 +77,7 @@ function fakeGcs() {
       return obj ? new Response(obj.body, { status: 200 }) : new Response(null, { status: 404 });
     }
     throw new Error(`unexpected ${method} ${u.href}`);
-  }) as unknown as typeof fetch;
+  };
   return { store, calls, fetchFn, tokenFetches: () => tokenFetches };
 }
 
@@ -132,7 +140,17 @@ describe('ADR 0867 — GCS blob: V4 presign', () => {
     expect(u.searchParams.get('X-Goog-Algorithm')).toBe('GOOG4-RSA-SHA256');
     expect(u.searchParams.get('X-Goog-Credential')).toBe('svc@proj.iam.gserviceaccount.com/20261009/auto/storage/goog4_request');
     expect(u.searchParams.get('X-Goog-Expires')).toBe('120');
-    const { stringToSign } = gcsV4StringToSign({ bucket: BUCKET, objectName: 'p/tenants/tenant-a/a b/c!.txt', email: CFG.signerEmail!, now, expiresIn: 120 });
+    // The GCS V4 recipe, written out by hand: canonical request, then string to sign.
+    const canonicalRequest = [
+      'GET',
+      '/bkt/p/tenants/tenant-a/a%20b/c%21.txt',
+      'X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Credential=svc%40proj.iam.gserviceaccount.com%2F20261009%2Fauto%2Fstorage%2Fgoog4_request&X-Goog-Date=20261009T120000Z&X-Goog-Expires=120&X-Goog-SignedHeaders=host',
+      'host:storage.googleapis.com',
+      '',
+      'host',
+      'UNSIGNED-PAYLOAD',
+    ].join('\n');
+    const stringToSign = ['GOOG4-RSA-SHA256', '20261009T120000Z', '20261009/auto/storage/goog4_request', createHash('sha256').update(canonicalRequest).digest('hex')].join('\n');
     const sig = Buffer.from(u.searchParams.get('X-Goog-Signature')!, 'hex');
     expect(verify('RSA-SHA256', Buffer.from(stringToSign), createPublicKey(privateKey), sig)).toBe(true);
     expect(out.expiresInSeconds).toBe(120);

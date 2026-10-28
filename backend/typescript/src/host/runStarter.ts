@@ -19,13 +19,14 @@ import { randomUUID } from 'node:crypto';
 import { OpenwopError } from '../types.js';
 import type { RunRecord } from '../types.js';
 import type { HostAdapterSuite } from './index.js';
-import type { Storage } from '../storage/storage.js';
+import type { InsertRunOptions, Storage } from '../storage/storage.js';
 import { definitionHashOf } from './definitionHash.js';
 import { resolveLaunchWorkflow } from './resolveLaunchDefinition.js';
 import { executeRun } from '../executor/executor.js';
 import { recordRunAttribution } from './agentRunActivityIndex.js';
 import { insertRunWithStartContext } from './runInsert.js';
-import { stripReservedRunMetadata } from './runDispatch.js';
+import { stripReservedRunMetadata, failRunClosedOnDispatchError } from './runDispatch.js';
+import { inheritedRunMetadata } from './inheritedRunMetadata.js';
 import { workflowBudgetExhausted } from './workflowBudgets.js';
 import { reservePlanRun } from './planRunLimit.js';
 import { seedRunVariables } from './variablesRuntime.js';
@@ -57,6 +58,13 @@ export async function startWorkflowRun(
      * executor wakeup. Public HTTP callers continue to use their ledger-backed
      * Idempotency-Key contract instead. */
     runId?: string;
+    /** A host HTTP caller may atomically commit its cached response with the
+     * accepted run/outbox, using the existing ADR 0549 ledger owner. */
+    idempotencyCommit?: InsertRunOptions['idempotencyCommit'];
+    /** Host-only: inherit registered, projected decisions from this same-tenant
+     * run before contributors freeze the new run. The new run stays independent
+     * in the executor; no arbitrary caller metadata or authority is inherited. */
+    inheritFromRunId?: string;
     /** Attribution block stamped onto `run.metadata` (e.g. `{ schedule: {...} }`). */
     metadata?: Record<string, unknown>;
     /** Run-level `configurable` (e.g. the ADR 0024 §4 / Option C
@@ -115,6 +123,14 @@ export async function startWorkflowRun(
     log.warn('run_starter_definition_hash_mismatch', { workflowId: input.workflowId });
     return null;
   }
+  let inherited: Record<string, unknown> = {};
+  if (input.inheritFromRunId !== undefined) {
+    const parent = await storage.getRun(input.inheritFromRunId);
+    if (!parent || parent.tenantId !== input.tenantId) {
+      throw new OpenwopError('not_found', 'The source run for inherited context is unavailable.', 404);
+    }
+    inherited = inheritedRunMetadata(parent.metadata as Record<string, unknown> | undefined);
+  }
   // ADR 0482 §5 — daily hard cap: every starter-driven launch (schedules,
   // triggers, kanban, MCP, CRM, approved proposals) is refused while a
   // hard-capped budget is exhausted. Review H1 — a NULL return here was
@@ -151,6 +167,7 @@ export async function startWorkflowRun(
     // at buildRunRecord; every current startWorkflowRun caller host-composes
     // metadata, but the strip HERE keeps that true for future callers.
     metadata: {
+      ...inherited,
       ...stripReservedRunMetadata(input.metadata),
       launchResolved: wf.launchResolved,
       ...(input.orgScopeSubject ? { orgScopeSubject: input.orgScopeSubject } : {}),
@@ -170,7 +187,7 @@ export async function startWorkflowRun(
   // and the same fix. The definition came from the catalog, so the durable
   // worker can re-resolve it.
   try {
-    await insertRunWithStartContext(storage, run, { definition: wf.definition, enqueueDispatch: true });
+    await insertRunWithStartContext(storage, run, { definition: wf.definition, enqueueDispatch: true, ...(input.idempotencyCommit ? { idempotencyCommit: input.idempotencyCommit } : {}) });
   } catch (err) {
     // ADR 0821 P5 — this run never landed (or a peer's identical run did, which
     // that peer already counted): give the reserved unit back.
@@ -207,11 +224,13 @@ export async function startWorkflowRun(
   // hit an index instead of scanning recent runs. Best-effort — never blocks.
   await recordRunAttribution(storage, run);
   setImmediate(() => {
-    executeRun(storage, run, wf.definition, { policyResolver: hostSuite.providerPolicyResolver }).catch((err) => {
-      log.error('run_starter_dispatch_failed', {
-        runId,
-        error: err instanceof Error ? err.message : String(err),
-      });
+    executeRun(storage, run, wf.definition, { policyResolver: hostSuite.providerPolicyResolver }).catch(async (err) => {
+      const message = err instanceof Error ? err.message : String(err);
+      log.error('run_starter_dispatch_failed', { runId, error: message });
+      // ADR 0975 D10 — fail the run closed, as `POST /runs`' dispatcher does.
+      // Logging alone left both kicktodo.com Factory runs `running` forever
+      // (2026-10-27): the creator saw a run that would never move or fail.
+      await failRunClosedOnDispatchError(storage, runId, message);
     });
   });
   return runId;

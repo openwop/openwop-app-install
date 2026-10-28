@@ -29,10 +29,9 @@ export const messages = {
   removeMemory: 'Supprimer la mémoire',
   // MemoryInspectorPage — header
   eyebrow: 'Mémoire',
-  inspectorTitle: 'Inspecteur de mémoire',
-  inspectorLedePrefix:
-    "Parcourez le registre de mémoire du locataire. Les entrées sont écrites en interne par l’hôte — l’exécuteur écrit un résumé de l’exécution à la fin. Les lectures et les suppressions sont limitées à vos identifiants côté serveur ; l’inspecteur ne peut pas voir la mémoire d’un autre locataire.",
-  inspectorLedeShowing: 'Affichage',
+  inspectorTitle: 'Résumés d’exécution',
+  inspectorLede: 'De courts résumés écrits à la fin d’une exécution de workflow, ainsi que les notes enregistrées par une étape du workflow. Les agents ne lisent pas cette liste : les souvenirs d’un agent se trouvent dans son onglet Mémoire.',
+  inspectorOwnRunsOnly: 'Vous voyez les exécutions que vous avez lancées ; les administrateurs de l’espace de travail les voient toutes.',
   // MemoryInspectorPage — redaction
   redactedBadge: 'expurgée',
   redactedTitle: 'Contient du contenu secret expurgé par l’hôte (SR-1)',
@@ -72,11 +71,11 @@ export const messages = {
   emptyNoEntriesTitle: 'Aucune entrée de mémoire pour l’instant',
   emptyNoMatchBody: 'Aucune entrée ne correspond à la recherche ou au filtre par étiquette actuels. Effacez les filtres pour voir l’intégralité du registre.',
   clearFilters: 'Effacer les filtres',
-  emptyNoEntriesBody: 'Les entrées sont écrites en interne par l’hôte — l’exécuteur écrit un résumé de l’exécution à la fin. Lancez un workflow pour alimenter le registre.',
+  emptyNoEntriesBody: 'Un résumé apparaît ici à la fin d’une exécution de workflow. Les exécutions qui ont utilisé un résultat de démonstration ou fictif n’en écrivent pas.',
   // memoryClient — errors
   getEntryError: 'getMemoryEntry a renvoyé {{status}}',
   deleteEntryRequestError: 'deleteMemoryEntry a renvoyé {{status}}',
-  removeMemoryConfirmBody: 'Supprimer cette mémoire ? L’agent ne s’en souviendra plus.',
+  removeMemoryConfirmBody: 'Supprimer cette mémoire ? Elle ne sera plus rappelée.',
   storedUnknown: "Mémoires enregistrées : inconnu",
   loadFailedTitle: "Impossible de charger ces mémoires",
   loadFailedBody: "C’est une lecture en échec, pas une mémoire vide : ce qui est enregistré est toujours là.",

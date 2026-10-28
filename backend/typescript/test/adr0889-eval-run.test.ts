@@ -3,8 +3,14 @@
  * RFC 0244). A real app, a real `POST /runs {mode:"eval"}`, the real live-dispatch
  * lane driven by the scripted `tool-calls` mock (no provider key), a real event
  * log and the normative `GET /runs/{id}/eval-summary`.
+ *
+ * Tracker TST-BHG-3. Red when (sabotage-witnessed, wave 62): the fork route stops
+ * refusing an eval run; a locked suite version can be overwritten; an unadvertised
+ * `trials.count` is accepted; a missing `evalSuiteRef` is accepted; or a fixture miss
+ * on the live-dispatch lane (`agentEvalRun.ts`, the `failClosed` check) stops failing
+ * the task. Each case seeds its own suite (no case depends on another's run).
  */
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import { createApp } from '../src/index.js';
@@ -50,13 +56,37 @@ async function putSuite(suite: Record<string, unknown>): Promise<void> {
 }
 
 async function waitTerminal(runId: string): Promise<string> {
-  for (let i = 0; i < 200; i += 1) {
+  return vi.waitFor(async () => {
     const r = await send('GET', `/runs/${runId}`, V2);
     const status = String((r.json as { status?: string }).status ?? '');
-    if (['completed', 'failed', 'cancelled'].includes(status)) return status;
-    await new Promise((res) => setTimeout(res, 25));
-  }
-  throw new Error(`run ${runId} never settled`);
+    expect(['completed', 'failed', 'cancelled']).toContain(status);
+    return status;
+  }, { timeout: 10_000, interval: 25 });
+}
+
+/** A one-task golden suite of this case's own, PUT fresh (no shared state across cases). */
+async function goldenSuite(suiteId: string): Promise<string> {
+  await putSuite({
+    suiteId, version: '1.0.0', modes: ['golden'], thresholds: { passScore: 1 },
+    tasks: [{
+      taskId: 'lookup', input: { q: 'hi' },
+      expected: { kind: 'golden', match: { strategy: 'contains', value: 'done' } },
+      fixtures: { toolResponses: [{ tool: TOOL, response: { ok: true } }] },
+    }],
+  });
+  return `${suiteId}@1.0.0`;
+}
+
+/** Run a golden suite to a terminal status; returns the run id. */
+async function runGolden(ref: string): Promise<string> {
+  const c = await send('POST', '/runs', V2, {
+    mode: 'eval', evalSuiteRef: ref, agentId: AGENT,
+    configurable: { mockProvider: { id: 'tool-calls', rounds: { lookup: rounds('all done', { kind: 'node' }) } } },
+  });
+  expect(c.status, c.text.slice(0, 300)).toBe(201);
+  const runId = String(c.json['runId']);
+  expect(await waitTerminal(runId)).toBe('completed');
+  return runId;
 }
 
 async function events(runId: string): Promise<Array<{ type: string; payload: Record<string, unknown> }>> {
@@ -169,22 +199,31 @@ describe('ADR 0889 — mode:"eval" end to end', () => {
   });
 
   it('refuses missing fields, unknown suites and the scripted mock on a production posture', async () => {
+    const ref = await goldenSuite('test.acme.evals.refusals');
     const noRef = await send('POST', '/runs', V2, { mode: 'eval', agentId: AGENT });
     expect(noRef.status).toBe(400);
     expect((noRef.json['details'] as Record<string, unknown>)['field']).toBe('evalSuiteRef');
     const unknown = await send('POST', '/runs', V2, { mode: 'eval', evalSuiteRef: 'test.acme.evals.nope@1.0.0', agentId: AGENT });
     expect(unknown.status).toBe(404);
-    const noAgent = await send('POST', '/runs', V2, { mode: 'eval', evalSuiteRef: 'test.acme.evals.golden@1.0.0', agentId: 'not.an.agent' });
+    const noAgent = await send('POST', '/runs', V2, { mode: 'eval', evalSuiteRef: ref, agentId: 'not.an.agent' });
     expect(noAgent.status).toBe(404);
+    // Production posture: the scripted mock is a test-host affordance only.
+    const saved = process.env.OPENWOP_MOCK_PROVIDER_ENABLED;
+    process.env.OPENWOP_MOCK_PROVIDER_ENABLED = 'false';
+    try {
+      const mocked = await send('POST', '/runs', V2, {
+        mode: 'eval', evalSuiteRef: ref, agentId: AGENT,
+        configurable: { mockProvider: { id: 'tool-calls', rounds: { lookup: rounds('all done', { kind: 'node' }) } } },
+      });
+      expect(mocked.status, mocked.text.slice(0, 300)).toBe(403);
+      expect((mocked.json['details'] as Record<string, unknown>)['field']).toBe('configurable.mockProvider');
+    } finally {
+      if (saved === undefined) delete process.env.OPENWOP_MOCK_PROVIDER_ENABLED; else process.env.OPENWOP_MOCK_PROVIDER_ENABLED = saved;
+    }
   });
 
   it('A2 — an eval run cannot be forked; A5 — a non-eval run has no eval-summary', async () => {
-    const c = await send('POST', '/runs', V2, {
-      mode: 'eval', evalSuiteRef: 'test.acme.evals.golden@1.0.0', agentId: AGENT,
-      configurable: { mockProvider: { id: 'tool-calls', rounds: { lookup: rounds('all done', { kind: 'node' }) } } },
-    });
-    const runId = String(c.json['runId']);
-    await waitTerminal(runId);
+    const runId = await runGolden(await goldenSuite('test.acme.evals.fork'));
     const fork = await send('POST', `/runs/${runId}:fork`, V2, { mode: 'replay', fromSeq: 0 });
     expect(fork.status, fork.text.slice(0, 200)).toBe(409);
     expect((fork.json['details'] as Record<string, unknown>)['reason']).toBe('eval_run_not_forkable');
@@ -196,10 +235,15 @@ describe('ADR 0889 — mode:"eval" end to end', () => {
   });
 
   it('a referenced suite version is immutable', async () => {
-    const r = await send('PUT', '/host/openwop-app/agent-evals/suites/test.acme.evals.golden@1.0.0', V2, {
-      suiteId: 'test.acme.evals.golden', version: '1.0.0', modes: ['golden'],
+    // Positive control: before any run references it, the version can be re-PUT.
+    const ref = await goldenSuite('test.acme.evals.locked');
+    await goldenSuite('test.acme.evals.locked');
+    await runGolden(ref);
+    const r = await send('PUT', '/host/openwop-app/agent-evals/suites/test.acme.evals.locked@1.0.0', V2, {
+      suiteId: 'test.acme.evals.locked', version: '1.0.0', modes: ['golden'],
       tasks: [{ taskId: 'lookup', input: {}, expected: { kind: 'golden', match: { strategy: 'exact', value: 'changed' } } }],
     });
-    expect(r.status).toBe(409);
+    expect(r.status, r.text.slice(0, 300)).toBe(409);
+    expect((r.json['details'] as Record<string, unknown>)['reason']).toBe('suite_locked');
   });
 });

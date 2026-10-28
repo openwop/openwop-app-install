@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.crm.nodes/1.15.0/routing-result.input.json",
+  "title": "CrmRoutingResultInput",
+  "type": "object",
+  "required": [
+    "route"
+  ],
+  "properties": {
+    "route": {
+      "type": "object"
+    },
+    "lifecycle": {}
+  },
+  "additionalProperties": false
+}

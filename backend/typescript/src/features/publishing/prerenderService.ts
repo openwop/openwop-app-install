@@ -36,6 +36,15 @@ const BOT_UA_TOKENS = [
   'discordbot', 'whatsapp', 'telegrambot', 'pinterest', 'redditbot', 'applebot',
   // search engines (document parity with the sitemap they crawl)
   'googlebot', 'bingbot', 'duckduckbot', 'yandexbot', 'baiduspider',
+  // Googlebot AS CLOUD RUN SEES IT behind Firebase Hosting (#5227). The Hosting
+  // rewrite replaces the `Googlebot` token with `Google-Firebase` before it
+  // forwards the request — `(compatible; Googlebot/2.1; +http://www.google.com/bot.html)`
+  // arrives as `(compatible; Google-Firebase/2.1; …)`, desktop and smartphone
+  // alike (MEASURED 2026-10-25 in the myndhyve-prod request logs). Without this
+  // token every Google crawl of a Hosting-fronted deploy got the bare SPA shell,
+  // so the public pages were unindexed while bingbot/GPTBot (passed through
+  // unchanged) got the prerender.
+  'google-firebase',
   // AI crawlers
   'gptbot', 'chatgpt-user', 'oai-searchbot', 'claudebot', 'claude-user',
   'anthropic-ai', 'perplexitybot', 'perplexity-user', 'google-extended',

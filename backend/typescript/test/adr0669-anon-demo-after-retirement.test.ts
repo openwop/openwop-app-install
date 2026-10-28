@@ -15,6 +15,11 @@ import { createApp } from '../src/index.js';
  * Measured 2026-09-30 before this file existed: it still mints on both sides of
  * the cut. This pins the retired side; the pre-cut control went with major 1
  * (ADR 0812 P3c). The 401 leg keeps the mint from passing vacuously.
+ *
+ * Tracker TST-BG3-25. Red when the auth middleware's no-credential refusal stops being
+ * scoped to protocol requests (`/users/me` then gets the 401 and no cookie), the
+ * refusal is skipped (a credential-less v2 read is no longer the ADR 0750 401), or
+ * the anonymous mint stops setting the session cookie.
  */
 let server: Server;
 let base = '';
@@ -34,24 +39,28 @@ const V2 = { 'OpenWOP-Version': '2.0', accept: 'application/json' };
 
 /** The demo visitor's first two calls: the SPA's `/me` bootstrap, then a v2 read. */
 async function firstVisit() {
-  {
-    const me = await fetch(`${base}/host/openwop-app/users/me`);
-    const cookie = (me.headers.get('set-cookie') ?? '').split(';')[0];
-    const withSession = await fetch(`${base}/runs`, { headers: { ...V2, cookie } });
-    const withoutSession = await fetch(`${base}/runs`, { headers: V2 });
-    return { cookie, withSession: withSession.status, withoutSession: withoutSession.status };
-  }
+  const me = await fetch(`${base}/host/openwop-app/users/me`);
+  const cookie = (me.headers.get('set-cookie') ?? '').split(';')[0] ?? '';
+  const withSession = await fetch(`${base}/runs`, { headers: { ...V2, cookie } });
+  const withoutSession = await fetch(`${base}/runs`, { headers: V2 });
+  return {
+    cookie,
+    withSession: withSession.status,
+    withoutSession: withoutSession.status,
+    refusal: (await withoutSession.json().catch(() => ({}))) as { error?: string; message?: string },
+    challenge: withoutSession.headers.get('www-authenticate') ?? '',
+  };
 }
 
 describe('ADR 0669 — the anonymous demo visitor survives the cut', () => {
-  {
-    const side = 'RETIRED';
-    it(`${side}: the credential-less /users/me bootstrap mints a session, and a v2 read with it succeeds`, async () => {
-      const r = await firstVisit();
-      expect(r.cookie, `${side}: /users/me must set the session cookie`).toMatch(/^__session=/);
-      expect(r.withSession, `${side}: a v2 read carrying the minted session`).toBe(200);
-      // The refusal the bootstrap exists to recover from, still in force (ADR 0750).
-      expect(r.withoutSession, `${side}: a v2 read with no credential at all`).toBe(401);
-    });
-  }
+  it('RETIRED: the credential-less /users/me bootstrap mints a session, and a v2 read with it succeeds', async () => {
+    const r = await firstVisit();
+    expect(r.cookie, '/users/me must set the session cookie').toMatch(/^__session=/);
+    expect(r.withSession, 'a v2 read carrying the minted session').toBe(200);
+    // The refusal the bootstrap exists to recover from, still in force (ADR 0750) —
+    // the no-credential 401 itself, not a bearer or expired-session 401.
+    expect(r.withoutSession, 'a v2 read with no credential at all').toBe(401);
+    expect(r.refusal.message).toBe('No credential presented. Authenticate, or establish a session first.');
+    expect(r.challenge).toMatch(/^Bearer/);
+  });
 });

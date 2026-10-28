@@ -483,7 +483,6 @@ const ACTOR_ATTRIBUTED_DEBT = new Map<string, string>([
   //    in the same batch, which is the one thing the ceiling exists to stop.
   //    Covered instead by `eraseKnowledgeSyncSubject` (ADR 0605 R2, `KSC-21`) —
   //    asserted below, decisions and residuals argued at the function itself.
-  ['prompts:entry', 'A shared prompt-library entry authored by a member; org content.'],
   ['reco:placement', 'A recommendations placement — org storefront config authored by a member.'],
   // ── FOUND BY the CONS-7 cross-file type resolution (mechanism 6). Every one of
   //    these declares `createdBy: string` in a sibling `types.ts`, imported into
@@ -501,7 +500,6 @@ const ACTOR_ATTRIBUTED_DEBT = new Map<string, string>([
   ['bi:metric', 'FOUND BY the CONS-7 cross-file widening. `MetricDef.createdBy` (bi/metricTypes.ts). A metric DEFINITION is org analytics config that dashboards and scheduled reports resolve by id; deleting it on erasure would break every consumer. Re-attribute, which needs the bi owner to choose a target.'],
   ['campaign-brief:brief', 'FOUND BY the CONS-7 cross-file widening. `CampaignBrief.createdBy` (campaign-brief/types.ts). Org marketing collateral — the same shape as the `campaign-brief:*` artifacts already on this list, which is itself the tell that the family was only PARTLY visible before.'],
   ['campaign-brief:persona', 'FOUND BY the CONS-7 cross-file widening. `Persona.createdBy` (campaign-brief/types.ts). An audience persona is org marketing config, not a person\'s own data (the persona DESCRIBES a market segment). Re-attribute.'],
-  ['campaign-orchestration:campaign', 'FOUND BY the CONS-7 cross-file widening. `MarketingCampaign.createdBy` (campaign-orchestration/types.ts). A live campaign is org marketing state with sends, versions and journey enrollments hanging off it. Delete would be destructive well beyond the erased person; re-attribution needs the campaign-orchestration owner.'],
   ['creative-briefs:brief', 'FOUND BY the CONS-7 cross-file widening. `CreativeBrief.createdBy` (creative-briefs/types.ts). Same shape as campaign-brief: org creative collateral authored by a member.'],
 ]);
 
@@ -606,8 +604,23 @@ const ACTOR_ATTRIBUTED_DEBT = new Map<string, string>([
  *  note, with the tombstone as the target) and also scrubs `allowedEditors`, the
  *  audit actor and a font's `attestedBy`, which this matcher cannot see. Module-level
  *  coverage cannot witness those fields, so `test/adr0891-brand-probes.test.ts`
- *  BR2-S5 asserts each one. Ledger 20, ceiling 20. */
-const ACTOR_DEBT_CEILING = 20;
+ *  BR2-S5 asserts each one. Ledger 20, ceiling 20.
+ *
+ *  ADR 0946 P0 (2026-10-20): `campaign-orchestration:campaign` leaves this ledger
+ *  because `features/campaign-orchestration/variants/erasure.ts` registers
+ *  `eraseCampaignVariantSetSubject`, which tombstones `createdBy` on campaigns
+ *  (kept as org state) as well as on the new variant-set version rows.
+ *  `test/adr0946-variant-sets.test.ts` § "subject erasure" witnesses both.
+ *  Ledger 19, ceiling 19.
+ *
+ *  ADR 0993 D6 (2026-10-27, feature loop row 61): `prompts:entry` leaves this
+ *  ledger. Its entry called it "org content", which was half true: a PRIVATE
+ *  entry is the subject's own data. `eraseSubjectPromptEntries` (registered from
+ *  `features/prompts/feature.ts`) deletes the subject's private entries with their
+ *  body versions and share links, and tombstones `createdBy`/`updatedBy` on the
+ *  rest. `test/adr0993-prompt-library-probes.test.ts` D6 witnesses both arms and
+ *  the doubled `user:user:` spelling. Ledger 18, ceiling 18. */
+const ACTOR_DEBT_CEILING = 18;
 
 /** NO-GROWTH: debt may only shrink. Raising this is a deliberate, reviewable act.
  *  RAISED 4→5 (2026-08-15, the R3 subjectId widening): the WIDENED matcher found
@@ -898,20 +911,24 @@ const CROSS_FILE_TYPE_INDEX: ReadonlyMap<string, string> = (() => {
   return out;
 })();
 
-function resolveTypeBody(src: string, typeParam: string): string {
+function resolveTypeBody(src: string, typeParam: string, seen = new Set<string>()): string {
   const raw = typeParam.trim();
-  if (!raw) return '';
+  if (!raw || seen.has(raw)) return '';
+  seen = new Set([...seen, raw]);
   // An inline object literal IS its own body.
   if (/^\{[\s\S]*\}$/.test(raw)) return raw;
-  // An intersection: resolve each member and concatenate.
-  if (raw.includes('&')) {
+  // A union can keep live rows beside retired markers. Every object member
+  // still belongs in the erasure denominator; a string-literal union does not.
+  if (raw.includes('&') || raw.includes('|')) {
     let out = '';
-    for (const part of raw.split('&')) out += resolveTypeBody(src, part);
+    for (const part of raw.split(/[&|]/)) out += resolveTypeBody(src, part, seen);
     return out;
   }
   const local = typeBodyIn(src, raw);
-  if (local) return local; // same-file wins — it is what this call site refers to
-  return CROSS_FILE_TYPE_INDEX.get(raw.replace(/<.*$/, '').trim()) ?? '';
+  const resolved = local || CROSS_FILE_TYPE_INDEX.get(raw.replace(/<.*$/, '').trim()) || '';
+  // Named aliases may refer to types imported from a sibling types.ts.
+  return /^[A-Za-z_]\w*(?:\s*[|&]\s*[A-Za-z_]\w*)*$/.test(resolved)
+    ? resolveTypeBody(src, resolved, seen) : resolved;
 }
 
 /** The `{...}` body of `interface Name {` / `type Name = {` within one file. */
@@ -920,6 +937,8 @@ function typeBodyIn(src: string, typeName: string): string {
   if (!/^[A-Za-z_]\w*$/.test(bare)) return '';
   const decl = new RegExp(`\\b(?:interface|type)\\s+${bare}\\b`).exec(src);
   if (!decl) return '';
+  const alias = new RegExp(`^type\\s+${bare}\\s*=\\s*([A-Za-z_]\\w*(?:\\s*[|&]\\s*[A-Za-z_]\\w*)*)\\s*;`).exec(src.slice(decl.index));
+  if (alias) return alias[1]!;
   const open = src.indexOf('{', decl.index);
   if (open < 0) return '';
   // CONS-7 — the `{` must belong to THIS declaration.
@@ -1498,6 +1517,9 @@ describe('ADR 0464 — feature-owned subject-bearing stores', () => {
       'commerce-connect:dispute', 'commerce-connect:fee-config', 'commerce-connect:order',
       'commerce-connect:order-by-intent', 'commerce-connect:order-by-seller',
       'commerce-connect:payout', 'commerce-connect:seller',
+      // ADR 0948 P0b — a client org's own seller: the same financial record as
+      // `commerce-connect:seller`, tenant-indexed and reclaimed by tenant teardown.
+      'commerce-connect:client-seller',
       'commerce-connect:seller-by-account', 'commerce-connect:webhook-event',
     ];
     const unexpectedlyVisible = STILL_INVISIBLE.filter((ns) => stores.has(ns));
@@ -1505,7 +1527,7 @@ describe('ADR 0464 — feature-owned subject-bearing stores', () => {
       unexpectedlyVisible,
       'A store here became visible to the gate. That is GOOD — classify it in a ledger and remove it from this list.',
     ).toEqual([]);
-    // Non-vacuity: the list is not simply nine names that never existed. Every one
+    // Non-vacuity: the list is not simply ten names that never existed. Every one
     // of them IS a declared namespace in the feature, just not an enumerated one.
     const declared = readFileSync(join(FEATURES_ROOT, 'commerce-connect', 'stores.ts'), 'utf8');
     for (const ns of STILL_INVISIBLE) {

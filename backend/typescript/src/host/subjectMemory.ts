@@ -26,17 +26,17 @@
  * @see docs/adr/0038-per-agent-knowledge-memory.md
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { AgentMemoryPort } from './agentDispatch.js';
 import { MEMORY_UNTRUSTED_TAG } from './agentDispatch.js';
 import { hasLegacyAutoExtractedPrefix, isUntrustedMemoryRow } from './memoryTrust.js';
-import { writeMemoryEntry, listMemoryEntries, removeMemoryEntry, clearMemoryScope, buildHostSurfaceBundle } from './inMemorySurfaces.js';
+import { writeMemoryEntry, listMemoryEntries, getMemoryEntry, removeMemoryEntry, clearMemoryScope, buildHostSurfaceBundle } from './inMemorySurfaces.js';
 import { embedText, effectiveEmbedDims } from '../aiProviders/localEmbedding.js';
 import { scrubSecretShaped } from './redactSecrets.js';
 import { DurableCollection } from './hostExtPersistence.js';
 import { type Subject, subjectScope, personSubject } from './subject.js';
 import { registerSubjectEraser } from './subjectErasure.js';
-import { subjectKeyForms } from './subjectErasureRedaction.js';
+import { subjectKeyForms, ERASED_USER_REF } from './subjectErasureRedaction.js';
 import { purgeNamespaceVectors } from './vector/vectorTenantPurge.js';
 import { createLogger } from '../observability/logger.js';
 import { OpenwopError } from '../types.js';
@@ -95,7 +95,7 @@ async function persistAndIndex(
   tenantId: string,
   vector: VectorSurface,
   scope: string,
-  opts: { content: string; tags: string[]; id?: string; createdAt?: string },
+  opts: { content: string; tags: string[]; id?: string; createdAt?: string; ttlSeconds?: number },
 ): Promise<{ id: string; content: string; createdAt: string }> {
   // SR-1 (RFC 0004): scrub secret-shaped tokens BEFORE the durable write + the
   // embed — a turn summary or curated note may echo a credential the turn handled.
@@ -106,6 +106,9 @@ async function persistAndIndex(
     tags: opts.tags,
     ...(opts.id ? { id: opts.id } : {}),
     ...(opts.createdAt ? { createdAt: opts.createdAt } : {}),
+    ...(opts.ttlSeconds ? { ttlSeconds: opts.ttlSeconds } : {}),
+    // ADR 0944 D4 — a curated note is never pushed out of recall by summaries.
+    evictionProtectedTag: NOTE_TAG,
   });
   // Index for RAG recall — best-effort; a vector-store failure never loses the
   // write above. Mirror content-trust onto the vector metadata so the RAG read
@@ -145,11 +148,11 @@ export function createSubjectMemoryPort(tenantId: string): AgentMemoryPort {
   // Built once per port; underlying state is process-global so writes persist.
   const vector = buildHostSurfaceBundle({ tenantId }).db.vector;
 
-  const recency = async (scope: string): Promise<Array<{ content: string; contentTrust: 'trusted' | 'untrusted' }>> =>
-    (await listMemoryEntries(tenantId, scope)).map((e) => ({ content: e.content, contentTrust: trustOf(e.tags, e.content) }));
+  const recency = async (scope: string): Promise<Array<{ content: string; contentTrust: 'trusted' | 'untrusted'; id: string }>> =>
+    (await listMemoryEntries(tenantId, scope)).map((e) => ({ content: e.content, contentTrust: trustOf(e.tags, e.content), id: e.id }));
 
   return {
-    async read(scope: string, query?: string): Promise<ReadonlyArray<{ content: string; contentTrust?: 'trusted' | 'untrusted' }>> {
+    async read(scope: string, query?: string): Promise<ReadonlyArray<{ content: string; contentTrust?: 'trusted' | 'untrusted'; id?: string }>> {
       // RAG path: rank by embedding cosine similarity. Embed at the SAME dimension
       // used on write (effectiveEmbedDims()) so cosine is valid.
       if (query && query.trim().length > 0) {
@@ -159,17 +162,31 @@ export function createSubjectMemoryPort(tenantId: string): AgentMemoryPort {
             vector: embedText(query, effectiveEmbedDims()),
             topK: RAG_TOP_K,
           });
-          const matches = (res.matches ?? []) as Array<{ metadata?: { content?: unknown; contentTrust?: unknown } }>;
-          const ranked = matches
-            .map((m) => m.metadata)
-            .filter((md): md is { content: string; contentTrust?: unknown } => typeof md?.content === 'string')
+          const matches = (res.matches ?? []) as Array<{ id?: unknown; metadata?: { content?: unknown; contentTrust?: unknown } }>;
+          let ranked = matches
+            .filter((m): m is { id?: unknown; metadata: { content: string; contentTrust?: unknown } } => typeof m.metadata?.content === 'string')
             // Legacy vector rows (written before AGMEM-2) carry `contentTrust:'trusted'`
             // metadata for auto-extracted facts, so the prefix check applies here too.
-            .map((md) => ({
-              content: md.content,
+            .map((m) => ({
+              content: m.metadata.content,
               contentTrust:
-                md.contentTrust === 'untrusted' || hasLegacyAutoExtractedPrefix(md.content) ? ('untrusted' as const) : ('trusted' as const),
+                m.metadata.contentTrust === 'untrusted' || hasLegacyAutoExtractedPrefix(m.metadata.content) ? ('untrusted' as const) : ('trusted' as const),
+              // ADR 0944 D6 — the row id a read receipt records (shared with the memory row).
+              ...(typeof m.id === 'string' ? { id: m.id } : {}),
             }));
+          if (scope.startsWith('org:')) {
+            // ADR 0944 D8 — the vector index can outlive a client summary's TTL
+            // or a failed delete. The tenant-scoped row is the current authority
+            // for existence, expiry, text and trust; stale vector metadata cannot
+            // restore a summary or a removed note. At most RAG_TOP_K reads.
+            const current: typeof ranked = [];
+            for (const hit of ranked) {
+              if (!hit.id) continue;
+              const row = await getMemoryEntry(tenantId, scope, hit.id);
+              if (row) current.push({ id: row.id, content: row.content, contentTrust: trustOf(row.tags, row.content) });
+            }
+            ranked = current;
+          }
           if (ranked.length > 0) return ranked;
           // Vector store empty for this scope (e.g. entries seeded pre-A5) → recency.
         } catch {
@@ -179,7 +196,12 @@ export function createSubjectMemoryPort(tenantId: string): AgentMemoryPort {
       return recency(scope);
     },
     async write(scope: string, entry: { content: string; tags?: string[]; id?: string }): Promise<void> {
-      await persistAndIndex(tenantId, vector, scope, { content: entry.content, tags: entry.tags ?? [], ...(entry.id ? { id: entry.id } : {}) });
+      const tags = entry.tags ?? [];
+      // ADR 0944 D8 — an untrusted turn summary in a SHARED client scope expires
+      // (free text can name a person; the TTL bounds that residual). Notes never do.
+      const ttlSeconds = scope.startsWith('org:') && tags.includes(MEMORY_UNTRUSTED_TAG) && !tags.includes(NOTE_TAG)
+        ? CLIENT_SUMMARY_TTL_DAYS * 86_400 : undefined;
+      await persistAndIndex(tenantId, vector, scope, { content: entry.content, tags, ...(entry.id ? { id: entry.id } : {}), ...(ttlSeconds ? { ttlSeconds } : {}) });
     },
   };
 }
@@ -219,6 +241,10 @@ export interface SubjectNote {
   /** Provenance. Absent on rows written before ADR 0587 ⇒ projected as `'user'`,
    *  except legacy `[auto-extracted] `-prefixed rows (see the prefix docblock). */
   source: SubjectNoteSource;
+  /** ADR 0944 D4 — the person who wrote (or approved) a note in a SHARED scope
+   *  (`org:<orgId>`), where "who said this" is not the scope's owner. Tombstoned
+   *  to `ERASED_USER_REF` on that person's DSAR; the shared note stays. */
+  authoredBy?: string;
   createdAt: string;
 }
 
@@ -247,8 +273,17 @@ interface DurableNote {
   contentTrust: 'trusted' | 'untrusted';
   /** ADR 0587 — provenance as data. Optional for rows written before it landed. */
   source?: SubjectNoteSource;
+  /** ADR 0944 D4 — see `SubjectNote.authoredBy`. */
+  authoredBy?: string;
+  /** ADR 0944 D8 / M4 — set on a client (`org:`) note so `deleteOrg` sees the
+   *  client's memory and refuses rather than orphaning it. */
+  orgId?: string;
   createdAt: string;
 }
+
+/** ADR 0944 D8 (Q2, recommended default) — untrusted turn summaries in a client's
+ *  shared `org:` memory expire after this many days. */
+export const CLIENT_SUMMARY_TTL_DAYS = 180;
 
 const notesStore = new DurableCollection<DurableNote>('subject-memory:note', (r) => r.key);
 
@@ -261,10 +296,48 @@ function projectNote(r: DurableNote): SubjectNote {
     content: r.content,
     contentTrust: legacy ? 'untrusted' : r.contentTrust,
     source: r.source ?? (legacy ? 'auto-extract' : 'user'),
+    ...(r.authoredBy ? { authoredBy: r.authoredBy } : {}),
     createdAt: r.createdAt,
   };
 }
 const noteKey = (tenantId: string, scope: string, id: string): string => `${tenantId}:${scope}:${id}`;
+
+// ── ADR 0982 D6 — "forget" for facts the extraction lane learned ─────────────
+//
+// When a person deletes a learned (`source:'auto-extract'`) note, the Personal Memory route
+// records a tombstone here and the extraction lane refuses to learn that fact again. Without it,
+// a fact the person deleted came back the next time they happened to restate it. A tombstone
+// gates ONLY the extraction lane; it never blocks a fact the person types.
+//
+// The row holds a sha256 of the normalized fact, not the text. A short fact's hash can be
+// guessed, so it is still PERSONAL DATA: `eraseSubjectMemory` deletes it with the scope's notes,
+// and the collection declares its tenant so tenant teardown reaches it.
+
+/** The one normalization the lane dedupes, keys and tombstones on (ADR 0982 D6). */
+export function normalizeFactText(text: string): string {
+  // Scrubbed FIRST, so a raw extracted fact and the stored (scrubbed) note compare equal
+  // (code-review #3: a fact the scrubber altered could come back after "forget").
+  return scrubSecretShaped(text).toLowerCase().replace(/\s+/g, ' ').trim().replace(/[.!]+$/, '').trim();
+}
+
+interface ForgottenFact { key: string; tenantId: string; scope: string; hash: string; at: string }
+const forgottenStore = new DurableCollection<ForgottenFact>('subject-memory:forgotten', (r) => r.key, undefined, (r) => r.tenantId);
+const factHashOf = (text: string): string => createHash('sha256').update(normalizeFactText(text)).digest('hex');
+
+/** Record that the person deleted this learned fact, so the extraction lane never re-learns it. */
+export async function forgetLearnedFact(tenantId: string, subject: MemorySubject, content: string): Promise<void> {
+  const scope = subjectMemoryScope(subject);
+  const hash = factHashOf(content);
+  await forgottenStore.put({ key: `${tenantId}:${scope}:${hash}`, tenantId, scope, hash, at: new Date().toISOString() });
+}
+
+/** True when the person deleted a learned note with this normalized text (ADR 0982 D6). */
+export async function forgottenFactMatcher(tenantId: string, subject: MemorySubject): Promise<(text: string) => boolean> {
+  const scope = subjectMemoryScope(subject);
+  const hashes = new Set((await forgottenStore.listByPrefix(`${tenantId}:${scope}:`)).map((r) => r.hash));
+  return (text) => hashes.has(factHashOf(text));
+}
+
 const notePrefix = (tenantId: string, scope: string): string => `${tenantId}:${scope}:`;
 
 /** List a subject's curated notes (newest first) from the durable source. */
@@ -329,6 +402,10 @@ export interface AddSubjectNoteOptions {
    * An `'auto-extract'` note is untrusted regardless of what is passed here.
    */
   contentTrust?: 'trusted' | 'untrusted';
+  /** ADR 0944 D4 — the writing person, recorded on a note in a SHARED scope. */
+  authoredBy?: string;
+  /** Host-only operation identity for a recoverable human-approved write. */
+  idempotencyKey?: string;
 }
 
 /** Add a curated note (the "memory" a user trains). Validates + caps, then writes
@@ -346,7 +423,7 @@ export async function addSubjectNote(
   subject: MemorySubject,
   content: unknown,
   opts: AddSubjectNoteOptions = {},
-): Promise<void> {
+): Promise<{ id: string }> {
   const text = typeof content === 'string' ? content.trim() : '';
   if (text.length === 0) {
     throw new OpenwopError('validation_error', 'Field `content` is required and MUST be a non-empty string.', 400, { field: 'content' });
@@ -370,12 +447,11 @@ export async function addSubjectNote(
   // MACHINE lane writes a project scope (the two `projectSubject` references outside this
   // module are a descriptive provenance field and a READ), so the `trusted` default on that
   // door is a human note by an authorized member and is consistent with the sibling lanes.
-  if ((await countSubjectNotes(tenantId, subject)) >= NOTE_CAP) {
-    throw new OpenwopError('validation_error', `This memory already holds the maximum ${NOTE_CAP} curated notes. Remove some before adding more.`, 400, { cap: NOTE_CAP });
-  }
   const scope = subjectMemoryScope(subject);
   const content2 = scrubSecretShaped(text);
-  const id = `mem_${randomUUID().slice(0, 12)}`;
+  const id = opts.idempotencyKey
+    ? `mem_${createHash('sha256').update(opts.idempotencyKey).digest('hex')}`
+    : `mem_${randomUUID().slice(0, 12)}`;
   const createdAt = new Date().toISOString();
   const source: SubjectNoteSource = opts.source ?? 'user';
   // A model-authored fact is untrusted BY CONSTRUCTION — derived, never passed in,
@@ -385,14 +461,40 @@ export async function addSubjectNote(
   // TIGHTENS — there is no argument that loosens `'auto-extract'`.
   const contentTrust: 'trusted' | 'untrusted' =
     source === 'auto-extract' ? 'untrusted' : (opts.contentTrust ?? 'trusted');
-  // Durable source of truth FIRST — if this throws, no note is created (fail-closed).
-  await notesStore.put({ key: noteKey(tenantId, scope, id), id, tenantId, scope, content: content2, contentTrust, source, createdAt });
+  const key = noteKey(tenantId, scope, id);
+  const matches = (row: DurableNote): boolean => row.tenantId === tenantId && row.scope === scope
+    && row.content === content2 && row.contentTrust === contentTrust && row.source === source;
+  const indexNote = async (note: DurableNote): Promise<void> => {
+    const tags = note.contentTrust === 'untrusted' ? [NOTE_TAG, subject.id, MEMORY_UNTRUSTED_TAG] : [NOTE_TAG, subject.id];
+    await persistAndIndex(tenantId, buildHostSurfaceBundle({ tenantId }).db.vector, scope,
+      { content: note.content, tags, id: note.id, createdAt: note.createdAt });
+  };
+  const existing = opts.idempotencyKey ? await notesStore.get(key) : null;
+  if (existing) {
+    if (!matches(existing)) throw new OpenwopError('conflict', 'This note operation already wrote different content.', 409);
+    // Never overwrite the original author (including a DSAR tombstone) on retry.
+    await indexNote(existing);
+    return { id };
+  }
+  if ((await countSubjectNotes(tenantId, subject)) >= NOTE_CAP) {
+    throw new OpenwopError('validation_error', `This memory already holds the maximum ${NOTE_CAP} curated notes. Remove some before adding more.`, 400, { cap: NOTE_CAP });
+  }
+  const row: DurableNote = { key, id, tenantId, ...(subject.kind === 'org' ? { orgId: subject.id } : {}), scope, content: content2, contentTrust, source, ...(opts.authoredBy ? { authoredBy: opts.authoredBy } : {}), createdAt };
+  // Durable source of truth FIRST. A lost acknowledgement is recovered by the
+  // same operation identity, never by adding a second note.
+  if (opts.idempotencyKey) {
+    if (!(await notesStore.compareAndSwap(null, row))) {
+      const winner = await notesStore.get(key);
+      if (!winner || !matches(winner)) throw new OpenwopError('conflict', 'The note write could not be confirmed.', 409);
+      await indexNote(winner);
+      return { id };
+    }
+  } else await notesStore.put(row);
   // Recall index (best-effort) under the SAME id, so dispatch RAG recall sees it.
   // The untrusted tag is what fences the row in every recall path (dispatch split,
   // composition block, vector metadata) — see `trustOf`.
-  const tags = contentTrust === 'untrusted' ? [NOTE_TAG, subject.id, MEMORY_UNTRUSTED_TAG] : [NOTE_TAG, subject.id];
-  const vector = buildHostSurfaceBundle({ tenantId }).db.vector;
-  await persistAndIndex(tenantId, vector, scope, { content: content2, tags, id, createdAt });
+  await indexNote(row);
+  return { id };
 }
 
 /** Drop ALL of a subject's durable curated notes (the cascade for deleting the
@@ -437,6 +539,10 @@ export async function eraseSubjectMemory(tenantId: string, subjectKey: string): 
     const rows = await notesStore.listByPrefix(notePrefix(tenantId, scope));
     for (const r of rows) await notesStore.delete(r.key);
     rowsTouched += rows.length;
+    // ADR 0982 D6 — the person's "forget" tombstones are personal data too.
+    const forgotten = await forgottenStore.listByPrefix(`${tenantId}:${scope}:`);
+    for (const r of forgotten) await forgottenStore.delete(r.key);
+    rowsTouched += forgotten.length;
     // In-memory recall working set (curated-note recency + transient turn summaries).
     await clearMemoryScope(tenantId, scope);
     // ADR 0666 D2 — purge the whole vector NAMESPACE, not the ids we happen to know.
@@ -474,6 +580,17 @@ export async function eraseSubjectMemory(tenantId: string, subjectKey: string): 
       log.error('subject_memory_vector_purge_partial', {
         tenantId, scope, failed: vectorPurge.failed, purged: vectorPurge.purged,
       });
+    }
+  }
+  // ADR 0944 D8 — in SHARED client scopes (`org:<orgId>`) the person is only the
+  // author of a note that belongs to the client. The note stays; who wrote it goes.
+  const orgNotes = await notesStore.listByPrefix(`${tenantId}:org:`);
+  for (const r of orgNotes) {
+    for (let attempt = 0; attempt < 6; attempt++) {
+      const current = await notesStore.get(r.key);
+      if (!current || current.tenantId !== tenantId || !current.authoredBy || !forms.has(current.authoredBy)) break;
+      if (await notesStore.compareAndSwap(current, { ...current, authoredBy: ERASED_USER_REF })) { rowsTouched += 1; break; }
+      if (attempt === 5) throw new Error('Shared note author erasure could not be confirmed.');
     }
   }
   // WF-TWIN-3 — report what was actually reached. A DSAR fielded by a shared

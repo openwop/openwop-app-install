@@ -7,11 +7,21 @@
  *  - /public/pricing returns the tier catalog WITHOUT any Stripe id and honors
  *    OPENWOP_BILLING_PLAN_DISPLAY (honest-when-unconfigured);
  *  - the `pricing` CMS section validates and renders through the prerender route.
+ *
+ * TST-BQR-8. Publishes are stamped apart by faking ONLY `Date` (the app runs
+ * in-process), so newest-first can never tie inside one millisecond. Red when:
+ * the blog list sorts oldest-first, orders by `updatedAt` (re-floats an edited
+ * post), drops the `kind:'post'` filter, counts non-prose keys (PROSE_KEYS) or
+ * ignores the 30k-word cap, drops the cover token; the RSS byline is not the
+ * subject-display name; the pricing catalog carries a Stripe id, invents a
+ * display block, or stops bounding `annualNote`. Not witnessed: a malformed
+ * (non-object) display entry is skipped by TWO paths (the object check and
+ * the empty-entry skip), so neither alone can be shown.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { getSetCookies } from './headerCookies.js';
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
@@ -34,18 +44,32 @@ beforeAll(async () => {
   if (d) await saveConfig({ ...d, status: 'on' }, 'test');
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
-afterEach(() => { delete process.env.OPENWOP_BILLING_PLAN_DISPLAY; delete process.env.OPENWOP_SEO_PRERENDER_DISABLED; });
+afterEach(() => { vi.useRealTimers(); delete process.env.OPENWOP_BILLING_PLAN_DISPLAY; delete process.env.OPENWOP_SEO_PRERENDER_DISABLED; });
 
-interface Res<T = any> { status: number; body: T }
+/** Move the (faked) wall clock forward so successive publishes never tie. */
+let clockBase = 0;
+function tick(): void {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  clockBase = Math.max(clockBase, Date.now()) + 60_000;
+  vi.setSystemTime(clockBase);
+}
+
+interface Res<T> { status: number; body: T }
+interface OrgBody { orgId: string }
+interface PageBody { pageId: string; slug: string }
+interface PostBody { title: string; category?: string; tags: string[]; authorId: string; excerpt: string; publishedAt: string; readingMinutes: number; coverImageToken?: string }
+interface BlogBody { posts: PostBody[] }
+interface TierBody { tier: string; name: string; display?: { price?: string; highlighted?: boolean; priceAnnual?: string; cadenceAnnual?: string; annualNote?: string } }
+interface PricingBody { tiers: TierBody[] }
+interface CmsPageBody { page: { sections: Array<{ type: string; data: Record<string, unknown> }> } }
 function client() {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-    for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
+    for (const c of getSetCookies(res.headers)) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]!; }
+    return { status: res.status, body: (await res.json().catch(() => ({}))) as T };
   };
-  return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b), patch: (p: string, b?: unknown) => call('PATCH', p, b), put: (p: string, b?: unknown) => call('PUT', p, b) };
+  return { get: <T>(p: string) => call<T>('GET', p), post: <T>(p: string, b?: unknown) => call<T>('POST', p, b), patch: <T>(p: string, b?: unknown) => call<T>('PATCH', p, b), put: <T>(p: string, b?: unknown) => call<T>('PUT', p, b) };
 }
 
 /** Raw GET returning raw text (for the XML feed + prerender HTML). */
@@ -65,19 +89,22 @@ const cms = (orgId: string, sfx = ''): string => `/host/openwop-app/cms/orgs/${e
 
 /** Create a page of the given facets and (optionally) publish it. */
 async function makePage(owner: ReturnType<typeof client>, orgId: string, body: Record<string, unknown>, publish: boolean): Promise<{ pageId: string; slug: string }> {
-  const created = await owner.post(cms(orgId, '/pages'), body);
+  const created = await owner.post<PageBody>(cms(orgId, '/pages'), body);
   expect(created.status, JSON.stringify(created.body)).toBe(201);
-  const pageId = created.body.pageId as string;
-  if (publish) expect((await owner.post(cms(orgId, `/pages/${pageId}/publish`))).status).toBe(200);
-  return { pageId, slug: created.body.slug as string };
+  const pageId = created.body.pageId;
+  if (publish) { tick(); expect((await owner.post(cms(orgId, `/pages/${pageId}/publish`))).status).toBe(200); }
+  return { pageId, slug: created.body.slug };
 }
 
 /** An org seeded with two published posts, one plain published page, one draft post. */
 async function blogOrg(): Promise<{ orgId: string; pageTitle: string }> {
   const owner = client();
   await owner.post('/host/openwop-app/test/login', { email: `blog-${Date.now()}-${n++}@acme.test` });
-  const org = await owner.post('/host/openwop-app/orgs', { name: 'Blog Co' });
-  const orgId = org.body.orgId as string;
+  // A named owner, so the RSS test has one resolvable byline (Second Post).
+  const named = await owner.patch('/host/openwop-app/users/me', { displayName: 'Blog Owner' });
+  expect(named.status, JSON.stringify(named.body)).toBe(200);
+  const org = await owner.post<OrgBody>('/host/openwop-app/orgs', { name: 'Blog Co' });
+  const orgId = org.body.orgId;
 
   await makePage(owner, orgId, {
     title: 'First Post', kind: 'post', category: 'Engineering', authorId: 'author-1', tags: ['Alpha'],
@@ -100,17 +127,17 @@ describe('ADR 0391 — public blog list', () => {
   it('returns PUBLISHED POSTS only (excludes a draft post and an ordinary page)', async () => {
     const { orgId } = await blogOrg();
     const anon = client();
-    const r = await anon.get(blog(orgId));
+    const r = await anon.get<BlogBody>(blog(orgId));
     expect(r.status).toBe(200);
-    const titles = (r.body.posts as Array<{ title: string }>).map((p) => p.title);
+    const titles = r.body.posts.map((p) => p.title);
     expect(titles).toContain('First Post');
     expect(titles).toContain('Second Post');
     expect(titles).not.toContain('Plain Page Only'); // kind:'page'
     expect(titles).not.toContain('Draft Post');       // unpublished
-    // newest-first by updatedAt (Second Post published after First Post)
+    // newest-first by the PUBLISH instant (Second Post published 60 s after First Post)
     expect(titles).toEqual(['Second Post', 'First Post']);
     // projection carries the facets + an excerpt, never draft section internals
-    const first = (r.body.posts as Array<Record<string, unknown>>).find((p) => p.title === 'First Post')!;
+    const first = r.body.posts.find((p) => p.title === 'First Post')!;
     expect(first.category).toBe('engineering'); // slugified
     expect(first.tags).toEqual(['alpha']);
     expect(first.authorId).toBe('author-1');
@@ -121,12 +148,12 @@ describe('ADR 0391 — public blog list', () => {
   it('narrows by tag, category, and author', async () => {
     const { orgId } = await blogOrg();
     const anon = client();
-    const byTag = await anon.get(blog(orgId, '?tag=alpha'));
-    expect((byTag.body.posts as Array<{ title: string }>).map((p) => p.title)).toEqual(['First Post']);
-    const byCat = await anon.get(blog(orgId, '?category=product'));
-    expect((byCat.body.posts as Array<{ title: string }>).map((p) => p.title)).toEqual(['Second Post']);
-    const byAuthor = await anon.get(blog(orgId, '?author=author-1'));
-    expect((byAuthor.body.posts as Array<{ title: string }>).map((p) => p.title)).toEqual(['First Post']);
+    const byTag = await anon.get<BlogBody>(blog(orgId, '?tag=alpha'));
+    expect(byTag.body.posts.map((p) => p.title)).toEqual(['First Post']);
+    const byCat = await anon.get<BlogBody>(blog(orgId, '?category=product'));
+    expect(byCat.body.posts.map((p) => p.title)).toEqual(['Second Post']);
+    const byAuthor = await anon.get<BlogBody>(blog(orgId, '?author=author-1'));
+    expect(byAuthor.body.posts.map((p) => p.title)).toEqual(['First Post']);
   });
 
   it('unknown org is a uniform 404', async () => {
@@ -140,7 +167,7 @@ describe('blog projection — readingMinutes + coverImageToken', () => {
   it('reading time is floored at 1 and GROWS with the published body', async () => {
     const owner = client();
     await owner.post('/host/openwop-app/test/login', { email: `blog-read-${Date.now()}-${n++}@acme.test` });
-    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Reading Co' })).body.orgId as string;
+    const orgId = (await owner.post<OrgBody>('/host/openwop-app/orgs', { name: 'Reading Co' })).body.orgId;
 
     // ~1000 words of prose → ≈4 min at 225 wpm; the short post floors at 1.
     const long = Array.from({ length: 1000 }, (_, i) => `word${i}`).join(' ');
@@ -153,7 +180,7 @@ describe('blog projection — readingMinutes + coverImageToken', () => {
       sections: [{ type: 'richText', data: { heading: 'Long Post', text: long } }],
     }, true);
 
-    const posts = (await client().get(blog(orgId))).body.posts as Array<{ title: string; readingMinutes: number }>;
+    const posts = (await client().get<BlogBody>(blog(orgId))).body.posts;
     const short = posts.find((p) => p.title === 'Short Post')!;
     const longer = posts.find((p) => p.title === 'Long Post')!;
     expect(short.readingMinutes).toBe(1);
@@ -176,23 +203,34 @@ describe('blog projection — readingMinutes + coverImageToken', () => {
     expect(readingMinutesFor({ sections: sections.slice(0, 2) })).toBe(18); // 4000 / 225
   });
 
-  it('a NON-prose field (asset token, url, icon slug) never inflates the estimate', async () => {
+  it('a NON-prose field (ids, codes — a key outside PROSE_KEYS) never inflates the estimate', async () => {
     const owner = client();
     await owner.post('/host/openwop-app/test/login', { email: `blog-nonprose-${Date.now()}-${n++}@acme.test` });
-    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Non-prose Co' })).body.orgId as string;
-    const noise = Array.from({ length: 1000 }, (_, i) => `tok${i}`).join(' ');
-    await makePage(owner, orgId, {
+    const orgId = (await owner.post<OrgBody>('/host/openwop-app/orgs', { name: 'Non-prose Co' })).body.orgId;
+    // 600 space-separated ids per key × 2 keys = 1,200 non-prose words (≈5 min if
+    // counted). A `fields` section keeps named text verbatim (ADR 0748); the
+    // earlier hero ctaUrl fixture was DROPPED on save (no ctaLabel ⇒ no ctaUrl),
+    // so the noise never reached the counter.
+    const noise = Array.from({ length: 600 }, (_, i) => `tok${i}`).join(' ');
+    const { slug } = await makePage(owner, orgId, {
       title: 'Noisy Post', kind: 'post',
-      sections: [{ type: 'hero', data: { heading: 'Noisy Post', ctaUrl: noise, ctaUrl2: noise } }],
+      sections: [
+        { type: 'hero', data: { heading: 'Noisy Post' } },
+        { type: 'fields', data: { skuList: noise, partIds: noise } },
+      ],
     }, true);
-    const posts = (await client().get(blog(orgId))).body.posts as Array<{ readingMinutes: number }>;
+    // Precondition: the noise is STORED (else this case is vacuous).
+    const stored = await owner.get<CmsPageBody>(cms(orgId, `/pages/by-slug/${slug}`));
+    const fieldsData = stored.body.page.sections.find((x) => x.type === 'fields')?.data;
+    expect(fieldsData?.skuList).toBe(noise);
+    const posts = (await client().get<BlogBody>(blog(orgId))).body.posts;
     expect(posts[0]!.readingMinutes).toBe(1);
   });
 
   it('projects the post’s OG image token as the card cover — and omits it when unset', async () => {
     const owner = client();
     await owner.post('/host/openwop-app/test/login', { email: `blog-cover-${Date.now()}-${n++}@acme.test` });
-    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Cover Co' })).body.orgId as string;
+    const orgId = (await owner.post<OrgBody>('/host/openwop-app/orgs', { name: 'Cover Co' })).body.orgId;
     const org = await getOrg(orgId);
     const withCover = await makePage(owner, orgId, { title: 'Has Cover', kind: 'post', sections: [{ type: 'hero', data: { heading: 'Has Cover' } }] }, true);
     await makePage(owner, orgId, { title: 'No Cover', kind: 'post', sections: [{ type: 'hero', data: { heading: 'No Cover' } }] }, true);
@@ -201,7 +239,7 @@ describe('blog projection — readingMinutes + coverImageToken', () => {
     const put = await owner.put(`/host/openwop-app/publishing/orgs/${encodeURIComponent(orgId)}/pages/${withCover.pageId}/seo`, { ogImageToken: serveToken });
     expect(put.status, JSON.stringify(put.body)).toBe(200);
 
-    const posts = (await client().get(blog(orgId))).body.posts as Array<{ title: string; coverImageToken?: string }>;
+    const posts = (await client().get<BlogBody>(blog(orgId))).body.posts;
     expect(posts.find((p) => p.title === 'Has Cover')!.coverImageToken).toBe(serveToken);
     expect(posts.find((p) => p.title === 'No Cover')!.coverImageToken).toBeUndefined();
   });
@@ -214,7 +252,12 @@ describe('ADR 0391 — blog RSS (author-enriched, post-scoped)', () => {
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toContain('rss');
     expect(res.body).toContain('xmlns:dc="http://purl.org/dc/elements/1.1/"');
-    expect(res.body).toContain('<dc:creator>');
+    // Bylines are names only. Second Post (newest) was created by the named
+    // owner; First Post's `authorId` 'author-1' has no user record, so it gets
+    // no <dc:creator> at all — never the seam's humanized-id fallback, which
+    // means nothing to a feed reader (the system-site "By 0b39f331" report).
+    const creators = [...res.body.matchAll(/<dc:creator>([^<]*)<\/dc:creator>/g)].map((m) => m[1]);
+    expect(creators).toEqual(['Blog Owner']);
     expect(res.body).toContain('<category>engineering</category>');
     expect(res.body).toContain('First Post');
     // an ordinary (kind:'page') page never appears in the blog feed
@@ -226,8 +269,8 @@ describe('ADR 0391 (BLOG-2) — editing a published post does NOT re-float it', 
   it('blog order + RSS pubDate track the PUBLISH instant, not updatedAt', async () => {
     const owner = client();
     await owner.post('/host/openwop-app/test/login', { email: `blog-refloat-${Date.now()}-${n++}@acme.test` });
-    const org = await owner.post('/host/openwop-app/orgs', { name: 'Refloat Co' });
-    const orgId = org.body.orgId as string;
+    const org = await owner.post<OrgBody>('/host/openwop-app/orgs', { name: 'Refloat Co' });
+    const orgId = org.body.orgId;
 
     // First is published BEFORE Second → Second sorts newest-first.
     const first = await makePage(owner, orgId, { title: 'First Post', kind: 'post', sections: [{ type: 'hero', data: { heading: 'First Post' } }] }, true);
@@ -236,12 +279,13 @@ describe('ADR 0391 (BLOG-2) — editing a published post does NOT re-float it', 
     // Edit the (already published) First Post — this bumps its `updatedAt` to be
     // the newest of the two, but must NOT change its `publishedAt`. The org owner
     // holds host:members:manage, so editing a published page succeeds.
+    tick(); // the edit lands AFTER both publishes
     const put = await owner.patch(cms(orgId, `/pages/${first.pageId}`), { sections: [{ type: 'hero', data: { heading: 'First Post (edited)' } }] });
     expect(put.status, JSON.stringify(put.body)).toBe(200);
 
     const anon = client();
-    const list = await anon.get(blog(orgId));
-    const titles = (list.body.posts as Array<{ title: string }>).map((p) => p.title);
+    const list = await anon.get<BlogBody>(blog(orgId));
+    const titles = list.body.posts.map((p) => p.title);
     // First did NOT re-float despite a newer updatedAt — publishedAt drives order.
     expect(titles).toEqual(['Second Post', 'First Post']);
 
@@ -254,11 +298,13 @@ describe('R2-BLOG-3 — the blog projection honors Accept-Language', () => {
   it('localizes excerpts + reading estimates via the page-view negotiation; base without the header', async () => {
     // Authoring locales needs the (default-OFF) cms-localization toggle.
     const loc = getToggleDefault('cms-localization');
-    if (loc) await saveConfig({ ...loc, status: 'on' }, 'test');
+    expect(loc, 'cms-localization toggle must exist').toBeTruthy();
+    await saveConfig({ ...loc!, status: 'on' }, 'test');
+    try {
     const owner = client();
     await owner.post('/host/openwop-app/test/login', { email: `blog-l10n-${Date.now()}-${n++}@acme.test` });
-    const org = await owner.post('/host/openwop-app/orgs', { name: 'L10n Blog Co' });
-    const orgId = org.body.orgId as string;
+    const org = await owner.post<OrgBody>('/host/openwop-app/orgs', { name: 'L10n Blog Co' });
+    const orgId = org.body.orgId;
     expect((await owner.put(cms(orgId, '/language-settings'), { supportedLocales: ['pt-BR'] })).status).toBe(200);
     await makePage(owner, orgId, {
       title: 'Hello', kind: 'post',
@@ -274,6 +320,9 @@ describe('R2-BLOG-3 — the blog projection honors Accept-Language', () => {
     // Title stays base BY DESIGN — localizePage never localizes the title
     // field (the page view serves the base title too, so cards and pages agree).
     expect(br.posts[0]!.title).toBe('Hello');
+    } finally {
+      await saveConfig(loc!, 'test');
+    }
   });
 });
 
@@ -293,8 +342,8 @@ describe('ADR 0391 — public pricing catalog', () => {
   it('honors OPENWOP_BILLING_PLAN_DISPLAY (and ignores malformed tier entries)', async () => {
     process.env.OPENWOP_BILLING_PLAN_DISPLAY = JSON.stringify({ pro: { price: '$29', cadence: '/mo', highlighted: true }, team: 'not-an-object' });
     const client_ = client();
-    const r = await client_.get('/host/openwop-app/public/pricing');
-    const tiers = r.body.tiers as Array<{ tier: string; display?: { price?: string; highlighted?: boolean } }>;
+    const r = await client_.get<PricingBody>('/host/openwop-app/public/pricing');
+    const tiers = r.body.tiers;
     const pro = tiers.find((t) => t.tier === 'pro')!;
     expect(pro.display?.price).toBe('$29');
     expect(pro.display?.highlighted).toBe(true);
@@ -309,8 +358,8 @@ describe('ADR 0391 — public pricing catalog', () => {
       pro: { price: '$29', cadence: '/mo', priceAnnual: '$290', cadenceAnnual: '/yr', annualNote: 'Two months free on yearly' },
       free: { price: '$0', cadence: '/mo', annualNote: 'x'.repeat(200) }, // over the 80-char bound
     });
-    const r = await client().get('/host/openwop-app/public/pricing');
-    const tiers = r.body.tiers as Array<{ tier: string; display?: { priceAnnual?: string; cadenceAnnual?: string; annualNote?: string } }>;
+    const r = await client().get<PricingBody>('/host/openwop-app/public/pricing');
+    const tiers = r.body.tiers;
     const pro = tiers.find((t) => t.tier === 'pro')!;
     expect(pro.display?.priceAnnual).toBe('$290');
     expect(pro.display?.cadenceAnnual).toBe('/yr');
@@ -325,16 +374,16 @@ describe('ADR 0391 — pricing CMS section', () => {
   it('validates the pricing section and renders it via the prerender route', async () => {
     const owner = client();
     await owner.post('/host/openwop-app/test/login', { email: `price-${Date.now()}-${n++}@acme.test` });
-    const org = await owner.post('/host/openwop-app/orgs', { name: 'Pricing Co' });
-    const orgId = org.body.orgId as string;
+    const org = await owner.post<OrgBody>('/host/openwop-app/orgs', { name: 'Pricing Co' });
+    const orgId = org.body.orgId;
     const { slug } = await makePage(owner, orgId, {
       title: 'Pricing',
       sections: [{ type: 'pricing', data: { heading: 'Plans', blurb: 'Pick a plan.', tiers: ['free', 'pro', 'bogus'], ctaLabel: 'Compare', ctaUrl: '/pricing' } }],
     }, true);
 
     // closed-enum validation dropped the bogus tier; kept the valid subset
-    const page = await owner.get(cms(orgId, `/pages/by-slug/${slug}`));
-    const section = (page.body.page.sections as Array<{ type: string; data: Record<string, unknown> }>).find((s) => s.type === 'pricing')!;
+    const page = await owner.get<CmsPageBody>(cms(orgId, `/pages/by-slug/${slug}`));
+    const section = page.body.page.sections.find((s) => s.type === 'pricing')!;
     expect(section.data.tiers).toEqual(['free', 'pro']);
 
     // renders through the ONE server section renderer (semantic stub: heading + CTA)

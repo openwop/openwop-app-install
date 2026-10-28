@@ -5,6 +5,11 @@
  * `npm test`. Its verdict is a pure function precisely so that the part most
  * likely to be vacuous — "did we pass because nothing ran?" — is pinned here,
  * cheaply, on every run.
+ *
+ * The population is pinned as literal ids (not a length), and every refusal names
+ * the row it refuses. What breaks it: a verdict that counts only failures, ignores
+ * a missing row, accepts any death, lowers the kill floor, or lets one passing row
+ * launder a failing twin (probes 8fw2g1-dl-*, all witnessed in round 1).
  */
 import { describe, expect, it } from 'vitest';
 
@@ -18,7 +23,13 @@ describe('durability lane verdict (ADR 0739 D5)', () => {
   it('pins the population: five rows, two of which need a death — as LITERALS', () => {
     // A collection's size pinned to itself proves nothing; an emptied
     // REQUIRED_ROWS would make every loop below pass vacuously.
-    expect(REQUIRED_ROWS.length).toBe(5);
+    expect([...REQUIRED_ROWS]).toEqual([
+      'openwop.requirement.0158.kill-after-accept',
+      'openwop.requirement.0158.kill-during-execution',
+      'openwop.requirement.0158.duplicate-delivery',
+      'openwop.requirement.0158.bound-is-derived',
+      'openwop.requirement.0158.poison-exhaustion',
+    ]);
     expect(KILL_ROW_COUNT).toBe(2);
   });
 
@@ -52,7 +63,7 @@ describe('durability lane verdict (ADR 0739 D5)', () => {
   it('a row that passed once and failed once is refused — one good row does not launder a bad one', () => {
     const id = REQUIRED_ROWS[0];
     const problems = evaluateLane([...allPass(), { requirementId: id, disposition: 'executed-fail', detail: 'second leg' }], [sigkill(), sigkill()]);
-    expect(problems).toHaveLength(1);
+    expect(problems).toEqual([`${id}: executed-fail — second leg`]);
   });
 
   it('ALL GREEN WITH NO DEATH ON RECORD is refused — the vacuous pass this lane exists to exclude', () => {

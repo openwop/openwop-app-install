@@ -9,8 +9,13 @@
  * the self-approval exemption, or (demo mode, single-principal tenant) grants
  * OWNER through the bypass. `dropMarker` makes that row: the primary row stays,
  * its index marker goes.
+ *
+ * Tracker TST-BG1-20. Red when (probe-witnessed, wave 58): a member the index
+ * misses is not confirmed against the scan (in `resolveEffectiveAccess` or in
+ * `resolveSubjectScopesUnion`); `hasDistinctScopeHolder` trusts an index `false`;
+ * a verified index still scans; the excluded subject is counted as a holder.
  */
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { reconcileTenantIndexesOnce } from '../src/host/tenantIndexAdoption.js';
@@ -34,6 +39,7 @@ afterAll(() => {
   if (PRIOR_DEMO === undefined) delete process.env.OPENWOP_DEMO_MODE;
   else process.env.OPENWOP_DEMO_MODE = PRIOR_DEMO;
 });
+afterEach(() => { vi.restoreAllMocks(); });
 beforeEach(async () => {
   storage = await openStorage('memory://');
   initHostExtPersistence(storage);

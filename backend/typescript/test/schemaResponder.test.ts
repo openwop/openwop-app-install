@@ -66,9 +66,11 @@ describe('schemaResponder.buildSchemaResponse', () => {
     expect(res.schemas[0]?.outputs).toEqual(
       Object.entries(props).map(([name, p]) => ({ name, type: typeof p.type === 'string' ? p.type : 'any' })),
     );
-    // wait.input.json declares no properties ⇒ no input fields, honestly empty.
-    expect(Object.keys((want.input as { properties: object }).properties)).toEqual([]);
-    expect(res.schemas[0]?.inputs).toEqual([]);
+    const inputs = (want.input as { properties: Record<string, { type?: string }> }).properties;
+    expect(inputs.timestamp?.type).toBe('string');
+    expect(res.schemas[0]?.inputs).toEqual(
+      Object.entries(inputs).map(([name, p]) => ({ name, type: typeof p.type === 'string' ? p.type : 'any' })),
+    );
   });
 
   it('resolves a pack node the in-process registry has NOT resolved (not notFound)', () => {

@@ -6,6 +6,11 @@
  *           from cookie mode).
  *   SEC-2 — a token rejection logs a coarse `reason` at DEBUG (the non-secret `runId` only,
  *           never the token/secret), so a stream 404 is diagnosable.
+ *
+ * Sabotage witnessed red (8f grade-tests wave 2): an env-or-fallback secret in
+ * place of `readSessionSecret` (`8fw2g3-sec-failclosed`), the `reason` dropped
+ * from the log (`-sec-log-reason`), and the token written into the logged
+ * field (`-sec-log-leak`).
  */
 import { vi } from 'vitest';
 // Must run BEFORE the logger module initializes its level constant (hoisted above imports).

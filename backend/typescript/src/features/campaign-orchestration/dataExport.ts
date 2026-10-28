@@ -5,11 +5,17 @@
  * call. Tenant-scoped (`${tenantId}::` prefix + the tenantId filter).
  */
 import { listCampaignVersions, listCampaigns } from './campaignService.js';
+import { listVariantSetVersions, listVariantSets } from './variants/variantSetService.js';
 import type { FeatureDataSections } from '../../host/featureDataExport.js';
 
 export async function exportCampaignOrchestrationData(tenantId: string): Promise<FeatureDataSections> {
   const campaigns = (await listCampaigns(tenantId)).filter((c) => c.tenantId === tenantId);
   const versions: unknown[] = [];
-  for (const c of campaigns) versions.push(...await listCampaignVersions(tenantId, c.id));
-  return { campaigns, versions };
+  const variantSets: unknown[] = [];
+  for (const c of campaigns) {
+    versions.push(...await listCampaignVersions(tenantId, c.id));
+    // ADR 0946 — every immutable version of every variant set.
+    for (const s of await listVariantSets(tenantId, c.id)) variantSets.push(...await listVariantSetVersions(tenantId, c.id, s.setId));
+  }
+  return { campaigns, versions, variantSets };
 }

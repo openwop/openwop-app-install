@@ -23,6 +23,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { humanNote, isHeldNote, machineNote, withMachineNote } from './restoreNote.js';
 import {
   DndContext,
   KeyboardSensor,
@@ -73,6 +74,9 @@ export interface CardPatch {
   priority?: 'low' | 'normal' | 'high';
   dueAt?: string;
   blockerNote?: string;
+  /** ADR 0963 — send `blockerNote` only if the card's note is still this one
+   *  (the server answers 409 otherwise), so a stale copy cannot clear a hold. */
+  ifBlockerNote?: string;
 }
 
 /** A canvas-neutral position intent. The backend turns this into a durable
@@ -279,20 +283,23 @@ function DraggableCard({
   const [eDescription, setEDescription] = useState(card.description ?? '');
   const [ePriority, setEPriority] = useState<'low' | 'normal' | 'high'>(card.priority ?? 'normal');
   const [eDueAt, setEDueAt] = useState(card.dueAt ? card.dueAt.slice(0, 10) : '');
-  const [eBlocker, setEBlocker] = useState(card.blockerNote ?? '');
+  // ADR 0963 — the field edits the PERSON's note only; the machine hold line is
+  // kept as-is (releasing is its own action), so editing cannot merge the two.
+  const [eBlocker, setEBlocker] = useState(humanNote(card.blockerNote));
   // The diff BASELINE is the card as the user SAW it when the form opened —
   // not the live prop at save time. The board refetches every 5s (poll + SSE),
   // so a peer's concurrent rename would otherwise make the untouched stale
   // title read as "changed" and PATCH the old value back over theirs. Only a
   // field the USER altered relative to what they saw may enter the patch.
-  const editBaseline = useRef<{ title: string; description: string; priority: 'low' | 'normal' | 'high'; dueAt: string; blockerNote: string } | null>(null);
+  const editBaseline = useRef<{ title: string; description: string; priority: 'low' | 'normal' | 'high'; dueAt: string; blockerNote: string; rawBlockerNote: string } | null>(null);
   const openEdit = (): void => {
     const base = {
       title: card.title,
       description: card.description ?? '',
       priority: card.priority ?? 'normal' as const,
       dueAt: card.dueAt ? card.dueAt.slice(0, 10) : '',
-      blockerNote: card.blockerNote ?? '',
+      blockerNote: humanNote(card.blockerNote),
+      rawBlockerNote: card.blockerNote ?? '',
     };
     editBaseline.current = base;
     setETitle(base.title);
@@ -312,7 +319,9 @@ function DraggableCard({
       ...(eDescription.trim() !== base.description ? { description: eDescription.trim() } : {}),
       ...(ePriority !== base.priority ? { priority: ePriority } : {}),
       ...(eDueAt !== base.dueAt ? { dueAt: eDueAt } : {}),
-      ...(eBlocker.trim() !== base.blockerNote ? { blockerNote: eBlocker.trim() } : {}),
+      ...(eBlocker.trim() !== base.blockerNote
+        ? { blockerNote: withMachineNote(eBlocker, machineNote(base.rawBlockerNote)), ifBlockerNote: base.rawBlockerNote }
+        : {}),
     };
     setEditing(false);
     if (Object.keys(patch).length > 0) onEdit?.(card.id, patch);
@@ -346,6 +355,9 @@ function DraggableCard({
     <div
       ref={setNodeRef}
       data-card-id={card.id}
+      // ADR 0963 — programmatic focus target for "show me this card" (Up next's
+      // held list); -1 adds no tab stop. dnd-kit's attributes may override it.
+      tabIndex={-1}
       className={['surface-card kb-card kanban-card-box', lane === 'waiting' ? 'kb-card--waiting' : '', isSelected ? 'kb-card--selected' : ''].filter(Boolean).join(' ')}
       style={style}
     >
@@ -411,7 +423,29 @@ function DraggableCard({
       {cardExtra?.(card)}
       {card.assignmentReason ? <div className="muted u-fs-12">{t('whyAssigned', { reason: card.assignmentReason })}</div> : null}
       {card.handoff ? <CardHandoffNote handoff={card.handoff} /> : null}
-      {card.blockerNote ? <div className="kanban-blocker"><AlertIcon size={12} /> {t('blocked', { note: card.blockerNote })}</div> : null}
+      {humanNote(card.blockerNote) ? <div className="kanban-blocker"><AlertIcon size={12} /> {t('blocked', { note: humanNote(card.blockerNote) })}</div> : null}
+      {/* ADR 0963 D3 — a card the loop restored after a stopped or failed run is
+          HELD: shown as a state with its release, never as the raw machine note. */}
+      {isHeldNote(card.blockerNote) ? (
+        <div className="u-grid u-gap-1">
+          <div className="u-flex u-items-center u-gap-1 u-fs-12">
+            <span className="chip chip--warning">{t('heldChip')}</span>
+            <span className="muted">{t('heldExplain')}</span>
+          </div>
+          {onEdit ? (
+            <div>
+              <Button
+                variant="secondary" size="sm"
+                aria-label={t('heldReleaseAria', { title: card.title })}
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={(e) => { e.stopPropagation(); onEdit(card.id, { blockerNote: humanNote(card.blockerNote), ifBlockerNote: card.blockerNote ?? '' }); }}
+              >
+                {t('heldRelease')}
+              </Button>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
       {workItem ? <WorkItemSummary workItem={workItem} workflowOptions={workflowOptions} onRun={onRunWorkItem} running={workItemRunning} /> : null}
       {/* ADR 0313 D3 — a bare todo card on an agent board says what the
           heartbeat will do with it (or that nothing will). */}

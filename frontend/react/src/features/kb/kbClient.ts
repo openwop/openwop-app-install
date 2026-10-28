@@ -19,19 +19,39 @@ export interface KbCollection {
    *  read-only here (hand-edits are rejected server-side). */
   managed?: 'strategy' | 'priority-matrix';
   /** ADR 0113 — per-collection retrieval pipeline config (+ ADR 0351 embedder). */
-  retrievalConfig?: { mode?: RetrievalMode; embedder?: EmbedderMode; enrichment?: EnrichmentMode };
+  retrievalConfig?: { mode?: RetrievalMode; embedder?: EmbedderMode; enrichment?: EnrichmentMode; rerank?: { kind: RerankerKind; topN?: number } };
   /** ADR 0398 P3 — the pinned per-collection embedding spec (set via a reindex). */
   embeddingSpec?: EmbeddingSpec;
 }
 
-/** ADR 0351 — which embedder vectorizes the collection. */
-export type EmbedderMode = 'local' | 'provider';
+/** ADR 0351 — which embedder vectorizes the collection. ADR 0904 D1: `default` (absent
+ *  on the wire) follows the deployment — the operator's embedder where one is offered,
+ *  else the built-in hash. Sending `default` clears an explicit choice. */
+export type EmbedderMode = 'default' | 'local' | 'provider';
 
-/** ADR 0351 P4 — contextual enrichment of the embedded chunk text. */
-export type EnrichmentMode = 'off' | 'heading-path';
+/** ADR 0351 P4 — contextual enrichment of the embedded chunk text. ADR 0904 D7 adds
+ *  `llm`: a per-chunk situating sentence written with the tenant's OWN AI key. */
+export type EnrichmentMode = 'off' | 'heading-path' | 'llm';
+
+/** ADR 0904 — `GET …/quality`, the fields this page reads. */
+export interface CollectionQuality {
+  collectionId: string;
+  enrichment: EnrichmentMode;
+  /** `llm` is set but the tenant's AI key does not resolve now (builds run un-enriched). */
+  enrichmentUnavailable?: true;
+  /** Tokens a full LLM enrichment would cost on the tenant's key. */
+  enrichmentEstimateTokens?: number;
+  /** ADR 0904 — who embeds this collection (Vertex and BYOK Gemini share a model id, so
+   *  the funding is named) and whether the vectors on disk match the configuration. */
+  embedder: { mode: 'local' | 'provider'; funding: 'none' | 'byok' | 'host'; provider: string; model: string; available: boolean; pinned: boolean };
+  retrievalMode: RetrievalMode;
+  availableRerankers?: RerankerKind[];
+  indexState: 'current' | 'unbuilt' | 'stale' | 'reindexing';
+}
 
 /** ADR 0113 retrieval pipeline mode. */
 export type RetrievalMode = 'dense' | 'hybrid' | 'hybrid+rerank';
+export type RerankerKind = 'local' | 'connection' | 'vertex';
 
 /**
  * KB-UX-8 (widened) — the source union MUST match the backend's, which is
@@ -57,7 +77,10 @@ export interface SearchHit {
   title: string;
   chunkIndex: number;
   text: string;
+  /** The mode's raw score (cosine / RRF / rerank) — not comparable across modes. */
   score: number;
+  /** ADR 0904 D4 — calibrated 0–1 relevance (what thresholds apply to). */
+  relevance?: number;
 }
 
 export interface RagResult {
@@ -100,6 +123,12 @@ export async function listOrgs(): Promise<Org[]> {
 const base = (orgId: string): string => `${root}/kb/orgs/${encodeURIComponent(orgId)}`;
 const col = (orgId: string, collectionId: string): string => `${base(orgId)}/collections/${encodeURIComponent(collectionId)}`;
 
+/** ADR 0904 — per-collection retrieval state (stored state only; never embeds). */
+export async function getQuality(orgId: string): Promise<CollectionQuality[]> {
+  const res = await fetch(`${base(orgId)}/quality`, fetchOpts({ headers: authedHeaders() }));
+  return (await asJson<{ collections: CollectionQuality[] }>(res, 'getQuality')).collections;
+}
+
 export async function listCollections(orgId: string): Promise<KbCollection[]> {
   const res = await fetch(`${base(orgId)}/collections`, fetchOpts({ headers: authedHeaders() }));
   return (await asJson<{ collections: KbCollection[] }>(res, 'listCollections')).collections;
@@ -114,6 +143,12 @@ export async function createCollection(orgId: string, name: string, description?
 export async function setRetrievalMode(orgId: string, collectionId: string, mode: RetrievalMode): Promise<KbCollection> {
   const res = await fetch(`${col(orgId, collectionId)}/retrieval`, fetchOpts({ method: 'PATCH', headers: jsonHeaders(), body: JSON.stringify({ mode }) }));
   return (await asJson<{ collection: KbCollection }>(res, 'setRetrievalMode')).collection;
+}
+
+/** Same retrieval-config owner; provider availability remains server-authoritative. */
+export async function setReranker(orgId: string, collectionId: string, kind: RerankerKind): Promise<KbCollection> {
+  const res = await fetch(`${col(orgId, collectionId)}/retrieval`, fetchOpts({ method: 'PATCH', headers: jsonHeaders(), body: JSON.stringify({ rerank: { kind } }) }));
+  return (await asJson<{ collection: KbCollection }>(res, 'setReranker')).collection;
 }
 
 /** ADR 0351 — set a collection's embedder (local hash vs the tenant's BYOK

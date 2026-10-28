@@ -24,7 +24,7 @@ import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { createAgentToolProvider, builtinAgentToolIds } from '../src/host/agentToolProvider.js';
-import { EMAIL_GET_CAMPAIGN_TOOL_ID, EMAIL_SAVE_DRAFT_TOOL_ID } from '../src/features/email/agentTools.js';
+import { EMAIL_GET_CAMPAIGN_TOOL_ID, EMAIL_SAVE_DRAFT_TOOL_ID, EMAIL_SUBMIT_FOR_REVIEW_TOOL_ID } from '../src/features/email/agentTools.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { createOrg, listOrgs } from '../src/host/accessControlService.js';
@@ -61,9 +61,10 @@ describe('CFP-1 — the email agents pack rides the real registered tools', () =
     agents: { toolAllowlist: string[]; systemPromptRef: string }[];
   };
 
-  it('the allowlist is exactly the two registered tool ids (no un-resolvable node typeIds)', () => {
+  it('the allowlist is exactly the three registered tool ids (no un-resolvable node typeIds)', () => {
+    // ADR 0905 D5 added submit-for-review; there is still no approve or send tool.
     expect([...manifest.agents[0]!.toolAllowlist].sort()).toEqual(
-      [EMAIL_GET_CAMPAIGN_TOOL_ID, EMAIL_SAVE_DRAFT_TOOL_ID].sort(),
+      [EMAIL_GET_CAMPAIGN_TOOL_ID, EMAIL_SAVE_DRAFT_TOOL_ID, EMAIL_SUBMIT_FOR_REVIEW_TOOL_ID].sort(),
     );
   });
 

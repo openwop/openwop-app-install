@@ -17,7 +17,11 @@ import { OpenwopError } from '../../../types.js';
 import { assertOrgScope } from '../../../host/accessControlService.js';
 import { getPage, updatePage, type Page } from '../../cms/cmsService.js';
 import { contentHashOf } from '../contentHash.js';
-import type { AssetSnapshot, ConstrainedEdit, DestinationAdapter, WriteOutcome } from '../types.js';
+import { assertCreativePublishable } from '../../../host/creativePublishGate.js';
+import type { AssetLocator, AssetSnapshot, ConstrainedEdit, DestinationAdapter, WriteOutcome } from '../types.js';
+
+/** The page id of a CMS locator; '' (reads as not found) for any other locator. */
+const pageIdOf = (l: AssetLocator): string => ('pageId' in l ? l.pageId : '');
 
 const SECTION_PATH = /^sections\[(sec:[A-Za-z0-9-]+)\]\.data\.([A-Za-z][A-Za-z0-9_]{0,63})$/;
 
@@ -87,20 +91,38 @@ export function fieldsHash(fields: Readonly<Record<string, string>>, editableFie
   return contentHashOf(projected);
 }
 
+/** ADR 0945 D5 — a media reference an edit puts on the page runs the creative
+ *  publish gate. CMS sections hold media under these keys: an image section's
+ *  `token`, a hero's `imageToken`, and a video section's `src` / `poster`
+ *  (URLs; a host serve URL resolves, anything else passes untouched). Only
+ *  references the edit CHANGES are checked: content already live is not this
+ *  write's to refuse. */
+const MEDIA_FIELD = /\.data\.(token|imageToken|src|poster)$/;
+async function gateNewMedia(tenantId: string, before: Record<string, string>, after: Record<string, string>): Promise<{ field: string; code: string } | null> {
+  for (const [field, value] of Object.entries(after)) {
+    if (!MEDIA_FIELD.test(field) || !value || before[field] === value) continue;
+    const decision = await assertCreativePublishable({ tenantId, mediaRef: value, destination: 'openwop.cms.page' });
+    if (!decision.ok) return { field, code: decision.code };
+  }
+  return null;
+}
+
 export const cmsPageAdapter: DestinationAdapter = {
   kind: 'openwop.cms.page',
 
   async read(asset, ctx) {
-    const page = await getPage(ctx.tenantId, asset.orgId, asset.locator.pageId);
+    const page = await getPage(ctx.tenantId, asset.orgId, pageIdOf(asset.locator));
     return page ? snapshotOf(page) : null;
   },
 
   async preview(asset, edits, ctx) {
-    const page = await getPage(ctx.tenantId, asset.orgId, asset.locator.pageId);
+    const page = await getPage(ctx.tenantId, asset.orgId, pageIdOf(asset.locator));
     if (!page) return { refused: 'asset_gone' as const };
     const applied = applyEditsToPage(page, edits, asset.editableFields);
     if ('refused' in applied) return { refused: applied.refused, field: applied.field };
     const after = pageFields({ title: applied.title, sections: applied.sections });
+    const blocked = await gateNewMedia(ctx.tenantId, pageFields(page), after);
+    if (blocked) return { refused: 'creative_blocked' as const, field: `${blocked.field} (${blocked.code})` };
     return {
       sourceVersion: page.version,
       sourceContentHash: pageContentHash(page),
@@ -111,14 +133,17 @@ export const cmsPageAdapter: DestinationAdapter = {
   },
 
   async write(asset, edits, opts, ctx): Promise<WriteOutcome> {
-    const page = await getPage(ctx.tenantId, asset.orgId, asset.locator.pageId);
+    const page = await getPage(ctx.tenantId, asset.orgId, pageIdOf(asset.locator));
     if (!page) return { kind: 'refused', reason: 'asset_gone' };
     if (page.version !== opts.expectedVersion) return { kind: 'version_conflict', currentVersion: page.version };
     const applied = applyEditsToPage(page, edits, asset.editableFields);
     if ('refused' in applied) return { kind: 'refused', reason: applied.refused, detail: applied.field };
+    // Re-checked at write time: a verdict can change between preview and execution.
+    const blocked = await gateNewMedia(ctx.tenantId, pageFields(page), pageFields({ title: applied.title, sections: applied.sections }));
+    if (blocked) return { kind: 'refused', reason: 'creative_blocked', detail: `${blocked.field}: ${blocked.code}` };
     try {
       const saved = await updatePage(
-        ctx.tenantId, asset.orgId, asset.locator.pageId,
+        ctx.tenantId, asset.orgId, pageIdOf(asset.locator),
         { title: applied.title, sections: applied.sections },
         ctx.actingUserId,
         {

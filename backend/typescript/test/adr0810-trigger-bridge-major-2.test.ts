@@ -10,6 +10,15 @@
  *     validates against the CLOSED v2 page schema — which is what proves every
  *     id in it went out bound;
  *   - another tenant's bound id is `404`.
+ * Tracker: TST-BTR-7.
+ *
+ * Red when (wave 60 probes w60g4-tb2-*): the `~`-projected segment is not
+ * decoded; a record's `subscriptionId` goes out unbound; another tenant's
+ * record is served under the caller's tenant.
+ * CEILING: the percent spelling is decoded by BOTH the `%` branch and the
+ * plain fallback for tenant `default` (no `:`), so this file cannot tell them
+ * apart. The `%` branch is load-bearing only for a `user:`/`ws:` tenant, which
+ * `adr0726-personal-tenant-http.test.ts` drives ("…raw user:x%2Fopaque…").
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';
@@ -30,10 +39,17 @@ const saved: Record<string, string | undefined> = {};
 
 const V2 = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'schemas', 'v2');
 const ajv = new Ajv2020({ strict: false, allErrors: true });
-(addFormats as unknown as (a: unknown) => void)(ajv);
+addFormats(ajv);
 for (const f of readdirSync(V2)) {
   if (!f.endsWith('.json')) continue;
-  try { ajv.addSchema(JSON.parse(readFileSync(join(V2, f), 'utf8')) as Record<string, unknown>, f); } catch { /* duplicate $id */ }
+  try {
+    ajv.addSchema(JSON.parse(readFileSync(join(V2, f), 'utf8')) as Record<string, unknown>, f);
+  } catch (err) {
+    // Expected, and the only two tolerated: a schema already registered under the
+    // same `$id`, and one whose `$schema` names a v2 meta-schema this Ajv does
+    // not load (the page schema below needs neither).
+    if (!(err instanceof Error && /already exists|no schema with key or ref/.test(err.message))) throw err;
+  }
 }
 function pageErrors(doc: unknown): string[] {
   const fn = ajv.getSchema('https://openwop.dev/spec/v2/trigger-dead-letter-page.schema.json');
@@ -41,13 +57,20 @@ function pageErrors(doc: unknown): string[] {
   return fn(doc) ? [] : (fn.errors ?? []).map((e) => `${e.instancePath} ${e.message}`);
 }
 
-async function v2(method: string, path: string, opts: { key?: string; body?: unknown } = {}) {
+interface DeadLetter { subscriptionId: string; attempt: { subscriptionId: string }; reason: string }
+interface Body {
+  error?: string;
+  deliveries?: DeadLetter[];
+  subscription?: { subscriptionId: string; state?: string };
+  binding?: { ingestUrl: string };
+}
+async function v2(method: string, path: string, opts: { key?: string; body?: unknown } = {}): Promise<{ status: number; body: Body }> {
   const r = await fetch(`${base}${path}`, {
     method,
     headers: { 'content-type': 'application/json', 'OpenWOP-Version': '2', authorization: `Bearer ${opts.key ?? OP}` },
     ...(opts.body !== undefined ? { body: JSON.stringify(opts.body) } : {}),
   });
-  return { status: r.status, body: (await r.json().catch(() => ({}))) as Record<string, any> };
+  return { status: r.status, body: (await r.json().catch(() => ({}))) as Body };
 }
 
 beforeAll(async () => {
@@ -71,9 +94,9 @@ describe('ADR 0810 — triggerBridge at major 2', () => {
   it('a registered subscription, a refused post, and a dead-letter page with bound ids under both segment spellings', async () => {
     const reg = await v2('POST', '/trigger-subscriptions', { body: { source: 'webhook', workflowId: 'openwop-app.uppercase', verification: { mode: 'required' } } });
     expect(reg.status, JSON.stringify(reg.body)).toBe(201);
-    const bound = reg.body.subscription.subscriptionId as string;
+    const bound = reg.body.subscription?.subscriptionId ?? '';
     expect(bound, 'identity.md §5 — a tenant-bound id at major 2').toMatch(/^[^/]+\/[A-Za-z0-9._~-]{16,128}$/);
-    const ingestUrl = reg.body.binding.ingestUrl as string;
+    const ingestUrl = reg.body.binding?.ingestUrl ?? '';
     expect(typeof ingestUrl).toBe('string');
 
     const canary = `canary-${randomBytes(8).toString('hex')}`;
@@ -89,7 +112,7 @@ describe('ADR 0810 — triggerBridge at major 2', () => {
       expect(page.status, `${seg}: ${JSON.stringify(page.body)}`).toBe(200);
       expect(pageErrors(page.body), 'the CLOSED v2 page schema').toEqual([]);
       expect(page.body.deliveries).toHaveLength(1);
-      const rec = page.body.deliveries[0];
+      const rec = page.body.deliveries![0]!;
       expect(rec.subscriptionId, 'bound like the path segment').toBe(bound);
       expect(rec.attempt.subscriptionId).toBe(bound);
       expect(rec.reason).toBe('verification_failed');
@@ -98,7 +121,7 @@ describe('ADR 0810 — triggerBridge at major 2', () => {
 
     const sub = await v2('GET', `/trigger-subscriptions/${projectBoundId(bound)}`);
     expect(sub.status).toBe(200);
-    expect(sub.body.subscription.state, 'a refused post changed no state').toBe('active');
+    expect(sub.body.subscription?.state, 'a refused post changed no state').toBe('active');
 
     // At major 2 a bound id NAMES its tenant, so identity.md §5 decides first: a
     // segment that is not the caller's tenant is `403 id_tenant_mismatch` (a v2

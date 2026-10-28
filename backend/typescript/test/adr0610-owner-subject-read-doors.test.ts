@@ -11,6 +11,12 @@
  * pins the READ door only. Positive controls guard against a dead cure (the
  * owner and a project member still read; an `org`-visible project is unaffected).
  *
+ * Tracker TST-BG3-13. Red when: the documents read door (`routes.ts`
+ * `canReadDocument`), the artifact single-GET or Library LIST filter, the shared
+ * `canReadDocument` predicate itself, the canvas `loadCanvas` read check, the
+ * priority-matrix list GET or listing filter, or the work-selection ranking's
+ * owner-subject check is bypassed for a same-tenant org viewer who is not a member.
+ *
  * @see docs/adr/0610-owner-subject-access-and-egress-allowlist.md (D3′)
  */
 
@@ -40,14 +46,19 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+interface Res { status: number; body: unknown }
+/** Narrow a JSON body to the one field a call site reads. */
+function field<T>(r: Res, key: string): T {
+  const body = r.body as Record<string, unknown> | undefined;
+  return body?.[key] as T;
+}
 interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; patch: (p: string, b?: unknown) => Promise<Res>; del: (p: string) => Promise<Res> }
 function client(): Client {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    const out: unknown = res.status === 204 ? undefined : await res.json().catch(() => undefined);
     return { status: res.status, body: out };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b), del: (p) => call('DELETE', p) };
@@ -66,22 +77,22 @@ async function privateProjectDoc(visibility: 'private' | 'org' = 'private') {
   const tenantId = `org:adr0610-${Date.now()}-${n++}`;
   const owner = client();
   await owner.post('/host/openwop-app/test/login', { email: uniqEmail('own'), tenantId });
-  const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'PrivCo' })).body.orgId;
-  const projectId = (await owner.post(P, { orgId, name: 'Secret' })).body.id;
+  const orgId = field<string>(await owner.post('/host/openwop-app/orgs', { name: 'PrivCo' }), 'orgId');
+  const projectId = field<string>(await owner.post(P, { orgId, name: 'Secret' }), 'id');
   const create = await owner.post(DOC(orgId), {
     title: 'Merger plan', kind: 'note', format: 'markdown',
     ownerSubject: { kind: 'project', id: projectId },
   });
   expect(create.status, JSON.stringify(create.body)).toBe(201);
-  const documentId: string = create.body.documentId;
-  expect((await owner.patch(`${P}/${projectId}/visibility`, { visibility })).body.visibility).toBe(visibility);
+  const documentId = field<string>(create, 'documentId');
+  expect(field<string>(await owner.patch(`${P}/${projectId}/visibility`, { visibility }), 'visibility')).toBe(visibility);
   return { tenantId, orgId, projectId, documentId, owner };
 }
 
 /** A real org VIEWER (workspace:read) of the same org who is NOT a project member. */
 async function orgViewer(tenantId: string, orgId: string): Promise<Client & { userId: string }> {
   const viewer = client();
-  const viewerId = (await viewer.post('/host/openwop-app/test/login', { email: uniqEmail('view'), tenantId })).body.user.userId;
+  const viewerId = field<{ userId: string }>(await viewer.post('/host/openwop-app/test/login', { email: uniqEmail('view'), tenantId }), 'user').userId;
   await createMember({ tenantId, orgId, subject: viewerId, displayName: 'V', roles: ['viewer'] });
   return Object.assign(viewer, { userId: viewerId as string });
 }
@@ -113,12 +124,16 @@ describe("ADR 0610 D3' — a private project's document is not readable by a non
     expect((await owner.post(`${P}/${projectId}/members`, { ref: `user:${viewer.userId}`, role: 'observer' })).status).toBe(201);
 
     // Membership grants READ on a private project — and it must reach the doc door.
-    expect((await viewer.get(`${DOC(orgId)}/${documentId}`)).status).toBe(200);
+    const regained = await viewer.get(`${DOC(orgId)}/${documentId}`);
+    expect(regained.status).toBe(200);
+    expect(JSON.stringify(regained.body)).toContain('Merger plan');
 
     // And an ORG-visible project's doc is readable by any org viewer (no over-block).
     const open = await privateProjectDoc('org');
     const stranger = await orgViewer(open.tenantId, open.orgId);
-    expect((await stranger.get(`${DOC(open.orgId)}/${open.documentId}`)).status).toBe(200);
+    const openRead = await stranger.get(`${DOC(open.orgId)}/${open.documentId}`);
+    expect(openRead.status).toBe(200);
+    expect(JSON.stringify(openRead.body)).toContain('Merger plan');
   });
 
   // The ARTIFACT lane (host/artifactProjection) is a SECOND door over the same
@@ -143,11 +158,14 @@ describe("ADR 0610 D3' — a private project's document is not readable by a non
     const aid = `document:${documentId}`;
     // Owner control: the doc IS in the owner's Library (non-vacuous).
     const ownerLib = await owner.get('/host/openwop-app/artifacts');
-    expect(JSON.stringify(ownerLib.body.artifacts ?? [])).toContain(aid);
-    // Non-member: NOT enumerated.
+    expect(JSON.stringify(field<unknown[]>(ownerLib, 'artifacts') ?? [])).toContain(aid);
+    // Non-member: NOT enumerated — on a list the viewer really did read (200, an
+    // `artifacts` array), so a refused or broken read cannot pass as "absent".
     const viewerLib = await viewer.get('/host/openwop-app/artifacts');
-    expect(JSON.stringify(viewerLib.body.artifacts ?? [])).not.toContain(aid);
-    expect(JSON.stringify(viewerLib.body.artifacts ?? [])).not.toContain('Merger plan');
+    expect(viewerLib.status).toBe(200);
+    expect(Array.isArray(field<unknown[]>(viewerLib, 'artifacts'))).toBe(true);
+    expect(JSON.stringify(field<unknown[]>(viewerLib, 'artifacts'))).not.toContain(aid);
+    expect(JSON.stringify(field<unknown[]>(viewerLib, 'artifacts'))).not.toContain('Merger plan');
   });
 });
 
@@ -156,14 +174,14 @@ async function privateProjectCanvas(visibility: 'private' | 'org' = 'private') {
   const tenantId = `org:adr0610c-${Date.now()}-${n++}`;
   const owner = client();
   await owner.post('/host/openwop-app/test/login', { email: uniqEmail('cown'), tenantId });
-  const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'PrivCo' })).body.orgId;
-  const projectId = (await owner.post(P, { orgId, name: 'Secret' })).body.id;
+  const orgId = field<string>(await owner.post('/host/openwop-app/orgs', { name: 'PrivCo' }), 'orgId');
+  const projectId = field<string>(await owner.post(P, { orgId, name: 'Secret' }), 'id');
   const canvas = await createCanvasForTenant(tenantId, {
     canvasTypeId: 'canvas.app-builder', name: 'Secret app',
     ownerSubject: { kind: 'project', id: projectId },
     initialState: { name: 'Secret app', screens: [{ id: 'home', name: 'Home', isInitial: true, components: [] }] },
   });
-  expect((await owner.patch(`${P}/${projectId}/visibility`, { visibility })).body.visibility).toBe(visibility);
+  expect(field<string>(await owner.patch(`${P}/${projectId}/visibility`, { visibility }), 'visibility')).toBe(visibility);
   return { tenantId, orgId, projectId, canvasId: canvas.canvasId, owner };
 }
 
@@ -187,11 +205,15 @@ describe("ADR 0610 D3' — a private project's canvas is not readable by a non-m
     const { tenantId, orgId, canvasId, owner, projectId } = await privateProjectCanvas('private');
     const viewer = await orgViewer(tenantId, orgId);
     expect((await owner.post(`${P}/${projectId}/members`, { ref: `user:${viewer.userId}`, role: 'observer' })).status).toBe(201);
-    expect((await viewer.get(`${CANVAS(orgId)}/${canvasId}`)).status).toBe(200);
+    const regained = await viewer.get(`${CANVAS(orgId)}/${canvasId}`);
+    expect(regained.status).toBe(200);
+    expect(JSON.stringify(regained.body)).toContain('Secret app');
 
     const open = await privateProjectCanvas('org');
     const stranger = await orgViewer(open.tenantId, open.orgId);
-    expect((await stranger.get(`${CANVAS(open.orgId)}/${open.canvasId}`)).status).toBe(200);
+    const openRead = await stranger.get(`${CANVAS(open.orgId)}/${open.canvasId}`);
+    expect(openRead.status).toBe(200);
+    expect(JSON.stringify(openRead.body)).toContain('Secret app');
   });
 });
 
@@ -201,18 +223,18 @@ async function privateProjectList(visibility: 'private' | 'org' = 'private') {
   const tenantId = `org:adr0610p-${Date.now()}-${n++}`;
   const owner = client();
   await owner.post('/host/openwop-app/test/login', { email: uniqEmail('pown'), tenantId });
-  const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'PrivCo' })).body.orgId;
-  const projectId = (await owner.post(P, { orgId, name: 'Secret' })).body.id;
+  const orgId = field<string>(await owner.post('/host/openwop-app/orgs', { name: 'PrivCo' }), 'orgId');
+  const projectId = field<string>(await owner.post(P, { orgId, name: 'Secret' }), 'id');
   const created = await owner.post(`${PM}/lists`, { orgId, projectId, name: 'Secret backlog' });
   expect(created.status, JSON.stringify(created.body)).toBe(201);
-  const listId: string = created.body.id;
+  const listId = field<string>(created, 'id');
   // A project-owned GENERIC kanban board (default To Do column) with a card, for
   // the work-selection ranking door — a priority-matrix board has no 'todo' lane
   // so `readBoardRanking` returns [] for it regardless (a vacuous fixture).
   const board = await createBoard({ tenantId, name: 'Secret board', ownerSubject: { kind: 'project', id: projectId } });
   const todo = board.columns.find((c) => c.id === 'todo' || c.name.toLowerCase() === 'to do')!;
   await createCard({ boardId: board.id, columnId: todo.id, title: 'Do the secret thing' });
-  expect((await owner.patch(`${P}/${projectId}/visibility`, { visibility })).body.visibility).toBe(visibility);
+  expect(field<string>(await owner.patch(`${P}/${projectId}/visibility`, { visibility }), 'visibility')).toBe(visibility);
   return { tenantId, orgId, projectId, listId, boardId: board.id, owner };
 }
 
@@ -227,20 +249,25 @@ describe("ADR 0610 D3' — a private project's priority list + work-selection ra
     expect(leakedList.status).toBe(404);
     expect(JSON.stringify(leakedList.body ?? {})).not.toContain('Secret backlog');
     // And the list must not enumerate to the viewer.
+    // Owner control first: the listing route does enumerate this list.
+    const ownerListing = await owner.get(`${PM}/lists?orgId=${encodeURIComponent(orgId)}`);
+    expect(ownerListing.status).toBe(200);
+    expect(JSON.stringify(ownerListing.body)).toContain(listId);
     const listing = await viewer.get(`${PM}/lists?orgId=${encodeURIComponent(orgId)}`);
+    expect(listing.status).toBe(200);
     expect(JSON.stringify(listing.body ?? {})).not.toContain(listId);
 
     // Positive control FIRST: the OWNER's ranking is NON-EMPTY — so the viewer's
     // empty result below is the gate refusing, not an empty board (non-vacuous).
     const ownerRanking = await owner.get(RANKING(boardId));
     expect(ownerRanking.status).toBe(200);
-    expect((ownerRanking.body.ranked as unknown[]).length).toBeGreaterThan(0);
+    expect(field<unknown[]>(ownerRanking, 'ranked').length).toBeGreaterThan(0);
 
     // WSC-1 (=CPC-14): the work-selection ranking door over the SAME project board.
     // Reports EMPTY (not 404) — the door's fail-closed posture.
     const ranking = await viewer.get(RANKING(boardId));
     expect(ranking.status).toBe(200);
-    expect(ranking.body.ranked).toEqual([]);
+    expect(field<unknown[]>(ranking, 'ranked')).toEqual([]);
 
     // The OWNER still reads the list too.
     expect((await owner.get(`${PM}/lists/${listId}`)).status).toBe(200);
@@ -250,10 +277,14 @@ describe("ADR 0610 D3' — a private project's priority list + work-selection ra
     const { tenantId, orgId, listId, owner, projectId } = await privateProjectList('private');
     const viewer = await orgViewer(tenantId, orgId);
     expect((await owner.post(`${P}/${projectId}/members`, { ref: `user:${viewer.userId}`, role: 'observer' })).status).toBe(201);
-    expect((await viewer.get(`${PM}/lists/${listId}`)).status).toBe(200);
+    const regained = await viewer.get(`${PM}/lists/${listId}`);
+    expect(regained.status).toBe(200);
+    expect(JSON.stringify(regained.body)).toContain('Secret backlog');
 
     const open = await privateProjectList('org');
     const stranger = await orgViewer(open.tenantId, open.orgId);
-    expect((await stranger.get(`${PM}/lists/${open.listId}`)).status).toBe(200);
+    const openRead = await stranger.get(`${PM}/lists/${open.listId}`);
+    expect(openRead.status).toBe(200);
+    expect(JSON.stringify(openRead.body)).toContain('Secret backlog');
   });
 });

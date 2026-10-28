@@ -15,8 +15,8 @@
     "build:win": "electron-builder --win"
   },
   "devDependencies": {
-    "electron": "^44.6.0",
-    "electron-builder": "^26.0.0"
+    "electron": "^45.0.0",
+    "electron-builder": "^26.18.0"
   },
   "build": {
     "appId": "dev.openwop.desktop",

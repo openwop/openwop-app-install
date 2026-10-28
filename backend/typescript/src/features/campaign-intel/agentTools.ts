@@ -38,12 +38,19 @@ import { planBudget } from './budgetPlanner.js';
 import { buildPacing } from './pacing.js';
 import { buildAttribution } from './attribution.js';
 import { orgScopeGranted } from './routes.js';
+import { listCaps, getCapState } from './spendCaps.js';
+import { proposeReallocation } from './reallocation.js';
+import { makeAdsAdapter } from '../../host/adsAdapter.js';
+import { hostExtStorage } from '../../host/hostExtPersistence.js';
 
 export const CAMPAIGN_INTEL_BUDGET_OPTIMIZE_TOOL_ID = 'openwop:campaign-intel.budget-optimize';
 export const CAMPAIGN_INTEL_FORECAST_TOOL_ID = 'openwop:campaign-intel.forecast';
 export const CAMPAIGN_INTEL_PLAN_BUDGET_TOOL_ID = 'openwop:campaign-intel.plan-budget';
 export const CAMPAIGN_INTEL_PACING_TOOL_ID = 'openwop:campaign-intel.pacing';
 export const CAMPAIGN_INTEL_ATTRIBUTION_TOOL_ID = 'openwop:campaign-intel.attribution';
+/** ADR 0952 D8 — the Media Buyer widening of the analyst (allowlist +2). */
+export const CAMPAIGN_INTEL_CAPS_TOOL_ID = 'openwop:campaign-intel.caps';
+export const CAMPAIGN_INTEL_PROPOSE_REALLOCATION_TOOL_ID = 'openwop:campaign-intel.propose-reallocation';
 
 type ToolResult = { content: string; isError?: boolean };
 
@@ -248,6 +255,77 @@ export function registerCampaignIntelAgentTools(): void {
       const gate = await readGate(scope, input.orgId, { content: JSON.stringify({ rows: [], email: [], unattributedConversions: 0, note: 'No acting user — nothing to read.' }) });
       if (isResult(gate)) return gate;
       return { content: JSON.stringify(await buildAttribution(scope.tenantId, gate.orgId)) };
+    },
+  });
+
+  // ── ADR 0952 D8 — the Media Buyer: caps (read) and a reallocation PROPOSAL.
+  // The agent proposes; the approval decides. It has no tool that applies a plan,
+  // activates a campaign or raises a cap.
+  registerFeatureAgentTool({
+    contentTrust: 'untrusted',
+    effect: 'read',
+    def: {
+      name: CAMPAIGN_INTEL_CAPS_TOOL_ID,
+      description:
+        'Read the organization\'s hard spend caps (per campaign or per client) and each cap\'s state this period: '
+        + 'status ok | near | breached | stale, the last spend read (minor units of the cap currency, or null when never '
+        + 'read), and which campaigns were paused because of it. Use it before answering "how close are we to the cap?". '
+        + 'Returns { caps[] }. Read-only.',
+      inputSchema: {
+        type: 'object',
+        properties: { orgId: { type: 'string', description: 'The organization whose caps to read.' } },
+        required: ['orgId'],
+        additionalProperties: false,
+      },
+    },
+    async run(input, scope) {
+      const gate = await readGate(scope, input.orgId, { content: JSON.stringify({ caps: [] }) });
+      if (isResult(gate)) return gate;
+      const caps = await listCaps(scope.tenantId, gate.orgId);
+      const out = await Promise.all(caps.map(async (c) => {
+        const st = await getCapState(c);
+        return {
+          capId: c.capId, scope: c.scope, limitMinor: c.limitMinor, currency: c.currency, period: c.period, maxStaleMinutes: c.maxStaleMinutes,
+          state: st ? { status: st.status, spentMinor: st.spentMinor, readAt: st.readAt, ...(st.readError ? { readError: st.readError } : {}), pausedTargets: st.pausedTargets.length } : null,
+        };
+      }));
+      return { content: JSON.stringify({ caps: out }) };
+    },
+  });
+
+  registerFeatureAgentTool({
+    contentTrust: 'untrusted',
+    effect: 'write',
+    def: {
+      name: CAMPAIGN_INTEL_PROPOSE_REALLOCATION_TOOL_ID,
+      description:
+        'PROPOSE a cross-channel budget reallocation as ONE plan for a human to approve (ADR 0952 D3). It turns the '
+        + 'budget recommendation into per-campaign daily-budget changes with each campaign\'s live current budget, decreases '
+        + 'first, and leaves out any increase a spend cap would not allow. It opens ONE approval in the Inbox and changes NO '
+        + 'budget: a person approves, then applies it from Campaign Intelligence. Returns { outcome: proposed | no_change, '
+        + 'planId?, approvalId?, ops, dropped } — tell the user what is in the plan and that it waits for approval.',
+      inputSchema: {
+        type: 'object',
+        properties: { orgId: { type: 'string', description: 'The organization whose budgets to reallocate.' } },
+        required: ['orgId'],
+        additionalProperties: false,
+      },
+    },
+    async run(input, scope) {
+      const gate = await readGate(scope, input.orgId, { content: JSON.stringify({ outcome: 'no_change', dropped: [], note: 'No acting user — nothing proposed.' }) });
+      if (isResult(gate)) return gate;
+      // Proposing reads live budgets through the person's ad connections and opens
+      // an approval — the route's write scope, not the read gate's.
+      if (!(await orgScopeGranted(scope.tenantId, gate.actingUserId, gate.orgId, 'workspace:write'))) {
+        return toolError('forbidden_scope', 'The user cannot change budgets in that organization, so no plan can be proposed for them.', { requiredScope: 'workspace:write', orgId: gate.orgId });
+      }
+      const adapter = makeAdsAdapter({ storage: hostExtStorage(), tenantId: scope.tenantId, runId: scope.runId ?? `hostext:intel-propose:${gate.orgId}`, actingUserId: gate.actingUserId, orgId: gate.orgId });
+      const out = await proposeReallocation(adapter, scope.tenantId, gate.orgId, { runId: scope.runId ?? 'chat', actor: gate.actingUserId });
+      return {
+        content: JSON.stringify(out.outcome === 'no_change'
+          ? out
+          : { outcome: 'proposed', planId: out.plan.planId, approvalId: out.plan.approvalId, ops: out.plan.ops, dropped: out.plan.dropped, note: 'Waiting for approval in the Inbox; nothing has changed yet.' }),
+      };
     },
   });
 }

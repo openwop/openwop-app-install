@@ -12,6 +12,15 @@
  * Two witnesses, because a ratchet polices a spelling, not the invariant:
  * the source scan stops the overwrite spelling coming back, and the HTTP check
  * pins the symptom on the real route.
+ *
+ * The scan covers every replacing spelling Express offers: `setHeader`, `set`
+ * and its alias `header` with a 'Vary' name (any case), and the object form
+ * `res.set({ Vary: … })` / `writeHead(…, { Vary: … })`. MEASURED 2026-10-24 at
+ * 6a852d799: 0 offenders over 1,995 `src/**` files (~0.2 s). The baseline is
+ * zero; a hit is fixed with `res.vary()`, never allowlisted.
+ * Witnessed (grade-tests w63): one `setHeader('Vary', …)` on the snapshot route
+ * → both cases red; the middleware's `vary('OpenWOP-Version')` renamed → the
+ * HTTP case red.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';
@@ -30,12 +39,22 @@ function* tsFiles(dir: string): Generator<string> {
   }
 }
 
+const REPLACES_VARY: readonly RegExp[] = [
+  /\.(setHeader|set|header)\(\s*['"]vary['"]/i,
+  /\.(set|writeHead)\([^)]*\{[^}]*['"]?\bvary['"]?\s*:/i,
+];
+
 describe('Vary is append-only', () => {
-  it('no source file REPLACES Vary (setHeader/set) — use res.vary(), which appends', () => {
+  it('no source file REPLACES Vary (setHeader/set/header, or an object form) — use res.vary(), which appends', () => {
+    // Non-vacuity: the patterns catch every spelling they name.
+    for (const sample of [`res.setHeader('Vary', 'X')`, `res.set("vary", 'X')`, `res.header('Vary', 'X')`, `res.set({ Vary: 'X' })`, `res.writeHead(200, { 'Vary': 'X' })`]) {
+      expect(REPLACES_VARY.some((re) => re.test(sample)), sample).toBe(true);
+    }
+    expect(REPLACES_VARY.some((re) => re.test(`res.vary('Accept-Encoding')`))).toBe(false);
     const offenders: string[] = [];
     for (const f of tsFiles(SRC)) {
       readFileSync(f, 'utf8').split('\n').forEach((line, i) => {
-        if (/\.(setHeader|set)\(\s*['"]Vary['"]/.test(line)) offenders.push(`${f.slice(SRC.length + 1)}:${i + 1}`);
+        if (REPLACES_VARY.some((re) => re.test(line))) offenders.push(`${f.slice(SRC.length + 1)}:${i + 1}`);
       });
     }
     expect(offenders).toEqual([]);
@@ -45,7 +64,7 @@ describe('Vary is append-only', () => {
     let server: http.Server; let base = '';
     const saved: Record<string, string | undefined> = {};
     beforeAll(async () => {
-      for (const k of ['OPENWOP_API_KEYS', 'OPENWOP_AUTH_ENFORCE_BEARER', 'OPENWOP_DEPLOY_POSTURE']) saved[k] = process.env[k];
+      for (const k of ['OPENWOP_STORAGE_DSN', 'OPENWOP_SESSION_SECRET', 'OPENWOP_API_KEYS', 'OPENWOP_AUTH_ENFORCE_BEARER', 'OPENWOP_DEPLOY_POSTURE']) saved[k] = process.env[k];
       process.env.OPENWOP_STORAGE_DSN = 'memory://';
       process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
       process.env.OPENWOP_API_KEYS = 'k-vary-0001:*';

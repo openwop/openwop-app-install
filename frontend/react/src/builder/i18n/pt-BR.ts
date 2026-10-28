@@ -256,6 +256,8 @@ export const messages = {
   templateVersionMismatch_other: 'Copiado — mas {{count}} etapas estão instaladas em versões diferentes das usadas por este modelo: {{nodes}}. Elas podem se comportar de outra forma.',
   templateVersionMismatchItem: '{{label}} ({{installed}} instalada, o modelo usa {{pinned}})',
   templateIncompleteConfig: 'Copiado, mas {{count}} etapa ainda precisa de configuração: {{fields}}. Abra a etapa para preencher.',
+  templateUnfilledParams_one: 'Copiado, mas {{count}} entrada do modelo ainda está em branco: {{params}}. Uma execução vai falhar até você preenchê-la.',
+  templateUnfilledParams_other: 'Copiado, mas {{count}} entradas do modelo ainda estão em branco: {{params}}. Uma execução vai falhar até você preenchê-las.',
   templateInstantiateError: 'Não foi possível criar um fluxo de trabalho a partir deste modelo. Tente novamente.',
 
 
@@ -264,6 +266,7 @@ export const messages = {
   paletteCategoryData: 'Dados',
   paletteCategoryAi: 'IA',
   paletteCategoryControl: 'Controle',
+  paletteCategoryJourney: 'Jornada',
   paletteCategoryIntegration: 'Integração',
   paletteBuiltin: 'Integrado',
   nodes: 'Nós',

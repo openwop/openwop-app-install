@@ -48,6 +48,7 @@ import {
   listBoards,
   listBoardsWithCards,
   isTerminalColumn,
+  isPreconditionFailure,
   listCards,
   listCardsAssignedToUser,
   listWorkItemProjectionsForBoard,
@@ -667,6 +668,8 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
         createdBy?: unknown;
         assignmentReason?: unknown;
         blockerNote?: unknown;
+        /** ADR 0963 — apply `blockerNote` only if the card's note is still this one. */
+        ifBlockerNote?: unknown;
       };
 
       // ADR 0049 D4 — a caller with only card-scoped (assignment) access may
@@ -714,8 +717,18 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
             assignmentReason: typeof body.assignmentReason === 'string' ? body.assignmentReason : undefined,
             blockerNote: typeof body.blockerNote === 'string' ? body.blockerNote : undefined,
           },
+          // ADR 0963 (grade-code) — a release or note edit built from a stale copy
+          // of the card must not clear a hold the loop wrote since (a retried
+          // run that failed again). The caller names the note it saw; a mismatch
+          // is a 409, never a silent overwrite.
+          ...(typeof body.ifBlockerNote === 'string'
+            ? { precondition: (fresh: KanbanCard) => (fresh.blockerNote ?? '') === body.ifBlockerNote }
+            : {}),
         });
       } catch (err) {
+        if (isPreconditionFailure(err)) {
+          throw new OpenwopError('conflict', 'This card changed since you loaded it. Reload and try again.', 409, { reason: 'stale_card' });
+        }
         rethrowCardCommandError(err);
       }
 

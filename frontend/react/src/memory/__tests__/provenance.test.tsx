@@ -55,13 +55,21 @@ beforeEach(() => {
 });
 
 describe('MEM-UX-3 — a model-inferred belief is visibly distinguishable from a fact you typed', () => {
-  it('renders the auto-learned chip AND the previously-dead untrusted chip', async () => {
+  it('renders the auto-learned chip, and NOT the "imported from an external source" chip (ADR 0982 MAE2UX-3)', async () => {
     await mount();
     // On the AUTO row specifically — a chip that moved to the typed row must not pass.
     const autoRow = screen.getByText('The user banks with Acme').closest('li')!;
     expect(within(autoRow).getByText('Auto-learned')).toBeTruthy();
-    // Dead code before ADR 0587 — nothing could produce an untrusted note.
-    expect(within(autoRow).getByText('External · unverified')).toBeTruthy();
+    // Its own title already says "treated as unverified"; the external chip's title would
+    // claim the person's own words were imported from elsewhere.
+    expect(within(autoRow).queryByText('External · unverified')).toBeNull();
+  });
+
+  it('the untrusted chip still renders for an untrusted note of another source (ADR 0601 copied text)', async () => {
+    list.mockResolvedValue([{ ...TYPED, id: 'n3', content: 'Pasted from a vendor page', contentTrust: 'untrusted' }]);
+    await mount();
+    const row = screen.getByText('Pasted from a vendor page').closest('li')!;
+    expect(within(row).getByText('External · unverified')).toBeTruthy();
   });
 
   it('ANTI-ROT: a user-typed note carries NEITHER chip — this is not "label everything"', async () => {

@@ -8,4 +8,5 @@ export const CATEGORY_LABEL_KEYS: Record<NodeCategory, string> = {
   ai: 'paletteCategoryAi',
   control: 'paletteCategoryControl',
   integration: 'paletteCategoryIntegration',
+  journey: 'paletteCategoryJourney',
 };

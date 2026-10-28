@@ -23,6 +23,11 @@
  *
  * Adding a consumer read? Add its row. If it has no v2 home, that is the finding
  * — do NOT delete the row to make this green.
+ *
+ * Tracker TST-BAA-12. Red when (sabotage-witnessed, wave 60): `demoMode` is
+ * dropped from `extensions["openwop-app.host"]`; `envelopes` loses
+ * `tierOneSubsetCompliance`; the host-surfaces extension is renamed. A `null`
+ * counts as absent: the SPA's optional chains treat it the same way.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -84,8 +89,10 @@ describe('PHC-1 — the served v2 document is a superset of what the SPA reads',
   });
 
   it.each(CONSUMER_READS)('$v2Path resolves — $what', ({ v2Path, consumer }) => {
+    const value = resolve(doc, v2Path);
+    expect(value ?? null, `${v2Path} is null on the served major-2 document`).not.toBeNull();
     expect(
-      resolve(doc, v2Path),
+      value,
       `${v2Path} is ABSENT from the served major-2 document. ${consumer} reads it, and meets a missing value with a catch that renders nothing — so this ships as a silent UI regression, not an error. Either advertise it at major 2 or keep that consumer on the major-1 read.`,
     ).toBeDefined();
   });

@@ -27,10 +27,12 @@ import { setAdsComplianceChecker } from '../../host/adsAdapter.js';
 import { buildAdsComplianceChecker } from './brandService.js';
 import { buildBrandSurface } from './surface.js';
 import { registerBrandErasure } from './erasure.js';
+import { registerBrandPlaybookContent } from './playbookContent.js';
 
 export const brandFeature: BackendFeature = {
   id: 'brand',
   registerRoutes: (deps) => {
+    registerBrandPlaybookContent(); // ADR 0959 D5 — this feature owns its playbook content kind
     registerBrandRoutes(deps);
     // CFP-1 — the Brand Steward's three READ chat tools (list-brands,
     // resolve-voice, compliance-check), sharing the brand routes' org-scope

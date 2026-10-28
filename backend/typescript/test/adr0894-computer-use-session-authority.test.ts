@@ -24,6 +24,23 @@
  *   D8  a wall-clock ceiling, and a user-facing abort.
  *   D9  the read projection carries no provider session handle; DSAR erasure
  *       reaches the rows.
+ *
+ * (TST-BPE) Red when (each sabotage-witnessed, wave 65): the seam asks `startTask` for
+ * `workspace:read` instead of `runs:create`; the service accepts an empty orgId; a
+ * non-opener may decide; `sessionForRun` skips its org read gate; the request hash
+ * ignores who asked; an advance re-checks a weaker scope, ignores a removed opener or
+ * the wall clock; the allowlist admits a private host or the app's own origin; a
+ * credential action is offered for approval; a name resolving private is admitted at
+ * start or survives rebinding; erasure keeps the opener or the task text; an anon
+ * session may start.
+ *
+ * DOUBLE GUARDS (recorded, each half in a different file):
+ *  - a run with no person: `features/computer-use/feature.ts` startTask AND
+ *    `computerUseService.ts` startTask both refuse; the case asserts the surface's
+ *    message, so the outer (surface) refusal is the one it names;
+ *  - a literal `approve: true`: `feature.ts` decide calls `verifiedApprovalInterrupt`
+ *    (`approvalBinding.ts`), which throws `approval_required` before the service's
+ *    consumed-approval check is reached.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -48,11 +65,25 @@ import { sessions, type CuSession } from '../src/features/computer-use/sessionSt
 import { createApplyGrant } from '../src/host/applyGrant.js';
 import { getSetCookies } from './headerCookies.js';
 import { bareRunId } from './support/bareRunId.js';
+import type { Storage } from '../src/storage/storage.js';
+import type { HostAdapterSuite } from '../src/host/index.js';
 
 let BASE = '';
 let server: http.Server;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any -- app.locals is untyped Express state
-let appRef: { locals: { storage: any; hostSuite: any } } | undefined;
+let appRef: { locals: { storage: Storage; hostSuite: HostAdapterSuite } } | undefined;
+
+/** The response fields these probes read (a narrow local view of the wire bodies). */
+interface WireInterrupt {
+  nodeId: string; kind: string; token?: string;
+  data?: { prompt?: string; computerUse?: { kind?: string; url?: string; origin?: string; digest?: string }; approverRefs?: string[]; providerNote?: string };
+}
+interface WireBody {
+  orgId?: string; runId?: string; workflowId?: string; status?: string;
+  user?: { userId: string };
+  session?: { sessionId: string; status: string };
+  interrupts?: WireInterrupt[];
+  error?: { code?: string; message?: string };
+}
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -62,7 +93,7 @@ beforeAll(async () => {
   delete process.env.OPENWOP_DEMO_MODE;
   delete process.env.OPENWOP_COMPUTER_USE_DAILY_SESSIONS;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'adr0894', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  appRef = app as unknown as typeof appRef;
+  appRef = { locals: { storage: app.locals.storage, hostSuite: app.locals.hostSuite } };
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   await setToggle('on');
   const u = getToggleDefault('users'); if (u) await saveConfig({ ...u, status: 'on' }, 'test');
@@ -118,7 +149,7 @@ describe('D1 — starting a session needs a person, an org and runs:create there
   });
   it('a run with no person (a webhook or system job) cannot drive a browser', async () => {
     const t = await team();
-    await expect(surfaceFor(t.tenantId).startTask!(startArgs(t.orgA, 'look around'))).rejects.toMatchObject({ httpStatus: 403 });
+    await expect(surfaceFor(t.tenantId).startTask!(startArgs(t.orgA, 'look around'))).rejects.toMatchObject({ httpStatus: 403, message: 'A browser session needs a person behind the run.' });
   });
   it('an empty orgId is refused, not stored as an org-less session the floor never saw', async () => {
     const t = await team();
@@ -183,10 +214,10 @@ describe('D3 — end to end: the run suspends on an approval the decide node rai
   it('computer-use.run-task: suspend → approve → the commit is recorded as human, bound to the interrupt', async () => {
     const tenantId = `org:cu894-e2e-${Date.now()}`;
     let cookie = '';
-    const call = async (method: string, path: string, body?: unknown): Promise<{ status: number; json: any }> => {
+    const call = async (method: string, path: string, body?: unknown): Promise<{ status: number; json: WireBody }> => {
       const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
       for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]!; }
-      return { status: res.status, json: await res.json().catch(() => undefined) };
+      return { status: res.status, json: (await res.json().catch(() => ({}))) as WireBody };
     };
     const login = await call('POST', '/host/openwop-app/test/login', { email: `cu894-e2e-${Date.now()}@acme.test`, tenantId });
     expect(login.status, JSON.stringify(login.json)).toBe(201);
@@ -213,7 +244,7 @@ describe('D3 — end to end: the run suspends on an approval the decide node rai
     const data = open[0]!.data ?? {};
     expect(String(data.prompt ?? ''), 'the approver-facing prompt is host-composed, never page text').not.toContain(injected);
     expect(data.computerUse).toMatchObject({ kind: 'submit', origin: ORIGIN });
-    const openerId = login.json.user.userId as string;
+    const openerId = login.json.user!.userId;
     expect(data.approverRefs, 'A1 — only the opener may resolve it').toEqual([openerId]);
 
     // A1 — a peer editor in the same org (approvals:respond) is NOT an eligible approver.
@@ -235,7 +266,7 @@ describe('D3 — end to end: the run suspends on an approval the decide node rai
     let status = '';
     for (let i = 0; i < 80; i++) {
       await new Promise((r) => setTimeout(r, 50));
-      status = (await call('GET', `/runs/${runId}`)).json?.status;
+      status = (await call('GET', `/runs/${runId}`)).json?.status ?? '';
       if (['completed', 'failed', 'cancelled'].includes(status)) break;
     }
     expect(status).toBe('completed');
@@ -360,7 +391,7 @@ describe('D8 — a wall-clock ceiling and a user-facing abort', () => {
     const { session, orgId, call } = await httpSession();
     const res = await call('POST', `/host/openwop-app/computer-use/orgs/${orgId}/sessions/${encodeURIComponent(session.sessionId)}/abort`);
     expect(res.status, JSON.stringify(res.json)).toBe(200);
-    expect(res.json.session.status).toBe('aborted');
+    expect(res.json.session?.status).toBe('aborted');
   });
 });
 
@@ -384,16 +415,16 @@ describe('D9 — the read projection and DSAR erasure', () => {
 });
 
 /** A halted session opened over HTTP by a logged-in owner (for the route probes). */
-async function httpSession(): Promise<{ session: { sessionId: string }; orgId: string; call: (m: string, p: string, b?: unknown) => Promise<{ status: number; json: any }> }> {
+async function httpSession(): Promise<{ session: { sessionId: string }; orgId: string; call: (m: string, p: string, b?: unknown) => Promise<{ status: number; json: WireBody }> }> {
   const tenantId = `org:cu894-http-${Date.now()}-${n++}`;
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<{ status: number; json: any }> => {
+  const call = async (method: string, path: string, body?: unknown): Promise<{ status: number; json: WireBody }> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]!; }
-    return { status: res.status, json: await res.json().catch(() => undefined) };
+    return { status: res.status, json: (await res.json().catch(() => ({}))) as WireBody };
   };
   const login = await call('POST', '/host/openwop-app/test/login', { email: `cu894-h-${Date.now()}-${n++}@acme.test`, tenantId });
-  const userId = login.json.user.userId as string;
+  const userId = login.json.user!.userId;
   const org = await call('POST', '/host/openwop-app/orgs', { name: 'H' });
   const orgId = org.json.orgId as string;
   const out = await surfaceFor(tenantId, userId).startTask!(startArgs(orgId, mockTask([act('a1', 'submit', `${ORIGIN}/send`)], `h${n++}`))) as { session: { sessionId: string } };
@@ -407,17 +438,17 @@ async function httpSession(): Promise<{ session: { sessionId: string }; orgId: s
  *  and started it; returns once the run suspends on its first approval. */
 async function runTaskToApproval(actions: CuAction[]): Promise<{
   tenantId: string; orgId: string; openerId: string; runId: string; nodeId: string;
-  call: (m: string, p: string, b?: unknown, headers?: Record<string, string>) => Promise<{ status: number; json: any }>;
+  call: (m: string, p: string, b?: unknown, headers?: Record<string, string>) => Promise<{ status: number; json: WireBody }>;
 }> {
   const tenantId = `org:cu894-g-${Date.now()}-${n++}`;
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown, headers: Record<string, string> = {}): Promise<{ status: number; json: any }> => {
+  const call = async (method: string, path: string, body?: unknown, headers: Record<string, string> = {}): Promise<{ status: number; json: WireBody }> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie && !headers.authorization ? { cookie } : {}), ...headers }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]!; }
-    return { status: res.status, json: await res.json().catch(() => undefined) };
+    return { status: res.status, json: (await res.json().catch(() => ({}))) as WireBody };
   };
   const login = await call('POST', '/host/openwop-app/test/login', { email: `cu894-g-${Date.now()}-${n++}@acme.test`, tenantId });
-  const openerId = login.json.user.userId as string;
+  const openerId = login.json.user!.userId;
   const orgId = (await call('POST', '/host/openwop-app/orgs', { name: 'G' })).json.orgId as string;
   const wf = await call('POST', '/host/openwop-app/workflows/from-chain', {
     chainId: 'computer-use.run-task',
@@ -434,11 +465,11 @@ async function runTaskToApproval(actions: CuAction[]): Promise<{
   return { tenantId, orgId, openerId, runId, nodeId: open[0]!.nodeId, call };
 }
 
-async function runStatus(call: (m: string, p: string) => Promise<{ json: any }>, runId: string): Promise<string> {
+async function runStatus(call: (m: string, p: string) => Promise<{ json: WireBody }>, runId: string): Promise<string> {
   let status = '';
   for (let i = 0; i < 80; i++) {
     await new Promise((r) => setTimeout(r, 50));
-    status = (await call('GET', `/runs/${runId}`)).json?.status;
+    status = (await call('GET', `/runs/${runId}`)).json?.status ?? '';
     if (['completed', 'failed', 'cancelled'].includes(status)) break;
   }
   return status;
@@ -447,7 +478,6 @@ async function runStatus(call: (m: string, p: string) => Promise<{ json: any }>,
 describe('CU2CD-1 — a session the provider is still working on is driven, not abandoned', () => {
   it('decide polls and waits on a timer until the provider acts, then completes', async () => {
     const { makeSuspendFn, SuspendSignal } = await import('../src/executor/suspendSignal.js');
-    // @ts-expect-error — .mjs pack module has no type declarations (pure-JS node pack).
     const { nodes } = await import('../../../packs/feature.computer-use.nodes/index.mjs');
     const t = await team();
     const surface = surfaceFor(t.tenantId, t.opener);
@@ -455,10 +485,10 @@ describe('CU2CD-1 — a session the provider is still working on is driven, not 
     expect(started.session.status, 'the provider is still thinking when task returns').toBe('running');
     let resolution: { resumeKey: string; value: unknown } | undefined;
     const waits: string[] = [];
-    let out: { status: string; outputs: { session: { status: string } } } | undefined;
+    let out: { status: string; outputs?: Record<string, unknown> } | undefined;
     for (let i = 0; i < 20 && !out; i++) {
       try {
-        out = await nodes['feature.computer-use.nodes.decide']({ nodeId: 'decide', inputs: { sessionId: started.session.sessionId }, features: { 'computer-use': surface }, suspend: makeSuspendFn('decide', resolution) });
+        out = await nodes['feature.computer-use.nodes.decide']!({ nodeId: 'decide', inputs: { sessionId: started.session.sessionId }, features: { 'computer-use': surface }, suspend: makeSuspendFn('decide', resolution) });
       } catch (err) {
         if (!(err instanceof SuspendSignal)) throw err;
         expect(err.kind).toBe('timer');
@@ -468,7 +498,7 @@ describe('CU2CD-1 — a session the provider is still working on is driven, not 
     }
     expect(waits.length, 'it waited between polls').toBeGreaterThan(0);
     expect(new Set(waits).size, 'every wait has a fresh key').toBe(waits.length);
-    expect(out?.outputs.session.status).toBe('completed');
+    expect((out?.outputs?.['session'] as { status?: string } | undefined)?.status).toBe('completed');
   });
 });
 
@@ -625,10 +655,10 @@ describe('addendum G-D — a credential refusal is visible, not a quiet success'
     const r = await (async () => {
       const tenantId = `org:cu894-cred-${Date.now()}`;
       let cookie = '';
-      const call = async (method: string, path: string, body?: unknown): Promise<{ status: number; json: any }> => {
+      const call = async (method: string, path: string, body?: unknown): Promise<{ status: number; json: WireBody }> => {
         const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
         for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]!; }
-        return { status: res.status, json: await res.json().catch(() => undefined) };
+        return { status: res.status, json: (await res.json().catch(() => ({}))) as WireBody };
       };
       await call('POST', '/host/openwop-app/test/login', { email: `cu894-cred-${Date.now()}@acme.test`, tenantId });
       const orgId = (await call('POST', '/host/openwop-app/orgs', { name: 'C' })).json.orgId as string;
@@ -670,7 +700,8 @@ describe('addendum 2 — no non-human resolver can approve a browser commit (one
   it('an anonymous caller (no session) cannot resolve the approval', async () => {
     const r = await runTaskToApproval([act('a1', 'submit', `${ORIGIN}/send`)]);
     const res = await fetch(`${BASE}/runs/${r.runId}/interrupts/${r.nodeId}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ resumeValue: { action: 'approve' } }) });
-    expect(res.status, await res.clone().text()).toBeGreaterThanOrEqual(400);
+    // middleware/auth.ts answers first: no credential, no session to act as.
+    expect([res.status, ((await res.json()) as { error?: string }).error]).toEqual([401, 'unauthenticated']);
     await noCommit(r.tenantId);
   });
   it('the inbound-messaging lane (a channel message resuming the run) cannot approve', async () => {
@@ -681,7 +712,10 @@ describe('addendum 2 — no non-human resolver can approve a browser commit (one
       ?? await app.locals.storage.getInterruptByNode(bareRunId(r.runId), r.nodeId);
     expect(itr, 'the open approval').toBeTruthy();
     // Exactly what `connections/inboundWebhooks.ts` passes: the event under `message`.
-    await resolveAndResume(app.locals.storage, app.locals.hostSuite, itr.interruptId, { message: { text: 'approve', action: 'approve' }, source: 'slack' }, { capabilityToken: true }).catch(() => undefined);
+    const outcome = await resolveAndResume(app.locals.storage, app.locals.hostSuite, itr!.interruptId, { message: { text: 'approve', action: 'approve' }, source: 'slack' }, { capabilityToken: true })
+      .then(() => 'returned', (e: unknown) => `threw: ${e instanceof Error ? e.message : String(e)}`);
+    // Refused by the gate's approver ACL before anything resolves (ADR 0899 D1).
+    expect(outcome).toBe('threw: The `voter` is not an eligible approver for this gate.');
     await runStatus(r.call, r.runId).catch(() => '');
     await noCommit(r.tenantId);
   });
@@ -697,7 +731,7 @@ describe('addendum 2 — no non-human resolver can approve a browser commit (one
     const app = appRef!;
     const itr = await app.locals.storage.getInterruptByNode(r.runId, r.nodeId) ?? await app.locals.storage.getInterruptByNode(bareRunId(r.runId), r.nodeId);
     // What `executor/approvalGateTimeout.ts` writes for an expired gate.
-    await app.locals.storage.resolveInterrupt(itr.interruptId, { action: 'reject', reason: 'timeout' }, new Date().toISOString());
+    await app.locals.storage.resolveInterrupt(itr!.interruptId, { action: 'reject', reason: 'timeout' }, new Date().toISOString());
     const row = (await sessions.listByPrefix(`${r.tenantId}:`))[0]!;
     const { verifiedApprovalInterrupt } = await import('../src/features/computer-use/approvalBinding.js');
     await expect(verifiedApprovalInterrupt({ runId: r.runId, nodeId: r.nodeId, session: row })).rejects.toMatchObject({ code: 'approval_required' });

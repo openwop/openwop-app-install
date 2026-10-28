@@ -31,6 +31,12 @@ import { recordEvent, listEvents, summarizeForReport, sinceIsoForDays, trendForD
 import { recordNav, navReport } from './navTelemetryService.js';
 import { notePaywallEvent, isValidPaywallEvent, type PaywallEventInput } from '../../host/paywallFunnel.js';
 import { visitorHashFor } from './visitorIdentity.js';
+import { HEATMAPS_TOGGLE, SESSION_REPLAY_TOGGLE, REPLAY_DEFAULT_RETENTION_DAYS, replayStorageStatus } from './replayStore.js';
+import { recordHeat, countBotBatch, listHeatPages, readHeatmap, DEVICE_CLASSES, type DeviceClass } from './heatStore.js';
+import { parseHeatBatch, normalizePageKey, heatmapsEnabled } from './heatIngest.js';
+import { isAutomatedTraffic } from './botTraffic.js';
+import { offeredVisitorChoices } from '../consent/consentService.js';
+import { resolveExperimentStamp } from './experimentStampResolver.js';
 
 const FEATURE = { toggleId: 'analytics', label: 'Analytics' };
 /** Most paywall events one beacon may carry (a page shows a handful of locks). */
@@ -116,6 +122,55 @@ export function registerAnalyticsRoutes(deps: RouteDeps): void {
     } catch (err) { next(err); }
   });
 
+  // ───────────────────────── behavior capture (ADR 0951 P1) ──────────────────
+  // Whether this site collects heat data. Not visitor-specific (the visitor's own
+  // consent is decided per batch, server-side), so it is publicly cacheable. The
+  // capture script asks only after the visitor's analytics decision allows it.
+  app.get(`${PUB}/:orgId/capture-config`, async (req, res, next) => {
+    try {
+      const tenantId = await resolvePublicTenant(req.params.orgId);
+      res.setHeader('Cache-Control', 'public, max-age=300');
+      res.json({ heatmaps: await heatmapsEnabled(tenantId) });
+    } catch (err) { next(err); }
+  });
+
+  // D3 — batched heat events. EVERY outcome that is not a malformed request is the
+  // same `204` (consent refused, heat maps off, bot, page cap, recorded), so the
+  // lane is not an oracle for anyone's consent or the org's settings. The
+  // `sessionKey` is read for the consent decision and the experiment arm only and
+  // is never stored (heatStore.ts).
+  app.post(`${PUB}/:orgId/heat`, async (req, res, next) => {
+    try {
+      const orgId = req.params.orgId;
+      const tenantId = await resolvePublicTenant(orgId);
+      if (!takeOrgBeaconBudget(orgId)) {
+        res.status(429).set('Retry-After', '60').json({ error: 'rate_limited', message: 'analytics beacon budget for this site is exhausted; retry in a minute' });
+        return;
+      }
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const batch = parseHeatBatch(body); // typed 400 on a malformed batch
+      const sessionKey = typeof body.sessionKey === 'string' ? body.sessionKey : '';
+      const visitorCtx = visitorConsentContextOf(req, tenantId, body.consentToken);
+      if (!(await heatmapsEnabled(tenantId))) { res.status(204).end(); return; }
+      let consented: boolean;
+      try { consented = await analyticsConsentAllows(tenantId, sessionKey, visitorCtx); }
+      catch (err) { throw new OpenwopError('consent_unreadable', 'The consent store could not be read; nothing was recorded. Retry.', 503, { cause: String(err) }); }
+      if (!consented) { res.status(204).end(); return; }
+      let arm = '';
+      if (batch.experimentId && sessionKey) {
+        const outcome = await resolveExperimentStamp(tenantId, orgId, batch.experimentId, sessionKey);
+        if (outcome.ok) arm = `${outcome.id}/${outcome.variant}`;
+      }
+      const target = { tenantId, orgId, pageKey: batch.pageKey, arm, device: batch.device, now: new Date() };
+      if (isAutomatedTraffic(typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : undefined, batch.automation)) {
+        await countBotBatch(target);
+      } else {
+        await recordHeat(target, batch.events);
+      }
+      res.status(204).end();
+    } catch (err) { next(err); }
+  });
+
   // ───────────────────────── authed reporting ────────────────────────────────
   app.get(`${ORG}/summary`, async (req, res, next) => {
     try {
@@ -166,6 +221,62 @@ export function registerAnalyticsRoutes(deps: RouteDeps): void {
       });
     }
     catch (err) { next(err); }
+  });
+
+  // ADR 0951 P0 — behavior-capture status for the settings section. Read-only and
+  // workspace:read: it reports whether each capability is on and, for session
+  // replay, whether storage is configured ("not configured" fails closed — the
+  // recorder is never served). No backend name or bucket leaves the host.
+  // ADR 0951 P1 — heat maps are aggregate reads (workspace:read, D4), gated on the
+  // sub-toggle with the same uniform 404 as a toggle-off feature.
+  const requireHeatmaps = async (tenantId: string): Promise<void> => {
+    if (!(await heatmapsEnabled(tenantId))) throw new OpenwopError('not_found', 'Heat maps are not enabled for this workspace.', 404, {});
+  };
+  app.get(`${ORG}/heatmap/pages`, async (req, res, next) => {
+    try {
+      const { orgId, tenantId } = await authz(req, 'workspace:read');
+      await requireHeatmaps(tenantId);
+      res.json({ pages: (await listHeatPages(tenantId, orgId)).map((p) => ({ pageKey: p.pageKey, firstSeen: p.firstSeen, lastSeen: p.lastSeen })) });
+    } catch (err) { next(err); }
+  });
+  app.get(`${ORG}/heatmap`, async (req, res, next) => {
+    try {
+      const { orgId, tenantId } = await authz(req, 'workspace:read');
+      await requireHeatmaps(tenantId);
+      const pageKey = typeof req.query.page === 'string' ? normalizePageKey(req.query.page) : null;
+      if (!pageKey) throw new OpenwopError('validation_error', 'Query `page` is required: a page key from `heatmap/pages`.', 400, { field: 'page' });
+      const deviceQ = typeof req.query.device === 'string' ? req.query.device : 'all';
+      if (deviceQ !== 'all' && !(DEVICE_CLASSES as readonly string[]).includes(deviceQ)) {
+        throw new OpenwopError('validation_error', `Query \`device\` must be one of: all, ${DEVICE_CLASSES.join(', ')}.`, 400, { field: 'device' });
+      }
+      const days = windowDaysFor(req) ?? 30;
+      const arm = typeof req.query.arm === 'string' && req.query.arm ? req.query.arm.slice(0, 200) : undefined;
+      res.setHeader('Cache-Control', 'private, no-store');
+      res.json(await readHeatmap({ tenantId, orgId, pageKey, device: deviceQ as DeviceClass | 'all', days, ...(arm ? { arm } : {}) }));
+    } catch (err) { next(err); }
+  });
+
+  app.get(`${ORG}/behavior/settings`, async (req, res, next) => {
+    try {
+      const { tenantId } = await authz(req, 'workspace:read');
+      const on = async (id: string) => Boolean((await resolveOne(id, { tenantId }).catch(() => null))?.enabled);
+      const [heatmaps, replay, consent] = await Promise.all([on(HEATMAPS_TOGGLE), on(SESSION_REPLAY_TOGGLE), on('consent')]);
+      const storageConfigured = replayStorageStatus().configured;
+      const recordingOffered = (await offeredVisitorChoices(tenantId)).includes('analytics.replay');
+      res.setHeader('Cache-Control', 'private, no-store');
+      res.json({
+        heatmaps: { enabled: heatmaps },
+        replay: {
+          enabled: replay,
+          storageConfigured,
+          consentEnabled: consent,
+          // The existing choice registry is also the capture-availability owner.
+          // Storage and toggles alone cannot advertise an uninstalled recorder.
+          available: recordingOffered && replay && storageConfigured && consent,
+          retentionDays: REPLAY_DEFAULT_RETENTION_DAYS,
+        },
+      });
+    } catch (err) { next(err); }
   });
 
   // R2 AN-R2-1 — the trend chart's aggregate. Windowed ONLY (the same

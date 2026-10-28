@@ -4,6 +4,13 @@
  * and `/prompts:render` answered an unbound required variable with a VENDOR code
  * where the v2 OpenAPI names `validation_error`. The executor halves are driven
  * end to end in `run-timeout.test.ts`; this file pins the two seams.
+ *
+ * Breaks it (round-1 probes, witnessed): dropping the v1 flat read
+ * (8fw2g2-rro-flat), dropping the `typeof section === 'object'` guard
+ * (rro-typeof — reds on the ABSENT-section leg, where `undefined[key]` throws),
+ * and mapping `prompt_variable_unresolved` to any other v2 code (rro-v2code).
+ * The `run: 7` leg pins that a scalar section is never returned as the option
+ * value (8fw2g2-rro-scalar-r2).
  */
 import { describe, expect, it } from 'vitest';
 import { runOption } from '../src/host/runOptions.js';

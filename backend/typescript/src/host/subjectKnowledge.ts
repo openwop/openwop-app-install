@@ -74,8 +74,12 @@ export async function clearSubjectKnowledge(tenantId: string, subject: Subject):
 /** DSAR eraser — drop the subject's knowledge binding under their `user:` scope. */
 export async function eraseSubjectKnowledge(tenantId: string, subjectKey: string): Promise<void> {
   if (!tenantId || !subjectKey) return;
-  const { raw } = subjectKeyForms(subjectKey);
-  await store.delete(keyOf(tenantId, personSubject(raw)));
+  // ADR 0464 correction (DSAR-DBL) — `personSubject(User.userId)` scopes as
+  // `user:user:<hash>`, which the raw-only key missed. Delete that spelling too:
+  // the user-tagged scope re-wrapped, never an `agent:` scope (no bridge).
+  const { raw, scope } = subjectKeyForms(subjectKey);
+  const ids = new Set([raw, ...(scope.startsWith('user:') ? [scope] : [])]);
+  for (const id of ids) await store.delete(keyOf(tenantId, personSubject(id)));
 }
 
 /** Register the subject-knowledge DSAR eraser (idempotent — the seam dedupes by

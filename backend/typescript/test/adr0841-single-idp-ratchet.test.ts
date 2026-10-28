@@ -6,6 +6,11 @@
  * a second issuer or a stored IdP makes the same principal string able to name
  * two humans (CONNCD-15) — so it fails here, pointing at ADR 0841 D3, instead of
  * shipping silently.
+ *
+ * TST-BWB-8 (grade-tests w62): red when src reads a new OPENWOP_(OIDC|SAML|SCIM)_* env
+ * name, or declares a DurableCollection named like an SSO/IdP config. Measured: the 14
+ * pinned names are every such name in src. A destructured `process.env` read would escape
+ * the first scan (recorded, not seen in src).
  */
 import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';

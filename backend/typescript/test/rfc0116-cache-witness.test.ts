@@ -6,8 +6,17 @@
  * MUSTs without a live Anthropic key:
  *  - a HIT reports cacheReadTokens > 0;
  *  - a cross-tenant MISS (tenant B reusing tenant A's cachePrefixId) reports
- *    cacheReadTokens == 0 — a STRUCTURAL miss (different bytes), not bookkeeping;
- *  - outcome-invariance: inputTokens/outputTokens are identical hit vs miss.
+ *    cacheReadTokens == 0 — a STRUCTURAL miss (different bytes), not bookkeeping.
+ *
+ * Round-2 grade note (PROTECTED-LOW, kept by ruling): the cross-tenant miss is
+ * the same break as its twins `rfc0116-prompt-prefix-cache.test.ts` › "tenant B
+ * uses tenant A’s cachePrefixId → DIFFERENT prefix bytes" (unit) and
+ * `rfc0116-prefix-cache-seam.test.ts` › "A primes → A hits → B…" (HTTP, real
+ * seam); probe 8fw2g1-cw-marker-notenant reds all three. The old
+ * "outcome-invariance" asserts compared two constants of this file's OWN mock
+ * (no product edit could red them) and were removed; outcome-invariance on the
+ * wire is the seam's claim (rfc0116-prefix-cache-seam). Case 2 now pins the
+ * unscoped bytes literally instead of asserting a mock hit.
  */
 import { describe, expect, it } from 'vitest';
 import { cacheableAnthropicSystem, type AnthropicSystemBlock } from '../src/providers/promptCaching.js';
@@ -39,7 +48,7 @@ function makeContentAddressedAnthropic() {
 }
 
 describe('RFC 0116 — two-tenant cache witness (real prefix assembly + content-addressed cache)', () => {
-  it('prime → hit → cross-tenant miss, with outcome-invariance', () => {
+  it('prime → hit → cross-tenant miss (same cachePrefixId, different tenant)', () => {
     const anthropic = makeContentAddressedAnthropic();
     const scopeA = { tenant: 'tenant-A', cachePrefixId: 'shared-id' };
     const scopeB = { tenant: 'tenant-B', cachePrefixId: 'shared-id' }; // SAME cachePrefixId
@@ -56,20 +65,19 @@ describe('RFC 0116 — two-tenant cache witness (real prefix assembly + content-
     // Tenant B, FIRST use of tenant A's cachePrefixId — STRUCTURAL MISS (read == 0).
     const b1 = anthropic.call(cacheableAnthropicSystem(SYSTEM, true, scopeB));
     expect(b1.cacheReadTokens).toBe(0); // the cross-tenant isolation MUST
-
-    // Outcome-invariance: a hit and a miss bill identical input/output tokens —
-    // cachePrefixId is a COST hint only, never a semantic input.
-    expect(a2.inputTokens).toBe(b1.inputTokens);
-    expect(a2.outputTokens).toBe(b1.outputTokens);
   });
 
-  it('no scope (global) would FALSELY share across tenants — the bug this prevents', () => {
+  it('unscoped assembly is the bare SYSTEM bytes, so two unscoped tenants would share one cache entry', () => {
+    // Without the (tenant, cachePrefixId) scope the assembled block is exactly the
+    // system prompt (no tenant in the bytes), so a content-addressed cache cannot
+    // tell two tenants apart: the hazard the scope exists to prevent. Twin:
+    // rfc0116-prompt-prefix-cache › "backward-compat: no scope → …".
+    expect(cacheableAnthropicSystem(SYSTEM, true)).toEqual([
+      { type: 'text', text: SYSTEM, cache_control: { type: 'ephemeral' } },
+    ]);
     const anthropic = makeContentAddressedAnthropic();
-    // Without the (tenant, cachePrefixId) scope, both tenants assemble identical
-    // bytes → tenant B would HIT tenant A's cache (the cross-tenant leak). This
-    // asserts the hazard exists absent namespacing, so the fix is load-bearing.
     anthropic.call(cacheableAnthropicSystem(SYSTEM, true)); // "A" primes (unscoped)
     const bUnscoped = anthropic.call(cacheableAnthropicSystem(SYSTEM, true)); // "B" — same bytes
-    expect(bUnscoped.cacheReadTokens).toBeGreaterThan(0); // leak WITHOUT scope → why we scope
+    expect(bUnscoped.cacheReadTokens).toBeGreaterThan(0);
   });
 });

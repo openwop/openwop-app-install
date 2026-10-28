@@ -13,6 +13,7 @@
  *
  *   Alt+N                  → new tab
  *   Alt+W                  → close the active tab (the focused-tab Delete path still works too)
+ *   Alt+P                  → pin / unpin the active tab
  *   Alt+1..9               → focus the Nth tab
  *   Alt+Shift+Left/Right   → move the ACTIVE tab one position left/right (reorder; no-op at the edge)
  */
@@ -26,8 +27,11 @@ export function useDeckShortcuts(opts: {
   onJumpTo: (index: number) => void;
   /** Move the active tab by `delta` slots (-1 left, +1 right). No-op at the edge. */
   onMoveActive: (delta: -1 | 1) => void;
+  /** Pin / unpin the active tab (ADR 0978, round-1 MTCU-103 — the pin control is
+   *  `tabIndex=-1` inside the roving tablist, so it needs a keyboard path). */
+  onTogglePinActive?: () => void;
 }): void {
-  const { onNewTab, onCloseActive, onJumpTo, onMoveActive } = opts;
+  const { onNewTab, onCloseActive, onJumpTo, onMoveActive, onTogglePinActive } = opts;
   useEffect(() => {
     const handler = (e: KeyboardEvent): void => {
       if (!e.altKey || e.ctrlKey || e.metaKey) return; // Alt-based
@@ -42,10 +46,11 @@ export function useDeckShortcuts(opts: {
       }
       if (e.code === 'KeyN') { e.preventDefault(); onNewTab(); return; }
       if (e.code === 'KeyW') { e.preventDefault(); onCloseActive(); return; }
+      if (e.code === 'KeyP' && onTogglePinActive) { e.preventDefault(); onTogglePinActive(); return; }
       const m = /^Digit([1-9])$/.exec(e.code);
       if (m) { e.preventDefault(); onJumpTo(Number(m[1]) - 1); }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [onNewTab, onCloseActive, onJumpTo, onMoveActive]);
+  }, [onNewTab, onCloseActive, onJumpTo, onMoveActive, onTogglePinActive]);
 }

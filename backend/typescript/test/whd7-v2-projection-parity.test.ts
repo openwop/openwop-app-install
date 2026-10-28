@@ -59,7 +59,7 @@
  *     aiProviders.realtimeVoice, aiProviders.maxInlineMediaBytes,
  *     envelopes.reliability.
  */
-import { afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -106,10 +106,17 @@ function buildV2(): Rec {
 const ENV_KEYS = ['OPENWOP_CHAIN_SUBCHAINS', 'OPENWOP_TEST_TRIGGER_COMPACTION'] as const;
 const savedEnv = new Map<string, string | undefined>();
 
+let savedDsn: string | undefined;
 beforeAll(() => {
   // The storage-family records read the configured tier.
+  savedDsn = process.env.OPENWOP_STORAGE_DSN;
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   for (const k of ENV_KEYS) savedEnv.set(k, process.env[k]);
+});
+
+afterAll(() => {
+  if (savedDsn === undefined) delete process.env.OPENWOP_STORAGE_DSN;
+  else process.env.OPENWOP_STORAGE_DSN = savedDsn;
 });
 
 afterEach(() => {
@@ -202,7 +209,8 @@ describe('WHD-7 — the v2 document under the corpus projection', () => {
       }
     }
     expect(leaked, leaked.join('\n')).toEqual([]);
-    expect(checked).toBeGreaterThan(60);
+    // MEASURED 209 facets at 19d13e682 (/grade-tests 8f W5; the floor was 60, far below the truth).
+    expect(checked).toBeGreaterThanOrEqual(209);
   });
 });
 
@@ -246,6 +254,7 @@ describe('WHD-7 — carriesUnspliceablePayload(): no advertised family is a bare
       if (facets.length === 0) bare.push(family);
     }
     expect(bare, `advertised as a bare {status, since, witness} record although the v1 value WAS the payload — only a person can name the seat (RFC 0193 §B): ${bare.join(', ')}`).toEqual([]);
-    expect(judged).toBeGreaterThanOrEqual(14);
+    // MEASURED 32 v1-carried families at 19d13e682 (/grade-tests 8f W5; the floor was 14).
+    expect(judged).toBeGreaterThanOrEqual(32);
   });
 });

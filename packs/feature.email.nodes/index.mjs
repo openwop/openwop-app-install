@@ -56,10 +56,24 @@ export async function render(ctx) {
   return { status: 'success', outputs: { rendered: out.rendered } };
 }
 
+/** ADR 0905 D5 — submit a campaign for send review. A side effect (it writes the
+ *  approval row), so it is classified `side-effect`: a replay fork serves the recorded
+ *  outcome instead of re-executing. It cannot approve or send. */
+export async function submitForReview(ctx) {
+  const email = ensureEmail(ctx);
+  if (typeof email.submitForReview !== 'function') {
+    throw Object.assign(new Error('host does not expose ctx.features.email.submitForReview (ADR 0905)'), { code: 'host_capability_missing', capability: 'host.sample.email' });
+  }
+  const a = argsOf(ctx);
+  const out = await email.submitForReview({ orgId: strOf(a.orgId), campaignId: strOf(a.campaignId) });
+  return { status: 'success', outputs: out };
+}
+
 export const nodes = {
   'feature.email.nodes.list-templates': listTemplates,
   'feature.email.nodes.get-template': getTemplate,
   'feature.email.nodes.render': render,
+  'feature.email.nodes.submit-for-review': submitForReview,
 };
 
 export default nodes;

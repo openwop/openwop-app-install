@@ -31,18 +31,18 @@ const PACK = JSON.parse(readFileSync(join(REPO, 'packs', 'feature.cms.nodes', 'p
   version: string; description: string; nodes: { typeId: string; role: string }[];
 };
 const id = (n: string): string => `feature.cms.nodes.${n}`;
-const WRITERS_SERVED = ['update-section-draft', 'submit-page'];
+const WRITERS_SERVED = ['update-section-draft', 'submit-page', 'create-draft-page']; // + ADR 0948 P1
 const WRITER_HELD = 'translate-section';
 const READS = ['get-page', 'list-pages', 'get-draft-page'];
 
 describe('ADR 0668 D5 — CMS node replay classification', () => {
-  it('leg 1: the three writers declare side-effect; the three reads stay action', () => {
+  it('leg 1: the four writers declare side-effect; the three reads stay action', () => {
     const byId = new Map(PACK.nodes.map((n) => [n.typeId, n.role]));
     for (const n of [...WRITERS_SERVED, WRITER_HELD]) expect(byId.get(id(n)), n).toBe('side-effect');
     for (const n of READS) expect(byId.get(id(n)), n).toBe('action');
   });
 
-  it('leg 2: the two pure writers are floored AND replay-SERVED', () => {
+  it('leg 2: the three pure writers are floored AND replay-SERVED', () => {
     for (const n of WRITERS_SERVED) {
       expect(MANIFEST_DECLARED_TYPE_IDS.has(id(n)), n).toBe(true);
       expect(MANIFEST_SIDE_EFFECT_FLOOR.has(id(n)), `${n} is floored`).toBe(true);

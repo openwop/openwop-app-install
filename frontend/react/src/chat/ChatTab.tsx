@@ -21,16 +21,19 @@
 import { Suspense, lazy, useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Notice } from '../ui/Notice.js';
-import { BYOKWizard } from '../byok/BYOKWizard.js';
 import { useBYOKConfig } from '../byok/lib/useBYOKConfig.js';
 import { SignInRequiredContext } from './SignInRequiredNotice.js';
 import { useFeatureAccess } from '../featureToggles/FeatureAccessContext.js';
 import { useAuth } from '../auth/useAuth.js';
 import { ChatSidebar } from './ChatSidebar.js';
+import { StateCard } from '../ui/StateCard.js';
+import { useClientDeepLink } from './useClientDeepLink.js';
 
 // ADR 0140 — lazy: the multi-tab deck is behind a default-OFF toggle, so it must NOT
 // ride in the entry chunk (it would blow the bundle budget). Loaded only when on.
 const TabChatDeck = lazy(() => import('./tabDeck/TabChatDeck.js').then((m) => ({ default: m.TabChatDeck })));
+// Setup/settings are a separate state; ready chat does not need their code.
+const BYOKWizard = lazy(() => import('../byok/BYOKWizard.js').then((m) => ({ default: m.BYOKWizard })));
 import { BackendStatusCard } from './BackendStatusCard.js';
 import { SessionExpiredCard } from './SessionExpiredCard.js';
 import { registerDefaultCards } from './registry/defaultCards.js';
@@ -64,6 +67,22 @@ export function ChatTab(): JSX.Element {
   // Stable so it doesn't re-render every keep-alive TabSession on a ChatTab tick
   // (e.g. the visibilitychange refresh) — preserves React.memo on the deck's tabs.
   const reconfigureBYOK = useCallback(() => setForceWizard(true), []);
+  // ADR 0944 D2 — `?client=` mints a client-bound conversation, then hands over
+  // to the `?conversation=` link both layouts already read.
+  const clientLink = useClientDeepLink(status === 'ready' && !forceWizard);
+
+  // ADR 0993 D1 — the prompt library as `/p-<slug>` commands, for BOTH chat shells
+  // (the multi-tab deck never registered them). Lazy: the module stays out of the
+  // entry chunk. Re-read on visibility; the module skips reads under a minute old.
+  const chatReady = status === 'ready';
+  useEffect(() => {
+    if (!chatReady) return;
+    const load = (force: boolean) => { void import('./promptCommands.js').then((m) => m.registerWorkspacePromptCommands({ force })); };
+    load(true); // a mount or an identity change always re-reads
+    const onVis = () => { if (document.visibilityState === 'visible') load(false); };
+    document.addEventListener('visibilitychange', onVis);
+    return () => document.removeEventListener('visibilitychange', onVis);
+  }, [chatReady, user?.uid]);
 
   // Auto-refresh storedRefs when the tab becomes visible (e.g., after
   // the user resolves an issue in another tab). BACKGROUND refresh — it must
@@ -123,6 +142,7 @@ export function ChatTab(): JSX.Element {
             <Notice variant="error" announce={byokError}>{byokError}</Notice>
           </div>
         ) : null}
+        <Suspense fallback={<StateCard loading title={t('common:loading')} />}>
         <BYOKWizard
           // Seeded so the key step can offer a key this workspace already has
           // instead of minting a duplicate (ADR 0517 fix A).
@@ -150,9 +170,17 @@ export function ChatTab(): JSX.Element {
           }}
           onCancel={forceWizard ? () => { setByokError(null); setForceWizard(false); } : undefined}
         />
+        </Suspense>
       </div>
     );
   }
+
+  if (clientLink.state === 'opening') {
+    return <StateCard loading title={t('chat:clientLinkOpening')} />;
+  }
+  const clientLinkNotice = clientLink.state === 'failed'
+    ? <Notice variant="error" announce={t('chat:clientLinkFailed')}>{t('chat:clientLinkFailed')}</Notice>
+    : null;
 
   if (multiTab.enabled) {
     // P3: the deck replaces the sidebar body wholesale (its own minimal shell). The
@@ -160,6 +188,7 @@ export function ChatTab(): JSX.Element {
     // credential error in any tab can still re-open the wizard.
     return (
       <SignInRequiredContext.Provider value={signInRequired}>
+        {clientLinkNotice}
         <Suspense fallback={<div className="u-flex-1 u-minh-0" />}>
           <TabChatDeck key={user?.uid ?? 'anon'} config={config!} byokStored={byokStored} onReconfigureBYOK={reconfigureBYOK} />
         </Suspense>
@@ -169,6 +198,7 @@ export function ChatTab(): JSX.Element {
 
   return (
     <SignInRequiredContext.Provider value={signInRequired}>
+      {clientLinkNotice}
       <ChatSidebar
         byokStored={byokStored}
         config={config!}

@@ -15,6 +15,11 @@
  *
  * The probe turns every operator-gated surface it can ON, so a gated family is
  * inside the check rather than excused by a default.
+ *
+ * Tracker TST-BFA-12. Red when: an emitted family is dropped from the v2
+ * document (the coverage and P3 legs); a ledgered family starts being emitted
+ * without leaving the ledger (the shrink-only leg). MEASURED 2026-10-24: 74
+ * seats, 48 emitted, 26 ledgered.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -122,8 +127,11 @@ afterAll(() => {
 
 describe('ADR 0858 — every v2 family seat is emitted or ledgered', () => {
   it('reads a real seat list and a real document (non-vacuous)', () => {
-    expect(seats.length).toBeGreaterThanOrEqual(70);
-    expect(seats.filter((s) => emitted.has(s)).length).toBeGreaterThanOrEqual(34);
+    expect(seats.length).toBeGreaterThanOrEqual(74);
+    const emittedSeats = seats.filter((s) => emitted.has(s)).length;
+    expect(emittedSeats).toBeGreaterThanOrEqual(48);
+    // Every seat is accounted for exactly once: emitted, or ledgered.
+    expect(emittedSeats).toBe(seats.length - Object.keys(KNOWN_UNEMITTED_FAMILIES).length);
   });
 
   it('no seat is silently unemitted: each missing family is in the ledger, with a reason', () => {

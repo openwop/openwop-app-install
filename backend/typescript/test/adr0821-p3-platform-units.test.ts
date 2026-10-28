@@ -9,6 +9,12 @@
  *      queries ONLY on the platform's key (positive control: a tenant BYOK key is
  *      not metered), the image gateway's key-source report, and the chat-widget's
  *      "opened a conversation" signal.
+ *
+ * Tracker TST-BUL-5. Sabotage-witnessed (w62): red when an exempt tenant is
+ * drawn, a non-positive rate is accepted, units are not recorded, the plan
+ * allowance is not drawn first, a site's featureId or meter call is dropped, a
+ * tenant's OWN web-search key is metered as platform spend, the image gateway
+ * misreports the key source, or the widget stops flagging a new session.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -25,6 +31,7 @@ import { createWebResearchSurface } from '../src/host/webResearchSurface.js';
 import { dispatchImageGeneration } from '../src/host/imageProviderAdapter.js';
 import { checkWidgetTurn } from '../src/features/chat-widget/capsTracker.js';
 import type { WidgetConfig } from '../src/features/chat-widget/widgetService.js';
+import { clearAllSecrets, setSecret } from '../src/byok/secretResolver.js';
 
 let server: http.Server;
 let URL_BASE = '';
@@ -109,8 +116,10 @@ describe('per-site wiring', () => {
     const runner = createSandboxRunner('user:cx')!;
     await runner({ language: 'python', code: 'print(1)' });
     const row = (await listFeatureSpendForTenant('user:cx')).find((r) => r.featureId === 'code-exec')!;
-    expect(row.units?.codeExecSecond).toBeGreaterThanOrEqual(1);
-    expect(draws).toHaveLength(1);
+    const seconds = row.units?.codeExecSecond ?? 0;
+    expect(seconds).toBeGreaterThanOrEqual(1);
+    // rate 1 credit/second × the default 1000 token-equivalents per credit.
+    expect(draws).toEqual([seconds * 1000]);
   });
 
   it('web search: a query on the PLATFORM key is metered as `webSearch`', async () => {
@@ -120,6 +129,25 @@ describe('per-site wiring', () => {
     const r = await createWebResearchSurface({ tenantId: 'user:ws1' }).search({ query: 'q', maxResults: 3 });
     expect(r.engine).toBe('brave');
     expect((await listFeatureSpendForTenant('user:ws1')).find((x) => x.featureId === 'web-research')?.units).toEqual({ webSearch: 1 });
+  });
+
+  it('web search: the tenant\'s OWN key is never metered (it is the tenant\'s spend)', async () => {
+    const prevEphemeral = process.env.OPENWOP_BYOK_EPHEMERAL;
+    process.env.OPENWOP_BYOK_EPHEMERAL = 'true';
+    process.env.OPENWOP_WEBSEARCH_API_KEY = 'host-key';
+    process.env.OPENWOP_WEBSEARCH_BASE_URL = `${URL_BASE}/search`;
+    process.env.OPENWOP_WEBSEARCH_ENGINE = 'brave';
+    try {
+      // An org tenant (not `user:`/`ws:`), so the ephemeral store accepts the key without KMS.
+      await setSecret('web-search', 'tenant-own-key', { tenantId: 'org:ws3-0821' });
+      const r = await createWebResearchSurface({ tenantId: 'org:ws3-0821' }).search({ query: 'q', maxResults: 3 });
+      // Positive control: the live stub served the query (not the demo result).
+      expect(r.engine).toBe('brave');
+      expect(await listFeatureSpendForTenant('org:ws3-0821')).toEqual([]);
+    } finally {
+      await clearAllSecrets();
+      if (prevEphemeral === undefined) delete process.env.OPENWOP_BYOK_EPHEMERAL; else process.env.OPENWOP_BYOK_EPHEMERAL = prevEphemeral;
+    }
   });
 
   it('web search: no live key ⇒ nothing metered (the demo result is free)', async () => {
@@ -136,7 +164,10 @@ describe('per-site wiring', () => {
   });
 
   it('chat widget: only the turn that OPENS a conversation carries `newSession`', async () => {
-    const widget = { widgetId: 'w-0821', tenantId: 'user:owner', caps: {} } as unknown as WidgetConfig;
+    const widget: WidgetConfig = {
+      widgetId: 'w-0821', tenantId: 'user:owner', orgId: 'org-0821', agentId: 'agent-0821', allowedDomains: ['example.com'],
+      caps: {}, token: 'tok-0821', enabled: true, createdBy: 'user:owner', createdAt: '2026-10-05T00:00:00.000Z', updatedAt: '2026-10-05T00:00:00.000Z',
+    };
     const day = new Date().toISOString().slice(0, 10);
     expect(await checkWidgetTurn(widget, 'visitor-1', day)).toEqual({ allowed: true, newSession: true });
     expect(await checkWidgetTurn(widget, 'visitor-1', day)).toEqual({ allowed: true });

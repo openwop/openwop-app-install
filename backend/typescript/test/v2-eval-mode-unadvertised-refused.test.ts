@@ -1,16 +1,23 @@
 /**
- * #4318 — `POST /runs { mode: "eval" }` on a host that does not advertise
- * `agents.evalSuite` is `422 capability_not_provided` (spec/v2/core/runs.md
- * §Refusals; suite leg `v2-eval-mode-unadvertised-refused`).
+ * #4318 → ADR 0889 — `POST /runs { mode: "eval" }` follows the `agents.evalSuite`
+ * ADVERT (spec/v2/core/runs.md §Refusals; suite leg
+ * `v2-eval-mode-unadvertised-refused`).
  *
- * The defect: the create handler never read `mode`. A complete eval body
- * (`evalSuiteRef` + `agentId`, no `workflowId` — which v2 does not require under
- * `mode: eval`) fell into the `workflowId is required` guard and answered
- * `400 invalid_request`; the same body WITH a `workflowId` answered `201` and
- * started an ordinary run — a yes to a request this host cannot honour.
+ * HISTORY: the create handler never read `mode`. A complete eval body (no
+ * `workflowId`) answered `400 workflowId is required`, and the same body WITH a
+ * `workflowId` answered `201` and started an ordinary run. #4318 added the
+ * `422 capability_not_provided` refusal for an unadvertised host. Since ADR 0889
+ * this host ADVERTISES and serves `mode: eval`, so that 422 branch is not
+ * reachable here (the PREMISE case pins the advert). What this file pins now:
+ * an eval body takes the EVAL branch (never an ordinary run), an unknown suite
+ * is the eval branch's own 404 naming the ref, a missing ref is 400 naming the
+ * field, and a refused eval create leaves no run behind.
  *
  * Every refusal has a CONTROL: the route has many ways to refuse, so the code,
- * the named capability and the unchanged run count pin WHICH refusal fired.
+ * the details and the unchanged run count pin WHICH refusal fired (a "workflow
+ * not found" 404 would otherwise pass the eval 404).
+ * Witnessed (grade-tests w63): skipping the eval branch → the two 404 cases and
+ * the 400 case red; dropping the evalSuiteRef check → the 400 case red.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -74,6 +81,10 @@ describe('#4318 → ADR 0889 — mode: eval follows the advert (major 2)', () =>
     const before = await runCount();
     const r = await send('POST', '/runs', V2, EVAL);
     expect(r.status, r.text.slice(0, 200)).toBe(404);
+    expect(r.json['error']).toBe('not_found');
+    // The eval branch's own 404 names the ref (URL-redacted by the error
+    // envelope, so the origin prefix is what can be pinned).
+    expect(String((r.json['details'] as Record<string, unknown> | undefined)?.['evalSuiteRef'])).toMatch(/^https:\/\/conformance\.openwop\./);
     expect(await runCount()).toBe(before);
   });
 
@@ -81,6 +92,10 @@ describe('#4318 → ADR 0889 — mode: eval follows the advert (major 2)', () =>
     const before = await runCount();
     const r = await send('POST', '/runs', V2, { ...EVAL, workflowId: 'conformance-noop' });
     expect(r.status, r.text.slice(0, 200)).toBe(404);
+    expect(r.json['error']).toBe('not_found');
+    // The eval branch's own 404 names the ref (URL-redacted by the error
+    // envelope, so the origin prefix is what can be pinned).
+    expect(String((r.json['details'] as Record<string, unknown> | undefined)?.['evalSuiteRef'])).toMatch(/^https:\/\/conformance\.openwop\./);
     expect(await runCount()).toBe(before);
   });
 
@@ -93,5 +108,6 @@ describe('#4318 → ADR 0889 — mode: eval follows the advert (major 2)', () =>
   it('CONTROL: a body with no workflowId and no eval mode keeps its 400 (the refusal is tied to mode, not to the missing id)', async () => {
     const r = await send('POST', '/runs', V2, { inputs: {} });
     expect(r.status, r.text.slice(0, 200)).toBe(400);
+    expect(r.json['message']).toBe('workflowId is required');
   });
 });

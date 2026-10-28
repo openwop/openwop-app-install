@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.crm.nodes/1.15.0/sla-deadline.output.json",
+  "title": "CrmSlaDeadlineOutput",
+  "type": "object",
+  "required": [
+    "hasSla"
+  ],
+  "properties": {
+    "hasSla": {
+      "type": "boolean"
+    },
+    "slaDeadline": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "slaEscalateAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "slaReportAt": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "additionalProperties": false
+}

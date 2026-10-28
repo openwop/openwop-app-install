@@ -17,8 +17,7 @@ import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { declarePiiFields } from '../../host/dataClassification.js';
 import { registerSubjectEraser } from '../../host/subjectErasure.js';
 import { ERASED, subjectKeyForms } from '../../host/subjectErasureRedaction.js';
-import { cleanOpaqueToken } from '../../host/boundedStrings.js';
-import { scrubSecretShaped } from '../../host/redactSecrets.js';
+import { cleanOpaqueToken, refuseIfScrubbed } from '../../host/boundedStrings.js';
 import { OpenwopError } from '../../types.js';
 import { getProject, updateProject, type Project } from '../projects/projectsService.js';
 import { getDocument } from '../documents/documentsService.js';
@@ -123,9 +122,7 @@ export function strictText(raw: unknown, max: number, field: string): string {
   }
   const t = raw.trim();
   if (t.length > max) throw new OpenwopError('validation_error', `\`${field}\` is ${t.length} characters; the limit is ${max}.`, 400, { field, limit: max });
-  if (scrubSecretShaped(t) !== t) {
-    throw new OpenwopError('validation_error', `\`${field}\` contains a secret-shaped token (an API key or a 40+ character unbroken blob). Remove or break it up; it will not be stored or rewritten.`, 400, { field });
-  }
+  refuseIfScrubbed(t, field, `\`${field}\` contains a secret-shaped token (an API key or a 40+ character unbroken blob). Remove or break it up; it will not be stored or rewritten.`);
   return t;
 }
 

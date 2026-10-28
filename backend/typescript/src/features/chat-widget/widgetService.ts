@@ -13,6 +13,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { OpenwopError } from '../../types.js';
+import { isAnonHitlOnlyTool } from '../../host/agentToolProvider.js';
 
 export interface WidgetCaps { maxTurnsPerSession?: number; maxSessionsPerDay?: number; maxWritesPerDay?: number; maxAutoWritesPerSession?: number }
 
@@ -154,6 +155,11 @@ function cleanAnonGrant(v: unknown): WidgetAnonToolGrant | undefined {
   if (write.length > 0) {
     if (g.writeControl !== 'hitl' && g.writeControl !== 'rate-limit-session-cap') {
       throw new OpenwopError('validation_error', '`anonToolGrant.write` requires a `writeControl` ("hitl" or "rate-limit-session-cap") — an uncontrolled anon write is forbidden (RFC 0132 §C.3).', 400, { field: 'anonToolGrant.writeControl' });
+    }
+    // ADR 0954 P4 — a hold-only write cannot ride an auto-run control.
+    const holdOnly = g.writeControl === 'rate-limit-session-cap' ? write.filter(isAnonHitlOnlyTool) : [];
+    if (holdOnly.length > 0) {
+      throw new OpenwopError('validation_error', `${holdOnly.join(', ')} can only be held for review: grant ${holdOnly.length === 1 ? 'it' : 'them'} with writeControl "hitl".`, 400, { field: 'anonToolGrant.writeControl', tools: holdOnly });
     }
     grant.write = write;
     grant.writeControl = g.writeControl;

@@ -17,11 +17,11 @@
  *   - ADR 0938 D5 — apply names the `{revision, artifactDigest}` its caller saw.
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { canonicalJSON } from '../../host/jcs.js';
 import { OpenwopError } from '../../types.js';
-import type { Proposal, ProposalKind, ProposalState } from './types.js';
+import type { InstalledArtifact, Proposal, ProposalKind, ProposalState } from './types.js';
 
 // Row key is `${tenant}::${id}` so the collection is tenant-partitioned and a
 // prefix scan lists exactly one tenant's slice (no cross-tenant read).
@@ -45,8 +45,17 @@ export const DEMO_PROPOSAL_ID = 'demo-reviewable-learning';
 // ── ADR 0938 D1 — the installer seam ─────────────────────────────────────────
 
 export interface ProposalInstaller {
-  /** Install `proposal.artifact` verbatim; return a ref to what was really written. */
-  install(tenant: string, proposal: Proposal): Promise<{ installedArtifactRef: string }>;
+  /**
+   * Install `proposal.artifact` verbatim; return a ref to what was really written.
+   * `rollback` undoes exactly that write; `applyProposal` calls it when the
+   * proposal's own CAS loses, so `applied` and an install only exist together
+   * (ADR 0972 D5).
+   */
+  install(tenant: string, proposal: Proposal): Promise<{
+    installedArtifactRef: string;
+    installedArtifact?: InstalledArtifact;
+    rollback?: () => Promise<void>;
+  }>;
 }
 
 const installers = new Map<ProposalKind, ProposalInstaller>();
@@ -91,8 +100,9 @@ export function revisionOf(p: Proposal): number {
   return typeof p.revision === 'number' ? p.revision : 0;
 }
 
-/** sha256 (hex) of the artifact with keys sorted at every depth (RFC 8785), so a
- *  storage backend that reorders keys cannot move it (ADR 0938 A3). */
+/** `sha256:` + hex SHA-256 of the artifact's RFC 8785 (JCS) bytes, so a storage
+ *  backend that reorders keys cannot move it (ADR 0938 A3). The prefixed form is
+ *  RFC 0249 §C's (ADR 0972 D7); clients bind to the value they read. */
 export function artifactDigestOf(artifact: Record<string, unknown>): string {
   let bytes: string;
   try {
@@ -103,7 +113,7 @@ export function artifactDigestOf(artifact: Record<string, unknown>): string {
     // function of the stored bytes, in a separate domain so it never equals a JCS digest.
     bytes = `raw:${JSON.stringify(artifact)}`;
   }
-  return createHash('sha256').update(bytes).digest('hex');
+  return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
 }
 
 /** The read projection: the stored row plus the two values a decision binds to. */
@@ -188,23 +198,62 @@ export async function archiveProposal(p: Proposal, expectedRevision?: number): P
  * Apply a proposal (ADR 0938 D1/D4/D5). The caller is scope-checked at the route.
  * Order: state → binding → installer, so a refusal never depends on whether an
  * installer exists. With no installer for the kind: 409 `proposal_not_installable`
- * and the row is untouched.
+ * and the row is untouched. The host-extension route binds `revision` and the
+ * digest; the v2 route binds the digest alone (ADR 0972 D7), which covers every
+ * byte that gets installed.
  */
 export async function applyProposal(
   p: Proposal,
-  seen: { revision: number; artifactDigest: string },
+  seen: { revision?: number; artifactDigest: string },
 ): Promise<{ proposal: Proposal; installedArtifactRef: string }> {
   nextState(p, 'apply');
-  if (seen.revision !== revisionOf(p) || seen.artifactDigest !== artifactDigestOf(p.artifact)) throw staleError(p);
+  if ((seen.revision !== undefined && seen.revision !== revisionOf(p)) || seen.artifactDigest !== artifactDigestOf(p.artifact)) throw staleError(p);
   const installer = installers.get(p.kind);
   if (!installer) {
     throw new OpenwopError('conflict', `This host cannot install a \`${p.kind}\` proposal, so it cannot be applied. Nothing was changed.`, 409, {
       reason: 'proposal_not_installable', kind: p.kind,
     });
   }
-  const { installedArtifactRef } = await installer.install(p.owner.tenant, p);
-  const applied = await commit(p, { ...p, state: 'applied', activation: { approvalId: null, installedArtifactRef } });
+  const { installedArtifactRef, installedArtifact, rollback } = await installer.install(p.owner.tenant, p);
+  let applied: Proposal;
+  try {
+    applied = await commit(p, {
+      ...p,
+      state: 'applied',
+      activation: { approvalId: null, installedArtifactRef, ...(installedArtifact ? { installedArtifact } : {}) },
+    });
+  } catch (err) {
+    await rollback?.();
+    throw err;
+  }
   return { proposal: applied, installedArtifactRef };
+}
+
+/**
+ * RFC 0249 §B — a client-submitted draft (ADR 0972 D1). Held to every RFC 0096
+ * rule a synthesized draft is: inert, and installed only by `applyProposal`. It
+ * carries no run provenance, because no run produced it.
+ */
+export async function submitProposal(
+  tenant: string,
+  draft: { kind: ProposalKind; artifact: Record<string, unknown>; title?: string; rationale?: string },
+  principal?: string,
+): Promise<Proposal> {
+  const proposal: Proposal = {
+    id: `p:${randomUUID()}`,
+    kind: draft.kind,
+    state: 'draft',
+    ...(draft.title !== undefined ? { title: draft.title } : {}),
+    ...(draft.rationale !== undefined ? { rationale: draft.rationale } : {}),
+    artifact: draft.artifact,
+    provenance: { sourceRunIds: [] },
+    duplicateOf: null,
+    owner: { tenant, ...(principal ? { principal } : {}) },
+    revision: 0,
+    createdAt: nowIso(),
+  };
+  if (!(await proposals.compareAndSwap(null, proposal))) throw staleError(proposal);
+  return proposal;
 }
 
 /** Test/seed helper — upsert a proposal directly. */

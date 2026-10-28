@@ -33,7 +33,6 @@
 import { requireNonAnonymousPrincipal } from '../middleware/auth.js';
 import { gunzipSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
-import { extract as tarExtract } from 'tar-stream';
 import express, { type Express, type Request, type Response, type NextFunction } from 'express';
 import { OpenwopError } from '../types.js';
 import { createLogger } from '../observability/logger.js';
@@ -194,7 +193,10 @@ interface ParsedEntry {
 
 /** Parse the decompressed tar stream into per-entry buffers. Synchronous
  *  in spirit — `tar-stream` is event-driven so we wrap into a Promise. */
-function parseTar(body: Buffer): Promise<ParsedEntry[]> {
+async function parseTar(body: Buffer): Promise<ParsedEntry[]> {
+  // Loaded on first use, not at import: this route module is on the app's
+  // import graph, so every test file that boots the app paid for it (ADR 0863 D7).
+  const { extract: tarExtract } = await import('tar-stream');
   return new Promise((resolve, reject) => {
     const entries: ParsedEntry[] = [];
     const extractor = tarExtract();

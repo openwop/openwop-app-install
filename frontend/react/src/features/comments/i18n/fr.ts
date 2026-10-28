@@ -36,6 +36,8 @@ export const messages = {
   noResourcesCanvasDocument: 'Aucun document pour le moment.',
   resourceTypeCanvasSlides: 'Présentation',
   noResourcesCanvasSlides: 'Aucune présentation pour le moment.',
+  resourceTypeMediaAsset: 'Fichier média',
+  noResourcesMediaAsset: 'Aucun fichier média pour le moment.',
   openSlide: 'Ouvrir la diapositive',
   resourceTypePriorityIdea: 'Idée priorisée',
   resourceTypeCreativeBrief: 'Brief créatif',

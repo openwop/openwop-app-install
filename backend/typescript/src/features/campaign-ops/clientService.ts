@@ -9,7 +9,11 @@ import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { createOrg, getOrg, isWorkspaceRootPair } from '../../host/accessControlService.js';
 import { cleanString } from '../../host/boundedStrings.js';
 import { OpenwopError } from '../../types.js';
-import type { ClientAccount, ClientMode, ClientStatus } from './types.js';
+import type { ApprovalPolicyMode, ClientAccount, ClientMode, ClientStatus, ExternalAgentsAccess } from './types.js';
+import { NEW_CLIENT_PRESET, bindClientPresetIfAbsent, deleteBindingsForOrg } from '../../host/autonomyPolicy/index.js';
+import { createLogger } from '../../observability/logger.js';
+
+const log = createLogger('campaign-ops-clients');
 
 const clients = new DurableCollection<ClientAccount>(
   'campaign-ops:client',
@@ -73,6 +77,15 @@ export async function createClient(input: {
   if (!(await clients.compareAndSwap(null, row))) {
     throw new OpenwopError('conflict', 'This organization is already a client.', 409, { reason: 'client_exists', orgId });
   }
+  // ADR 0942 (David, 2026-10-19): a new client starts on Guarded. Written whatever
+  // the toggle says (a binding is inert until the autonomy toggle stamps runs), and
+  // never over an existing binding. A failed write leaves the client unbound, which
+  // resolves to the stricter Review-everything fallback, so it is logged, not thrown.
+  try {
+    await bindClientPresetIfAbsent(input.tenantId, orgId, NEW_CLIENT_PRESET, input.createdBy);
+  } catch (err) {
+    log.warn('client_autonomy_default_bind_failed', { orgId, error: err instanceof Error ? err.message : String(err) });
+  }
   return row;
 }
 
@@ -80,13 +93,15 @@ export async function createClient(input: {
 export async function updateClient(
   tenantId: string,
   orgId: string,
-  patch: { status?: ClientStatus; mode?: ClientMode; name?: string },
+  patch: { status?: ClientStatus; mode?: ClientMode; name?: string; approvalPolicy?: ApprovalPolicyMode; externalAgents?: ExternalAgentsAccess },
 ): Promise<ClientAccount | null> {
   const cur = await getClient(tenantId, orgId);
   if (!cur) return null;
   const next: ClientAccount = { ...cur, updatedAt: nowIso() };
   if (patch.status) next.status = patch.status;
   if (patch.mode) next.mode = patch.mode;
+  if (patch.approvalPolicy) next.approvalPolicy = patch.approvalPolicy;
+  if (patch.externalAgents) next.externalAgents = patch.externalAgents;
   if (patch.name !== undefined) {
     const n = cleanString(patch.name, 120, '').trim();
     if (!n) throw new OpenwopError('validation_error', 'A client needs a name.', 400, { field: 'name' });
@@ -111,5 +126,8 @@ export async function eraseClientCreators(tenantId: string, forms: ReadonlySet<s
 
 /** Delete the campaign-ops record of a client (the org itself is accessControl's). */
 export async function deleteClient(tenantId: string, orgId: string): Promise<boolean> {
-  return clients.delete(`${tenantId}::${orgId}`);
+  const deleted = await clients.delete(`${tenantId}::${orgId}`);
+  // ADR 0942 — the client's autonomy bindings go with it (deleteOrg refuses a populated org).
+  if (deleted) await deleteBindingsForOrg(tenantId, orgId);
+  return deleted;
 }

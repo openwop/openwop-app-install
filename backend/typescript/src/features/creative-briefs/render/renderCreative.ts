@@ -137,6 +137,17 @@ function nudgedBox(layer: TemplateLayer, nudge: Required<LayerNudge>): { x: numb
   };
 }
 
+/** ADR 0945 D3 — where the renderer drew an image layer: the post-nudge slot
+ *  box and its corner radius, computed by the same {@link clampNudge} +
+ *  {@link nudgedBox} the composer uses (so the fidelity check samples exactly
+ *  the region the product was placed in). Null when the template has no such
+ *  image layer. */
+export function imageLayerSlot(template: AdLayoutTemplate, layerId: AdLayerId, overrides?: Partial<Record<AdLayerId, LayerNudge>>): { box: { x: number; y: number; w: number; h: number }; radiusPx: number } | null {
+  const layer = template.layers.find((l) => l.id === layerId && l.kind === 'image');
+  if (!layer) return null;
+  return { box: nudgedBox(layer, clampNudge(overrides?.[layerId], template)), radiusPx: layer.radiusPx ?? 0 };
+}
+
 /** Greedy word wrap against the deterministic width estimate. Overlong words
  *  hard-split; overflow beyond maxLines is dropped with an ellipsis on the
  *  last line (and reported by the caller as a warning). */

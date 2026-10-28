@@ -1,0 +1,512 @@
+{
+  "date": "2026-10-24",
+  "scope": "Plan coverage, not implementation closure",
+  "baseline_gap_count": 28,
+  "original_gaps": [
+    {
+      "id": "OPS-01",
+      "section": 1,
+      "prd": "01-operator-installation-upgrades-and-branding.prd.md",
+      "closure_status": "Open; implementation/evidence required"
+    },
+    {
+      "id": "OPS-02",
+      "section": 1,
+      "prd": "01-operator-installation-upgrades-and-branding.prd.md",
+      "closure_status": "Open; implementation/evidence required"
+    },
+    {
+      "id": "UX-01",
+      "section": 7,
+      "prd": "07-ux-accessibility-localization-and-first-value.prd.md",
+      "closure_status": "Open; implementation/evidence required"
+    },
+    {
+      "id": "SEC-01",
+      "section": 2,
+      "prd": "02-secure-profiles-and-independent-assurance.prd.md",
+      "closure_status": "Open; implementation/evidence required"
+    },
+    {
+      "id": "SCALE-01",
+      "section": 3,
+      "prd": "03-distributed-admission-and-resource-budgets.prd.md",
+      "closure_status": "Open; implementation/evidence required"
+    },
+    {
+      "id": "EVENT-01",
+      "section": 4,
+      "prd": "04-host-event-durability-and-resync.prd.md",
+      "closure_status": "Open; implementation/evidence required"
+    },
+    {
+      "id": "OPS-03",
+      "section": 6,
+      "prd": "06-release-qualification-recovery-and-slos.prd.md",
+      "closure_status": "Open; implementation/evidence required"
+    },
+    {
+      "id": "REL-01",
+      "section": 6,
+      "prd": "06-release-qualification-recovery-and-slos.prd.md",
+      "closure_status": "Open; implementation/evidence required"
+    },
+    {
+      "id": "DATA-01",
+      "section": 5,
+      "prd": "05-data-integrity-leases-and-lifecycle.prd.md",
+      "closure_status": "Open; implementation/evidence required"
+    },
+    {
+      "id": "UX-02",
+      "section": 7,
+      "prd": "07-ux-accessibility-localization-and-first-value.prd.md",
+      "closure_status": "Open; implementation/evidence required"
+    },
+    {
+      "id": "UX-03",
+      "section": 7,
+      "prd": "07-ux-accessibility-localization-and-first-value.prd.md",
+      "closure_status": "Open; implementation/evidence required"
+    },
+    {
+      "id": "UX-04",
+      "section": 7,
+      "prd": "07-ux-accessibility-localization-and-first-value.prd.md",
+      "closure_status": "Open; implementation/evidence required"
+    },
+    {
+      "id": "UX-05",
+      "section": 7,
+      "prd": "07-ux-accessibility-localization-and-first-value.prd.md",
+      "closure_status": "Open; implementation/evidence required"
+    },
+    {
+      "id": "LOC-01",
+      "section": 7,
+      "prd": "07-ux-accessibility-localization-and-first-value.prd.md",
+      "closure_status": "Open; implementation/evidence required"
+    },
+    {
+      "id": "BRAND-01",
+      "section": 1,
+      "prd": "01-operator-installation-upgrades-and-branding.prd.md",
+      "closure_status": "Open; implementation/evidence required"
+    },
+    {
+      "id": "OPS-04",
+      "section": 1,
+      "prd": "01-operator-installation-upgrades-and-branding.prd.md",
+      "closure_status": "Open; implementation/evidence required"
+    },
+    {
+      "id": "APP-01",
+      "section": 8,
+      "prd": "08-functional-app-builder-and-governed-output.prd.md",
+      "closure_status": "Open; implementation/evidence required"
+    },
+    {
+      "id": "INT-01",
+      "section": 9,
+      "prd": "09-ai-outcomes-and-qualified-integrations.prd.md",
+      "closure_status": "Open; implementation/evidence required"
+    },
+    {
+      "id": "AI-01",
+      "section": 9,
+      "prd": "09-ai-outcomes-and-qualified-integrations.prd.md",
+      "closure_status": "Open; implementation/evidence required"
+    },
+    {
+      "id": "DEV-01",
+      "section": 10,
+      "prd": "10-publisher-marketplace-and-financial-operations.prd.md",
+      "closure_status": "Open; implementation/evidence required"
+    },
+    {
+      "id": "MKT-01",
+      "section": 10,
+      "prd": "10-publisher-marketplace-and-financial-operations.prd.md",
+      "closure_status": "Open; implementation/evidence required"
+    },
+    {
+      "id": "COM-01",
+      "section": 10,
+      "prd": "10-publisher-marketplace-and-financial-operations.prd.md",
+      "closure_status": "Open; implementation/evidence required"
+    },
+    {
+      "id": "SEC-02",
+      "section": 2,
+      "prd": "02-secure-profiles-and-independent-assurance.prd.md",
+      "closure_status": "Open; implementation/evidence required"
+    },
+    {
+      "id": "QA-01",
+      "section": 6,
+      "prd": "06-release-qualification-recovery-and-slos.prd.md",
+      "closure_status": "Open; implementation/evidence required"
+    },
+    {
+      "id": "SUP-01",
+      "section": 12,
+      "prd": "12-support-economics-and-ecosystem-evidence.prd.md",
+      "closure_status": "Open; implementation/evidence required"
+    },
+    {
+      "id": "FAM-01",
+      "section": 11,
+      "prd": "11-all-product-families-and-technical-debt.prd.md",
+      "closure_status": "Open; implementation/evidence required"
+    },
+    {
+      "id": "MKT-02",
+      "section": 12,
+      "prd": "12-support-economics-and-ecosystem-evidence.prd.md",
+      "closure_status": "Open; implementation/evidence required"
+    },
+    {
+      "id": "TCO-01",
+      "section": 12,
+      "prd": "12-support-economics-and-ecosystem-evidence.prd.md",
+      "closure_status": "Open; implementation/evidence required"
+    }
+  ],
+  "live_checks": [
+    {
+      "id": "CT-01",
+      "sections": [
+        1,
+        2,
+        7,
+        10
+      ],
+      "status": "Not executed by planning"
+    },
+    {
+      "id": "CT-02",
+      "sections": [
+        2,
+        10,
+        11
+      ],
+      "status": "Not executed by planning"
+    },
+    {
+      "id": "CT-03",
+      "sections": [
+        7,
+        11
+      ],
+      "status": "Not executed by planning"
+    },
+    {
+      "id": "CT-04",
+      "sections": [
+        4,
+        7,
+        9,
+        11
+      ],
+      "status": "Not executed by planning"
+    },
+    {
+      "id": "CT-05",
+      "sections": [
+        10
+      ],
+      "status": "Not executed by planning"
+    },
+    {
+      "id": "CT-06",
+      "sections": [
+        1,
+        6
+      ],
+      "status": "Not executed by planning"
+    },
+    {
+      "id": "CT-07",
+      "sections": [
+        3,
+        4,
+        5,
+        6
+      ],
+      "status": "Not executed by planning"
+    },
+    {
+      "id": "CT-08",
+      "sections": [
+        9,
+        10,
+        11,
+        12
+      ],
+      "status": "Not executed by planning"
+    }
+  ],
+  "categories": [
+    {
+      "category": "Feature breadth and integration",
+      "sections": [
+        9,
+        10,
+        11
+      ],
+      "grade_change": "None; must re-assess after evidence"
+    },
+    {
+      "category": "Feature depth / end-to-end completeness",
+      "sections": [
+        8,
+        11
+      ],
+      "grade_change": "None; must re-assess after evidence"
+    },
+    {
+      "category": "Architecture and maintainability",
+      "sections": [
+        5,
+        11
+      ],
+      "grade_change": "None; must re-assess after evidence"
+    },
+    {
+      "category": "Workflow execution / replay / human control",
+      "sections": [
+        3,
+        5,
+        6,
+        9,
+        11
+      ],
+      "grade_change": "None; must re-assess after evidence"
+    },
+    {
+      "category": "AI capabilities and evaluation",
+      "sections": [
+        9,
+        11
+      ],
+      "grade_change": "None; must re-assess after evidence"
+    },
+    {
+      "category": "Extensibility / customization",
+      "sections": [
+        8,
+        10
+      ],
+      "grade_change": "None; must re-assess after evidence"
+    },
+    {
+      "category": "Integration coverage and quality",
+      "sections": [
+        9
+      ],
+      "grade_change": "None; must re-assess after evidence"
+    },
+    {
+      "category": "Security control implementation",
+      "sections": [
+        2,
+        5
+      ],
+      "grade_change": "None; must re-assess after evidence"
+    },
+    {
+      "category": "Security assurance / compliance evidence",
+      "sections": [
+        2,
+        6
+      ],
+      "grade_change": "None; must re-assess after evidence"
+    },
+    {
+      "category": "Tenant isolation / authorization",
+      "sections": [
+        2,
+        5,
+        11
+      ],
+      "grade_change": "None; must re-assess after evidence"
+    },
+    {
+      "category": "Data integrity / privacy / lifecycle",
+      "sections": [
+        5,
+        11
+      ],
+      "grade_change": "None; must re-assess after evidence"
+    },
+    {
+      "category": "Performance / scalability",
+      "sections": [
+        3,
+        4,
+        6,
+        11
+      ],
+      "grade_change": "None; must re-assess after evidence"
+    },
+    {
+      "category": "Availability / disaster recovery",
+      "sections": [
+        1,
+        6
+      ],
+      "grade_change": "None; must re-assess after evidence"
+    },
+    {
+      "category": "Observability / operations",
+      "sections": [
+        4,
+        6
+      ],
+      "grade_change": "None; must re-assess after evidence"
+    },
+    {
+      "category": "Test / build / release governance",
+      "sections": [
+        1,
+        6
+      ],
+      "grade_change": "None; must re-assess after evidence"
+    },
+    {
+      "category": "Design system / visual consistency",
+      "sections": [
+        1,
+        7
+      ],
+      "grade_change": "None; must re-assess after evidence"
+    },
+    {
+      "category": "Usability / navigation",
+      "sections": [
+        7,
+        11
+      ],
+      "grade_change": "None; must re-assess after evidence"
+    },
+    {
+      "category": "Onboarding / first value",
+      "sections": [
+        1,
+        7
+      ],
+      "grade_change": "None; must re-assess after evidence"
+    },
+    {
+      "category": "Error states / resilience",
+      "sections": [
+        7,
+        11
+      ],
+      "grade_change": "None; must re-assess after evidence"
+    },
+    {
+      "category": "Accessibility",
+      "sections": [
+        7,
+        8,
+        11
+      ],
+      "grade_change": "None; must re-assess after evidence"
+    },
+    {
+      "category": "Localization / global readiness",
+      "sections": [
+        7,
+        11
+      ],
+      "grade_change": "None; must re-assess after evidence"
+    },
+    {
+      "category": "White-label identity / branding",
+      "sections": [
+        1,
+        7
+      ],
+      "grade_change": "None; must re-assess after evidence"
+    },
+    {
+      "category": "Packaging / deployment portability",
+      "sections": [
+        1,
+        6
+      ],
+      "grade_change": "None; must re-assess after evidence"
+    },
+    {
+      "category": "Upgrades / version compatibility",
+      "sections": [
+        1,
+        5,
+        6
+      ],
+      "grade_change": "None; must re-assess after evidence"
+    },
+    {
+      "category": "Billing / reseller commerce",
+      "sections": [
+        3,
+        10,
+        12
+      ],
+      "grade_change": "None; must re-assess after evidence"
+    },
+    {
+      "category": "Marketplace mechanics",
+      "sections": [
+        10
+      ],
+      "grade_change": "None; must re-assess after evidence"
+    },
+    {
+      "category": "Marketplace ecosystem / adoption",
+      "sections": [
+        10,
+        12
+      ],
+      "grade_change": "None; must re-assess after evidence"
+    },
+    {
+      "category": "Documentation / developer experience",
+      "sections": [
+        1,
+        10,
+        12
+      ],
+      "grade_change": "None; must re-assess after evidence"
+    },
+    {
+      "category": "Commercial support / release commitments",
+      "sections": [
+        12
+      ],
+      "grade_change": "None; must re-assess after evidence"
+    },
+    {
+      "category": "Total cost of ownership / ROI",
+      "sections": [
+        12
+      ],
+      "grade_change": "None; must re-assess after evidence"
+    },
+    {
+      "category": "Source access / declared license",
+      "sections": [
+        2,
+        12
+      ],
+      "grade_change": "None; must re-assess after evidence"
+    }
+  ],
+  "counts": {
+    "requirements": 69,
+    "witnesses": 48,
+    "planning_questions": 38,
+    "risks": 25
+  }
+}

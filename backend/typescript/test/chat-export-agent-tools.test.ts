@@ -55,7 +55,9 @@ async function seedConversation(tenantId: string, sessionId: string, title: stri
   await hostExtStorage().createChatSession({ sessionId, tenantId, title, createdAt: now, updatedAt: now, messageCount: 0 });
   await hostExtStorage().appendChatMessage({ messageId: `${sessionId}-m0`, sessionId, role: 'user', content: 'draft the rollout plan', meta: null, authorSubject: null, createdAt: now });
   await hostExtStorage().appendChatMessage({ messageId: `${sessionId}-m1`, sessionId, role: 'assistant', content: 'here is the bold rollout plan', meta: null, authorSubject: null, createdAt: now });
-  if (ownerUserId) await ensureConversationMeta(tenantId, sessionId, { type: 'person', ownerUserId });
+  // ADR 0992 D8 — a solo chat is `type:'agent'` (ADR 0043); a 'person' chat is a DM
+  // with another human, which export-as-Document now refuses.
+  if (ownerUserId) await ensureConversationMeta(tenantId, sessionId, { type: 'agent', ownerUserId });
 }
 
 function run(tenantId: string, input: Record<string, unknown>, scope: { actingUserId?: string; conversationId?: string; runId?: string } = {}): Promise<{ content: string; isError?: boolean }> {

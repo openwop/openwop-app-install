@@ -43,6 +43,12 @@ vi.mock('../../cms/cmsClient.js', async (importOriginal) => {
   const orig = await importOriginal<Record<string, unknown>>();
   return { ...orig, ...cms };
 });
+// ADR 0948 P6a — the page reads the org's custom domains for the primary-domain
+// picker; none here (the section then stays hidden).
+vi.mock('../../custom-domains/domainsClient.js', async (importOriginal) => {
+  const orig = await importOriginal<Record<string, unknown>>();
+  return { ...orig, listDomains: vi.fn(async () => []) };
+});
 
 const { FunnelDetailPage } = await import('../FunnelDetailPage.js');
 

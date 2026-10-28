@@ -24,7 +24,7 @@ import { OpenwopError } from '../../types.js';
 import { adapterFor } from './adapters/registry.js';
 import { fieldsHash } from './adapters/cmsPage.js';
 import { getAsset } from './assetService.js';
-import { auditOps } from './approval.js';
+import { auditOps, writerOf } from './approval.js';
 import { getChangeSet, transitionChangeSet } from './changeSetService.js';
 import { getClient } from './clientService.js';
 import type { ChangeSet, ChangeSetEntry } from './types.js';
@@ -35,7 +35,7 @@ export type StepReason =
   | 'newer_human_edit' | 'readback_mismatch' | 'ambiguous_write_then_changed'
   | 'wrong_client' | 'client_inactive' | 'asset_gone' | 'preview_only'
   | 'access_revoked' | 'destination_unavailable' | 'email_already_sent'
-  | 'not_authorized' | 'publish_blocked';
+  | 'not_authorized' | 'publish_blocked' | 'creative_blocked';
 
 export interface JobStep {
   assetId: string;
@@ -206,7 +206,12 @@ export async function executeApprovedChangeSet(tenantId: string, orgId: string, 
     throw new OpenwopError('forbidden', 'The approval does not name this change.', 403, { reason: 'change_set_mismatch' });
   }
   const client = await getClient(tenantId, orgId);
-  let job = await ensureJob(tenantId, cs, approvalId, approval.decidedBy);
+  // The writer comes from the APPROVAL, never from the run (a fork re-stamps the
+  // run's person): the agency approver, or for a client approval the member who
+  // sent the link, recorded at the decision (ADR 0924 D5).
+  const writer = await writerOf(approval);
+  if (!writer) throw new OpenwopError('forbidden', 'This change has not been approved.', 403, { reason: 'not_approved' });
+  let job = await ensureJob(tenantId, cs, approvalId, writer);
   await transitionChangeSet(tenantId, orgId, cs.changeSetId, ['approved'], 'executing');
   for (const entry of cs.entries) {
     const step = stepOf(job, entry.assetId);

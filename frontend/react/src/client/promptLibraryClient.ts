@@ -25,7 +25,28 @@ export async function listOrgs(): Promise<Org[]> {
   return (await http<{ orgs: Org[] }>('/host/openwop-app/orgs')).orgs ?? [];
 }
 
-export interface PromptEntry { entryId: string; name: string; description?: string; promptRef: string }
+export type PromptVisibility = 'private' | 'org' | 'shared';
+export type PromptKind = 'system' | 'user' | 'few-shot' | 'schema-hint';
+
+/** A library entry as the routes return it (ADR 0993 D4: `available` and `body`). */
+export interface PromptEntry {
+  entryId: string;
+  name: string;
+  description?: string;
+  tags?: string[];
+  /** A binding to a prompt-store template; absent on a published entry. */
+  promptRef?: string;
+  /** A published entry's pinned body version. */
+  bodyVersion?: string;
+  visibility?: PromptVisibility;
+  revision?: number;
+  /** False when the entry's template or body no longer resolves. */
+  available?: boolean;
+  ownedByCaller?: boolean;
+  body?: { kind: PromptKind; text: string; version: string };
+  createdAt?: string;
+  updatedAt?: string;
+}
 
 const BASE = (orgId: string): string => `/host/openwop-app/prompts/orgs/${encodeURIComponent(orgId)}/entries`;
 

@@ -22,7 +22,7 @@ import type {
   ForkRunResponse,
   RunSnapshot,
 } from '@openwop/openwop';
-import { IdempotentCommitRejectedError, type Storage } from '../storage/storage.js';
+import { AdmissionRefusedError, IdempotentCommitRejectedError, type Storage } from '../storage/storage.js';
 import type { HostAdapterSuite } from '../host/index.js';
 import { OpenwopError, type RunRecord } from '../types.js';
 import { seedRunVariables, snapshotRunVariables, hydrateRunVariables, deferredConfigurableInputs } from '../host/variablesRuntime.js';
@@ -73,7 +73,7 @@ import { resolveSecret } from '../byok/secretResolver.js';
 import { runAiCredentialRefViolation } from '../host/runCredentials.js';
 import { advertisedByokProviders } from '../aiProviders/aiProvidersHost.js';
 import { createLogger } from '../observability/logger.js';
-import { runQuotaMiddleware, reserveConcurrentSlot } from '../middleware/rateLimit.js';
+import { refuseRunAdmission, runAdmissionFor, runQuotaMiddleware, reserveConcurrentSlot } from '../middleware/rateLimit.js';
 import { isProtocolRequest, v2ErrorCode, vendorPath } from '../middleware/protocolVersion.js';
 import { RUN_LIST, mintRunListCursor, parseRunListCursor } from '../host/runList.js';
 import { requestOrigin } from '../host/requestOrigin.js';
@@ -82,11 +82,13 @@ import { v2ConfigurableViolation } from '../host/v2Configurable.js';
 import { cancelRunAndCascade, isTerminalRunStatus } from '../host/runCancel.js';
 import { isManagedCredentialRef, MANAGED_DEFAULTING_TYPE_IDS } from '../providers/managedProvider.js';
 import { managedAnonSignInRequired } from '../host/deployPosture.js';
-import { requireProtocolScope, requireKeyLaneScope, holdsProtocolScope } from '../host/protocolAuthorization.js';
+import { requireProtocolScope, requireKeyLaneScope, holdsProtocolScope, grantMayStandIn, withdrawScopeChallenge } from '../host/protocolAuthorization.js';
+import { runStartGrantFor, RUN_START_GRANT_METADATA_KEY, type RunStartStamp } from '../host/runStartGrant.js';
 import { mayReadRunPayload, runPayloadReader, withoutEventPayload, withoutRunPayload } from '../host/runPayloadAccess.js';
 import { decideTokenProjector } from './interrupts.js';
 import { dataResidencyEnabled, dataResidencyRegions, residencyRegionAdmissible, readResidencyRegion } from '../features/cdp/dataResidency.js';
 import { loadReadableRun, loadOwnedRun } from '../host/runAccess.js';
+import { storedRunId } from '../host/evals/runIds.js';
 import { resolveRunArtifact } from '../host/runArtifactRead.js';
 import { artifact10 } from '../host/a2aCodec10.js';
 import { personalTenantOf } from '../host/requestSubject.js';
@@ -179,7 +181,9 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
   // surface (capabilities.feedback), NOT the RFC 0049 run-lifecycle vocabulary —
   // it has no run-scope mapping and gating it would over-reach RFC 0049.
 
-  app.post('/runs', runQuotaMiddleware(), async (req, res, next) => {
+  // ADR 0987 D2 — `/runs` counts concurrency inside the run insert (every instance,
+  // every holding state), so the per-process map does not gate it.
+  app.post('/runs', runQuotaMiddleware({ concurrencyInStore: true }), async (req, res, next) => {
     // ADR 0549 P1 — hoisted ABOVE the try so the `finally` can see them. The
     // release is owed by whoever wins a claim, and the only scope that reliably
     // runs on every exit path is a `finally` sibling to the try.
@@ -212,6 +216,13 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
       // `spec/v2/core/runs.md` — `workflowId` is REQUIRED unless `mode: eval`
       // (ADR 0889: the eval branch below needs `evalSuiteRef` + `agentId` instead).
       const isEvalCreate = !!body && typeof body === 'object' && (body as { mode?: unknown }).mode === 'eval';
+      // ADR 0983 D1 (RFC 0251 §B) and ADR 0984 (RFC 0252 §B) — `evalModes`,
+      // `baselineRunId` and `fixtureRuns` mean nothing without `mode: "eval"`;
+      // refused before the run starts, on both majors.
+      if (body && typeof body === 'object' && !isEvalCreate) {
+        const stray = (['evalModes', 'baselineRunId', 'fixtureRuns'] as const).find((k) => (body as Record<string, unknown>)[k] !== undefined);
+        if (stray) throw new OpenwopError('validation_error', `${stray} applies only to mode "eval".`, 400, { field: stray });
+      }
       if (!body || typeof body !== 'object' || (!body.workflowId && !isEvalCreate)) {
         throw new OpenwopError('invalid_request', 'workflowId is required', 400);
       }
@@ -341,7 +352,20 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
       // ABOVE the principal/tenant authorize. No-op unless
       // OPENWOP_AUTHORIZATION_ENFORCEMENT is on (back-compat); then a caller
       // without `runs:create` in their resolved scopes is denied fail-closed.
-      await requireProtocolScope(req, 'runs:create');
+      //
+      // ADR 0975 D8 — when ONLY the scope is missing, a feature's run-start grant
+      // may admit a run of its own workflow (`host/runStartGrant.ts`); the admitted
+      // start is stamped below so the feature's follow-up grants can recognise it.
+      let startGrant: RunStartStamp | null = null;
+      try {
+        await requireProtocolScope(req, 'runs:create');
+      } catch (err) {
+        if (!grantMayStandIn(req, err, 'runs:create')) throw err;
+        const callerMeta = body.metadata && typeof body.metadata === 'object' && !Array.isArray(body.metadata) ? body.metadata as Record<string, unknown> : {};
+        startGrant = body.workflowId ? await runStartGrantFor(req, { tenantId, workflowId: body.workflowId, metadata: callerMeta }) : null;
+        if (!startGrant) throw err;
+        withdrawScopeChallenge(req);
+      }
 
       const tenant = await hostSuite.tenantResolver.resolveTenant(tenantId);
       if (!tenant) throw new OpenwopError('forbidden_tenant', `tenant ${tenantId} not found`, 403);
@@ -473,11 +497,38 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
         await requireAgentEvalsEnabled({ tenantId, userId: principal.principalId });
         const { idempotencyKey: evalKey, replied: evalReplied } = await claimCreateIdempotency();
         if (evalReplied) return;
-        const created = await createAgentEvalRun({
-          caller: callerFromRequest(req, principal.principalId),
-          storage, hostSuite, body: body as unknown as Record<string, unknown>, tenantId,
-          ...(evalKey && heldClaimToken ? { idempotency: { key: evalKey, claimToken: heldClaimToken, endpoint: RUNS_ENDPOINT } } : {}),
-        });
+        const evalAdmission = runAdmissionFor(req);
+        let created: Awaited<ReturnType<typeof createAgentEvalRun>>;
+        try {
+          created = await createAgentEvalRun({
+            ...(evalAdmission ? { admission: evalAdmission } : {}),
+            caller: callerFromRequest(req, principal.principalId),
+            storage, hostSuite, body: body as unknown as Record<string, unknown>, tenantId,
+            wireMajor: currentContract() === 2 ? 2 : 1,
+            ...(evalKey && heldClaimToken ? { idempotency: { key: evalKey, claimToken: heldClaimToken, endpoint: RUNS_ENDPOINT } } : {}),
+            // RFC 0252 §C — a source is one THIS caller could read, payload included
+            // (a member reads only their own run's payload, #4543). Never a stream token.
+            readSourceRun: async (wireId) => {
+              // A v2 run id is tenant-bound (`ids.schema.json` runId). A bare id is
+              // not one: refused like any unusable source, so `eval.started`
+              // echoes only wire-form ids and nothing needs rewriting (ADR 0723).
+              if (currentContract() === 2 && !wireId.includes('/')) return null;
+              const id = storedRunId(wireId, tenantId);
+              if (!id) return null;
+              const src = await loadReadableRun(req, storage, id, { streamToken: false });
+              // Never across tenants, even for a wildcard operator who may read one.
+              if (src.tenantId !== tenantId) return null;
+              return (await runPayloadReader(req, src.tenantId))(src) ? src : null;
+            },
+          });
+        } catch (err) {
+          // ADR 0987 D2 — the store counted this caller's running runs and the cap was full.
+          if (err instanceof AdmissionRefusedError) {
+            refuseRunAdmission(req, res);
+            return;
+          }
+          throw err;
+        }
         if (evalKey && heldClaimToken) heldClaimToken = undefined;
         reserveConcurrentSlot(req, created.runId);
         res.status(201).json(created);
@@ -724,6 +775,8 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
           // ADR 0075 §D3/§D4 — the run's resolved approver org, read verbatim by
           // group/role eligibility + targeting (replay-safe; never re-resolved).
           ...(approverOrgId ? { approverOrgId } : {}),
+          // ADR 0975 D8 — host-written after the caller strip; never caller-settable.
+          ...(startGrant ? { [RUN_START_GRANT_METADATA_KEY]: startGrant } : {}),
         },
         actingUserId,
         ...(personalTenant ? { personalTenant } : {}),
@@ -791,8 +844,10 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
       try {
         // ADR 0821 P5 follow-up — the plan's monthly run limit (a no-op until
         // wired), AFTER every refusal above; a failed insert releases it.
+        const admission = runAdmissionFor(req);
         await withRunLimit(tenantId, () => insertRunWithStartContext(storage, run, {
           enqueueDispatch: true,
+          ...(admission ? { admission } : {}),
           ...(wf ? { definition: wf.definition } : {}),
           ...(idempotencyKey && heldClaimToken
             ? {
@@ -809,6 +864,12 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
             : {}),
         }));
       } catch (err) {
+        // ADR 0987 D2 — the store counted this user's (or key's) running runs
+        // across every instance and the cap was full. Nothing was written.
+        if (err instanceof AdmissionRefusedError) {
+          refuseRunAdmission(req, res);
+          return;
+        }
         if (err instanceof IdempotentCommitRejectedError) {
           // Nothing of ours exists — the insert rolled back. The `finally`
           // release with our (stale) token is a guaranteed no-op, so it is safe

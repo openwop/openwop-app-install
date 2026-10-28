@@ -7,7 +7,17 @@ import { createRequire } from 'node:module';
 import { locateRepoSchemasDir } from '../src/host/_repoPath.js';
 import { applyPayloadKeyAliases, payloadKeyAliases, projectV2Payload } from '../src/storage/v2PayloadProjection.js';
 import { demoAutoIngestSubscriptionId } from '../src/host/triggerBridgeService.js';
+import { generateWorkforceHistory } from '../src/host/workforceHistory.js';
 
+/**
+ * ADR 0722 — v2 wire hygiene: payload key aliases, the one composed major-2
+ * projection, the workforce seed's decision enum, and the demo subscription id.
+ *
+ * Tracker TST-BGF-24. Red when: an alias overwrites a present target or returns a
+ * copy when nothing moved; `projectV2Payload` skips the owner echo; the workforce
+ * seed writes a decision outside the corpus enum; or the demo subscription id
+ * leaves the opaque grammar.
+ */
 const here = dirname(fileURLToPath(import.meta.url));
 const schemasDir = locateRepoSchemasDir(here, 'run-event.schema.json');
 const payloads = JSON.parse(readFileSync(join(schemasDir, 'v2', 'run-event-payloads.schema.json'), 'utf8')) as {
@@ -68,8 +78,10 @@ describe('ADR 0722 — payload key aliases are migration debt with a tripwire', 
     expect(applyPayloadKeyAliases('artifact.created', { artifactTypeId: 'deck', versionId: 'v3' })).toEqual({ artifactType: 'deck', version: 'v3' });
     const both = { artifactTypeId: 'deck', artifactType: 'PRODUCER' };
     expect(applyPayloadKeyAliases('artifact.created', both)).toEqual({ artifactTypeId: 'deck', artifactType: 'PRODUCER' });
-    const idle = { conversationId: 'c1' };
-    expect(applyPayloadKeyAliases('conversation.exchanged', idle)).toBe(idle);
+    // Idle = a type WITH an alias map whose payload carries none of the aliased keys
+    // (a type without a map returns early and would not reach the "touched" check).
+    const idle = { artifactType: 'deck', title: 'Q3' };
+    expect(applyPayloadKeyAliases('artifact.created', idle)).toBe(idle);
   });
 });
 
@@ -98,8 +110,20 @@ describe('ADR 0722 — A.1: the workforce seed writes decision values the enum a
     expect(validate({ ...base, decision: 'granted' })).toBe(true);
     expect(validate({ ...base, decision: 'rejected' })).toBe(true);
     expect(validate({ ...base, decision: 'approve' }), 'the pre-ADR-0721 value must stay refused').toBe(false);
-    const src = readFileSync(join(here, '..', 'src', 'host', 'workforceHistory.ts'), 'utf8');
-    expect(src).not.toMatch(/decision: '(approve|reject)'/);
+    // BEHAVIOURAL: every decision the REAL seed writes is admitted by the enum.
+    const history = generateWorkforceHistory({
+      workforceId: 'wf-adr0722', tenantId: 'acme', workflowId: 'wf.adr0722', seed: 'adr0722', epochMs: Date.UTC(2026, 0, 1), runCount: 120,
+    });
+    const decisions = new Set<string>();
+    for (const run of history.runs) {
+      for (const e of run.events) {
+        if (e.type !== 'interrupt.resolved') continue;
+        const d = (e.payload as { decision?: unknown } | null)?.decision;
+        if (typeof d === 'string') decisions.add(d);
+      }
+    }
+    expect([...decisions].sort(), 'the seed must write both seated values').toEqual(['granted', 'rejected']);
+    for (const d of decisions) expect(validate({ ...base, decision: d }), d).toBe(true);
   });
 });
 

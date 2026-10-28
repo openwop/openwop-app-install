@@ -138,6 +138,16 @@ describe('/byok/active-config (ADR 0517)', () => {
     expect((await c.put(AC, { provider: 'google', model: '', credentialRef: 'byok:google' })).status).toBe(400);
   });
 
+  // ADR 0990 D6: MiniMax backs the free tier and is never a user's own key, even
+  // when a caller stored one by hand. The SPA already hides it; this is the API.
+  it('refuses a MiniMax binding on a stored key (free tier only, never user BYOK)', async () => {
+    const c = client();
+    expect((await c.post(SECRETS, { credentialRef: 'byok:minimax', value: 'mm-by-hand' })).status).toBe(201);
+    const r = await c.put(AC, { provider: 'minimax', model: 'MiniMax-M3', credentialRef: 'byok:minimax' });
+    expect(r.status).toBe(400);
+    expect(JSON.stringify(r.body)).toMatch(/not available with your own key/);
+  });
+
   it('accepts a managed sentinel, which names no stored secret', async () => {
     const c = client();
     const r = await c.put(AC, { provider: 'minimax', model: 'minimax-text', credentialRef: 'managed:minimax' });

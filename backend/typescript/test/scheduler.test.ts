@@ -1,10 +1,24 @@
 /**
- * Pure-function tests for the DAG scheduler. Covers:
- *   - topologicalOrder (stable order + cycle detection)
- *   - evaluateTrigger (all 5 triggerRules)
- *   - evaluateCondition
- *   - buildNodeInputs port-wiring
- *   - inspectDisposition (terminal completed / failed / waiting)
+ * Pure-function tests for the executor's DAG scheduler (`src/executor/scheduler.ts`,
+ * the live path the executor drives every run through). Covers:
+ *   - topologicalOrder (stable order + cycle detection; the core.dispatch ↔
+ *     supervisor back-edge is inert; parallel edges between one source→target
+ *     pair are legal — the 2026-07-09 live catch that broke the shipped ADR 0325
+ *     app-builder.design chain)
+ *   - evaluateTrigger (all 5 RFC 0022 §A triggerRules)
+ *   - evaluateCondition (eq / truthy / falsy / exists / contains / nested paths)
+ *   - buildNodeInputs port-wiring (failed upstreams contribute nothing)
+ *   - releaseDownstream + skip propagation, and ADR 0208 edge conditions as
+ *     control flow (a false condition folds to `skipped`; skipReasonFor names
+ *     condition vs upstream — ECR-2 / ECR-4)
+ *   - inspectDisposition (terminal completed / failed / waiting) and popReady's
+ *     concurrency cap
+ *
+ * What breaks it: any change that runs a not-taken branch, floods a merge, or
+ * reports a legal graph as a cycle. Sabotage witnesses (grade-tests 8f w2):
+ * ex-cycle, ex-dispatch-loop, ex-parallel, ex-allsuccess-skip, ex-anyfailed,
+ * ex-cond-fold, ex-falsy, ex-contains-arr, ex-popready, ex-waiting,
+ * ex-skipreason, ex-skip-propagate, ex-input-port.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -120,6 +134,53 @@ describe('topologicalOrder', () => {
       ],
     );
     expect(() => topologicalOrder(d, buildGraph(d))).toThrow(/cycle/i);
+  });
+});
+
+describe('conditional tail joins', () => {
+  it.each(['all_success', 'none_failed'] as const)('%s cannot launder a failed producer through a skipped approval', (rule) => {
+    const d = defOf(['compose', 'load', 'approve', 'apply'].map((nodeId) => ({ nodeId, typeId: 't' })), [
+      { from: 'compose', to: 'approve' }, { from: 'load', to: 'apply', rule }, { from: 'approve', to: 'apply', rule },
+    ]);
+    const graph = buildGraph(d); const snapshot = freshSnapshot(d);
+    markCompleted('load', { plan: 'unapproved' }, snapshot); releaseDownstream('load', graph, snapshot);
+    markFailed('compose', { code: 'compose_failed', message: 'No approved plan was produced' }, snapshot); releaseDownstream('compose', graph, snapshot);
+    expect(snapshot.nodeState.get('approve')).toBe('skipped'); expect(snapshot.nodeState.get('apply')).toBe('skipped');
+    expect(inspectDisposition(snapshot, graph, 0)).toMatchObject({ done: true, status: 'failed' });
+  });
+
+  it('a completed explicit error handler is a recovery boundary', () => {
+    const d = defOf(['source', 'skipped', 'recover', 'done'].map((nodeId) => ({ nodeId, typeId: 't' })), [
+      { from: 'source', to: 'skipped' }, { from: 'skipped', to: 'recover', rule: 'all_complete' }, { from: 'recover', to: 'done' },
+    ]);
+    const graph = buildGraph(d); const snapshot = freshSnapshot(d);
+    markFailed('source', { code: 'source_failed', message: 'Recoverable failure' }, snapshot); releaseDownstream('source', graph, snapshot);
+    expect(snapshot.nodeState.get('skipped')).toBe('skipped'); expect(snapshot.nodeState.get('recover')).toBe('ready');
+    markCompleted('recover', { recovered: true }, snapshot); releaseDownstream('recover', graph, snapshot);
+    expect(snapshot.nodeState.get('done')).toBe('ready');
+  });
+
+  it.each(['completed', 'failed'] as const)('reconsiders a waiting join after skip propagation from a %s source', (state) => {
+    const d = defOf(['source', 'branch', 'tail', 'join'].map((nodeId) => ({ nodeId, typeId: 't' })), [
+      { from: 'source', to: 'branch' }, { from: 'source', to: 'join', rule: 'none_failed' },
+      { from: 'branch', to: 'tail' }, { from: 'branch', to: 'join', rule: 'none_failed' },
+      { from: 'tail', to: 'join', rule: 'none_failed' },
+    ]);
+    const first = d.edges?.[0];
+    if (!first) throw new Error('The conditional source edge is required');
+    first.condition = { path: 'go', op: 'truthy' };
+    const graph = buildGraph(d); const snapshot = freshSnapshot(d);
+    if (state === 'completed') markCompleted('source', { go: false }, snapshot);
+    else markFailed('source', { code: 'source_failed', message: 'Real predecessor failure' }, snapshot);
+    const skipped: string[] = [];
+    releaseDownstream('source', graph, snapshot, (id) => skipped.push(id));
+    expect(snapshot.nodeState.get('branch')).toBe('skipped'); expect(snapshot.nodeState.get('tail')).toBe('skipped');
+    expect(snapshot.nodeState.get('join')).toBe(state === 'completed' ? 'ready' : 'skipped');
+    expect(new Set(skipped).size).toBe(skipped.length);
+    if (state === 'completed') {
+      markCompleted('join', { output: 'finished' }, snapshot);
+      expect(inspectDisposition(snapshot, graph, 0)).toMatchObject({ done: true, status: 'completed' });
+    } else expect(inspectDisposition(snapshot, graph, 0)).toMatchObject({ done: true, status: 'failed' });
   });
 });
 
@@ -520,23 +581,21 @@ describe('popReady — concurrency cap honored', () => {
 // counting misreported them as a cycle, which broke the shipped ADR 0325
 // app-builder.design chain (deepen→audit carries artifact + warning). ──
 describe('topologicalOrder — parallel edges (one source→target pair, two ports)', () => {
-  it('orders a linear chain with a dual-port edge instead of reporting a cycle', async () => {
-    const { topologicalOrder, buildGraph } = await import('../src/executor/scheduler.js');
-    const def = {
+  it('orders a linear chain with a dual-port edge instead of reporting a cycle', () => {
+    const def: WorkflowDefinition = {
       workflowId: 'parallel-edge-test',
-      nodes: [{ nodeId: 'a' }, { nodeId: 'b' }, { nodeId: 'c' }],
+      nodes: [{ nodeId: 'a', typeId: 't' }, { nodeId: 'b', typeId: 't' }, { nodeId: 'c', typeId: 't' }],
       edges: [
         { edgeId: 'e1', sourceNodeId: 'a', targetNodeId: 'b', sourceOutput: 'artifact', targetInput: 'artifact', triggerRule: 'all_success' },
         { edgeId: 'e2', sourceNodeId: 'a', targetNodeId: 'b', sourceOutput: 'warning', targetInput: 'upstreamWarning', triggerRule: 'all_success' },
         { edgeId: 'e3', sourceNodeId: 'b', targetNodeId: 'c', triggerRule: 'all_success' },
       ],
-    } as never;
+    };
     const order = topologicalOrder(def, buildGraph(def));
     expect(order).toEqual(['a', 'b', 'c']);
   });
 
   it('the SHIPPED app-builder.design chain passes graph validation (the live-caught regression)', async () => {
-    const { topologicalOrder, buildGraph } = await import('../src/executor/scheduler.js');
     // ADR 0346 4a — the builtin now expands from the workflows chain pack;
     // node ids carry the expansion prefix, so assert by suffix order.
     const { buildDesignWorkflowDefinition } = await import('../src/features/app-builder/designWorkflow.js');
@@ -545,16 +604,15 @@ describe('topologicalOrder — parallel edges (one source→target pair, two por
     expect(order.map((id) => id.split('_').pop())).toEqual(['intake', 'clarify', 'prd', 'research', 'plan', 'render', 'deepen', 'audit', 'auditRecord', 'review']); // AI-08: intake+clarify prepended (DECIDE-3)
   });
 
-  it('still detects a REAL cycle', async () => {
-    const { topologicalOrder, buildGraph } = await import('../src/executor/scheduler.js');
-    const def = {
+  it('still detects a REAL cycle', () => {
+    const def: WorkflowDefinition = {
       workflowId: 'real-cycle',
-      nodes: [{ nodeId: 'a' }, { nodeId: 'b' }],
+      nodes: [{ nodeId: 'a', typeId: 't' }, { nodeId: 'b', typeId: 't' }],
       edges: [
         { edgeId: 'e1', sourceNodeId: 'a', targetNodeId: 'b', triggerRule: 'all_success' },
         { edgeId: 'e2', sourceNodeId: 'b', targetNodeId: 'a', triggerRule: 'all_success' },
       ],
-    } as never;
+    };
     expect(() => topologicalOrder(def, buildGraph(def))).toThrow(/cycle/);
   });
 });

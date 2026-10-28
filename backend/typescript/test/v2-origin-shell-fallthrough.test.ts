@@ -25,7 +25,6 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from '../src/index.js';
-import { preferredVersion } from '../src/middleware/protocolVersion.js';
 
 // ADR 0812 P3c-0 — an API request names a run by its TENANT-BOUND id (the
 // dev-token's tenant is `default`); a bare id is refused 400 after the cut.
@@ -55,7 +54,7 @@ afterAll(async () => {
 
 async function get(path: string, headers: Record<string, string>) {
   const res = await fetch(`${base}${path}`, { headers: { Authorization: 'Bearer dev-token', ...headers } });
-  return { status: res.status, type: res.headers.get('content-type') ?? '', ver: res.headers.get('openwop-version'), vary: (res.headers.get('vary') ?? '').toLowerCase(), cache: res.headers.get('cache-control') ?? '', body: await res.text() };
+  return { status: res.status, type: res.headers.get('content-type') ?? '', ver: res.headers.get('openwop-version'), vary: (res.headers.get('vary') ?? '').toLowerCase().split(',').map((t) => t.trim()).filter(Boolean), cache: res.headers.get('cache-control') ?? '', body: await res.text() };
 }
 const HTML = { Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' };
 
@@ -70,6 +69,7 @@ describe('ADR 0631 — a manifest root serves the SPA shell to a browser and the
 
   it('2. the same path naming major 2 → the API (JSON, OpenWOP-Version: 2.0), never the shell', async () => {
     const r = await get(`/runs/${MISSING_BOUND}`, { ...HTML, 'OpenWOP-Version': '2' });
+    expect(r.status).toBe(404);
     expect(r.ver).toBe('2.0');
     expect(r.type).toContain('application/json');
     expect(r.body).not.toContain('SPA-SHELL-MARKER');
@@ -92,16 +92,28 @@ describe('ADR 0631 — a manifest root serves the SPA shell to a browser and the
   });
 
   it('5. the responses declare what they vary on (OpenWOP-Version on the API branch, Accept on the shell branch)', async () => {
+    // Compared as a TOKEN list: the shell branch also varies on `Accept-Language` /
+    // `Accept-Encoding` (publishing), so a substring `accept` matched those.
+    //
+    // DOUBLE GUARD (named, round 3): on the SHELL branch `Vary: Accept` is set twice —
+    // by the negotiator (`protocolVersion.ts` `if (sharedName) res.vary('Accept')`)
+    // and again by the shell route itself (`features/publishing/routes.ts`, the
+    // v2-root shell handler). Removing either alone leaves the shell half green
+    // (probe 8fw4g4-osf-vary-accept-r2, vacuous). The API branch at a shared name
+    // gets `Accept` ONLY from the negotiator (the shell route calls next() for a
+    // protocol client), and Accept is what decides API-vs-shell at that URL, so the
+    // negotiator's line is witnessed there.
     const api = await get(`/runs/${MISSING_BOUND}`, { ...HTML, 'OpenWOP-Version': '2' });
     expect(api.vary).toContain('openwop-version');
+    expect(api.vary, 'the API answer at a shared name also varies on Accept').toContain('accept');
     const shell = await get('/runs/some-run-id', HTML);
     expect(shell.vary).toContain('accept');
   });
 
-  it('6. a versioned path never falls through: /v1/runs/<id> from a browser is still JSON', async () => {
+  it('6. a versioned path never falls through: /v1/runs/<id> from a browser is a JSON 410', async () => {
     const r = await get('/v1/runs/some-run-id', HTML);
-    // ADR 0812 P3c-0 — 404 while 1.x is served; the withdrawn path space answers 410 after the cut.
-    expect(r.status).toBe(preferredVersion() === '2.0' ? 410 : 404);
+    // ADR 0812 P3c-0 — the withdrawn /v1 path space answers 410 (1.x is retired).
+    expect(r.status).toBe(410);
     expect(r.type).toContain('application/json');
     expect(r.body).not.toContain('SPA-SHELL-MARKER');
   });

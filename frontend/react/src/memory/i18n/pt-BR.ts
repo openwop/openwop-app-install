@@ -29,10 +29,9 @@ export const messages = {
   removeMemory: 'Remover memória',
   // MemoryInspectorPage — header
   eyebrow: 'Memória',
-  inspectorTitle: 'Inspetor de memória',
-  inspectorLedePrefix:
-    'Navegue pelo ledger de memória do tenant. As entradas são gravadas internamente pelo host — o executor grava um resumo de execução na conclusão. Leituras e exclusões têm escopo na sua credencial do lado do servidor; o inspetor não consegue ver a memória de outro tenant.',
-  inspectorLedeShowing: 'Mostrando',
+  inspectorTitle: 'Resumos de execuções',
+  inspectorLede: 'Resumos curtos gravados quando uma execução de fluxo de trabalho termina, além de notas que uma etapa do fluxo salvou. Os agentes não leem esta lista: as memórias de um agente ficam na aba Memória dele.',
+  inspectorOwnRunsOnly: 'Você vê as execuções que iniciou; os administradores do espaço de trabalho veem todas.',
   // MemoryInspectorPage — redaction
   redactedBadge: 'censurado',
   redactedTitle: 'Contém material secreto censurado pelo host (SR-1)',
@@ -72,11 +71,11 @@ export const messages = {
   emptyNoEntriesTitle: 'Nenhuma entrada de memória ainda',
   emptyNoMatchBody: 'Nenhuma entrada corresponde à pesquisa ou ao filtro de tag atual. Limpe os filtros para ver o ledger completo.',
   clearFilters: 'Limpar filtros',
-  emptyNoEntriesBody: 'As entradas são gravadas internamente pelo host — o executor grava um resumo de execução na conclusão. Execute um workflow para popular o ledger.',
+  emptyNoEntriesBody: 'Um resumo aparece aqui quando uma execução de fluxo de trabalho termina. Execuções que usaram resultado de demonstração ou provisório não gravam nenhum.',
   // memoryClient — errors
   getEntryError: 'getMemoryEntry retornou {{status}}',
   deleteEntryRequestError: 'deleteMemoryEntry retornou {{status}}',
-  removeMemoryConfirmBody: 'Remover esta memória? O agente não vai mais lembrá-la.',
+  removeMemoryConfirmBody: 'Remover esta memória? Ela não será mais lembrada.',
   storedUnknown: "Memórias armazenadas: desconhecido",
   loadFailedTitle: "Não foi possível carregar estas memórias",
   loadFailedBody: "Esta é uma leitura que falhou, não uma memória vazia: o que estiver armazenado continua lá.",

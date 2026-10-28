@@ -55,6 +55,7 @@ ALLOW_UNVERIFIED=0
 ALLOW_PIN_DRIFT=0
 ALLOW_TAGGED=0
 BACKEND_ONLY=0
+FRONTEND_ONLY=0
 for arg in "$@"; do
   case "$arg" in
     --allow-unverified-live) ALLOW_UNVERIFIED=1 ;;
@@ -64,6 +65,13 @@ for arg in "$@"; do
     # identity check (Gate 7), which protects a frontend half this deploy does not
     # have. Every other gate still applies.
     --backend-only) BACKEND_ONLY=1 ;;
+    # Forwarded by `deploy.sh --frontend-only` (#5228). It narrows ONE gate — the
+    # image stamp (Gate 4), which describes a Cloud Run image this deploy does not
+    # build. deploy.sh writes that stamp only for a backend half, so from the clean
+    # detached worktree the recipe prescribes, a frontend-only deploy could never
+    # pass its own preflight (hit on the MyndHyve cutover, 2026-10-25). The
+    # frontend carries its own stamp (/build-info.json), checked by verify-deploy.sh.
+    --frontend-only) FRONTEND_ONLY=1 ;;
     -h|--help) sed -n '2,40p' "$0" | sed 's/^#[[:space:]]\{0,1\}//'; exit 0 ;;
     *) echo "preflight-deploy: unknown argument: $arg" >&2; exit 2 ;;
   esac
@@ -261,7 +269,9 @@ fi
 # Resolve from git rather than a caller-supplied $ROOT: this script is run
 # standalone by the hand path, where no such variable exists.
 STAMP_FILE="$(git rev-parse --show-toplevel)/build-meta/commit.txt"
-if [ ! -f "$STAMP_FILE" ]; then
+if [ "$FRONTEND_ONLY" -eq 1 ]; then
+  note "SKIP" "image stamp — frontend-only deploy builds no image"
+elif [ ! -f "$STAMP_FILE" ]; then
   note "UNSTAMPED" "build-meta/commit.txt is missing — the image would report commit: unknown"
   echo "           run: node scripts/write-build-commit.mjs"
   fail=1
@@ -359,12 +369,13 @@ fi
 # ADR 0867: "pool" is PER INSTANCE and sums every pg pool the process can open —
 # the Storage pool (OPENWOP_PG_POOL_MAX) plus, when selected, the sql surface's
 # (OPENWOP_SQL_PG_POOL_MAX, `OPENWOP_SURFACE_SQL=postgres`) and pgvector's
-# (OPENWOP_VECTOR_PG_POOL_MAX, `OPENWOP_SURFACE_VECTOR=pgvector`); each defaults
+# (OPENWOP_VECTOR_PG_POOL_MAX, selected OR configured for lexical maintenance
+# and teardown via OPENWOP_VECTOR_PG_DSN, including secret bindings); each defaults
 # to 10, as in the adapters (`poolMaxFromEnv`).
 # (A deploy briefly runs old + new revisions together, so headroom matters too.)
 if command -v gcloud >/dev/null 2>&1 && [ -n "${OPENWOP_DEPLOY_SERVICE:-}" ]; then
   SVC_JSON=$(gcloud run services describe "$OPENWOP_DEPLOY_SERVICE" ${GC_ID[@]+"${GC_ID[@]}"} --region "${OPENWOP_DEPLOY_REGION:-us-central1}" --project "${OPENWOP_DEPLOY_PROJECT:-openwop-dev}" --format=json 2>/dev/null || true)
-  BUDGET=$(printf '%s' "$SVC_JSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);const t=(j.spec&&j.spec.template)||{};const a=(t.metadata&&t.metadata.annotations)||{};const env=(((t.spec||{}).containers||[])[0]||{}).env||[];const ev=n=>(env.find(e=>e.name===n)||{}).value;const pm=n=>{const v=Number(ev(n));return Number.isInteger(v)&&v>0?v:10};const sel=k=>(ev("OPENWOP_SURFACE_"+k)||ev("OPENWOP_SURFACE_BACKEND")||"memory").trim();const parts=[["storage",pm("OPENWOP_PG_POOL_MAX")]];if(sel("SQL")==="postgres")parts.push(["sql",pm("OPENWOP_SQL_PG_POOL_MAX")]);if(sel("VECTOR")==="pgvector")parts.push(["pgvector",pm("OPENWOP_VECTOR_PG_POOL_MAX")]);const pool=parts.reduce((n,[,v])=>n+v,0);const why=parts.map(([k,v])=>k+" "+v).join(" + ");const max=Number(a["autoscaling.knative.dev/maxScale"]||100);const min=Number(a["autoscaling.knative.dev/minScale"]||0);const tags=((j.spec&&j.spec.traffic)||[]).filter(x=>x.tag).map(x=>x.tag);process.stdout.write(pool+"\t"+max+"\t"+min+"\t"+tags.length+"\t"+tags.join(",")+"\t"+why)}catch(e){process.stdout.write("")}})' 2>/dev/null || true)
+  BUDGET=$(printf '%s' "$SVC_JSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);const t=(j.spec&&j.spec.template)||{};const a=(t.metadata&&t.metadata.annotations)||{};const env=(((t.spec||{}).containers||[])[0]||{}).env||[];const ev=n=>(env.find(e=>e.name===n)||{}).value;const pm=n=>{const v=Number(ev(n));return Number.isInteger(v)&&v>0?v:10};const sel=k=>(ev("OPENWOP_SURFACE_"+k)||ev("OPENWOP_SURFACE_BACKEND")||"memory").trim();const parts=[["storage",pm("OPENWOP_PG_POOL_MAX")]];if(sel("SQL")==="postgres")parts.push(["sql",pm("OPENWOP_SQL_PG_POOL_MAX")]);if(sel("VECTOR")==="pgvector"||env.some(e=>e.name==="OPENWOP_VECTOR_PG_DSN"&&(e.valueFrom||(typeof e.value==="string"&&e.value.trim()))))parts.push(["pgvector",pm("OPENWOP_VECTOR_PG_POOL_MAX")]);const pool=parts.reduce((n,[,v])=>n+v,0);const why=parts.map(([k,v])=>k+" "+v).join(" + ");const max=Number(a["autoscaling.knative.dev/maxScale"]||100);const min=Number(a["autoscaling.knative.dev/minScale"]||0);const tags=((j.spec&&j.spec.traffic)||[]).filter(x=>x.tag).map(x=>x.tag);process.stdout.write(pool+"\t"+max+"\t"+min+"\t"+tags.length+"\t"+tags.join(",")+"\t"+why)}catch(e){process.stdout.write("")}})' 2>/dev/null || true)
   # Two OUTCOMES, never one. `refusing to guess` and `the budget does not fit`
   # are different facts: the first is an UNKNOWN, the second is a MEASURED
   # breach. They shared `fail=1` and one summary line until 2026-09-11, so an
@@ -424,6 +435,39 @@ if command -v gcloud >/dev/null 2>&1 && [ -n "${OPENWOP_DEPLOY_SERVICE:-}" ]; th
     fi
   else
     echo "  tags      : OK    no tagged revisions"
+  fi
+  # ── Gate 5c (ADR 0981 P3): the strict profile's two rule decisions ────────
+  # Under OPENWOP_DEPLOY_POSTURE=auth this release REFUSES TO BOOT unless
+  # membership enforcement is on (or OPENWOP_ALLOW_UNENFORCED_AUTHORIZATION=true)
+  # and, with superadmins listed, the superadmin second factor is required (or
+  # OPENWOP_ALLOW_SUPERADMIN_WITHOUT_MFA=true). A bare `gcloud run deploy`
+  # carries the LIVE env forward, so the live env is what the new revision boots
+  # with. Checking it here turns an 8-minute build plus a revision that fails
+  # its startup probe into a refusal that names the variable. The rule mirrors
+  # `strictProfileRuleErrors()` (host/startupChecks.ts): exact "true", posture
+  # read as `readDeployPosture` reads it. A value bound from a secret cannot be
+  # read here, so it is reported UNMEASURED and refused, never guessed.
+  RULES=$(printf '%s' "$SVC_JSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);const env=((((j.spec||{}).template||{}).spec||{}).containers||[{}])[0].env||[];const get=n=>env.find(e=>e.name===n);const val=n=>{const e=get(n);if(!e)return "";if(e.valueFrom)return "<secret>";return typeof e.value==="string"?e.value:""};const p=val("OPENWOP_DEPLOY_POSTURE");const posture=(p==="bearer-shared"||p==="cookie-per-visitor"||p==="auth")?p:(val("OPENWOP_AUTH_ENFORCE_BEARER")==="true"?"auth":"cookie-per-visitor");const out=[posture];const unread=["OPENWOP_DEPLOY_POSTURE","OPENWOP_AUTHORIZATION_ENFORCEMENT","OPENWOP_ALLOW_UNENFORCED_AUTHORIZATION","OPENWOP_SUPERADMIN_REQUIRE_MFA","OPENWOP_ALLOW_SUPERADMIN_WITHOUT_MFA"].filter(n=>val(n)==="<secret>");const sa=val("OPENWOP_SUPERADMIN_TENANTS");const listed=sa==="<secret>"||sa.split(",").some(x=>x.trim());const miss=[];if(val("OPENWOP_AUTHORIZATION_ENFORCEMENT")!=="true"&&val("OPENWOP_ALLOW_UNENFORCED_AUTHORIZATION")!=="true")miss.push("authz");if(listed&&val("OPENWOP_SUPERADMIN_REQUIRE_MFA")!=="true"&&val("OPENWOP_ALLOW_SUPERADMIN_WITHOUT_MFA")!=="true")miss.push("mfa");process.stdout.write(posture+"\t"+miss.join(",")+"\t"+unread.join(","))}catch(e){process.stdout.write("")}})' 2>/dev/null || true)
+  rules_posture=$(printf '%s' "$RULES" | cut -f1); rules_miss=$(printf '%s' "$RULES" | cut -f2); rules_unread=$(printf '%s' "$RULES" | cut -f3)
+  if [ -z "$RULES" ]; then
+    echo "  profile   : UNREADABLE (no service JSON) — refusing to guess"
+    echo; echo "PREFLIGHT FAILED — the strict-profile decisions COULD NOT BE MEASURED; restore the \`services describe\` read, then re-run."; exit 1
+  elif [ "$rules_posture" != "auth" ]; then
+    echo "  profile   : OK    evaluation ($rules_posture) — the strict-profile rows do not apply"
+  elif [ -n "$rules_unread" ]; then
+    echo "  profile   : UNMEASURED  $rules_unread bound from a secret — this check cannot read the value"
+    echo; echo "PREFLIGHT FAILED — set those as plain env values (they are flags, not secrets), then re-run."; exit 1
+  elif [ -n "$rules_miss" ]; then
+    echo "  profile   : FAIL  strict (auth) — this release refuses to boot without:"
+    case ",$rules_miss," in *",authz,"*)
+      echo "              OPENWOP_AUTHORIZATION_ENFORCEMENT=true (read GET /host/openwop-app/operations/profile-census first),"
+      echo "              or accept the risk: OPENWOP_ALLOW_UNENFORCED_AUTHORIZATION=true" ;; esac
+    case ",$rules_miss," in *",mfa,"*)
+      echo "              OPENWOP_SUPERADMIN_REQUIRE_MFA=true (every listed superadmin enrolled in Settings → Security first),"
+      echo "              or accept the risk: OPENWOP_ALLOW_SUPERADMIN_WITHOUT_MFA=true" ;; esac
+    echo; echo "PREFLIGHT FAILED — set the variable(s) on the live service first (scripts/update-env.sh VAR=true), then deploy (ADR 0981)."; exit 1
+  else
+    echo "  profile   : OK    strict (auth) — membership and superadmin-MFA decisions are set"
   fi
 fi
 
@@ -525,6 +569,22 @@ if [ "${pins_unreadable:-0}" -eq 1 ]; then
   echo "  --pins, then re-run. --allow-pin-drift does NOT cover this: it states a KNOWN drift"
   echo "  is acceptable, and an unreadable list is not a known anything."
   exit 1
+fi
+
+# ── ADR 0991: the cross-machine release bus — ADVISORY, never a gate ─────────
+# Another machine's live deploy or gate lease is printed and nothing else: no
+# wait, no refusal here. An unreachable bus prints one `release-bus: unavailable`
+# line and changes nothing. D9: this deploy's TARGETS go along, so a deploy to
+# ANOTHER server is an INFO line, and only a lease on one of ours is a WARN.
+# (The one place the bus waits is deploy.sh's `acquire`, before this preflight.)
+if [ -f "$(dirname "$0")/lib/release-bus.sh" ]; then
+  # shellcheck source=lib/release-bus.sh
+  . "$(dirname "$0")/lib/release-bus.sh"
+  pf_halves=()
+  [ "$FRONTEND_ONLY" -eq 1 ] || pf_halves+=(backend)
+  [ "$BACKEND_ONLY" -eq 1 ] || pf_halves+=(frontend)
+  pf_targets="$(release_bus_targets ${pf_halves[@]+"${pf_halves[@]}"})"
+  release_bus warn-others --kinds deploy,gate,certify ${pf_targets:+--targets "$pf_targets"}
 fi
 
 echo "preflight passed."

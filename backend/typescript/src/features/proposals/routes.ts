@@ -44,7 +44,7 @@ import { JcsRefusal } from '../../host/jcs.js';
 
 const ID_PATTERN = /^[A-Za-z0-9_.:-]{1,128}$/;
 
-function paramId(req: Request): string {
+export function paramId(req: Request): string {
   const id = req.params.id;
   if (typeof id !== 'string' || !ID_PATTERN.test(id)) {
     throw new OpenwopError('validation_error', 'Invalid proposal id.', 400, { id });
@@ -53,7 +53,7 @@ function paramId(req: Request): string {
 }
 
 /** ADR 0938 D6 — the read gate, the SAME predicate the agent tool calls. */
-async function assertCanRead(req: Request): Promise<void> {
+export async function assertCanRead(req: Request): Promise<void> {
   await assertCanReadProposals(tenantOf(req), callerSubject(req), {
     personalTenant: personalTenantOf(req),
     wildcardOperator: req.principal?.tenants?.includes('*') === true,
@@ -67,7 +67,7 @@ async function loadProposal(req: Request): Promise<Proposal> {
 }
 
 /** ADR 0938 D6 — a filter outside its enum is a 400, never an empty 200. */
-function enumQuery<T extends string>(req: Request, field: string, allowed: readonly T[]): T | undefined {
+export function enumQuery<T extends string>(req: Request, field: string, allowed: readonly T[]): T | undefined {
   const raw = req.query[field];
   if (raw === undefined) return undefined;
   if (typeof raw !== 'string' || !(allowed as readonly string[]).includes(raw)) {
@@ -101,7 +101,7 @@ function optionalRevision(body: unknown): number | undefined {
  * `owner.principal` stays mutable by any writer, because there is no owner to
  * defer to and refusing would strand it.
  */
-async function assertCanMutate(req: Request, proposal: { owner?: { principal?: string } }): Promise<void> {
+export async function assertCanMutate(req: Request, proposal: { owner?: { principal?: string } }): Promise<void> {
   const subject = callerSubject(req);
   const tenant = tenantOf(req);
   const scopes = subject ? (await resolveSubjectScopesUnion(tenant, subject)).scopes : [];

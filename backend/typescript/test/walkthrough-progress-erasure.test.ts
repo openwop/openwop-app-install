@@ -12,6 +12,12 @@
  * The interesting case is the LEGACY row: `tenantId:walkthroughId` (no userId)
  * is shared tenant state by construction, so erasing one member's subject MUST
  * NOT delete it — that would silently destroy another member's resume state.
+ *
+ * DOUBLE GUARD (named): the eraser scans the key prefix `tenant:subject:` (the
+ * trailing ':' stops `user:abc` matching `user:abcd`) AND re-filters on the
+ * `userId` field; probe we-prefix-overreach defeats both. Witnessed (8f W4):
+ * we-prefix-overreach, we-legacy-deleted, we-other-member, we-other-tenant,
+ * we-partial, we-unregistered.
  */
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';

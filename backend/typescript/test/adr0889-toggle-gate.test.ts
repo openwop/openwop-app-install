@@ -3,7 +3,14 @@
  * SERVER on every agent-eval surface: the host-extension routes, the normative
  * `POST /runs {mode:"eval"}` branch (before any run row or idempotency claim),
  * and the chat tools. Before the fix it was UI-only, so a workspace whose plan
- * excluded `evals` could still create suites and spend judge calls.
+ * excluded `evals` could still create suites and spend judge calls (TST-BPA).
+ *
+ * Red when (sabotage-witnessed, wave 65): the namespace middleware in
+ * `routes/agentEvals.ts` stops calling `requireAgentEvalsEnabled`; the `mode:"eval"`
+ * branch of `POST /runs` drops it; the run tool or the list tool skips
+ * `agentEvalsToolGate`; or the refusal reason is no longer `feature_disabled`. The tool
+ * calls run as the OWNER of a personal workspace (who holds the route's scope), with a
+ * toggle-ON control, so only the toggle can be what refuses them.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -14,13 +21,16 @@ import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { builtinAgentTool } from '../src/host/agentToolProvider.js';
 import { hostExtStorage } from '../src/host/hostExtPersistence.js';
-import { evalWorkflowId } from '../src/host/evals/suiteStore.js';
+import { evalWorkflowId, putEvalSuite, validateEvalSuite } from '../src/host/evals/suiteStore.js';
+import type { BundleScope } from '../src/host/inMemorySurfaces.js';
 
 let server: Server; let base = '';
 const V2 = { Authorization: 'Bearer dev-token', 'Content-Type': 'application/json', 'OpenWOP-Version': '2' };
 const AGENT = 'eval.toggle-agent';
 const SUITE = { suiteId: 'test.acme.evals.toggle', version: '1.0.0', modes: ['golden'], tasks: [{ taskId: 't', input: {}, expected: { kind: 'golden', match: { strategy: 'contains', value: 'x' } } }] };
 const REF = 'test.acme.evals.toggle@1.0.0';
+const OWN_REF = 'test.acme.evals.toggle-own@1.0.0';
+const OWNER: BundleScope = { tenantId: 'user:u-tg', actingUserId: 'u-tg', personalTenant: 'user:u-tg' };
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -57,27 +67,39 @@ describe('ADR 0889 H1 — the evals toggle is enforced server-side', () => {
   });
 
   it('OFF: suite routes refuse, POST /runs {mode:eval} refuses with no run row, and the tools refuse', async () => {
+    // The tools act for the owner of a personal workspace, who holds the route's scope:
+    // with the toggle ON the same call lists the seeded suite (control), so OFF is the
+    // only thing that can empty it.
+    await putEvalSuite(OWNER.tenantId, validateEvalSuite({ ...SUITE, suiteId: 'test.acme.evals.toggle-own' }), 'user:u-tg');
+    const on = JSON.parse((await builtinAgentTool('openwop:agent-evals.list-suites')!.run({}, OWNER)).content) as { items: Array<{ ref: string }> };
+    expect(on.items.map((i) => i.ref)).toContain(OWN_REF);
     await withEvalsOff(async () => {
+      const reasonOf = (r: { json: Record<string, unknown> }) => (r.json['details'] as Record<string, unknown> | undefined)?.['reason'];
       const put = await send('PUT', `/host/openwop-app/agent-evals/suites/${REF}`, SUITE);
       expect(put.status).toBe(403);
-      expect((put.json['details'] as Record<string, unknown> | undefined)?.['reason']).toBe('feature_disabled');
-      expect((await send('GET', '/host/openwop-app/agent-evals/suites')).status).toBe(403);
-      expect((await send('GET', `/host/openwop-app/agent-evals/capture/${AGENT}`)).status).toBe(403);
+      expect(reasonOf(put)).toBe('feature_disabled');
+      const list = await send('GET', '/host/openwop-app/agent-evals/suites');
+      expect(list.status).toBe(403);
+      expect(reasonOf(list)).toBe('feature_disabled');
+      const capture = await send('GET', `/host/openwop-app/agent-evals/capture/${AGENT}`);
+      expect(capture.status).toBe(403);
+      expect(reasonOf(capture)).toBe('feature_disabled');
 
       const before = (await hostExtStorage().listRuns({ tenantId: 'default', workflowId: evalWorkflowId(REF), limit: 50 })).length;
       const create = await send('POST', '/runs', { mode: 'eval', evalSuiteRef: REF, agentId: AGENT });
       expect(create.status).toBe(403);
+      expect(reasonOf(create)).toBe('feature_disabled');
       const after = (await hostExtStorage().listRuns({ tenantId: 'default', workflowId: evalWorkflowId(REF), limit: 50 })).length;
       expect(after).toBe(before);
 
-      const scope = { tenantId: 'default', actingUserId: 'u-1' } as never;
-      const run = await builtinAgentTool('openwop:agent-evals.run')!.run({ suiteRef: REF, agentId: AGENT }, scope);
+      const run = await builtinAgentTool('openwop:agent-evals.run')!.run({ suiteRef: OWN_REF, agentId: AGENT }, OWNER);
       expect(run.isError).toBe(true);
       expect(JSON.parse(run.content).error).toBe('feature_disabled');
-      const list = await builtinAgentTool('openwop:agent-evals.list-suites')!.run({}, scope);
-      expect(JSON.parse(list.content)).toEqual({ items: [] });
+      const tools = await builtinAgentTool('openwop:agent-evals.list-suites')!.run({}, OWNER);
+      expect(JSON.parse(tools.content)).toEqual({ items: [] });
       const after2 = (await hostExtStorage().listRuns({ tenantId: 'default', workflowId: evalWorkflowId(REF), limit: 50 })).length;
       expect(after2).toBe(before);
+      expect(await hostExtStorage().listRuns({ tenantId: OWNER.tenantId, workflowId: evalWorkflowId(OWN_REF), limit: 50 })).toEqual([]);
     });
   });
 });

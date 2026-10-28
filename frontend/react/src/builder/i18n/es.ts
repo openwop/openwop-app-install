@@ -256,6 +256,8 @@ export const messages = {
   templateVersionMismatch_other: 'Copiado, pero {{count}} pasos están instalados en versiones distintas de las que usa esta plantilla: {{nodes}}. Pueden comportarse de otra manera.',
   templateVersionMismatchItem: '{{label}} ({{installed}} instalada, la plantilla usa {{pinned}})',
   templateIncompleteConfig: 'Copiado, pero {{count}} paso aún necesita configuración: {{fields}}. Abre el paso para completarlo.',
+  templateUnfilledParams_one: 'Copiado, pero {{count}} dato de la plantilla sigue vacío: {{params}}. Una ejecución fallará hasta que lo completes.',
+  templateUnfilledParams_other: 'Copiado, pero {{count}} datos de la plantilla siguen vacíos: {{params}}. Una ejecución fallará hasta que los completes.',
   templateInstantiateError: 'No se pudo crear un flujo de trabajo a partir de esta plantilla. Inténtalo de nuevo.',
 
 
@@ -264,6 +266,7 @@ export const messages = {
   paletteCategoryData: 'Datos',
   paletteCategoryAi: 'IA',
   paletteCategoryControl: 'Control',
+  paletteCategoryJourney: 'Recorrido',
   paletteCategoryIntegration: 'Integración',
   paletteBuiltin: 'Integrado',
   nodes: 'Nodos',

@@ -22,7 +22,7 @@ import { openStorage } from '../src/storage/index.js';
 import { createOrg, createMember } from '../src/host/accessControlService.js';
 import { createLink, resolveShared, resolveSharedCard } from '../src/features/sharing/sharingService.js';
 import { createEntry } from '../src/features/prompts/promptLibraryService.js';
-import { createUserTemplate } from '../src/host/promptStore.js';
+import { createTenantTemplate } from '../src/host/tenantPromptTemplates.js';
 
 const T = 'shp-tenant';
 const ORG = 'org-shp';
@@ -36,7 +36,7 @@ beforeAll(async () => {
   // actors that mint here hold REAL memberships (a bare actor's link is dark).
   await createOrg({ tenantId: T, createdBy: 'u1', name: 'Org', orgId: ORG, ownerSubject: 'u1' });
   for (const subject of ['owner-a', 'intruder-b']) await createMember({ tenantId: T, orgId: ORG, subject, displayName: subject, roles: ['editor'] });
-  createUserTemplate({ templateId: 'tpl-shared', version: '1.0.0', kind: 'user', text: 'Summarize {{topic}} crisply', name: 'tpl-shared' });
+  await createTenantTemplate(T, { templateId: 'tpl-shared', version: '1.0.0', kind: 'user', text: 'Summarize {{topic}} crisply', name: 'tpl-shared' });
 });
 
 describe('prompt share resolver', () => {
@@ -62,9 +62,11 @@ describe('prompt share resolver', () => {
     const mine = await createEntry(T, ORG, 'owner-a', { name: 'Private of A', promptRef: 'tpl-shared', visibility: 'private' });
 
     // The defect: a different member of the same org publishes A's private prompt.
+    // ADR 0993 D2 — refused with the uniform 404 a read gives (a 403 confirmed the
+    // entry exists to someone who cannot read it).
     await expect(
       createLink(T, ORG, 'intruder-b', { resourceType: 'prompt', resourceId: mine.entryId }),
-    ).rejects.toMatchObject({ code: 'forbidden' });
+    ).rejects.toMatchObject({ code: 'not_found' });
 
     // Non-vacuity, both directions: the OWNER may still share it...
     const own = await createLink(T, ORG, 'owner-a', { resourceType: 'prompt', resourceId: mine.entryId });

@@ -5,6 +5,12 @@
  * load call. Marking the job done then would disable the retract FOREVER on that
  * install. It must stay pending (and log an error) so the next boot retries.
  * Separate file: the loader mock is file-scoped.
+ *
+ * TST-BRT-1. Red when the job's verdict drops the corpus check
+ * (`complete: r.failed === 0 && corpusLoaded` → `r.failed === 0`,
+ * `appMigrations.ts`). The job is also run directly and must REPORT
+ * `{ complete: false }`: a job that threw would leave the marker unset too, so
+ * the marker alone could pass for the wrong reason.
  */
 import { describe, expect, it, vi } from 'vitest';
 
@@ -25,6 +31,9 @@ describe('ADR 0789 — the retract job with an empty corpus', () => {
     initHostExtPersistence(storage);
     setDurableStorage(storage);
     __resetBackgroundAppJobsForTests();
+    const job = BACKGROUND_APP_JOBS.find((j) => j.id === 'internal-seed-retract');
+    expect(job, 'the retract job is registered').toBeDefined();
+    expect(await job!.run(storage), 'the job ran to the end and reported incomplete (it did not throw)').toEqual({ complete: false });
     await startBackgroundAppJobs(storage, BACKGROUND_APP_JOBS);
     expect(await storage.getAppMeta('app_bg_job:internal-seed-retract')).toBeNull();
   });

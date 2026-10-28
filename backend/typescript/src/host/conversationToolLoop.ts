@@ -41,6 +41,7 @@ import { createAiProvidersAdapter, providerSupportsToolCalling, AiProviderError,
 import { explicitRefNamesOtherProvider } from '../aiProviders/credentialRefLadder.js';
 import { createScopedAgentToolProvider, builtinAgentToolIds } from './agentToolProvider.js';
 import { createTurnRunDispatchCollector, type TurnRunDispatch } from './turnRunDispatch.js';
+import type { ServedModel } from './turnAttribution.js';
 import { compileAgentTools, runChatToolLoop, type AgentEvent, managedLimitCode } from './agentDispatch.js';
 import { resolveAgentToolPermissionSet } from './agentProfileService.js';
 import { resolveAgentIdentity } from './agentIdentity.js';
@@ -89,6 +90,9 @@ export interface AgentToolTurnResult {
    *  allocation and the response, so the bubble lands at a correct index and
    *  reaches the client without a reload. Empty ⇒ no run was dispatched. */
   runDispatches?: TurnRunDispatch[];
+  /** ADR 0986 D1 — what ANSWERED: the loop's provider and the model it actually
+   *  used after any bump fallback (a managed TIER id on the managed path). */
+  served?: ServedModel;
 }
 
 export interface AgentToolTurnParams {
@@ -600,6 +604,7 @@ export async function runConversationAgentToolTurn(params: AgentToolTurnParams):
   return {
     text: loop.finalText,
     events: loop.events,
+    served: { provider: loopProvider, model: modelUsed, ...(isManagedCredentialRef(credentialRef) ? { managed: true as const } : {}) },
     // Name the provider/model in the surfaced failure — a bare "Provider
     // rate-limited." hid WHICH model was rejected and cost real debugging
     // hours (the class-bumped model differs from the tenant's selection).

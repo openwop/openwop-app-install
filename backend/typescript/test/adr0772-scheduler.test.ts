@@ -8,6 +8,15 @@
  *  - `RRWF-8`: a pause requested while a node waited on its retry backoff
  *    persisted that node `running`; after resume nothing re-popped it and the
  *    run ended `scheduler stalled`.
+ *
+ * Red when (wave 60 probes, tracker TST-BRB-8): the fan-in sort key reads only
+ * `edgeId` (the TypeError returns), or the pause drain point ignores a pending
+ * retry timer.
+ *
+ * The id-only edges are built WITHOUT a cast: a typed definition, then each edge's
+ * `edgeId` moved to `id` at runtime. That is the unvalidated shape the scheduler must
+ * survive; `validateWorkflowDefinition` now copies `id` into `edgeId`, so a posted
+ * definition never reaches the scheduler this way.
  */
 import { describe, expect, it } from 'vitest';
 import { executeRun, type SerializedSnapshot } from '../src/executor/executor.js';
@@ -66,18 +75,25 @@ async function newRun(workflowId: string): Promise<RunRecord> {
 
 describe('ADR 0772 D4 (RRWF-5) — a canonical-shape fan-in runs', () => {
   it('two incoming edges carrying only `id` join without a TypeError', async () => {
-    const def = {
+    const edges: NonNullable<WorkflowDefinition['edges']> = [
+      { edgeId: 'a-join', sourceNodeId: 'a', targetNodeId: 'join' },
+      { edgeId: 'b-join', sourceNodeId: 'b', targetNodeId: 'join' },
+    ];
+    // The canonical wire shape: `id` only, no `edgeId`.
+    for (const e of edges) {
+      Reflect.set(e, 'id', e.edgeId);
+      Reflect.deleteProperty(e, 'edgeId');
+    }
+    const def: WorkflowDefinition = {
       workflowId: 'wf.0772.fanin',
       nodes: [
         { nodeId: 'a', typeId: 'core.noop', config: {} },
         { nodeId: 'b', typeId: 'core.noop', config: {} },
         { nodeId: 'join', typeId: 'core.noop', config: {} },
       ],
-      edges: [
-        { id: 'a-join', sourceNodeId: 'a', targetNodeId: 'join' },
-        { id: 'b-join', sourceNodeId: 'b', targetNodeId: 'join' },
-      ],
-    } as unknown as WorkflowDefinition;
+      edges,
+    };
+    expect(edges.map((e) => Object.keys(e).sort())).toEqual([['id', 'sourceNodeId', 'targetNodeId'], ['id', 'sourceNodeId', 'targetNodeId']]);
     const run = await newRun(def.workflowId);
     const result = await executeRun(storage, run, def);
     expect(result.status).toBe('completed');

@@ -18,18 +18,16 @@
  */
 import { createHash } from 'node:crypto';
 import { guardedEgressFetch } from '../webhookEgressGuard.js';
+import { GcpMetadataError, gcpMetadata } from '../gcpAdc.js';
 import type { DnsRecord, EdgeCertificateProvider, EdgeHandle, EdgeIssue, EdgeStatus, StepResult } from './port.js';
 
 const API = 'https://certificatemanager.googleapis.com/v1';
-const METADATA = 'http://metadata.google.internal/computeMetadata/v1';
 
 /**
  * The metadata-server reads this adapter needs: an access token for the
- * runtime service account and the project id.
- *
- * TODO(ADR 0904 P1b): replace with `host/gcpAdc.ts` once it lands on main. That
- * ADR owns the one shared metadata client; this is deliberately a small local
- * function (not a fifth shared copy), per the 0906/0904 ownership split.
+ * runtime service account and the project id. Production reads both through
+ * the ONE shared metadata client, `host/gcpAdc.ts` (ADR 0904 D12). Tests pass a
+ * fake.
  */
 export interface EdgeMetadata {
   accessToken(): Promise<string>;
@@ -38,27 +36,21 @@ export interface EdgeMetadata {
   invalidate(): void;
 }
 
-function localMetadata(): EdgeMetadata {
-  let cached: { value: string; expiresAt: number } | null = null;
-  const read = async (path: string): Promise<string> => {
-    // Direct, never through the egress guard: the metadata host is on its SSRF blocklist on purpose.
-    const res = await fetch(`${METADATA}/${path}`, { headers: { 'Metadata-Flavor': 'Google' }, signal: AbortSignal.timeout(3_000) });
-    if (!res.ok) throw new EdgeProviderError(res.status, `metadata ${path} unavailable (not running on GCP?)`);
-    return (await res.text()).trim();
+/** `EdgeMetadata` over the shared client. A metadata failure becomes a typed provider error. */
+function sharedMetadata(): EdgeMetadata {
+  const typed = async <T>(read: () => Promise<T>): Promise<T> => {
+    try { return await read(); } catch (err) {
+      if (err instanceof GcpMetadataError) throw new EdgeProviderError(503, `${err.message} (not running on GCP?)`);
+      throw err;
+    }
   };
   return {
-    async accessToken() {
-      if (cached && cached.expiresAt > Date.now()) return cached.value;
-      const body = JSON.parse(await read('instance/service-accounts/default/token')) as { access_token?: string; expires_in?: number };
-      if (!body.access_token) throw new EdgeProviderError(500, 'metadata token response had no access_token');
-      const ttl = typeof body.expires_in === 'number' && body.expires_in > 120 ? (body.expires_in - 60) * 1000 : 60_000;
-      cached = { value: body.access_token, expiresAt: Date.now() + ttl };
-      return cached.value;
-    },
-    projectId: () => read('project/project-id'),
-    invalidate() { cached = null; },
+    accessToken: () => typed(() => gcpMetadata().accessToken(AbortSignal.timeout(3_000))),
+    projectId: () => typed(() => gcpMetadata().metadataText('project/project-id', AbortSignal.timeout(3_000))),
+    invalidate: () => gcpMetadata().invalidate(),
   };
 }
+
 const OP_WAIT_MS = 5_000;
 const OP_POLL_MS = 500;
 const DETAIL_MAX = 300;
@@ -139,7 +131,7 @@ const undot = (s: string): string => s.replace(/\.$/, '');
 
 export function createGcpCertificateManagerProvider(deps: GcpCertificateManagerDeps): EdgeCertificateProvider {
   const fetchFn: FetchFn = deps.fetch ?? ((url, init) => guardedEgressFetch(url, init));
-  const runtime = deps.metadata ?? localMetadata();
+  const runtime = deps.metadata ?? sharedMetadata();
   const metadata = deps.impersonate ? impersonatedMetadata(runtime, deps.impersonate, fetchFn, deps.now) : runtime;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const opWaitMs = deps.opWaitMs ?? OP_WAIT_MS;

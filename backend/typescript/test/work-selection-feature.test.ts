@@ -1,10 +1,19 @@
 /**
- * ADR 0534 P3 — the feature end-to-end: toggle gate, replay stamp, reason vocabulary.
+ * ADR 0534 P3 — the feature end-to-end: the toggle gate and the replay stamp.
  *
  * P1 tested the policy in isolation and P2 tested the seam's fail-open. What is
  * new here is the wiring that only exists once the feature is real: does the
- * per-tenant toggle actually gate ranking, and does the winning card's decision
- * get frozen into `run.metadata` so a `:fork` cannot re-rank?
+ * per-tenant toggle actually gate ranking (failing CLOSED when unregistered), and
+ * is the winning card's decision available as the plain-JSON stamp that
+ * `run.metadata` reads (ADR 0534 D3), so a `:fork` cannot re-rank? (The
+ * `run.metadata` seat itself is wired in `heartbeatService.ts` and is not
+ * exercised here.)
+ * Sabotages witnessed (/grade-tests 8f W5, 8fw5g6-ws-*): the toggle check, the
+ * unregistered fail-closed default, the stamp's rank / candidates / JSON copy, and
+ * a toggle-off pass returning no decision to stamp. (CORRECTED on the ADR 0963
+ * rebase: this used to say "the per-pass reset of the last picks". D6 removed that
+ * module state; `rankWorkCandidates` now RETURNS the pass's decisions and
+ * `workSelectionStamp(decisions, id)` reads them, `heartbeatService.ts:457,498`.)
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -14,22 +23,24 @@ import { __clearToggleStore } from '../src/host/featureToggles/service.js';
 import {
   registerWorkSelectionCompiler,
   setWorkSelectionPolicyId,
-  orderWorkCandidates,
+  rankWorkCandidates,
   workSelectionStamp,
 } from '../src/host/heartbeatService.js';
 import { workSelectionCompiler, WORK_SELECTION_POLICY } from '../src/features/work-selection/service.js';
 import { workSelectionFeature } from '../src/features/work-selection/feature.js';
 import type { KanbanCard } from '../src/host/kanbanService.js';
+import { WS_CRITERION } from '../src/features/work-selection/compiler.js';
 
 const NOW = Date.parse('2026-08-09T12:00:00.000Z');
 const T = 'ws-feature-t1';
 const daysAgo = (n: number) => new Date(NOW - n * 86_400_000).toISOString();
 
 function card(id: string, patch: Partial<KanbanCard> = {}): KanbanCard {
-  return {
+  const c: KanbanCard = {
     id, boardId: 'b1', columnId: 'todo', title: id, order: 0,
     createdAt: daysAgo(0), updatedAt: daysAgo(0), ...patch,
-  } as KanbanCard;
+  };
+  return c;
 }
 
 const ids = (cards: KanbanCard[]) => cards.map((c) => c.id);
@@ -61,7 +72,7 @@ describe('ADR 0534 P3 — the toggle gates ranking', () => {
     const input = [card('old-low', { priority: 'low', createdAt: daysAgo(30) }), card('new-high', { priority: 'high' })];
 
     expect(
-      ids(await orderWorkCandidates(input, NOW, T)),
+      ids((await rankWorkCandidates(input, NOW, T)).cards),
       'a tenant that never opted in must see exactly the old order',
     ).toEqual(['old-low', 'new-high']);
   });
@@ -70,25 +81,29 @@ describe('ADR 0534 P3 — the toggle gates ranking', () => {
     seedToggle('on');
     const input = [card('old-low', { priority: 'low', createdAt: daysAgo(30) }), card('new-high', { priority: 'high' })];
 
-    expect(ids(await orderWorkCandidates(input, NOW, T))[0]).toBe('new-high');
+    expect(ids((await rankWorkCandidates(input, NOW, T)).cards)[0]).toBe('new-high');
   });
 
   it('an unregistered toggle fails CLOSED to insertion order', async () => {
     // No default registered at all — an unresolvable toggle must not silently
     // enable a behaviour change for a tenant that never opted in.
     const input = [card('a'), card('b', { priority: 'high' })];
-    expect(ids(await orderWorkCandidates(input, NOW, T))).toEqual(['a', 'b']);
+    expect(ids((await rankWorkCandidates(input, NOW, T)).cards)).toEqual(['a', 'b']);
   });
 });
 
 describe('ADR 0534 D3 — the replay stamp', () => {
   it('freezes the winning decision as plain JSON', async () => {
     seedToggle('on');
-    await orderWorkCandidates([card('a', { priority: 'high' }), card('b', { priority: 'low' })], NOW, T);
+    const { decisions } = await rankWorkCandidates([card('a', { priority: 'high' }), card('b', { priority: 'low' })], NOW, T);
 
-    const stamp = workSelectionStamp('a');
+    const stamp = workSelectionStamp(decisions, 'a');
     expect(stamp).toMatchObject({ policy: WORK_SELECTION_POLICY, rank: 1, candidates: 2 });
     expect(typeof stamp?.score).toBe('number');
+    // The per-criterion scores, keyed by the criterion ids the compiler owns (SSoT).
+    const scores = stamp?.scores;
+    if (typeof scores !== 'object' || scores === null) throw new Error('stamp.scores is not an object');
+    expect(Object.keys(scores).sort()).toEqual(Object.values(WS_CRITERION).sort());
     // Must survive a JSON round-trip — `run.metadata` is persisted and replayed
     // verbatim, so a live reference here would not survive a fork.
     expect(JSON.parse(JSON.stringify(stamp))).toEqual(stamp);
@@ -98,13 +113,19 @@ describe('ADR 0534 D3 — the replay stamp', () => {
     // Rank 1 of 1 says much less than rank 1 of 40, and the difference is
     // invisible without this.
     seedToggle('on');
-    await orderWorkCandidates([card('only')], NOW, T);
-    expect(workSelectionStamp('only')).toMatchObject({ rank: 1, candidates: 1 });
+    // Three candidates (an asymmetric count: a constant `candidates: 1` or `2` is red).
+    const { decisions } = await rankWorkCandidates([card('only', { priority: 'high' }), card('x'), card('y')], NOW, T);
+    expect(workSelectionStamp(decisions, 'only')).toMatchObject({ rank: 1, candidates: 3 });
   });
 
   it('is absent when the toggle is off, so the stamp never claims a decision that did not happen', async () => {
+    // Positive control first: the same input ON does stamp `a`, so the null below
+    // is the toggle's doing, not an input the ranker never stamps.
+    seedToggle('on');
+    expect(workSelectionStamp((await rankWorkCandidates([card('a')], NOW, T)).decisions, 'a')).not.toBeNull();
+    __resetToggleDefaults();
     seedToggle('off');
-    await orderWorkCandidates([card('a')], NOW, T);
-    expect(workSelectionStamp('a')).toBeNull();
+    const { decisions } = await rankWorkCandidates([card('a')], NOW, T);
+    expect(workSelectionStamp(decisions, 'a')).toBeNull();
   });
 });

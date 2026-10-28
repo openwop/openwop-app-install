@@ -20,6 +20,7 @@ import { createApp } from '../src/index.js';
 import type { Storage } from '../src/storage/storage.js';
 import { extractRunAttribution } from '../src/host/agentRunActivityIndex.js';
 import { fromWireRunId } from '../src/host/v2Ids.js';
+import { getJob } from '../src/host/schedulingService.js';
 
 describe('run attribution is not caller-writable (POST /runs)', () => {
   let server: http.Server;
@@ -55,5 +56,40 @@ describe('run attribution is not caller-writable (POST /runs)', () => {
     for (const k of ['heartbeat', 'schedule', 'kanban', 'approval']) expect(md[k], k).toBeUndefined();
     expect(extractRunAttribution(md)).toBeUndefined();
     expect(md.note).toBe('mine');
+  });
+
+  // ADR 0075 §D4 — `approverOrgId` names the org whose admins approve the run. POST
+  // /runs wrote the host value only for workflows with group/role gates, so on any
+  // other workflow a caller's value survived; the scheduler copied job metadata onto
+  // every run it starts. Both entry points now strip it.
+  it('a caller-supplied approverOrgId is stripped on POST /runs; other metadata survives', async () => {
+    const res = await fetch(`${BASE}/runs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: 'Bearer dev-token' },
+      body: JSON.stringify({ workflowId, inputs: {}, metadata: { approverOrgId: 'org-chosen-by-caller', note: 'mine' } }),
+    });
+    const body = await res.json() as { runId: string };
+    expect(res.status, JSON.stringify(body)).toBe(201);
+    const id = fromWireRunId(body.runId, 'default');
+    if (!id.ok) throw new Error(`unexpected tenant segment in ${body.runId}`);
+    const md = (await storage.getRun(id.runId))!.metadata as Record<string, unknown>;
+    expect(md.approverOrgId).toBeUndefined();
+    expect(md.note).toBe('mine');
+  });
+
+  it('a caller-supplied approverOrgId is stripped from a scheduled job\'s metadata (it would ride every run the job starts)', async () => {
+    const res = await fetch(`${BASE}/host/openwop-app/scheduler/jobs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: 'Bearer dev-token' },
+      body: JSON.stringify({ cronExpr: '0 9 * * *', workflowId, enabled: false, metadata: { approverOrgId: 'org-chosen-by-caller', note: 'mine' } }),
+    });
+    const body = await res.json() as { jobId?: string; job?: { jobId?: string } };
+    expect([200, 201], JSON.stringify(body)).toContain(res.status);
+    const jobId = body.jobId ?? body.job?.jobId;
+    expect(jobId, JSON.stringify(body)).toBeTruthy();
+    const job = await getJob(jobId!);
+    expect(job, 'the job was not stored — the leg would be vacuous').toBeTruthy();
+    expect((job!.metadata ?? {}).approverOrgId).toBeUndefined();
+    expect((job!.metadata ?? {}).note).toBe('mine');
   });
 });

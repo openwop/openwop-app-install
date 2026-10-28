@@ -34,6 +34,11 @@ const EXPECTED_NODE_IDS = [
   'feature.funnels.nodes.create',
   'feature.funnels.nodes.set-steps',
   'feature.funnels.nodes.step-stats',
+  'feature.funnels.nodes.request-publish',
+  // ADR 0948 P2 — pure blueprint plumbing (no surface call), so role:'action'.
+  'feature.funnels.nodes.compose-step-page',
+  'feature.funnels.nodes.step-result',
+  'feature.funnels.nodes.collect-steps',
 ];
 
 beforeAll(async () => {
@@ -41,10 +46,12 @@ beforeAll(async () => {
 });
 
 describe('feature.funnels.nodes', () => {
-  it('manifest ↔ handlers parity, all role:action', () => {
+  it('manifest ↔ handlers parity; reads are action, the two draft writers side-effect (ADR 0948 P1)', () => {
     const m = read<NodeManifest>('packs/feature.funnels.nodes/pack.json');
     expect(m.nodes.map((n) => n.typeId).sort()).toEqual([...EXPECTED_NODE_IDS].sort());
-    expect(m.nodes.every((n) => n.role === 'action')).toBe(true);
+    const role = new Map(m.nodes.map((n) => [n.typeId, n.role]));
+    for (const w of ['create', 'set-steps', 'request-publish']) expect(role.get(`feature.funnels.nodes.${w}`), w).toBe('side-effect');
+    for (const r of ['list', 'get', 'step-stats', 'compose-step-page', 'step-result', 'collect-steps']) expect(role.get(`feature.funnels.nodes.${r}`), r).toBe('action');
     expect(Object.keys(funnelNodes).sort()).toEqual([...EXPECTED_NODE_IDS].sort());
   });
 
@@ -62,7 +69,9 @@ describe('feature.funnels.nodes', () => {
     const orgId = 'pack-org';
     const page = await createPage({ tenantId, orgId, title: 'Pack Landing', createdBy: 'u' });
     const surface = buildFunnelsSurface({ tenantId } as never);
-    expect(Object.keys(surface)).not.toContain('publish');
+    // ADR 0948 P1b — a node may only REQUEST a publish (a human approves it); the
+    // surface has no method that publishes.
+    expect(Object.keys(surface).filter((k) => /publish/i.test(k))).toEqual(['requestPublish']);
 
     const out = await funnelNodes['feature.funnels.nodes.create']({
       features: { funnels: surface },
@@ -83,14 +92,16 @@ describe('feature.funnels.nodes', () => {
 });
 
 describe('vendor.openwop-app.funnels.agents', () => {
-  it('loads via the manifest runtime with a funnels-only tool allowlist', async () => {
+  it('loads via the manifest runtime with a funnels tool allowlist (plus the read-before-write reads)', async () => {
     const m = read<AgentManifest>('packs/vendor.openwop-app.funnels.agents/pack.json');
     expect(m.agents).toHaveLength(1);
     const allow = m.agents[0].toolAllowlist;
     // CFP-1: the Funnel Architect now names the REAL registered `openwop:funnels.*`
     // agent tools (list/get/step-stats read + draft action), not the dead
     // `feature.funnels.nodes.*` node typeIds that no provider projected.
-    expect(allow.every((t) => t.startsWith('openwop:funnels.'))).toBe(true);
+    // ADR 0948 D5 — plus the two reads the architect makes before it writes.
+    const READ_BEFORE_WRITE = ['openwop:campaign-brief.get-brief', 'openwop:cms.get-page'];
+    expect(allow.filter((t) => !READ_BEFORE_WRITE.includes(t)).every((t) => t.startsWith('openwop:funnels.'))).toBe(true);
     const loaded = loadAgentsFromManifest(join(REPO_ROOT, 'packs', 'vendor.openwop-app.funnels.agents'));
     expect(loaded.map((a) => a.agentId)).toContain('vendor.openwop-app.funnels.agents.funnel-architect');
   });

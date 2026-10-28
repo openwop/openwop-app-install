@@ -359,12 +359,15 @@ describe('examples/workflow-chain-packs/crm-ops', () => {
     loaded = loadWorkflowChainPacks({ roots: [CHAIN_PACK_ROOT] });
   });
 
-  it('loads through loadWorkflowChainPacks with zero errors and registers all four chains', () => {
+  it('loads through loadWorkflowChainPacks with zero errors and registers all seven chains', () => {
     const { installed, errors } = loaded;
     expect(errors).toEqual([]);
     const mine = installed.find((p) => p.packName === 'core.openwop.workflows.crm-ops');
     expect(mine).toBeTruthy();
-    expect(mine!.chainIds.sort()).toEqual(['crm-ops.deal-hygiene', 'crm-ops.gmail-sync', 'crm-ops.route-new-lead', 'crm-ops.triage']);
+    expect(mine!.chainIds.sort()).toEqual(['crm-ops.deal-hygiene', 'crm-ops.gmail-sync', 'crm-ops.grade-lead', 'crm-ops.qualify-lead', 'crm-ops.route-lead', 'crm-ops.route-new-lead', 'crm-ops.triage']);
+    expect(getChain('crm-ops.qualify-lead')).not.toBeNull(); // ADR 0954 P4
+    expect(getChain('crm-ops.route-lead')).not.toBeNull(); // ADR 0954 P2
+    expect(getChain('crm-ops.grade-lead')).not.toBeNull(); // ADR 0954 P1
     expect(getChain('crm-ops.triage')).not.toBeNull(); // ADR 0837 D7
     expect(getChain('crm-ops.route-new-lead')).not.toBeNull();
     expect(getChain('crm-ops.deal-hygiene')).not.toBeNull();

@@ -11,7 +11,8 @@
 
 export type PortType = 'any' | 'string' | 'number' | 'boolean' | 'object';
 
-export type NodeCategory = 'flow' | 'data' | 'ai' | 'control' | 'integration';
+/** ADR 0955 P5 — `journey`: the lifecycle-journey nodes (ADR 0267 §4's journey palette on the ONE builder canvas). */
+export type NodeCategory = 'flow' | 'data' | 'ai' | 'control' | 'integration' | 'journey';
 
 /** Identifier for a palette entry. Static catalog uses friendly slugs
  *  ('noop', 'delay'); pack-derived entries use the full typeId

@@ -10,6 +10,11 @@
  * - `crossHostCausation.hostId` is the constant getRunAncestry answers with.
  * - `agents.dispatch: true` rests on CP-2: core.dispatch starts workers as child
  *   runs and never mutates the parent's registered definition.
+ *
+ * Tracker TST-BFA-6. Red when: the version ladder counts phases past a gap;
+ * `isPhase3Enabled` ignores PHASE_5; core.dispatch suspends with another kind
+ * or floor than advertised; a child run does not carry the parent's runId; the
+ * agents record stops claiming dispatch; `crossHostCausation.hostId` drifts.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';
@@ -31,6 +36,9 @@ import { insertRunWithStartContext } from '../src/host/runInsert.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { registerWorkflow, getRegisteredWorkflow } from '../src/host/workflowsRegistry.js';
 import type { RunRecord } from '../src/types.js';
+import type { NodeContext, WorkflowDefinition } from '../src/executor/types.js';
+import type { HostAdapterSuite } from '../src/host/index.js';
+import { executeRun } from '../src/executor/executor.js';
 import { corpusSchema } from './support/corpusSchema.js';
 
 const FLAGS = [
@@ -50,10 +58,32 @@ function setFlags(on: Partial<Record<(typeof FLAGS)[number], string>>): void {
 
 let server: http.Server;
 let BASE = '';
+let appStorage: Storage;
+let appHostSuite: HostAdapterSuite;
+/** The boot-time seams this file replaces, put back after each node-level case. */
+function restoreSeams(): void {
+  setEventLogBackend(appStorage);
+  setSubWorkflowDispatcher({
+    storage: appStorage, hostSuite: appHostSuite,
+    executeRun: (s, run, definition, options) => executeRun(s, run, definition as WorkflowDefinition, options as Parameters<typeof executeRun>[3]),
+  });
+}
+function nodeCtx(runId: string, tenantId: string, input: Record<string, unknown>): NodeContext {
+  const m = new Map<string, unknown>();
+  let seq = 0;
+  return {
+    runId, nodeId: 'd', tenantId, attempt: 1, secrets: {}, config: {}, configurable: {},
+    emit: async () => { seq += 1; return { eventId: `${runId}-ev-${seq}`, sequence: seq }; },
+    variables: { get: (n: string): unknown => m.get(n), set: (n: string, v: unknown): void => { m.set(n, v); } },
+    inputs: { input },
+  };
+}
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 't', serviceVersion: '0.0.1', enableConsoleTracer: false });
+  appStorage = app.locals.storage as Storage;
+  appHostSuite = app.locals.hostSuite as HostAdapterSuite;
   await new Promise<void>((r) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; r(); }); });
 }, 120_000);
 afterEach(() => { for (const [k, v] of saved) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } });
@@ -143,17 +173,15 @@ describe('ADR 0858 P4 — escalation advert and behaviour agree (floor and inter
 
     const storage = await openStorage('memory://');
     setEventLogBackend(storage);
-    ensureNodesRegistered();
-    const m = new Map<string, unknown>();
-    const vars = { get: (n: string): unknown => m.get(n), set: (n: string, v: unknown): void => { m.set(n, v); } };
-    const ctx = {
-      runId: 'run-escalate', nodeId: 'd', tenantId: 't-esc', config: {}, configurable: {}, variables: vars,
-      inputs: { input: { agentId: 'orchestrator.esc', decisions: [{ kind: 'next-worker', nextWorkerIds: ['wf-x'], confidence: 0.6 }] } },
-    };
-    const res = await getNodeRegistry().get('core.dispatch')!.execute(ctx as never) as { status: string; interrupt?: { kind?: string; data?: { floor?: number } } };
-    expect(res.status).toBe('suspended');
-    expect(res.interrupt?.kind).toBe(em?.confidenceEscalationInterruptKind);
-    expect(res.interrupt?.data?.floor).toBe(em?.confidenceEscalationFloor);
+    try {
+      ensureNodesRegistered();
+      const ctx = nodeCtx('run-escalate', 't-esc', { agentId: 'orchestrator.esc', decisions: [{ kind: 'next-worker', nextWorkerIds: ['wf-x'], confidence: 0.6 }] });
+      const res = await getNodeRegistry().get('core.dispatch')!.execute(ctx);
+      expect(res.status).toBe('suspended');
+      const interrupt = res.status === 'suspended' ? res.interrupt : undefined;
+      expect(interrupt?.kind).toBe(em?.confidenceEscalationInterruptKind);
+      expect((interrupt?.data as { floor?: number } | undefined)?.floor).toBe(em?.confidenceEscalationFloor);
+    } finally { restoreSeams(); }
   });
 });
 
@@ -172,25 +200,26 @@ describe('ADR 0858 P4 — agents.dispatch and CP-2', () => {
     setEventLogBackend(storage);
     initHostExtPersistence(storage);
     ensureNodesRegistered();
-    const parentDef = {
-      workflowId: 'cp2.parent', name: 'cp2', version: '1.0.0', variables: [],
+    const parentDef: WorkflowDefinition = {
+      workflowId: 'cp2.parent', variables: [],
       nodes: [{ nodeId: 'sup', typeId: 'core.orchestrator.supervisor' }, { nodeId: 'd', typeId: 'core.dispatch' }],
-      edges: [{ from: 'sup', to: 'd' }],
+      edges: [{ edgeId: 'sup-d', sourceNodeId: 'sup', targetNodeId: 'd' }],
     };
-    registerWorkflow(parentDef as never);
+    registerWorkflow(parentDef);
+    try {
     const before = JSON.stringify(getRegisteredWorkflow('cp2.parent'));
     const children: RunRecord[] = [];
+    const childDef: WorkflowDefinition = { workflowId: 'cp2.child', variables: [], nodes: [], edges: [] };
     setSubWorkflowDispatcher({
       storage,
-      hostSuite: { workflowCatalog: { getWorkflow: async () => ({ definition: { variables: [], nodes: [], edges: [] } }) } } as never,
+      // The real suite, with only the catalog answering the two worker ids.
+      hostSuite: { ...appHostSuite, workflowCatalog: { getWorkflow: async (workflowId: string) => ({ workflowId, definition: childDef }) } },
       executeRun: async (_s: Storage, child: RunRecord) => { children.push(child); await storage.updateRun(child.runId, { status: 'completed', updatedAt: new Date().toISOString() }); return undefined; },
     });
     const now = new Date().toISOString();
     await insertRunWithStartContext(storage, { runId: 'run-cp2', workflowId: 'cp2.parent', tenantId: 't-cp2', status: 'running', inputs: {}, metadata: {}, configurable: {}, createdAt: now, updatedAt: now });
-    const m = new Map<string, unknown>();
-    const vars = { get: (n: string): unknown => m.get(n), set: (n: string, v: unknown): void => { m.set(n, v); } };
-    const ctx = { runId: 'run-cp2', nodeId: 'd', tenantId: 't-cp2', config: {}, configurable: {}, variables: vars, inputs: { input: { agentId: 'orchestrator.cp2', decisions: [{ kind: 'next-worker', nextWorkerIds: ['wf-a', 'wf-b'] }] } } };
-    await getNodeRegistry().get('core.dispatch')!.execute(ctx as never);
+    const ctx = nodeCtx('run-cp2', 't-cp2', { agentId: 'orchestrator.cp2', decisions: [{ kind: 'next-worker', nextWorkerIds: ['wf-a', 'wf-b'] }] });
+    await getNodeRegistry().get('core.dispatch')!.execute(ctx);
 
     // Workers ran as SEPARATE child runs of the parent…
     expect(children.map((c) => c.parentRunId)).toEqual(['run-cp2', 'run-cp2']);
@@ -200,5 +229,6 @@ describe('ADR 0858 P4 — agents.dispatch and CP-2', () => {
     expect((await storage.getRun('run-cp2'))?.workflowId).toBe('cp2.parent');
     const types = new Set((await getEventLog().list('run-cp2')).map((e) => e.type));
     expect([...types].filter((t) => /node\.(added|inserted|removed)|definition\./.test(t))).toEqual([]);
+    } finally { restoreSeams(); }
   });
 });

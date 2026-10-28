@@ -276,6 +276,21 @@ describe('ReviewCard composed-workflow section (ADR 0473)', () => {
   });
 });
 
+describe('ADR 0905 — a unified email send review', () => {
+  it('renders the pinned review and echoes its full digest rather than the template hash', async () => {
+    const onDecide = vi.fn().mockResolvedValue(undefined);
+    const review: ReviewRequest = { ...base, kind: 'email-campaign-send', actions: [{ action: 'approve', label: 'Approve' }],
+      emailSend: { campaignId: 'campaign-1', templateId: 'template-1', templateVersion: 3, contentHash: 'template-only', reviewHash: 'full-send-review',
+        senderAddress: 'news@agency.test', audienceHash: 'a', audienceLabel: 'stage: lead', templateName: 'Launch', subject: 'Pinned email subject', body: 'Pinned email body' } };
+    render(<MemoryRouter><ReviewCard review={review} onDecide={onDecide} /></MemoryRouter>);
+    expect(await screen.findByText('Pinned email subject')).toBeTruthy();
+    expect(screen.getByText('Pinned email body')).toBeTruthy();
+    expect(screen.getByText('From news@agency.test')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: /^Approve$/ }));
+    await waitFor(() => expect(onDecide).toHaveBeenCalledWith('approve', { expectedContentHash: 'full-send-review' }));
+  });
+});
+
 describe('ADR 0862 — an assistant action review', () => {
   const action: ReviewRequest = {
     ...base,

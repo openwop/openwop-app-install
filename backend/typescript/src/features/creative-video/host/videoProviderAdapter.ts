@@ -93,6 +93,8 @@ export interface SubmitJobInput {
   model?: string;
   /** Requested clip length in seconds (t2v). */
   durationSec?: number;
+  /** ADR 0945 D7 — the still to animate, as a data URI (image→video). */
+  promptImage?: string;
   width?: number;
   height?: number;
 }

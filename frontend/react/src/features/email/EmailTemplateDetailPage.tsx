@@ -31,7 +31,7 @@ import { useFeatureAccess } from '../../featureToggles/FeatureAccessContext.js';
 import { GlobeIcon, LockIcon, SaveIcon, SendIcon, TrashIcon } from '../../ui/icons/index.js';
 import {
   deleteTemplate, getTemplate, listOrgs, updateTemplate, restoreTemplateVersion, TemplateVersionConflictError,
-  type EmailBodyFormat, type EmailTemplate,
+  type EmailBodyFormat, smsSegments, type EmailTemplate,
 } from './emailClient.js';
 import { EmailBodyPreview } from './EmailBodyPreview.js';
 import { EmailTemplateVersionHistory } from './EmailTemplateVersionHistory.js';
@@ -219,18 +219,26 @@ export function EmailTemplateDetailPage(): JSX.Element {
         <label className="u-label-sm">{t('editorNameLabel')}
           <input value={draft.name} onChange={(e) => edit({ name: e.target.value })} />
         </label>
-        <label className="u-label-sm">{t('editorSubjectLabel')}
-          <input value={draft.subject} onChange={(e) => edit({ subject: e.target.value })} />
-        </label>
+        {draft.format === 'sms' ? null : (
+          <label className="u-label-sm">{t('editorSubjectLabel')}
+            <input value={draft.subject} onChange={(e) => edit({ subject: e.target.value })} />
+          </label>
+        )}
         <label className="u-label-sm">{t('editorFormatLabel')}
-          <select value={draft.format ?? 'text'} onChange={(e) => edit({ format: e.target.value as EmailBodyFormat })}>
-            <option value="text">{t('formatPlain')}</option>
-            <option value="markdown">{t('formatMarkdown')}</option>
+          {/* ADR 0955 D8 — an SMS template never becomes an email one (or back). */}
+          <select value={draft.format ?? 'text'} disabled={draft.format === 'sms'} onChange={(e) => edit({ format: e.target.value as EmailBodyFormat })}>
+            {draft.format === 'sms' ? <option value="sms">{t('formatSms')}</option> : (
+              <>
+                <option value="text">{t('formatPlain')}</option>
+                <option value="markdown">{t('formatMarkdown')}</option>
+              </>
+            )}
           </select>
         </label>
         <label className="u-label-sm">{t('editorBodyLabel')}
-          <textarea value={draft.body} rows={12} onChange={(e) => edit({ body: e.target.value })} />
+          <textarea value={draft.body} rows={draft.format === 'sms' ? 4 : 12} onChange={(e) => edit({ body: e.target.value })} aria-describedby={draft.format === 'sms' ? 'email-sms-hint' : undefined} />
         </label>
+        {draft.format === 'sms' ? <p id="email-sms-hint" className="muted u-fs-13 u-m-0">{t('smsHint', { count: smsSegments(draft.body) })}</p> : null}
         {/* ADR 0256 — the preview is rendered by the SAME server-side renderer
             that builds the sent HTML part, so what is shown is what sends. */}
         {draft.format === 'markdown' ? (

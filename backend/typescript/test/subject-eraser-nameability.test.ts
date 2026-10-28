@@ -82,8 +82,13 @@ function stripComments(src: string): string {
   return src.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
 }
 
-/** Every `registerSubjectEraser(<arg…` call site, with the first ~40 chars of the
- *  argument — enough to classify its shape without parsing TypeScript. The
+/** Every `registerSubjectEraser(<arg…` call site, with the first ~160 chars of
+ *  the argument — enough to classify its shape without parsing TypeScript.
+ *  CORRECTED (grade-tests wave 61, probe 8fw3g2-sen-expr): the window was 40
+ *  chars, so `async function eraseSalesCommissionsSubjectX(` lost its `(` to the
+ *  cut, read as ANONYMOUS, and a new named-expression site was reported by the
+ *  wrong arm while the shrink-only arm never saw it. A window long enough to
+ *  reach the `(` is what lets each arm see its own shape. The
  *  DEFINITION in `subjectErasure.ts` is excluded (it is `export function
  *  registerSubjectEraser(fn: …)`, not a call). */
 function callSites(): { rel: string; arg: string }[] {
@@ -92,7 +97,7 @@ function callSites(): { rel: string; arg: string }[] {
     const rel = file.slice(SRC_ROOT.length + 1).split('\\').join('/');
     if (rel === 'host/subjectErasure.ts') continue;
     const src = stripComments(readFileSync(file, 'utf8'));
-    for (const m of src.matchAll(/registerSubjectEraser\(\s*([\s\S]{0,40})/g)) {
+    for (const m of src.matchAll(/registerSubjectEraser\(\s*([\s\S]{0,160})/g)) {
       out.push({ rel, arg: m[1]!.trim() });
     }
   }
@@ -109,10 +114,10 @@ describe('R2 CN-SP-6 — every SubjectEraser registration is nameable', () => {
 
   it('the census is non-empty — a regex that matches nothing would pass vacuously', () => {
     // Without this floor a typo in `callSites()` turns every assertion below into
-    // `expect([]).toEqual([])`: green, and policing nothing. The corpus has dozens
-    // of registrations; 10 is a floor well under the real count that still fails
-    // loudly if the walk or the pattern breaks.
-    expect(sites.length).toBeGreaterThan(10);
+    // `expect([]).toEqual([])`: green, and policing nothing. Floor = the MEASURED
+    // count (112 call sites, wave 61); the old `> 10` let a walk that lost 90% of
+    // `src/` pass.
+    expect(sites.length).toBeGreaterThanOrEqual(112);
   });
 
   it('NO registration passes an anonymous function — the operator would get `eraser#N`', () => {

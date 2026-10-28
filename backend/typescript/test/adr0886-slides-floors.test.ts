@@ -14,6 +14,12 @@
  *      deck. It kept serving the LIVE deck's speaker notes for four hours.
  *  S3  DSAR erasure left the person's user id in the deck metadata the Slide
  *      Designer's render tool writes (`metadata.producedBy`).
+ *
+ * Tracker TST-BHH-2. Red when (sabotage-witnessed, wave 62): the editor factory, the
+ * `ctx.canvas` run lane, the render tool or the share mint stops asking
+ * `canvasWriteAllowed`; the present remote stops re-checking the feature toggle or the
+ * minter's org write; the canvas eraser skips `metadata.producedBy`; or the collab
+ * ticket door stops requiring workspace write.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -39,7 +45,7 @@ beforeAll(async () => {
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
-  for (const id of ['users', 'projects', 'slides', 'document-editor', 'drawings', 'cad', 'campaign-studio', 'app-builder']) { const d = getToggleDefault(id); if (d) await saveConfig({ ...d, status: 'on' }, 'test'); }
+  for (const id of ['users', 'projects', 'slides', 'document-editor', 'drawings', 'cad', 'campaign-studio', 'app-builder', 'sharing', 'realtime-collab']) { const d = getToggleDefault(id); if (d) await saveConfig({ ...d, status: 'on' }, 'test'); }
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
@@ -48,15 +54,19 @@ const setSlides = async (status: 'on' | 'off'): Promise<void> => {
   if (d) await saveConfig({ ...d, status }, 'test');
 };
 
-interface Res<T = any> { status: number; body: T }
+interface Wire {
+  user: { userId: string }; orgId: string; id: string; access: 'read' | 'write'; token?: string; ticket?: string;
+  error?: string; message?: string; details?: { reason?: string; requiredScope?: string };
+}
+interface Res<T = Wire> { status: number; body: T }
 interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; patch: (p: string, b?: unknown) => Promise<Res>; del: (p: string) => Promise<Res> }
 function client(): Client {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
+    const out: unknown = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    return { status: res.status, body: out as Wire }; // wire JSON, typed by the shape above
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b), del: (p) => call('DELETE', p) };
 }
@@ -75,16 +85,16 @@ async function crossOrgWorld() {
   const tenantId = `org:adr0886-${Date.now()}-${n++}`;
   const owner = client();
   await owner.post('/host/openwop-app/test/login', { email: uniq('own'), tenantId });
-  const orgA = (await owner.post('/host/openwop-app/orgs', { name: 'Alpha' })).body.orgId as string;
-  const orgB = (await owner.post('/host/openwop-app/orgs', { name: 'Bravo' })).body.orgId as string;
+  const orgA = (await owner.post('/host/openwop-app/orgs', { name: 'Alpha' })).body.orgId;
+  const orgB = (await owner.post('/host/openwop-app/orgs', { name: 'Bravo' })).body.orgId;
   const project = await owner.post('/host/openwop-app/projects', { orgId: orgB, name: 'Board deck' });
   expect(project.status, JSON.stringify(project.body)).toBe(201);
-  const projectId = project.body.id as string;
+  const projectId = project.body.id;
   const canvas = await createCanvasForTenant(tenantId, {
     canvasTypeId: 'canvas.slides', name: 'Board deck', ownerSubject: { kind: 'project', id: projectId }, initialState: deck('Board deck'),
   });
   const u = client();
-  const userId = (await u.post('/host/openwop-app/test/login', { email: uniq('u'), tenantId })).body.user.userId as string;
+  const userId = (await u.post('/host/openwop-app/test/login', { email: uniq('u'), tenantId })).body.user.userId;
   await createMember({ tenantId, orgId: orgA, subject: userId, displayName: 'U', roles: ['editor'] });
   await createMember({ tenantId, orgId: orgB, subject: userId, displayName: 'U', roles: ['viewer'] });
   return { tenantId, orgA, orgB, projectId, canvasId: canvas.canvasId, owner, u, userId };
@@ -118,8 +128,6 @@ describe('S1 — a project-owned deck is written only with write in the PROJECT 
   });
 
   it('share: the org-B viewer cannot publish a public link to the deck through org A', async () => {
-    const sharing = getToggleDefault('sharing');
-    if (sharing) await saveConfig({ ...sharing, status: 'on' }, 'test');
     const w = await crossOrgWorld();
     const link = await w.u.post(`/host/openwop-app/sharing/orgs/${encodeURIComponent(w.orgA)}/links`, { resourceType: 'slides_canvas', resourceId: w.canvasId });
     expect(link.status).toBe(403);
@@ -130,8 +138,6 @@ describe('S1 — a project-owned deck is written only with write in the PROJECT 
   });
 
   it('share: the same holds for an app-builder canvas (the other canvas share type)', async () => {
-    const sharing = getToggleDefault('sharing');
-    if (sharing) await saveConfig({ ...sharing, status: 'on' }, 'test');
     const w = await crossOrgWorld();
     const app = await createCanvasForTenant(w.tenantId, { canvasTypeId: 'canvas.app-builder', name: 'App', ownerSubject: { kind: 'project', id: w.projectId }, initialState: { title: 'App' } });
     const link = await w.u.post(`/host/openwop-app/sharing/orgs/${encodeURIComponent(w.orgA)}/links`, { resourceType: 'app_builder_canvas', resourceId: app.canvasId });
@@ -143,14 +149,17 @@ describe('S1 — a project-owned deck is written only with write in the PROJECT 
   it('chat: the Slide Designer render tool cannot update the deck for that person', async () => {
     const w = await crossOrgWorld();
     const tools = createAgentToolProvider({ tenantId: w.tenantId, actingUserId: w.userId });
+    // The deck's REAL version, so the input is valid except for the write gate.
+    const baseVersion = (await getCanvasForTenant(w.tenantId, w.canvasId))!.version;
     const r = await tools.executeTool({
       name: SLIDES_RENDER_TOOL_ID,
       input: {
-        orgId: w.orgA, canvasId: w.canvasId, baseVersion: 1,
+        orgId: w.orgA, canvasId: w.canvasId, baseVersion,
         deck: { title: 'Hijacked', slides: [{ layout: 'title', title: 'Hijacked' }] },
       },
     });
     expect(r.isError).toBe(true);
+    expect(r.content).toContain('forbidden_scope');
     const after = await getCanvasForTenant(w.tenantId, w.canvasId);
     expect((after?.state as { title?: string })?.title).toBe('Board deck');
   });
@@ -160,7 +169,7 @@ describe('S1 — a project-owned deck is written only with write in the PROJECT 
     const surface = createCanvasSurface({ tenantId: w.tenantId, actingUserId: w.userId } as BundleScope);
     // Control: the read is allowed.
     await expect(surface.read(w.canvasId)).resolves.toMatchObject({ canvasId: w.canvasId });
-    await expect(surface.write(w.canvasId, deck('Hijacked'), { merge: 'replace' })).rejects.toBeTruthy();
+    await expect(surface.write(w.canvasId, deck('Hijacked'), { merge: 'replace' })).rejects.toMatchObject({ code: 'forbidden_scope' });
     const after = await getCanvasForTenant(w.tenantId, w.canvasId);
     expect((after?.state as { title?: string })?.title).toBe('Board deck');
   });
@@ -207,14 +216,14 @@ describe('S2 — the present remote is re-checked on every request', () => {
     const tenantId = `org:adr0886-pr-${Date.now()}-${n++}`;
     const owner = client();
     await owner.post('/host/openwop-app/test/login', { email: uniq('own'), tenantId });
-    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Show' })).body.orgId as string;
+    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Show' })).body.orgId;
     const canvas = await createCanvasForTenant(tenantId, { canvasTypeId: 'canvas.slides', name: 'Show', initialState: deck('Show') });
     const ed = client();
-    const userId = (await ed.post('/host/openwop-app/test/login', { email: uniq('ed'), tenantId })).body.user.userId as string;
+    const userId = (await ed.post('/host/openwop-app/test/login', { email: uniq('ed'), tenantId })).body.user.userId;
     const member = await createMember({ tenantId, orgId, subject: userId, displayName: 'E', roles: ['editor'] });
     const minted = await ed.post(`${SL(orgId)}/canvases/${canvas.canvasId}/present-remote`);
     expect(minted.status, JSON.stringify(minted.body)).toBe(201);
-    const token = encodeURIComponent(minted.body.token as string);
+    const token = encodeURIComponent(minted.body.token!);
     return { tenantId, orgId, canvasId: canvas.canvasId, memberId: member.memberId, token };
   }
   const pub = client();
@@ -247,8 +256,8 @@ describe('S3 — DSAR erasure covers the render tool’s producedBy', () => {
   it('erasing the person removes their id from the deck metadata', async () => {
     const tenantId = `org:adr0886-dsar-${Date.now()}-${n++}`;
     const owner = client();
-    const userId = (await owner.post('/host/openwop-app/test/login', { email: uniq('own'), tenantId })).body.user.userId as string;
-    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Solo' })).body.orgId as string;
+    const userId = (await owner.post('/host/openwop-app/test/login', { email: uniq('own'), tenantId })).body.user.userId;
+    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Solo' })).body.orgId;
     const tools = createAgentToolProvider({ tenantId, actingUserId: userId });
     const r = await tools.executeTool({ name: SLIDES_RENDER_TOOL_ID, input: { orgId, deck: { title: 'Mine', slides: [{ layout: 'title', title: 'Mine' }] } } });
     expect(r.isError, r.content).not.toBe(true);
@@ -283,24 +292,24 @@ describe('S3b — producedBy is erased even when the person does not own the can
 
 describe('S4 — a collab room is a write, so joining needs write', () => {
   it('a workspace Viewer cannot mint a collab ticket or claim the seed for a deck', async () => {
-    const collab = getToggleDefault('realtime-collab');
-    if (collab) await saveConfig({ ...collab, status: 'on' }, 'test');
     const tenantId = `org:adr0886-collab-${Date.now()}-${n++}`;
     const owner = client();
     await owner.post('/host/openwop-app/test/login', { email: uniq('own'), tenantId });
-    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Live' })).body.orgId as string;
+    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Live' })).body.orgId;
     const canvas = await createCanvasForTenant(tenantId, { canvasTypeId: 'canvas.slides', name: 'Live', initialState: deck('Live') });
     const viewer = client();
-    const viewerId = (await viewer.post('/host/openwop-app/test/login', { email: uniq('v'), tenantId })).body.user.userId as string;
+    const viewerId = (await viewer.post('/host/openwop-app/test/login', { email: uniq('v'), tenantId })).body.user.userId;
     await createMember({ tenantId, orgId, subject: viewerId, displayName: 'V', roles: ['viewer'] });
     // Control: the viewer reads the deck, and the owner may mint.
     expect((await viewer.get(`${SL(orgId)}/canvases/${canvas.canvasId}`)).status).toBe(200);
     expect((await owner.post(`/host/openwop-app/canvas-collab/${canvas.canvasId}/ticket`)).status).toBe(200);
 
     const ticket = await viewer.post(`/host/openwop-app/canvas-collab/${canvas.canvasId}/ticket`);
-    expect([403, 404]).toContain(ticket.status);
-    expect(ticket.body?.ticket).toBeUndefined();
+    expect(ticket.status).toBe(403);
+    expect(ticket.body.details?.reason).toBe('collab_write_required');
+    expect(ticket.body.ticket).toBeUndefined();
     const seed = await viewer.post(`/host/openwop-app/canvas-collab/${canvas.canvasId}/claim-seed`);
-    expect([403, 404]).toContain(seed.status);
+    expect(seed.status).toBe(403);
+    expect(seed.body.details?.reason).toBe('collab_write_required');
   });
 });

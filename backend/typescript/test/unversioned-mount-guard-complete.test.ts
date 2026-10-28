@@ -84,40 +84,75 @@ const PROTOCOL_ROOTS = new Set(v2MountedRootPrefixes());
  * tree) is not mistaken for a line comment.
  */
 function stripComments(src: string): string {
-  let out = '';
+  // Same semantics as the original char-by-char builder, but it copies whole
+  // non-comment RUNS with slice() instead of concatenating one char at a time
+  // (that concatenation was most of the 1.7 s this file cost; 8f W4).
+  const parts: string[] = [];
+  const n = src.length;
   let i = 0;
-  let quote: string | null = null;
-  while (i < src.length) {
-    const c = src[i];
-    const next = src[i + 1];
+  let start = 0;
+  let quote: number | null = null;
+  while (i < n) {
+    const c = src.charCodeAt(i);
     if (quote !== null) {
-      if (c === '\\') { out += c + (next ?? ''); i += 2; continue; }
+      if (c === 92 /* \\ */) { i += 2; continue; }
       if (c === quote) quote = null;
-      out += c; i += 1; continue;
+      i += 1; continue;
     }
-    if (c === "'" || c === '"' || c === '`') { quote = c; out += c; i += 1; continue; }
-    if (c === '/' && next === '/') { while (i < src.length && src[i] !== '\n') i += 1; continue; }
-    if (c === '/' && next === '*') {
-      i += 2;
-      while (i < src.length && !(src[i] === '*' && src[i + 1] === '/')) i += 1;
-      i += 2; continue;
+    if (c === 39 || c === 34 || c === 96) { quote = c; i += 1; continue; }
+    if (c === 47 /* / */) {
+      const next = src.charCodeAt(i + 1);
+      if (next === 47) {
+        parts.push(src.slice(start, i));
+        while (i < n && src.charCodeAt(i) !== 10) i += 1;
+        start = i; continue;
+      }
+      if (next === 42) {
+        parts.push(src.slice(start, i));
+        i += 2;
+        while (i < n && !(src.charCodeAt(i) === 42 && src.charCodeAt(i + 1) === 47)) i += 1;
+        i += 2; start = i; continue;
+      }
     }
-    out += c; i += 1;
+    i += 1;
   }
+  if (start < n) parts.push(src.slice(start));
+  return parts.join('');
+}
+
+/**
+ * The comment-stripped text of every `src/**\/*.ts` file, read ONCE per file run.
+ * Wave-3 lesson: a case that re-walks `src/` (2,074 files, 30 MB, char-wise
+ * stripping) per mechanism and again for the union measured 1.7 s alone (8f W4
+ * baseline); under gate load that kind of rewalk went past the timeout. Reading
+ * once and memoizing each pattern's scan changes nothing the cases claim.
+ */
+let SOURCES: readonly string[] | undefined;
+function sources(): readonly string[] {
+  if (SOURCES) return SOURCES;
+  const out: string[] = [];
+  for (const entry of readdirSync(SRC, { recursive: true, withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith('.ts')) continue;
+    out.push(stripComments(readFileSync(join(entry.parentPath ?? entry.path, entry.name), 'utf8')));
+  }
+  SOURCES = out;
   return out;
 }
 
+const SCANS = new Map<string, string[]>();
 function scan(pattern: RegExp): string[] {
+  const cached = SCANS.get(pattern.source);
+  if (cached) return cached;
   const roots = new Set<string>();
-  for (const entry of readdirSync(SRC, { recursive: true, withFileTypes: true })) {
-    if (!entry.isFile() || !entry.name.endsWith('.ts')) continue;
-    const text = stripComments(readFileSync(join(entry.parentPath ?? entry.path, entry.name), 'utf8'));
+  for (const text of sources()) {
     for (const m of text.matchAll(new RegExp(pattern.source, 'g'))) {
       const root = `/${m[1].replace(/^\//, '').split('/')[0]}`;
       if (!NOT_A_HOST_NAME.has(root) && !PROTOCOL_ROOTS.has(root.split(':')[0]!)) roots.add(root);
     }
   }
-  return [...roots].sort();
+  const result = [...roots].sort();
+  SCANS.set(pattern.source, result);
+  return result;
 }
 
 const MECHANISMS = [

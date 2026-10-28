@@ -102,4 +102,71 @@ describe('ADR 0907 P1 — ads-sandbox-verify.mjs', () => {
       reply = { status: 200, body: { events_received: 1 } };
     }
   });
+
+  it('ADR 0952 D1 delivery-status: refuses without a TEST account + campaign; Google goes out validateOnly with PAUSED', async () => {
+    const refused = await run(['meta', 'delivery-status'], { OPENWOP_ADS_SANDBOX: '1', OPENWOP_SANDBOX_META_TOKEN: 'T', OPENWOP_SANDBOX_META_ACCOUNT_ID: '1' });
+    expect(refused.status).toBe(2);
+    expect(refused.stderr).toMatch(/CAMPAIGN_ID are required/);
+    reply = { status: 200, body: { results: [{ resourceName: 'customers/1234567890/campaigns/55' }] } };
+    try {
+      const r = await run(['google', 'delivery-status'], {
+        OPENWOP_GOOGLE_ADS_API_BASE: `${base}/google`, OPENWOP_ADS_SANDBOX: '1', OPENWOP_SANDBOX_GOOGLE_TOKEN: 'G',
+        OPENWOP_SANDBOX_GOOGLE_DEVELOPER_TOKEN: 'DEV', OPENWOP_SANDBOX_GOOGLE_ACCOUNT_ID: '123-456-7890', OPENWOP_SANDBOX_GOOGLE_CAMPAIGN_ID: '55',
+      });
+      expect(r.status, r.stderr).toBe(0);
+      const hit = hits.at(-1)!;
+      expect(hit.url).toBe('/google/customers/1234567890/campaigns:mutate');
+      expect(hit.body).toEqual({ operations: [{ update: { resourceName: 'customers/1234567890/campaigns/55', status: 'PAUSED' }, updateMask: 'status' }], validateOnly: true });
+    } finally {
+      reply = { status: 200, body: { events_received: 1 } };
+    }
+  });
+
+  it('ADR 0952 P2 ceiling (meta): writes spend_cap through the adapter builder and PASSES only when the read-back matches', async () => {
+    const env = { OPENWOP_META_API_BASE: `${base}/meta`, OPENWOP_ADS_SANDBOX: '1', OPENWOP_SANDBOX_META_TOKEN: 'M', OPENWOP_SANDBOX_META_CAMPAIGN_ID: '55', OPENWOP_SANDBOX_META_CEILING_MINOR: '500000', OPENWOP_SANDBOX_META_CURRENCY: 'BHD' };
+    try {
+      // 500.000 BHD → Meta offset 100 → 50000.
+      reply = { status: 200, body: { success: true, spend_cap: '50000' } };
+      const pass = await run(['meta', 'ceiling'], env);
+      expect(pass.status, pass.stderr).toBe(0);
+      expect(hits.at(-2)?.body).toEqual({ spend_cap: 50000 }); // the write; the read-back follows
+      reply = { status: 200, body: { success: true, spend_cap: '5000' } }; // stored in another unit
+      expect((await run(['meta', 'ceiling'], env)).status).toBe(1);
+    } finally {
+      reply = { status: 200, body: { events_received: 1 } };
+    }
+  });
+
+  it('ADR 0952 P5: tiktok/linkedin delivery-status (PAUSED) and budget go out through the adapter builders', async () => {
+    try {
+      reply = { status: 200, body: { code: 0, message: 'OK', data: {} } };
+      const t = await run(['tiktok', 'budget'], { OPENWOP_TIKTOK_ADS_API_BASE: `${base}/tiktok`, OPENWOP_ADS_SANDBOX: '1', OPENWOP_SANDBOX_TIKTOK_TOKEN: 'TT', OPENWOP_SANDBOX_TIKTOK_ACCOUNT_ID: '7001', OPENWOP_SANDBOX_TIKTOK_CAMPAIGN_ID: '11', OPENWOP_SANDBOX_TIKTOK_BUDGET_MAJOR: '12.5' });
+      expect(t.status, t.stderr).toBe(0);
+      expect(hits.at(-1)).toMatchObject({ url: '/tiktok/campaign/update/', body: { advertiser_id: '7001', campaign_id: '11', budget: 12.5 } });
+      reply = { status: 200, body: {} };
+      const l = await run(['linkedin', 'delivery-status'], { OPENWOP_LINKEDIN_ADS_API_BASE: `${base}/li`, OPENWOP_ADS_SANDBOX: '1', OPENWOP_SANDBOX_LINKEDIN_TOKEN: 'L', OPENWOP_SANDBOX_LINKEDIN_ACCOUNT_ID: '5091', OPENWOP_SANDBOX_LINKEDIN_CAMPAIGN_ID: '21' });
+      expect(l.status, l.stderr).toBe(0);
+      const hit = hits.at(-1);
+      expect(hit?.url).toBe('/li/rest/adAccounts/5091/adCampaignGroups/21');
+      expect(hit?.headers['x-restli-method']).toBe('PARTIAL_UPDATE');
+      expect(hit?.body).toEqual({ patch: { $set: { status: 'PAUSED' } } });
+    } finally {
+      reply = { status: 200, body: { events_received: 1 } };
+    }
+  });
+
+  it('ADR 0945 D6 aigc-disclosure (tiktok, read-only): PASS only when TikTok stores the value the adapter sends', async () => {
+    const env = { OPENWOP_TIKTOK_ADS_API_BASE: `${base}/tiktok`, OPENWOP_ADS_SANDBOX: '1', OPENWOP_SANDBOX_TIKTOK_TOKEN: 'TT', OPENWOP_SANDBOX_TIKTOK_ACCOUNT_ID: '7001', OPENWOP_SANDBOX_TIKTOK_AD_ID: '99' };
+    try {
+      reply = { status: 200, body: { code: 0, data: { list: [{ ad_id: '99', aigc_disclosure_type: 'SELF_DISCLOSURE' }] } } };
+      const pass = await run(['tiktok', 'aigc-disclosure'], env);
+      expect(pass.status, pass.stderr).toBe(0);
+      expect(hits.at(-1)?.url).toMatch(/^\/tiktok\/ad\/get\/\?advertiser_id=7001/);
+      // Any other stored value (or none) is a FAIL: the adapter's value is not proven.
+      reply = { status: 200, body: { code: 0, data: { list: [{ ad_id: '99', aigc_disclosure_type: 'OTHER' }] } } };
+      expect((await run(['tiktok', 'aigc-disclosure'], env)).status).toBe(1);
+    } finally {
+      reply = { status: 200, body: { events_received: 1 } };
+    }
+  });
 });

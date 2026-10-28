@@ -14,6 +14,19 @@
  * live activation shows minutes left, is announced only right after activating,
  * and can be ended.
  *
+ * Also pinned (OPA-GAP-1..7, routed from /grade-tests w57): a change of signed-in
+ * person reloads the list and forgets "just activated"; `not_eligible`,
+ * `already_active` and an unsupported sign-in each have their own copy, and an
+ * unknown error falls back to the generic one; a failed list read shows the load
+ * error (never an empty, activatable form) and Retry reads again; "Switch into
+ * the workspace" switches to `host-kicktodo`, fires the auth change, then
+ * reloads, in that order; no fresh token after a successful MFA step restarts
+ * step-up instead of re-showing the consumed code step; a failed "End now" shows
+ * its refusal and leaves the activation live; and the 30 s tick counts the
+ * minutes down and turns the activation into "expired" while the panel is open.
+ * The count never exceeds the activation's own length, even when this browser's
+ * clock runs behind the server that stamped it (seen live: 8 h read "481").
+ *
  * Sabotage (witnessed, /grade-tests w57): rendering or loading without the
  * superadmin check, treating a tenant owner as eligible (r2), a minimum of 0, an
  * untrimmed length check (r2), the cached token instead of the re-auth token
@@ -21,7 +34,13 @@
  * (r2), never or always announcing, skipping the end call, dropping the typed
  * MFA code (r2), ignoring the caller subject, staying on the code step or keeping
  * the consumed code (r2), and collapsing refusals into the generic message each
- * turn a case red.
+ * turn a case red. For the OPA-GAP cases: not resetting `justActivated` on a
+ * subject change, dropping `callerSubject` from the effect, mapping an unknown
+ * code to a specific refusal, rendering the form on a failed read, a Retry that
+ * does not reload, switching to another workspace or skipping the auth change,
+ * re-showing the code step after a consumed MFA, reloading or clearing the live
+ * activation on a failed end, and removing the interval each turn a case red;
+ * dropping the `activatedAt` cap turns the clock-skew case red.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
@@ -41,6 +60,7 @@ const ME: User = {
 
 const state = {
   access: SUPERADMIN,
+  user: ME as User | null,
   rows: [] as OperatorActivation[],
   list: vi.fn<typeof listOperatorActivations>(),
   activate: vi.fn<typeof activateOperatorAccess>(),
@@ -70,7 +90,7 @@ vi.mock('../../../client/useEffectiveAccess.js', () => ({
   useEffectiveAccessState: (): { access: EffectiveAccess; resolved: boolean } => ({ access: state.access, resolved: true }),
 }));
 vi.mock('../../../auth/backendSession.js', () => ({
-  useBackendSession: (): { user: User | null; resolved: boolean } => ({ user: ME, resolved: true }),
+  useBackendSession: (): { user: User | null; resolved: boolean } => ({ user: state.user, resolved: true }),
 }));
 vi.mock('../../../client/operatorAccessClient.js', () => ({
   listOperatorActivations: (ws: string) => state.list(ws),
@@ -78,6 +98,10 @@ vi.mock('../../../client/operatorAccessClient.js', () => ({
   endOperatorAccess: (ws: string) => state.end(ws),
 }));
 vi.mock('../../../client/workspaceClient.js', () => ({ switchWorkspace: vi.fn(async () => {}) }));
+vi.mock('../../../client/config.js', async (orig) => ({
+  ...(await orig<typeof import('../../../client/config.js')>()),
+  fireAuthChanged: vi.fn(),
+}));
 vi.mock('../../../auth/firebase.js', () => {
   class MfaRequiredError extends Error {}
   return { MfaRequiredError, completeMfaSignIn: (code: string) => state.completeMfa(code) };
@@ -93,13 +117,19 @@ vi.mock('../../../auth/stepUp.js', () => {
 
 import { OperatorAccessPanel } from '../OperatorAccessPanel.js';
 import { MfaRequiredError } from '../../../auth/firebase.js';
+import { StepUpUnsupportedError } from '../../../auth/stepUp.js';
+import { switchWorkspace } from '../../../client/workspaceClient.js';
+import { fireAuthChanged } from '../../../client/config.js';
 
 beforeEach(() => {
   // The polite live region is module state: without this, a case could pass on
   // the announcement an EARLIER case made.
   announce('');
   state.access = SUPERADMIN;
+  state.user = ME;
   state.rows = [];
+  vi.mocked(switchWorkspace).mockClear();
+  vi.mocked(fireAuthChanged).mockClear();
   // mockReset (not mockClear) so an unconsumed *Once never leaks into the next case.
   for (const f of [state.list, state.activate, state.end, state.reauth, state.completeMfa, state.freshToken]) f.mockReset();
   defaults();
@@ -108,6 +138,10 @@ afterEach(cleanup);
 
 const refusal = (code: string) => new ApiError({ status: 403, statusText: 'Forbidden', url: '/x', body: { error: 'forbidden', details: { code } } });
 const justify = (value = 'A-08 first catalog / D-23') => fireEvent.change(screen.getByLabelText(/Why do you need operator access/), { target: { value } });
+const liveRow = (subject: string, minutesFromNow: number, id = 'opa_live'): OperatorActivation => ({
+  activationId: id, workspaceId: 'host-kicktodo', subject, justification: 'live session',
+  activatedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + minutesFromNow * 60_000).toISOString(),
+});
 const activateButton = () => screen.getByRole<HTMLButtonElement>('button', { name: 'Sign in again and activate' });
 
 describe('OperatorAccessPanel', () => {
@@ -230,5 +264,149 @@ describe('OperatorAccessPanel', () => {
     fireEvent.click(activateButton());
     expect(await screen.findByText(/That sign-in was too long ago/)).toBeTruthy();
     expect(screen.queryByText(/needs two-step verification first/)).toBeNull();
+  });
+
+  it('OPA-GAP-1: a change of signed-in person reloads the list and forgets "just activated"', async () => {
+    const { rerender } = render(<OperatorAccessPanel />);
+    await screen.findByText(/including approving your own submission/);
+    justify();
+    fireEvent.click(activateButton());
+    await waitFor(() => expect(currentAnnouncements().polite).toContain('Operator access is now active.'));
+    const readsBefore = state.list.mock.calls.length;
+    announce('');
+    // The next person already holds a live activation of their own.
+    state.user = { ...ME, userId: 'user:next', principalId: 'user:next' };
+    state.rows = [liveRow('user:next', 30, 'opa_next')];
+    rerender(<OperatorAccessPanel />);
+    // The panel's clock was last set at the earlier activation, so the minute
+    // count can round up by one; WHOSE activation is live is what matters here.
+    expect(await screen.findByText(/^Operator access is active: (30|31) minutes left\.$/)).toBeTruthy();
+    expect(screen.getByText(/live session/)).toBeTruthy();
+    expect(state.list.mock.calls.length).toBe(readsBefore + 1);
+    expect(state.list).toHaveBeenLastCalledWith('host-kicktodo');
+    // Their activation is state they arrived to, not an action they just took.
+    expect(currentAnnouncements().polite).not.toContain('Operator access is now active.');
+  });
+
+  it('OPA-GAP-2: not_eligible, already_active, an unsupported sign-in and an unknown error each get their own copy', async () => {
+    state.activate.mockRejectedValueOnce(refusal('not_eligible'));
+    render(<OperatorAccessPanel />);
+    await screen.findByText(/including approving your own submission/);
+    justify();
+    fireEvent.click(activateButton());
+    expect(await screen.findByText('Operator access is limited to the operators of this site.')).toBeTruthy();
+
+    state.activate.mockRejectedValueOnce(refusal('already_active'));
+    fireEvent.click(activateButton());
+    expect(await screen.findByText('Operator access is already active.')).toBeTruthy();
+    expect(screen.queryByText('Operator access is limited to the operators of this site.')).toBeNull();
+
+    state.reauth.mockRejectedValueOnce(new StepUpUnsupportedError());
+    fireEvent.click(activateButton());
+    expect(await screen.findByText(/Your sign-in method cannot confirm here/)).toBeTruthy();
+    expect(state.activate).toHaveBeenCalledTimes(2);
+
+    state.activate.mockRejectedValueOnce(refusal('something_new'));
+    fireEvent.click(activateButton());
+    expect(await screen.findByText('Operator access could not be changed. Try again.')).toBeTruthy();
+    expect(screen.queryByText(/Your sign-in method cannot confirm here/)).toBeNull();
+  });
+
+  it('OPA-GAP-3: a failed list read shows the load error, not an activatable form, and Retry reads again', async () => {
+    state.list.mockRejectedValueOnce(new Error('network'));
+    render(<OperatorAccessPanel />);
+    expect(await screen.findByText(/Operator access could not be loaded/)).toBeTruthy();
+    expect(screen.queryByLabelText(/Why do you need operator access/)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Sign in again and activate' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(await screen.findByLabelText(/Why do you need operator access/)).toBeTruthy();
+    expect(state.list).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText(/Operator access could not be loaded/)).toBeNull();
+  });
+
+  it('OPA-GAP-4: "Switch into the workspace" switches to host-kicktodo, fires the auth change, then reloads', async () => {
+    const reload = vi.fn();
+    const original = window.location;
+    Object.defineProperty(window, 'location', { configurable: true, value: { ...original, reload } });
+    try {
+      state.rows = [liveRow('user:me', 30)];
+      render(<OperatorAccessPanel />);
+      fireEvent.click(await screen.findByRole('button', { name: 'Switch into the workspace' }));
+      await waitFor(() => expect(reload).toHaveBeenCalledTimes(1));
+      expect(switchWorkspace).toHaveBeenCalledWith('host-kicktodo');
+      expect(fireAuthChanged).toHaveBeenCalledTimes(1);
+      const switched = vi.mocked(switchWorkspace).mock.invocationCallOrder[0]!;
+      const fired = vi.mocked(fireAuthChanged).mock.invocationCallOrder[0]!;
+      expect(switched).toBeLessThan(fired);
+      expect(fired).toBeLessThan(reload.mock.invocationCallOrder[0]!);
+    } finally {
+      Object.defineProperty(window, 'location', { configurable: true, value: original });
+    }
+  });
+
+  it('OPA-GAP-5: no fresh token after a successful MFA step restarts step-up instead of re-showing the code step', async () => {
+    state.reauth.mockRejectedValueOnce(new MfaRequiredError());
+    state.freshToken.mockResolvedValueOnce(null);
+    render(<OperatorAccessPanel />);
+    await screen.findByText(/including approving your own submission/);
+    justify();
+    fireEvent.click(activateButton());
+    fireEvent.change(await screen.findByLabelText('Authenticator code'), { target: { value: '123456' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm and activate' }));
+    expect(await screen.findByText('Operator access could not be changed. Try again.')).toBeTruthy();
+    expect(state.completeMfa).toHaveBeenCalledTimes(1);
+    expect(state.activate).not.toHaveBeenCalled();
+    // The consumed challenge is gone: back to the activate step, not the code step.
+    expect(screen.queryByLabelText('Authenticator code')).toBeNull();
+    fireEvent.click(activateButton());
+    await waitFor(() => expect(state.activate).toHaveBeenCalledTimes(1));
+    expect(state.reauth).toHaveBeenCalledTimes(2);
+    expect(state.completeMfa).toHaveBeenCalledTimes(1);
+    expect(state.activate.mock.calls[0]![2]).toBe('fresh-token');
+  });
+
+  it('OPA-GAP-6: a failed "End now" shows its refusal and leaves the activation live', async () => {
+    state.rows = [liveRow('user:me', 30)];
+    state.end.mockRejectedValueOnce(refusal('not_eligible'));
+    render(<OperatorAccessPanel />);
+    fireEvent.click(await screen.findByRole('button', { name: 'End now' }));
+    expect(await screen.findByText('Operator access is limited to the operators of this site.')).toBeTruthy();
+    expect(state.end).toHaveBeenCalledWith('host-kicktodo');
+    expect(state.list).toHaveBeenCalledTimes(1);
+    expect(screen.getByText('Operator access is active: 30 minutes left.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'End now' })).toBeTruthy();
+    expect(screen.queryByText(/ended early/)).toBeNull();
+  });
+
+  it('OPA-GAP-7: the 30 s tick counts the minutes down and turns the activation into "expired" while open', async () => {
+    // Only the interval and the clock are faked; promises and testing-library's
+    // own timers stay real.
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'], now: new Date('2026-10-23T12:00:00.000Z') });
+    try {
+      state.rows = [liveRow('user:me', 1.5)];
+      render(<OperatorAccessPanel />);
+      expect(await screen.findByText('Operator access is active: 2 minutes left.')).toBeTruthy();
+      act(() => { vi.advanceTimersByTime(30_000); });
+      expect(screen.getByText('Operator access is active: 1 minute left.')).toBeTruthy();
+      act(() => { vi.advanceTimersByTime(60_000); });
+      expect(screen.queryByText(/Operator access is active/)).toBeNull();
+      expect(screen.queryByRole('button', { name: 'End now' })).toBeNull();
+      expect(screen.getByText(/ — expired — live session/)).toBeTruthy();
+      expect(screen.getByLabelText(/Why do you need operator access/)).toBeTruthy();
+      expect(state.list).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('never shows more minutes than the activation lasts when this clock runs behind the server', async () => {
+    // The server stamped an 8 h activation 20 s "in the future" of this browser.
+    const serverNow = Date.now() + 20_000;
+    state.rows = [{
+      activationId: 'opa_skew', workspaceId: 'host-kicktodo', subject: 'user:me', justification: 'skewed clock',
+      activatedAt: new Date(serverNow).toISOString(), expiresAt: new Date(serverNow + 480 * 60_000).toISOString(),
+    }];
+    render(<OperatorAccessPanel />);
+    expect(await screen.findByText('Operator access is active: 480 minutes left.')).toBeTruthy();
   });
 });

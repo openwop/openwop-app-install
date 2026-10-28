@@ -9,7 +9,10 @@
  * 2. `auth.subjectLinkKey` is stated ONLY when both the `saml` and `scim` lanes
  *    are (spec-steward ruling 2026-10-10: identity.md §3 — a link joins exactly
  *    two subjects, so a one-lane host forms none). The v2 auth facet schema does
- *    not enforce this, so this file is the guard.
+ *    not enforce this, so this file is the guard. *
+ * Tracker TST-BFA-7. Red when: `subjectLinkKey` is stated for one lane; the
+ * advert's `maxFutureHorizon` is not the constant; `delayed` is dropped; the
+ * horizon refusal stops echoing the cap.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';

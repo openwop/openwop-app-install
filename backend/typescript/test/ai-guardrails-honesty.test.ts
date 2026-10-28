@@ -4,6 +4,9 @@
  * ctx.guardrails — a fail-open filter. Pin the honest contract: pass-throughs
  * are marked enforced:false + reason, real evaluations enforced:true, and
  * config.requireEnforcement turns the capability gap into a typed failure.
+ *
+ * TST-BNX-3. Red when: the pass-through claims `enforced:true`,
+ * `requireEnforcement` is ignored, or a real evaluation loses `enforced:true`.
  */
 import { describe, expect, it } from 'vitest';
 import { guardrails } from '../../../packs/core.openwop.ai/index.mjs';
@@ -26,6 +29,6 @@ describe('core.openwop.ai.guardrails honesty contract (XCH-CORE-3)', () => {
       guardrails: { evaluate: async () => ({ passed: false, violations: [{ check: 'pii' }] }) },
     };
     const r = await guardrails(ctx);
-    expect(r.outputs).toMatchObject({ enforced: true, passed: false });
+    expect(r.outputs).toEqual({ enforced: true, passed: false, violations: [{ check: 'pii' }] });
   });
 });

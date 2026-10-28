@@ -20,6 +20,7 @@ import type { BackendFeature } from '../types.js';
 import { registerTerritoryRoutes } from './routes.js';
 import { registerTerritoryVisibility } from './visibility.js';
 import { registerTerritoryCrmLifecycle } from './lifecycle.js';
+import { registerLeadTerritoryRouting } from './leadRouting.js';
 import { buildTerritorySurface } from './surface.js';
 import { registerTerritoryAgentTools } from './agentTools.js';
 import { registerTerritoryTransitionGate } from './modelTransitionApproval.js';
@@ -40,6 +41,7 @@ export const territoriesFeature: BackendFeature = {
     // (closes TERR-DATA-1). Safe regardless of toggle state: only ever deletes
     // this feature's own soft-reference rows.
     registerTerritoryCrmLifecycle();
+    registerLeadTerritoryRouting(); // ADR 0954 D5 — `contact` rules route leads
     // CFP-1 (D9) — the advisory Territory Planner's READ chat tools (self-gating
     // on the `territories` toggle per call; fail-empty without an acting user).
     registerTerritoryAgentTools();

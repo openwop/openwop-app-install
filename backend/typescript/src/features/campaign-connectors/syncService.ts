@@ -181,9 +181,9 @@ const connectorSettings = new DurableCollection<ConnectorSettings>(
   'campaign-connectors:connector-settings', (r) => r.key, undefined, (r) => r.tenantId,
 );
 
-export async function getConnectorSettings(tenantId: string, orgId: string, platform: LiveSyncPlatform): Promise<ConnectorSettings> {
+export async function getConnectorSettings(tenantId: string, orgId: string, platform: LiveSyncPlatform, opts: { throwOnReadError?: boolean } = {}): Promise<ConnectorSettings> {
   const key = stateKey(tenantId, orgId, platform);
-  const row = await connectorSettings.get(key).catch(() => undefined);
+  const row = opts.throwOnReadError ? await connectorSettings.get(key) : await connectorSettings.get(key).catch(() => undefined);
   if (row && row.tenantId === tenantId && row.orgId === orgId) return row;
   return { key, tenantId, orgId, platform, syncScope: 'dispatched', adAccountIds: [], updatedAt: '' };
 }

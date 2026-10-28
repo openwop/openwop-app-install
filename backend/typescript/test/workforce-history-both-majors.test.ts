@@ -10,12 +10,20 @@
  * The REAL path: `seedWorkforceHistory` persists into storage, and every event is
  * read back through `listEvents` at contract 1 AND contract 2 (the era adapter),
  * then validated against that major's vendored `$defs`.
+ *
+ * Non-vacuity: every gate TYPE must be exercised, and every approval OUTCOME
+ * that writes gate events (`escalated`, `overridden`, `open`) must be present
+ * in the seed, so each emission site is reached. Sabotage that turns it red
+ * (wave 64, witnessed): an `approval.*` kind written again (8fw5g2-whb-approval-kind),
+ * a non-enum `decision` (-whb-decision-enum), a required field dropped from
+ * `node.suspended` (-whb-suspended-required).
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
 import { describe, expect, it } from 'vitest';
 import { Ajv2020 } from 'ajv/dist/2020.js';
+import type { ValidateFunction } from 'ajv';
 import { openStorage } from '../src/storage/index.js';
 import { setEventLogBackend } from '../src/executor/eventLog.js';
 import { seedWorkforceHistory } from '../src/host/workforceService.js';
@@ -25,7 +33,7 @@ const req = createRequire(`${process.cwd()}/`);
 const SCHEMAS = join(req.resolve('@openwop/spec-artifacts/package.json'), '..', 'schemas');
 
 /** Ajv over one major's package schemas, siblings registered by walking `$ref`s. */
-function defsFor(major: 1 | 2): (type: string) => ((d: unknown) => boolean) & { errors?: unknown } {
+function defsFor(major: 1 | 2): (type: string) => ValidateFunction {
   const dir = major === 1 ? SCHEMAS : join(SCHEMAS, 'v2');
   const ajv = new Ajv2020({ strict: false, allErrors: true });
   (req('ajv-formats').default ?? req('ajv-formats'))(ajv);
@@ -53,7 +61,7 @@ function defsFor(major: 1 | 2): (type: string) => ((d: unknown) => boolean) & { 
     const ref = root.$defs._typeIndex.properties[type]?.$ref;
     const v = ref ? ajv.getSchema(`run-event-payloads.schema.json${ref}`) : undefined;
     if (!v) throw new Error(`major ${major}: no def for ${type}`);
-    return v as ((d: unknown) => boolean) & { errors?: unknown };
+    return v;
   };
 }
 
@@ -70,7 +78,10 @@ describe('openwop#1742 — the Workforce gate events validate on BOTH majors, re
     const runs = await storage.listRuns({ tenantId: tenant, limit: 1000 });
     const failures: string[] = [];
     const seen = new Map<string, number>();
+    const outcomes = new Map<string, number>();
     for (const run of runs) {
+      const outcome = run.metadata?.['outcome'];
+      if (typeof outcome === 'string') outcomes.set(outcome, (outcomes.get(outcome) ?? 0) + 1);
       const e1 = await storage.listEvents(run.runId, { fromSeq: -1, limit: 1000, contract: 1 });
       const e2 = await storage.listEvents(run.runId, { fromSeq: -1, limit: 1000, contract: 2 });
       for (const e of e1) {
@@ -88,6 +99,7 @@ describe('openwop#1742 — the Workforce gate events validate on BOTH majors, re
       }
     }
     for (const t of GATE_TYPES) expect(seen.get(t) ?? 0, `${t} must be exercised`).toBeGreaterThan(0);
+    for (const o of ['escalated', 'overridden', 'open']) expect(outcomes.get(o) ?? 0, `outcome ${o} must be seeded (its gate emission site)`).toBeGreaterThan(0);
     expect(failures.slice(0, 8), `${failures.length} failures`).toEqual([]);
   });
 });

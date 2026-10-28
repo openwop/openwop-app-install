@@ -60,6 +60,36 @@ import type { WorkflowDefinition } from '../executor/types.js';
  */
 export const DISPATCH_OUTBOX_HINT_GRACE_MS = 10_000;
 
+/**
+ * ADR 0941 D2b — a post-insert observer. Fires AFTER `storage.insertRun`
+ * commits, for every run created through this seam (fresh starts, `:fork`,
+ * redrive and sub-workflow children alike), so a feature can index runs it
+ * cares about without core importing it (the `registerRunStartContributor`
+ * shape, on the write-after side).
+ *
+ * Hooks are keyed (a repeated boot overwrites the slot), MUST be idempotent,
+ * and are fail-soft: a throw is logged and never fails the insert, which has
+ * already committed. A hook must not write `run.metadata` (the row is stored);
+ * a decision that belongs on the run is a run-start contributor instead.
+ */
+export type RunInsertedHook = (run: Readonly<RunRecord>, ctx: { derivedFromRun: boolean }) => Promise<void>;
+
+const runInsertedHooks = new Map<string, RunInsertedHook>();
+
+export function registerRunInsertedHook(key: string, fn: RunInsertedHook): void {
+  runInsertedHooks.set(key, fn);
+}
+
+async function fireRunInsertedHooks(run: RunRecord, derivedFromRun: boolean): Promise<void> {
+  for (const [key, hook] of runInsertedHooks) {
+    try {
+      await hook(run, { derivedFromRun });
+    } catch (err) {
+      log.warn('run_inserted_hook_failed', { key, runId: run.runId, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+}
+
 export async function insertRunWithStartContext(
   storage: Storage,
   run: RunRecord,
@@ -91,6 +121,10 @@ export async function insertRunWithStartContext(
      * which is the two-window duplicate H56 closes.
      */
     idempotencyCommit?: InsertRunOptions['idempotencyCommit'];
+    /** ADR 0987 D2 — concurrency admission, counted inside the insert (see
+     *  `InsertRunOptions.admission`). A refusal throws `AdmissionRefusedError`
+     *  and nothing is written. */
+    admission?: InsertRunOptions['admission'];
   },
 ): Promise<void> {
   if (ctx?.definition && (run.metadata as Record<string, unknown> | undefined)?.definitionRevision === undefined) {
@@ -127,12 +161,21 @@ export async function insertRunWithStartContext(
     // ADR 0604 (TOCWF-1) — forwarded so a per-run-decision contributor can tell
     // a fresh metadata blob from a `:fork`-copied one. See RunStartContext.
     ...(ctx?.derivedFromRun ? { derivedFromRun: true } : {}),
+    // ADR 0942 D4 / D10.4 — lineage, read from the row being inserted (host-written).
+    ...(run.parentRunId ? { parentRunId: run.parentRunId } : {}),
+    ...(run.forkMode ? { forkMode: run.forkMode } : {}),
     // ADR 0831 P2 — read-only view of the blob being stamped.
     metadata: run.metadata ?? {},
+    // ADR 0943 D2 — read-only, for per-node decisions (agent bindings).
+    ...(ctx?.definition ? { definition: ctx.definition } : {}),
+    // ADR 0959 D8 — which workflow this run is (the playbook stamp keys on it).
+    workflowId: run.workflowId,
   });
   const opts: InsertRunOptions = {
     ...(ctx?.enqueueDispatch ? { dispatchOutbox: { nextAttemptAt: Date.now() + DISPATCH_OUTBOX_HINT_GRACE_MS } } : {}),
     ...(ctx?.idempotencyCommit ? { idempotencyCommit: ctx.idempotencyCommit } : {}),
+    ...(ctx?.admission ? { admission: ctx.admission } : {}),
   };
   await storage.insertRun(run, Object.keys(opts).length > 0 ? opts : undefined);
+  if (runInsertedHooks.size > 0) await fireRunInsertedHooks(run, ctx?.derivedFromRun === true);
 }

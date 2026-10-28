@@ -17,6 +17,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { checkAgent, seedExampleAgents } from './rosterClient.js';
+import { heartbeatReasonText } from './heartbeatReason.js';
 import { isWriteRefusal, useAgentWriteAccess, writeErrorMessage } from './agentWriteAccess.js';
 import { listApprovals, type PendingApproval } from './approvalsClient.js';
 import { getCapabilities } from '../client/runsClient.js';
@@ -231,7 +232,9 @@ export function AgentDashboardPage(): JSX.Element {
       if (result.picked) {
         setNotice(t('dashPickedUp', { persona, title: result.cardTitle }));
       } else {
-        setNotice(t('dashNoEligible', { persona, reason: result.reason ?? t('dashIdle') }));
+        setNotice(result.reason === 'held'
+          ? t('checkHeldNotice', { persona })
+          : t('dashNoEligible', { persona, reason: heartbeatReasonText(t, result.reason, t('dashIdle')) }));
       }
       await refresh();
     } catch (err) {

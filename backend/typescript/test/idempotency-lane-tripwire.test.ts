@@ -113,6 +113,7 @@ const LEDGER_ROUTES = new Set<string>([
   'routes/runs.ts',
   'routes/userAgents.ts',
   'routes/hostEventTestTrigger.ts',
+  'features/crm/leadIntel/routes.ts',
 ]);
 
 function walk(dir: string): string[] {
@@ -129,7 +130,7 @@ function walk(dir: string): string[] {
  *  a feature package's own `routes.ts`. A route's idempotency key is caller-supplied
  *  by definition, which is the whole reason routes are excluded from the mutex lane. */
 function isRouteModule(rel: string): boolean {
-  return rel.startsWith('routes/') || /^features\/[^/]+\/routes\.ts$/.test(rel);
+  return rel.startsWith('routes/') || /^features\/[^/]+\/(?:[^/]+\/)*routes\.ts$/.test(rel);
 }
 
 const FILES = walk(SRC).map((p) => ({
@@ -206,10 +207,16 @@ describe('ADR 0549 — idempotency lane separation', () => {
   it('every allowlisted ledger route is registered in the endpoint union', () => {
     // Keeps the two lists honest against each other: a route may read the
     // header only if the union has a literal for it.
-    expect(LEDGER_ROUTES.size).toBe(IDEMPOTENT_ENDPOINTS.length);
+    // One module may own multiple endpoint namespaces (lead grade + route).
+    // Every endpoint still has exactly ONE reviewed owner, and every listed
+    // owner must actually read the header and declare a registered endpoint.
+    const owners = new Set<string>();
     for (const endpoint of IDEMPOTENT_ENDPOINTS) {
-      const declared = FILES.some((f) => LEDGER_ROUTES.has(f.rel) && f.text.includes(`'${endpoint}'`));
-      expect(declared, `no route declares the endpoint literal ${endpoint}`).toBe(true);
+      const declarations = FILES.filter((f) => LEDGER_ROUTES.has(f.rel) && f.text.includes(`'${endpoint}'`));
+      expect(declarations.map((f) => f.rel), `one owner for ${endpoint}`).toHaveLength(1);
+      owners.add(declarations[0]!.rel);
     }
+    expect([...owners].sort()).toEqual([...LEDGER_ROUTES].sort());
+    for (const owner of owners) expect(FILES.find((f) => f.rel === owner)?.text).toMatch(READS_HEADER);
   });
 });

@@ -9,6 +9,9 @@
  * `core.openwop.http` from the published packs.
  */
 
+import { resolveRunMemoryClient } from '../host/runClientOrg.js';
+import { runClientCollectionIds } from '../host/runClientKnowledge.js';
+import { APPROVAL_WAIT_KEY_PREFIX } from '../host/autonomyPolicy/waiters.js';
 import { confidenceEscalationFloor, multiAgentPhaseGates } from '../host/multiAgentPhases.js';
 import { declaredRunCredentialRefs } from '../host/runCredentials.js';
 import { createHash } from 'node:crypto';
@@ -35,7 +38,7 @@ import { appendChannelMessage } from '../host/channelsRuntime.js';
 import { getUser } from '../features/users/usersService.js';
 import { composePromptTemplate } from '../host/promptCompose.js';
 import { resolvePromptRef, promptOverridesFromConfigurable, type PromptKind } from '../host/promptResolve.js';
-import { getTemplate } from '../host/promptStore.js';
+import { resolveTenantTemplate } from '../host/tenantPromptTemplates.js';
 import { getPromptsHostConfig } from '../host/promptHostConfig.js';
 import { dispatchChat, type ChatMessage, type ContentPart, type DispatchResult, type ProviderId } from '../providers/dispatch.js';
 import { dispatchAnthropicWithTools, type ToolDef } from '../providers/dispatchAnthropicTools.js';
@@ -67,6 +70,8 @@ import { registerConformanceMcpInvokeNode } from './conformanceMcpInvokeNode.js'
 import { enterprisePosture } from '../host/deployPosture.js';
 import { diagnoseEmptyCompletion } from './emptyCompletionDiagnostic.js';
 import { storeMediaAsset, resolveMediaAsset, writeMemoryEntryRedacted, MEMORY_DEMO_REF } from '../host/inMemorySurfaces.js';
+import { tryDurableStorage } from '../host/durable/durableStore.js';
+import { runOwner } from '../host/runOwner.js';
 import { ALLOWED_UPLOAD_MIME, isAllowedUploadMime } from '../host/allowedUploadMime.js';
 import agentRunnerNode from '../host/agentRunnerNode.js';
 import { DurableSearchUnavailableError } from '../host/webResearchSurface.js';
@@ -354,7 +359,8 @@ const dispatchNode: NodeModule = {
     let terminateReason: string | null = null;
     // RFC 0118 — set by a parallel fan-out wave; surfaces the normative {joinOutcome, children[]}
     // node output (children: {workflowId, childRunId, childStatus, error?}). Last wave wins.
-    let parallelResult: { joinOutcome: string; children: Array<{ workflowId: string; childRunId: string; childStatus: string; error?: { code: string; message: string } }> } | null = null;
+    type ParallelResult = { joinOutcome: string; children: Array<{ workflowId: string; childRunId: string; childStatus: string; error?: { code: string; message: string } }> };
+    let parallelResult = null as ParallelResult | null;
 
     // RFC 0061 §B — the observable `iteration` counter on runOrchestrator.decided
     // (additive optional field, `run-event-payloads.schema.json#runOrchestratorDecided`).
@@ -370,7 +376,121 @@ const dispatchNode: NodeModule = {
     const ITERATION_VAR = '__runOrchestratorIteration';
     let iterationCounter = emitIteration ? Number(ctx.variables?.get(ITERATION_VAR) ?? 0) : 0;
 
-    for (const decision of decisions) {
+    // ADR 0935 — RFC 0118 wait-all: a wave that came back with a child still
+    // waiting (an approval gate) suspended this node; the host re-invokes it once
+    // every child has finished (`host/dispatchWaitAll.ts`). The marker names that
+    // wave; the resolution is the observed terminal order, recorded on
+    // `interrupt.resolved`. Decisions before the wave were already processed and
+    // emitted, so they are skipped, not replayed.
+    const waitAll = await import('../host/dispatchWaitAll.js');
+    const WAIT_VAR = `__dispatchWaitAll:${ctx.nodeId}`;
+    const WAIT_KEY = `dispatch-wait-all:${ctx.nodeId}`;
+    let resumedWave: { wave: import('../host/dispatchWaitAll.js').WaveCorrelation; join: import('../host/dispatchWaitAll.js').WaveJoinResolution } | null = null;
+    let waitMarker = ctx.variables?.get(WAIT_VAR) as import('../host/dispatchWaitAll.js').WaveCorrelation | null | undefined;
+    if (ctx.suspend) waitMarker = await waitAll.storedDispatchWave(ctx.tenantId, ctx.runId, ctx.nodeId) ?? waitMarker;
+    if (waitMarker && typeof waitMarker.fanOutEventId === 'string' && ctx.suspend) {
+      try {
+        const join = await ctx.suspend({ kind: 'external-event', resumeKey: WAIT_KEY }) as import('../host/dispatchWaitAll.js').WaveJoinResolution;
+        if (join && join.fanOutEventId === waitMarker.fanOutEventId && Array.isArray(join.terminals)) resumedWave = { wave: waitMarker, join };
+      } catch (err) {
+        const { SuspendSignal } = await import('../executor/suspendSignal.js');
+        if (!(err instanceof SuspendSignal)) throw err;
+        // No resolution: a fresh execution with a stale marker (a fork, a re-entry). Start over.
+      }
+      ctx.variables?.set(WAIT_VAR, null);
+    }
+    if (resumedWave) {
+      const decision = decisions[resumedWave.wave.decisionIndex];
+      const workers = Array.isArray(decision?.nextWorkerIds)
+        ? decision.nextWorkerIds.filter((id): id is string => typeof id === 'string' && id.length > 0).sort()
+        : [];
+      const recorded = resumedWave.wave.children.map((child) => child.workflowId).sort();
+      if (!Number.isSafeInteger(resumedWave.wave.decisionIndex) || resumedWave.wave.decisionIndex < 0
+        || !decision || decision.kind !== 'next-worker' || cfg.fanOutPolicy !== 'parallel' || workers.length < 2
+        || workers.length !== recorded.length || workers.some((id, index) => id !== recorded[index])) {
+        return { status: 'failure', error: { code: 'dispatch_wait_invalid_decision', message: 'Stored dispatch wave does not match this invocation’s parallel decision.' } };
+      }
+      if (resumedWave.wave.priorChildren) dispatchedChildren.push(...resumedWave.wave.priorChildren);
+    }
+
+    // RFC 0118 R1 — fold a finished wave: apply outputMapping ONCE in the recorded
+    // mergeOrder (last-in-mergeOrder wins on a colliding parent var; outputMapping
+    // is `{parentVar: childVarName}`, RFC 0022 §A) and record the join. Shared by
+    // the wave that finished at once and the wave that joined later.
+    type WaveTerminal = import('../host/dispatchFanOut.js').ChildTerminal;
+    const finishWave = async (fanOutEventId: string, out: import('../host/dispatchFanOut.js').FanOutOutput): Promise<void> => {
+      for (const childRunId of out.mergeOrder) {
+        const term = out.children.find((c: WaveTerminal) => c.childRunId === childRunId);
+        if (!term || term.status !== 'completed' || !term.workflowId || !term.childVariables) continue;
+        const om = perWorkerOutputMappings?.[term.workflowId] ?? defaultOutputMapping;
+        if (om) {
+          for (const [parentVar, childVar] of Object.entries(om)) {
+            if (Object.prototype.hasOwnProperty.call(term.childVariables, childVar)) {
+              ctx.variables?.set(parentVar, term.childVariables[childVar]);
+            }
+          }
+        }
+      }
+      await eventLog.append({
+        runId: ctx.runId,
+        nodeId: ctx.nodeId,
+        type: 'core.dispatch.join',
+        causationId: fanOutEventId,
+        payload: {
+          joinOutcome: out.joinOutcome,
+          completedCount: out.completedCount,
+          failedCount: out.failedCount,
+          cancelledCount: out.cancelledCount,
+          mergeOrder: out.mergeOrder,
+        },
+      });
+      for (const term of out.children) {
+        dispatchedChildren.push({ childRunId: term.childRunId, childWorkflowId: term.workflowId ?? '', childStatus: String(term.status) });
+      }
+      parallelResult = {
+        joinOutcome: out.joinOutcome,
+        children: out.children.map((t: WaveTerminal) => ({ workflowId: t.workflowId ?? '', childRunId: t.childRunId, childStatus: String(t.status), ...(t.error ? { error: t.error } : {}) })),
+      };
+    };
+
+    // The same crash may lose a prefix outputMapping write along with WAIT_VAR.
+    // Reapply its recorded child order before the current wave's mappings, so
+    // the later wave still wins a deliberate parent-variable collision.
+    if (resumedWave?.wave.priorChildren) {
+      const { hydrateRunVariables, snapshotRunVariables } = await import('../host/variablesRuntime.js');
+      for (const child of resumedWave.wave.priorChildren) {
+        if (child.childStatus !== 'completed') continue;
+        await hydrateRunVariables(child.childRunId);
+        const variables = snapshotRunVariables(child.childRunId) ?? {};
+        const mapping = perWorkerOutputMappings?.[child.childWorkflowId] ?? defaultOutputMapping;
+        for (const [parentVar, childVar] of Object.entries(mapping ?? {})) {
+          if (Object.prototype.hasOwnProperty.call(variables, childVar)) ctx.variables?.set(parentVar, variables[childVar]);
+        }
+      }
+    }
+
+    for (const [decisionIndex, decision] of decisions.entries()) {
+      if (resumedWave && decisionIndex < resumedWave.wave.decisionIndex) continue;
+      if (resumedWave && decisionIndex === resumedWave.wave.decisionIndex) {
+        const { foldJoin } = await import('../host/dispatchFanOut.js');
+        const { hydrateRunVariables, snapshotRunVariables } = await import('../host/variablesRuntime.js');
+        const byId = new Map(resumedWave.wave.children.map((c) => [c.childRunId, c]));
+        const terminals: WaveTerminal[] = [];
+        for (const t of resumedWave.join.terminals) {
+          const child = byId.get(t.childRunId);
+          if (!child) continue;
+          await hydrateRunVariables(t.childRunId);
+          terminals.push({
+            childRunId: t.childRunId,
+            status: t.status,
+            workflowId: child.workflowId,
+            childVariables: snapshotRunVariables(t.childRunId) ?? {},
+            ...(child.error ? { error: child.error } : {}),
+          });
+        }
+        await finishWave(resumedWave.wave.fanOutEventId, { ...foldJoin(terminals, { mode: 'wait-all' }), children: terminals });
+        continue;
+      }
       const kind = decision.kind;
       const iteration = emitIteration ? (iterationCounter += 1) : undefined;
       // RFC 0007 §D / `run-orchestrator-decided-event.schema.json` —
@@ -492,6 +612,8 @@ const dispatchNode: NodeModule = {
         const waveHandoffs: Array<Record<string, unknown> | undefined> = [];
         for (const w of workers) waveHandoffs.push(await stampHandoff(decision, w, decidedRec.eventId));
 
+        // ADR 0935 — the child's own status, before the fold maps it onto a terminal.
+        const rawStatus = new Map<string, string>();
         const out = await runParallelFanOut({
           nextWorkerIds: workers,
           config: { fanOutPolicy: 'parallel', ...(maxConcurrency !== undefined ? { maxConcurrency } : {}), joinPolicy: { mode: 'wait-all' } },
@@ -521,7 +643,8 @@ const dispatchNode: NodeModule = {
                 type: 'node.dispatched',
                 payload: { childRunId: result.childRunId, childWorkflowId, childStatus: result.childStatus },
               });
-              const status = result.childStatus === 'completed' ? 'completed' : result.childStatus === 'cancelled' ? 'cancelled' : 'failed';
+              rawStatus.set(result.childRunId, result.childStatus);
+              const status = waitAll.asChildStatus(result.childStatus);
               return {
                 childRunId: result.childRunId,
                 status,
@@ -543,42 +666,32 @@ const dispatchNode: NodeModule = {
           },
         });
 
-        // R1 — apply outputMapping ONCE in the recorded mergeOrder (last-in-mergeOrder wins on a
-        // colliding parent var). outputMapping is `{parentVar: childVarName}` (RFC 0022 §A).
-        for (const childRunId of out.mergeOrder) {
-          const term = out.children.find((c) => c.childRunId === childRunId);
-          if (!term || term.status !== 'completed' || !term.workflowId || !term.childVariables) continue;
-          const om = perWorkerOutputMappings?.[term.workflowId] ?? defaultOutputMapping;
-          if (om) {
-            for (const [parentVar, childVar] of Object.entries(om)) {
-              if (Object.prototype.hasOwnProperty.call(term.childVariables, childVar)) {
-                ctx.variables?.set(parentVar, term.childVariables[childVar]);
-              }
-            }
+        // ADR 0935 — a child still waiting (an approval gate, a clarification)
+        // is not terminal: RFC 0118 wait-all keeps this node suspended until it is.
+        const waiting = out.children.filter((c) => rawStatus.has(c.childRunId) && !waitAll.isTerminalStatus(rawStatus.get(c.childRunId)!));
+        if (waiting.length > 0) {
+          if (!ctx.suspend) {
+            return { status: 'failure', error: { code: 'internal_error', message: 'core.dispatch: a child is waiting and this context cannot suspend (RFC 0118 wait-all).' } };
           }
+          const correlation: import('../host/dispatchWaitAll.js').WaveCorrelation = {
+            fanOutEventId: fanOutRec.eventId,
+            decisionIndex,
+            children: out.children.map((c) => ({
+              childRunId: c.childRunId,
+              workflowId: c.workflowId ?? '',
+              status: rawStatus.get(c.childRunId) ?? String(c.status),
+              ...(c.error ? { error: c.error } : {}),
+            })),
+            settledOrder: out.mergeOrder.filter((id) => !waiting.some((w) => w.childRunId === id)),
+            priorChildren: [...dispatchedChildren],
+          };
+          ctx.variables?.set(WAIT_VAR, correlation);
+          if (emitIteration) ctx.variables?.set(ITERATION_VAR, iterationCounter);
+          // Throws the suspend signal; the executor records the interrupt.
+          await ctx.suspend({ kind: 'external-event', resumeKey: WAIT_KEY, eventType: waitAll.DISPATCH_WAIT_EVENT_TYPE, correlation });
         }
 
-        await eventLog.append({
-          runId: ctx.runId,
-          nodeId: ctx.nodeId,
-          type: 'core.dispatch.join',
-          causationId: fanOutRec.eventId,
-          payload: {
-            joinOutcome: out.joinOutcome,
-            completedCount: out.completedCount,
-            failedCount: out.failedCount,
-            cancelledCount: out.cancelledCount,
-            mergeOrder: out.mergeOrder,
-          },
-        });
-
-        for (const term of out.children) {
-          dispatchedChildren.push({ childRunId: term.childRunId, childWorkflowId: term.workflowId ?? '', childStatus: String(term.status) });
-        }
-        parallelResult = {
-          joinOutcome: out.joinOutcome,
-          children: out.children.map((t) => ({ workflowId: t.workflowId ?? '', childRunId: t.childRunId, childStatus: String(t.status), ...(t.error ? { error: t.error } : {}) })),
-        };
+        await finishWave(fanOutRec.eventId, out);
         continue; // wave handled; proceed to the next decision
       }
 
@@ -761,6 +874,14 @@ const dispatchNode: NodeModule = {
 const subWorkflowNode: NodeModule = {
   typeId: 'core.subWorkflow',
   version: '1.0.0',
+  // ADR 0964 D1 — dispatching a child run IS a side effect: a replay fork serves the
+  // recorded outcome instead of starting a fresh, non-replay child (which fired every
+  // side effect inside it again).
+  sideEffecting: true,
+  async applyServed({ runId, config, outputs }) {
+    const { applyServedSubWorkflow } = await import('../executor/subWorkflowReplay.js');
+    await applyServedSubWorkflow(runId, config, outputs);
+  },
   async execute(ctx) {
     const cfg = (ctx.config ?? {}) as {
       workflowId?: unknown;
@@ -845,6 +966,8 @@ const subWorkflowNode: NodeModule = {
           childRunId: result.childRunId,
           childStatus: result.childStatus,
           outputMappingSkipped: result.outputMappingSkipped,
+          // ADR 0964 D1 — recorded so a replay that serves this node re-applies them.
+          ...(result.parentVariableWrites ? { parentVariableWrites: result.parentVariableWrites } : {}),
         },
       };
     } catch (err) {
@@ -1299,7 +1422,9 @@ const mockAiNode: NodeModule = {
       if (!refMatch) return null;
       const templateId = refMatch[1]!;
       const version = refMatch[2];
-      const found = getTemplate(templateId, version !== undefined ? { version } : {});
+      // ADR 0993 D5 — the run's own tenant layer after the global layers; never
+      // another tenant's template.
+      const found = await resolveTenantTemplate(ctx.tenantId, templateId, version !== undefined ? { version } : {});
       if (!found || found === 'ambiguous') return null;
 
       // Compose with ctx.inputs as the variable-binding source. The
@@ -1316,7 +1441,7 @@ const mockAiNode: NodeModule = {
       const { bindings, bindingTrust } = await bagBindingsForTemplate(ctx, found.template, inputs);
       const composed = await composePromptTemplate({
         templateId,
-        template: found.template as unknown as Parameters<typeof composePromptTemplate>[0]['template'],
+        template: found.template,
         bindings,
         bindingTrust,
         observability: promptsConfig.observability,
@@ -1587,14 +1712,14 @@ async function resolveAndComposePromptRef(
   if (!refMatch) return null;
   const templateId = refMatch[1]!;
   const version = refMatch[2];
-  const found = getTemplate(templateId, version !== undefined ? { version } : {});
+  const found = await resolveTenantTemplate(ctx.tenantId, templateId, version !== undefined ? { version } : {}); // ADR 0993 D5
   if (!found || found === 'ambiguous') return null;
   // RFC 0124 — a MINTED template is not a fixture, so compose it inline; resolve its
   // materialized `source:"variable"` slots from the per-run variable bag (untrusted).
   const { bindings, bindingTrust } = await bagBindingsForTemplate(ctx, found.template, inputs);
   const composed = await composePromptTemplate({
     templateId,
-    template: found.template as unknown as Parameters<typeof composePromptTemplate>[0]['template'],
+    template: found.template,
     bindings,
     bindingTrust,
     observability: promptsConfig.observability,
@@ -1889,10 +2014,17 @@ export const chatResponderNode: NodeModule = {
             // registry id (TTL-cached resolve, so this stays cheap per turn).
             const memory = createAgentMemoryPort(ctx.tenantId);
             const nodeAgentIdentity = await resolveAgentIdentity(ctx.tenantId, agent.agentId, { allowReverseScan: true });
-            // ADR 0442 P3 — no acting participant on the workflow-node path; a
-            // default-scope agent reads `agent:<profileId>` exactly as before
-            // (`resolveAgentKnowledgeRetrieve` derives the scope from the profile).
-            const retrieve = await resolveAgentKnowledgeRetrieve(ctx.tenantId, nodeAgentIdentity.profileId, memory);
+            // ADR 0442 P3 — a default-scope agent reads `agent:<profileId>` exactly
+            // as before (`resolveAgentKnowledgeRetrieve` derives the scope from the
+            // profile). ADR 0944 D3 — a run lane, so the run's client stamp binds
+            // the scope like the agent runner's (a client run reads `org:<orgId>`).
+            const client = ctx.runId
+              ? await resolveRunMemoryClient({ tenantId: ctx.tenantId, runId: ctx.runId, actingUserId: ctx.actingUserId, orgScopeSubject: ctx.orgScopeSubject })
+              : undefined;
+            const retrieve = await resolveAgentKnowledgeRetrieve(
+              ctx.tenantId, nodeAgentIdentity.profileId, memory, { userId: ctx.actingUserId, client }, undefined,
+              client && 'orgId' in client ? await runClientCollectionIds(ctx.tenantId, ctx.runId) : [],
+            );
             if (retrieve) {
               const knowledgeBlock = await composeAgentKnowledgeContext(retrieve, knowledgeQuery);
               if (knowledgeBlock) systemBody = `${systemBody}\n\n${knowledgeBlock}`;
@@ -2360,7 +2492,11 @@ const memoryWriteNode: NodeModule = {
     // SR-1 — `note` is caller-supplied input that may carry a value the run's
     // BYOK vault resolved, so this in-run write goes through the redacting
     // chokepoint (`agent-memory.md` §SR-1), not the bare write.
-    const row = await writeMemoryEntryRedacted(ctx.tenantId, MEMORY_DEMO_REF, { content: note, tags }, ctx.runId);
+    // ADR 0979 D1 — the run's owner of record rides the row so the inspector can
+    // apply the run-payload rule. Unreadable ⇒ no owner ⇒ admins only (fail-closed).
+    const runRecord = await tryDurableStorage()?.getRun(ctx.runId).catch(() => null);
+    const owner = runRecord ? runOwner(runRecord)?.principal : undefined;
+    const row = await writeMemoryEntryRedacted(ctx.tenantId, MEMORY_DEMO_REF, { content: note, tags, ...(owner ? { owner } : {}) }, ctx.runId);
     // RFC 0057 §B — attribute the write on the event log, content-free
     // (identifiers + non-secret tags; never the entry content). `nodeId` is
     // included in the payload per the SHOULD; `ctx.emit` also stamps it on
@@ -3224,6 +3360,9 @@ const adMetricsNode: NodeModule = {
 const adBudgetUpdateNode: NodeModule = {
   typeId: 'core.openwop.connectors.ad-budget-update',
   version: '1.0.0',
+  // Paid mutation: a replay serves its recorded outcome rather than re-entering
+  // the live approval, governance and provider paths (ADR 0942 recovery).
+  sideEffecting: true,
   async execute(ctx) {
     const cfg = (ctx.config ?? {}) as Record<string, unknown>;
     const inputs = (ctx.inputs ?? {}) as Record<string, unknown>;
@@ -3245,6 +3384,13 @@ const adBudgetUpdateNode: NodeModule = {
     // Spend governance (campaign gap plan B3): threshold met → human sign-off in
     // the Approvals inbox, then re-run applies under the same fork-stable key.
     if (r.outcome === 'requires_approval') {
+      // ADR 0942 D5 — a CAMPAIGN run's policy asked: the run waits on the row (its
+      // finalizer resumes it), then this node re-runs and the same key applies. A
+      // non-campaign run keeps today's "recommend, approve, re-run" output.
+      if (r.autonomy && ctx.suspend) {
+        await ctx.suspend({ kind: 'external-event', key: `${APPROVAL_WAIT_KEY_PREFIX}${r.approvalId}`, approvalId: r.approvalId });
+        return { status: 'failure', error: { code: 'spend_approval_pending', message: 'The spend approval was not decided when this step resumed.' } };
+      }
       return { status: 'success', outputs: { applied: false, planned, requiresApproval: true, approvalId: r.approvalId } };
     }
     if (r.outcome === 'failed') return { status: 'failure', error: { code: 'ad_budget_update_failed', message: `Budget update failed (${r.error}).` } };

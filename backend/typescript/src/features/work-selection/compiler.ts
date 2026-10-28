@@ -75,8 +75,8 @@ export const WORK_SELECTION_CRITERIA: CriteriaSet = {
       id: WS_CRITERION.blocked,
       name: 'Blocked',
       description:
-        'A card carrying a blocker note. Costed, so blocked work sinks — including a card ' +
-        'ADR 0535 just restored after its run failed, which is what damps a crash loop.',
+        'A card carrying a person\'s blocker note. Costed, so blocked work sinks. (A card ' +
+        'restored after a stopped or failed run is HELD and never ranked — ADR 0963 D3.)',
       weight: 7,
       direction: 'cost',
       scaleHint: '10 = blocked, 1 = clear',
@@ -142,10 +142,11 @@ export function ageScore(card: KanbanCard, now: number): number {
 /**
  * Blocked, as a COST. A non-empty blocker note drags the card down.
  *
- * This is also how crash-loop damping falls out for free: ADR 0535 writes a
- * blocker note when it restores a card whose run failed, so a repeatedly-failing
- * card sinks on its own without a bespoke retry damper. Clearing the note (a human
- * saying "this is fine now") restores its rank.
+ * ADR 0963 D7 correction: this comment used to say crash-loop damping "falls out
+ * for free" here. It did not — a cost only REORDERS, so a board whose only card
+ * failed re-ran it every interval, and with ranking toggled off nothing was damped
+ * at all. A card restored after a stopped or failed run is now HELD out of the
+ * candidate set entirely (ADR 0963 D3); this criterion only weighs a person's note.
  */
 export function blockedScore(card: KanbanCard): number {
   return card.blockerNote && card.blockerNote.trim().length > 0 ? 10 : 1;

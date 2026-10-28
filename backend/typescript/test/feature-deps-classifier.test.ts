@@ -39,14 +39,17 @@ describe('ADR 0446 feature-dependency classifier', () => {
     const isCat = (a: string, b: string, c: number) => cat(c).some((e) => e.a === a && e.b === b);
     expect(isCat('crm', 'forms', 2)).toBe(true);       // D.3 submissionSinks — ADR 0330 inversion
     expect(isCat('cdp', 'analytics', 2)).toBe(true);   // D.3 identityLink — analytics owns sessions
-    expect(isCat('commerce', 'email', 2)).toBe(true);  // D.4 brokeredProvider — email domain adapter
+    // ADR 0905 D6 — the commerce → email edge (D.4 brokeredProvider) is GONE, not
+    // reclassified: the transactional seam moved to `host/transactionalEmail.ts` and the
+    // email feature registers the transport, so commerce no longer imports email.
+    expect(cat(2).some((e) => e.a === 'commerce' && e.b === 'email')).toBe(false);
     expect(isCat('email', 'consent', 2)).toBe(true);   // D.2 consent — compliance-protective, don't extract
     // ADR 0446 F, target-level (2026-08-18): #3326 put ONE resolveOne('email') inside
     // emailService's CRM merge-lifecycle SUBSCRIBER (a relink work-avoidance gate); the
     // exported surface stays ungated, so every inbound email edge is soft. Without the
-    // SUBSCRIBER_ONLY_GATE entry these six flip to [3] and this + the [3]==0 test go red
+    // SUBSCRIBER_ONLY_GATE entry these (then six, five since ADR 0905 removed commerce→email) flip to [3] and this + the [3]==0 test go red
     // (measured 2026-08-18: `expected 6 to be +0`).
-    for (const a of ['analytics', 'campaign-intel', 'campaign-journeys', 'commerce', 'crm', 'orgs']) {
+    for (const a of ['analytics', 'campaign-intel', 'campaign-journeys', 'crm', 'orgs']) {
       expect(isCat(a, 'email', 2)).toBe(true);
     }
     const crmEmail = cat(2).find((e) => e.a === 'crm' && e.b === 'email');

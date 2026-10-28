@@ -40,7 +40,23 @@ export interface Condition {
   value?: Scalar | Scalar[];
 }
 export type FilterExpr = { all: FilterExpr[] } | { any: FilterExpr[] } | Condition;
-export type AssignTarget = 'company' | 'deal';
+/** ADR 0954 D5 — `contact` rules route LEADS (lead routing evaluates them one
+ *  lead at a time; they are never materialized as assignments or used for
+ *  visibility, which stay company/deal). */
+export type AssignTarget = 'company' | 'deal' | 'contact';
+
+/** ADR 0954 D5 — the lead fields a `contact` rule may match: the contact's own
+ *  stage/company/owner plus the lead's source, band and score. */
+export interface LeadRecord {
+  stage?: string;
+  company?: string;
+  owner?: string;
+  source?: string;
+  band?: string;
+  score?: number;
+  customFields?: Record<string, Scalar>;
+}
+type MatchRecord = Deal | Company | LeadRecord;
 
 export interface AssignmentRule {
   ruleId: string;
@@ -69,6 +85,7 @@ export interface Assignment {
 
 const DEAL_FIELDS = new Set(['title', 'amount', 'currency', 'stageId', 'pipelineId', 'companyId', 'contactId', 'owner', 'status', 'closeDate']);
 const COMPANY_FIELDS = new Set(['name', 'domain', 'industry', 'tags']);
+const LEAD_FIELDS = new Set(['stage', 'company', 'owner', 'source', 'band', 'score']);
 const MAX = { conditions: 100, depth: 6, perModelRules: 500, valueLen: 200 };
 
 const rules = new DurableCollection<AssignmentRule>('crm:territory-rule', (r) => r.ruleId, validateAssignmentRule, (r) => r.tenantId);
@@ -93,7 +110,7 @@ function fieldAllowed(target: AssignTarget, field: string): boolean {
     // would otherwise pass; these resolve to inherited members, not own data.
     return !(key in Object.prototype);
   }
-  return (target === 'deal' ? DEAL_FIELDS : COMPANY_FIELDS).has(field);
+  return (target === 'deal' ? DEAL_FIELDS : target === 'contact' ? LEAD_FIELDS : COMPANY_FIELDS).has(field);
 }
 
 function validateExpr(expr: unknown, target: AssignTarget, depth: number, counter: { n: number }): FilterExpr {
@@ -139,7 +156,7 @@ function coerceScalar(v: unknown): Scalar {
 function projectDeal(d: Deal): Record<string, Scalar | undefined> {
   return { title: d.title, amount: d.amount, currency: d.currency, stageId: d.stageId, pipelineId: d.pipelineId, companyId: d.companyId, contactId: d.contactId, owner: d.owner, status: d.status ?? 'open', closeDate: d.closeDate };
 }
-function fieldValue(target: AssignTarget, record: Deal | Company, field: string): Scalar | Scalar[] | undefined {
+function fieldValue(target: AssignTarget, record: MatchRecord, field: string): Scalar | Scalar[] | undefined {
   if (field.startsWith('customFields.')) {
     const key = field.slice('customFields.'.length);
     const cf = (record as { customFields?: Record<string, Scalar> }).customFields;
@@ -147,6 +164,7 @@ function fieldValue(target: AssignTarget, record: Deal | Company, field: string)
     // depth even though CUSTOM_FIELD_RE already excludes dunder keys).
     return cf && Object.hasOwn(cf, key) ? cf[key] : undefined;
   }
+  if (target === 'contact') return (record as LeadRecord)[field as Exclude<keyof LeadRecord, 'customFields'>];
   if (target === 'company') {
     if (field === 'tags') return (record as Company).tags;
     return (record as unknown as Record<string, Scalar | undefined>)[field];
@@ -190,7 +208,7 @@ function evalCondition(fv: Scalar | Scalar[] | undefined, c: Condition): boolean
   }
 }
 
-function evalExpr(expr: FilterExpr, target: AssignTarget, record: Deal | Company): boolean {
+function evalExpr(expr: FilterExpr, target: AssignTarget, record: MatchRecord): boolean {
   if ('all' in expr) return expr.all.every((s) => evalExpr(s, target, record));
   if ('any' in expr) return expr.any.some((s) => evalExpr(s, target, record));
   return evalCondition(fieldValue(target, record, expr.field), expr);
@@ -202,14 +220,14 @@ export function orderRules(modelRules: AssignmentRule[], target: AssignTarget): 
 }
 
 /** First matching rule against ALREADY-ordered rules → its territory + ruleId. */
-export function firstMatch(orderedRules: AssignmentRule[], target: AssignTarget, record: Deal | Company): { territoryId: string; ruleId: string } | null {
+export function firstMatch(orderedRules: AssignmentRule[], target: AssignTarget, record: MatchRecord): { territoryId: string; ruleId: string } | null {
   for (const r of orderedRules) if (evalExpr(r.filter, target, record)) return { territoryId: r.territoryId, ruleId: r.ruleId };
   return null;
 }
 
 /** Convenience: order + first-match in one call (single-record callers, e.g. the
  *  P4 lazy resolver). Loop callers should `orderRules` once then `firstMatch`. */
-export function evaluateRecord(modelRules: AssignmentRule[], target: AssignTarget, record: Deal | Company): { territoryId: string; ruleId: string } | null {
+export function evaluateRecord(modelRules: AssignmentRule[], target: AssignTarget, record: MatchRecord): { territoryId: string; ruleId: string } | null {
   return firstMatch(orderRules(modelRules, target), target, record);
 }
 
@@ -230,8 +248,8 @@ export async function createRule(tenantId: string, orgId: string, modelId: strin
   const existing = scoped(await rules.listForTenantIndexed(tenantId), tenantId, orgId).filter((r) => r.modelId === modelId);
   if (existing.length >= MAX.perModelRules) throw new OpenwopError('validation_error', `This model has the maximum ${MAX.perModelRules} rules.`, 409, { max: MAX.perModelRules });
 
-  const target = input.target === 'company' ? 'company' : input.target === 'deal' ? 'deal' : null;
-  if (!target) throw new OpenwopError('validation_error', '`target` must be "company" or "deal".', 400, { target: input.target });
+  const target = input.target === 'company' ? 'company' : input.target === 'deal' ? 'deal' : input.target === 'contact' ? 'contact' : null;
+  if (!target) throw new OpenwopError('validation_error', '`target` must be "company", "deal" or "contact".', 400, { target: input.target });
   const territoryId = cleanOpaqueToken(input.territoryId, 200);
   if (!territoryId) throw new OpenwopError('validation_error', '`territoryId` is required.', 400, {});
   await getTerritory(tenantId, orgId, modelId, territoryId); // territory must exist in this model (IDOR)

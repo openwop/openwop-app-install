@@ -3,8 +3,13 @@
  * upsert; lifecycle-verb re-registers mint NO noise revision (the lifecycle-
  * stripped hash); the supersedes chain orders history; keep-N prune spares the
  * published revision + head; the registry delete cascades revisions.
+ *
+ * Sabotage-witnessed (grade-tests wave 64): dropping `supersedes`, hashing the
+ * lifecycle, pruning the published row, never pruning, unhooking the cascade,
+ * and re-inserting identical content (seq bump) each red their case
+ * (8fw5g5-wr-*).
  */
-import { describe, it, expect, beforeAll, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import type { Storage } from '../src/storage/storage.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
@@ -44,7 +49,7 @@ afterEach(async () => {
 });
 
 function def(id: string, nodes: Array<{ nodeId: string; typeId: string }>, name = 'Rev Test'): WorkflowDefinition {
-  return { workflowId: id, nodes, edges: [], metadata: { name } } as unknown as WorkflowDefinition;
+  return { workflowId: id, nodes, edges: [], metadata: { name } };
 }
 
 describe('workflow revisions (ADR 0474)', () => {
@@ -54,9 +59,15 @@ describe('workflow revisions (ADR 0474)', () => {
     const v1 = def(id, [{ nodeId: 'a', typeId: 'core.noop' }]);
     const h1 = await recordRevision(TENANT, v1);
     expect(h1).toBe(revisionHashOf(v1));
-    // identical content again — no new row
+    // identical content again — no new row. The key is content-addressed, so a
+    // row COUNT cannot tell an upsert from a blind re-insert; the re-insert would
+    // bump `seq` to 2 (8fw5g5-wr-upsert-r2), the upsert leaves the row untouched.
+    const before = (await listRevisions(id))[0]!;
     await recordRevision(TENANT, v1);
-    expect((await listRevisions(id)).length).toBe(1);
+    const once = await listRevisions(id);
+    expect(once.length).toBe(1);
+    expect(once[0]!.seq).toBe(1);
+    expect(once[0]!.createdAt).toBe(before.createdAt);
     // content change — new row, chained
     const v2 = def(id, [{ nodeId: 'a', typeId: 'core.noop' }, { nodeId: 'b', typeId: 'core.noop' }]);
     const h2 = await recordRevision(TENANT, v2);
@@ -81,6 +92,11 @@ describe('workflow revisions (ADR 0474)', () => {
 
   it('keep-N prune spares the published revision and the head', async () => {
     process.env.OPENWOP_WORKFLOW_REVISIONS_KEEP = '2';
+    // The pruner also spares the newest row of each calendar DAY; pin the clock so
+    // the four writes can never straddle midnight and spare v2 by accident.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(Date.parse('2026-07-23T12:00:00.000Z'));
+    try {
     const id = 'rev-wf-prune';
     cleanup.push(id);
     const v1 = def(id, [{ nodeId: 'a', typeId: 'core.noop' }], 'v1');
@@ -88,16 +104,18 @@ describe('workflow revisions (ADR 0474)', () => {
     // publish v1 (ownership carries the pin the pruner consults)
     await recordOwnership(TENANT, id, { nodeCount: 1, publishedRevision: h1! });
     const v2 = def(id, [{ nodeId: 'b', typeId: 'core.noop' }], 'v2');
-    await recordRevision(TENANT, v2);
+    const h2 = await recordRevision(TENANT, v2);
     const v3 = def(id, [{ nodeId: 'c', typeId: 'core.noop' }], 'v3');
     const h3 = await recordRevision(TENANT, v3);
     const v4 = def(id, [{ nodeId: 'd', typeId: 'core.noop' }], 'v4');
     const h4 = await recordRevision(TENANT, v4);
-    const left = new Set((await listRevisions(id)).map((r) => r.revisionHash));
-    expect(left.has(h1!)).toBe(true);  // published — never pruned
-    expect(left.has(h4!)).toBe(true);  // head — never pruned
-    expect(left.has(h3!)).toBe(true);  // within keep-2 window (newest non-head)
-    expect(left.size).toBeLessThanOrEqual(3);
+    const left = (await listRevisions(id)).map((r) => r.revisionHash).sort();
+    // h1 published — never pruned; h4 head; h3 inside the keep-2 window; h2 pruned.
+    expect(left).toEqual([h1!, h3!, h4!].sort());
+    expect(left).not.toContain(h2!);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('deleting the registered workflow cascades its revisions (the hook)', async () => {
@@ -107,8 +125,10 @@ describe('workflow revisions (ADR 0474)', () => {
     await recordRevision(TENANT, v1);
     expect((await listRevisions(id)).length).toBe(1);
     deleteRegisteredWorkflow(id);
-    // the hook is fire-and-forget — give the microtask a beat
-    await new Promise((res) => setTimeout(res, 20));
-    expect((await listRevisions(id)).length).toBe(0);
+    // The hook is fire-and-forget: wait for the real condition, and fail
+    // (naming it) if the cascade never lands.
+    await vi.waitFor(async () => {
+      expect((await listRevisions(id)).length, `revisions of ${id} not cascaded`).toBe(0);
+    }, { timeout: 2000, interval: 10 });
   });
 });

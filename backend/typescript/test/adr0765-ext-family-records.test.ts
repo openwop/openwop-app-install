@@ -12,6 +12,16 @@
  *     copy), carries none of the withheld ones, and v1 discovery carries none.
  * Plus `rest-transport`: the advert equals the constant that serves it, and the
  * behaviour (304 on If-None-Match; every advertised encoding applied) holds.
+ *
+ * Red when (wave 60 probes, tracker TST-BRA-9): `missingMethods` stops seeing a
+ * missing method, or `extFamilyRecord` stops throwing on one; a claim drops a method
+ * its pack calls; the rest-transport record is not registered, or a withheld family
+ * is; `ifNoneMatchSatisfied` never matches; the encoder is never chosen; or
+ * `resolveRunEncodings` stops narrowing to the declared set or treats blank as declared.
+ *
+ * Ceiling, recorded: the executor HAND-OFF (which surface reaches `ctx`, and which
+ * deps the data-integration adapter gets) is pinned by reading `executor.ts` source.
+ * Proving it behaviourally means running every family's nodes, which is new coverage.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';
@@ -25,7 +35,7 @@ import { mintAnonSession, signSession } from '../src/middleware/cookieSession.js
 import { locateRepoSchemasDir } from '../src/host/_repoPath.js';
 import { buildHostSurfaceBundle } from '../src/host/inMemorySurfaces.js';
 import { EXT_FAMILY_CLAIMS, extFamilyRecord, missingMethods } from '../src/host/extFamilyRecords.js';
-import { SUPPORTED_RUN_ENCODINGS } from '../src/host/restTransport.js';
+import { SUPPORTED_RUN_ENCODINGS, resolveRunEncodings } from '../src/host/restTransport.js';
 import { makeDataIntegrationAdapter } from '../src/host/dataIntegrationAdapter.js';
 import { projectBoundId } from '../src/host/boundIdProjection.js';
 
@@ -93,7 +103,8 @@ describe('ADR 0765 — execution: the executor\'s surface bundle provides every 
   it('a surface that loses a method loses its record (the claim cannot outlive the wiring)', () => {
     const claim = EXT_FAMILY_CLAIMS.find((c) => c.extensionName === 'kanban')!;
     const bundle = bundleOf();
-    const broken = { ...bundle, kanban: { ...(bundle as unknown as { kanban: Record<string, unknown> }).kanban, taskGet: undefined } } as unknown as typeof bundle;
+    const broken: typeof bundle = { ...bundle, kanban: { ...bundle.kanban } };
+    Reflect.deleteProperty(broken.kanban, 'taskGet');
     expect(missingMethods(claim, broken)).toEqual(['taskGet']);
     expect(() => extFamilyRecord(claim, broken)).toThrow(/ctx\.kanban lacks taskGet/);
   });
@@ -115,9 +126,8 @@ describe('ADR 0765 — the executor hands each claimed surface to the node conte
 describe('ADR 0765 — every claimed name is an ext family the declaration defines', () => {
   it('each record name is a declared `extensionName` (anchor: ext)', () => {
     const declared = new Set((declaration.families ?? []).filter((f) => f.anchor === 'ext' && typeof f.extensionName === 'string').map((f) => f.extensionName as string));
-    // The vendored declaration gained `extensionName` at suite 2.42.7; skip only an older pin.
-    if (declared.size === 0) return;
-    for (const name of [...CLAIMED, ...WITHHELD]) expect(declared, `${name} is a declared ext family`).toContain(name);
+    // Every declared ext family is either claimed or withheld, and nothing else is named.
+    expect([...declared].sort()).toEqual([...CLAIMED, ...WITHHELD].sort());
   });
 });
 
@@ -176,8 +186,7 @@ describe('ADR 0765 — wire: v2 discovery carries exactly the claimed families, 
   });
 });
 
-describe('restTransport — the advertised codings are the ones a client can RECEIVE', async () => {
-  const { resolveRunEncodings } = await import('../src/host/restTransport.js');
+describe('restTransport — the advertised codings are the ones a client can RECEIVE', () => {
   it('unset or blank: the runtime set stands', () => {
     expect(resolveRunEncodings(['zstd', 'br', 'gzip'], undefined)).toEqual(['zstd', 'br', 'gzip']);
     expect(resolveRunEncodings(['zstd', 'br', 'gzip'], '  ')).toEqual(['zstd', 'br', 'gzip']);

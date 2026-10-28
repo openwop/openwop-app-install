@@ -13,7 +13,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { registerRetentionPurger, purgeRowsByAge } from '../../host/retentionPurger.js';
 import { OpenwopError } from '../../types.js';
-import { cleanString, optionalCleanString } from '../../host/boundedStrings.js';
+import { cleanContent, cleanString, optionalCleanContent, optionalCleanString } from '../../host/boundedStrings.js';
 import { getNotificationEmitter } from '../../notifications/emitter.js';
 import { createLogger } from '../../observability/logger.js';
 import { getGovernancePolicy } from '../../host/governanceService.js';
@@ -25,7 +25,8 @@ import { fireProductDeleted } from './productLifecycleSeam.js';
 import { accrueCommission, reverseCommission, __resetAffiliates } from './affiliate.js';
 import { getContact } from '../crm/contactsService.js';
 import { createActivity, createDeal, makeLinkValidators } from '../crm/crmEntitiesService.js';
-import { sendTransactionalEmail } from './transactionalEmail.js';
+import { sendTransactional } from '../../host/transactionalEmail.js';
+import { ORDER_CONFIRMED_KIND, type OrderConfirmedData } from './transactionalTemplates.js';
 import { getStripePaymentIntent, createStripeRefund, toStripeMinorUnits, fromStripeMinorUnits } from '../billing/stripeApi.js';
 import { quoteTaxAndShipping } from './taxShipping.js';
 import { validateProductCustomFields, __clearProductFieldDefs } from './productFields.js';
@@ -71,8 +72,8 @@ function cleanAttributes(raw: unknown): { label: string; value: string }[] | und
   const out: { label: string; value: string }[] = [];
   const seen = new Set<string>();
   for (const r of raw) {
-    const label = optStr((r as { label?: unknown })?.label, MAX.short);
-    const value = optStr((r as { value?: unknown })?.value, MAX.short);
+    const label = optionalCleanContent((r as { label?: unknown })?.label, MAX.short, 'attributes.label');
+    const value = optionalCleanContent((r as { value?: unknown })?.value, MAX.short, 'attributes.value');
     if (!label || !value) continue;
     const key = label.toLowerCase();
     if (seen.has(key)) continue;
@@ -352,7 +353,7 @@ function cleanVariants(raw: unknown): ProductVariant[] {
   if (!Array.isArray(raw)) return [];
   return raw.slice(0, MAX.variants).map((v) => {
     const o = (v ?? {}) as Record<string, unknown>;
-    const name = optStr(o.name, MAX.short);
+    const name = optionalCleanContent(o.name, MAX.short, 'variants.name');
     if (!name) return null;
     const out: ProductVariant = { variantId: `var:${randomUUID()}`, name };
     if (optStr(o.sku, MAX.short)) out.sku = optStr(o.sku, MAX.short);
@@ -476,8 +477,8 @@ export async function createProduct(input: { tenantId: string; orgId: string; cr
   const customFields = await validateProductCustomFields(input.tenantId, input.orgId, input.customFields, true);
   const p: Product = {
     productId: `prod:${randomUUID()}`, tenantId: input.tenantId, orgId: input.orgId,
-    type, name: cleanStr(input.name, MAX.name, 'Untitled product'),
-    ...(optStr(input.description, MAX.desc) ? { description: optStr(input.description, MAX.desc) } : {}),
+    type, name: cleanContent(input.name, MAX.name, 'name', 'Untitled product'),
+    ...(optionalCleanContent(input.description, MAX.desc, 'description') ? { description: optionalCleanContent(input.description, MAX.desc, 'description') } : {}),
     price: quantizeMoney(nonNeg(input.price) ?? 0, currencyOf(input.currency)), currency: currencyOf(input.currency), // ADR 0875 D7
     ...(nonNeg(input.cost) !== undefined ? { cost: nonNeg(input.cost) } : {}),
     imageAssetTokens: cleanTokens(input.imageAssetTokens),
@@ -504,8 +505,8 @@ export async function updateProduct(tenantId: string, orgId: string, productId: 
   const p = await getProduct(tenantId, orgId, productId);
   if (!p) return null;
   const next: Product = { ...p, updatedAt: nowIso() };
-  if (patch.name !== undefined) next.name = cleanStr(patch.name, MAX.name, p.name);
-  if (patch.description !== undefined) { if (patch.description === null) delete next.description; else next.description = optStr(patch.description, MAX.desc); }
+  if (patch.name !== undefined) next.name = cleanContent(patch.name, MAX.name, 'name', p.name);
+  if (patch.description !== undefined) { if (patch.description === null) delete next.description; else next.description = optionalCleanContent(patch.description, MAX.desc, 'description'); }
   if (nonNeg(patch.price) !== undefined) next.price = quantizeMoney(nonNeg(patch.price)!, patch.currency !== undefined ? currencyOf(patch.currency) : next.currency); // ADR 0875 D7
   if (patch.cost !== undefined) { if (patch.cost === null) delete next.cost; else if (nonNeg(patch.cost) !== undefined) next.cost = nonNeg(patch.cost); }
   if (patch.kind !== undefined) { if (patch.kind === 'bundle') { next.kind = 'bundle'; next.components = cleanComponents(patch.components ?? p.components); } else { delete next.kind; delete next.components; } }
@@ -1367,12 +1368,13 @@ export async function markAsPaid(
           const { createLink } = await import('../sharing/sharingService.js');
           const link = await createLink(next.tenantId, next.orgId, 'system:commerce', { resourceType: 'commerce_order', resourceId: next.orderId, expiresInDays: 90 }, { lane: 'visitor', why: 'the buyer receipt link, minted on payment (ADR 0176 money truth)' });
           const base = (process.env.OPENWOP_PUBLIC_BASE_URL ?? '').replace(/\/+$/, '');
-          if (base) statusLink = `\n\nTrack your order: ${base}/shared/${link.token}`;
+          if (base) statusLink = `${base}/shared/${link.token}`;
         } catch { /* sharing unavailable — plain confirmation */ }
-        await sendTransactionalEmail({
+        // ADR 0905 D6 — the host registry renders the localized copy (host default locale;
+        // an order carries no recipient locale yet).
+        await sendTransactional<OrderConfirmedData>(ORDER_CONFIRMED_KIND, {
           to: contact.email,
-          subject: `Order ${next.orderId} confirmed`,
-          text: `Thanks for your order. Total: ${next.total} ${next.currency}.${statusLink}`,
+          data: { orderId: next.orderId, total: next.total, currency: next.currency, ...(statusLink ? { statusUrl: statusLink } : {}) },
           context: { tenantId: next.tenantId, orgId: next.orgId, actingUserId: next.createdBy, idempotencyKey: `commerce:order-confirm:${next.orderId}` },
         });
       }

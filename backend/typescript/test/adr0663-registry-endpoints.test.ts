@@ -8,6 +8,13 @@ import {
  * registry path through `.well-known/openwop-registry.json` `endpoints`
  * rather than constructing one, and a major-2 host must read the `v2` tree,
  * where the admissible versions live.
+ *
+ * Tracker TST-BG3-24. Red when: a major-2 host stops preferring the v2 tree, the
+ * v1 fallback breaks, OPENWOP_REGISTRY_TREE is ignored, the flat alias is not used for
+ * an unversioned key, a non-OK status or a missing `endpoints` is not reported as its
+ * own reason, or `expandEndpoint` stops percent-encoding. DOUBLE GUARD on "fetched
+ * once": both `resolveRegistry`'s cache and `fetchRegistryDocument`'s docCache hold the
+ * fetch count at 1, so removing either alone stays green (probe `0663-cache`).
  */
 const REG = 'https://registry.test';
 const WK = `${REG}/.well-known/openwop-registry.json`;
@@ -27,17 +34,21 @@ beforeEach(() => {
 });
 afterEach(() => { globalThis.fetch = origFetch; resetRegistryEndpointCache(); delete process.env.OPENWOP_REGISTRY_TREE; });
 
+let fetchMock = vi.fn<typeof fetch>();
 function serve(doc: unknown, status = 200): void {
-  globalThis.fetch = vi.fn(async (u: string | URL) => {
-    expect(String(u)).toBe(WK);
-    return new Response(JSON.stringify(doc), { status, headers: { 'content-type': 'application/json' } });
-  }) as unknown as typeof fetch;
+  fetchMock = vi.fn<typeof fetch>(async () =>
+    new Response(JSON.stringify(doc), { status, headers: { 'content-type': 'application/json' } }));
+  globalThis.fetch = fetchMock;
 }
+/** Every URL the code fetched — asserted OUTSIDE the mock, where a failure cannot be
+ *  swallowed by `fetchRegistryDocument`'s catch. */
+const fetchedUrls = (): string[] => fetchMock.mock.calls.map((c) => String(c[0]));
 
 describe('ADR 0663 — registry paths are resolved, never constructed', () => {
   it('a major-2 host resolves the v2 tree; a major-1 host resolves v1; the same registry serves both', async () => {
     serve(DOC);
     const asV2 = await resolveRegistry(REG, 2);
+    expect(fetchedUrls()).toEqual([WK]);
     expect(asV2.ok && asV2.resolved.tree).toBe('v2');
     expect(asV2.ok && templateFor(asV2.resolved, 'versionManifest')).toBe('/v2/packs/{name}/-/{version}.json');
     resetRegistryEndpointCache();
@@ -73,7 +84,8 @@ describe('ADR 0663 — registry paths are resolved, never constructed', () => {
     serve(DOC, 503);
     expect(await resolveRegistry(REG, 2)).toEqual({ ok: false, reason: 'unreachable' });
     resetRegistryEndpointCache();
-    globalThis.fetch = vi.fn(async () => { throw new Error('ECONNREFUSED'); }) as unknown as typeof fetch;
+    fetchMock = vi.fn<typeof fetch>(async () => { throw new Error('ECONNREFUSED'); });
+    globalThis.fetch = fetchMock;
     expect(await resolveRegistry(REG, 2)).toEqual({ ok: false, reason: 'unreachable' });
   });
 
@@ -89,6 +101,6 @@ describe('ADR 0663 — registry paths are resolved, never constructed', () => {
     serve(DOC);
     await resolveRegistry(REG, 2);
     await resolveRegistry(REG, 2);
-    expect((globalThis.fetch as unknown as { mock: { calls: unknown[] } }).mock.calls).toHaveLength(1);
+    expect(fetchedUrls()).toEqual([WK]);
   });
 });

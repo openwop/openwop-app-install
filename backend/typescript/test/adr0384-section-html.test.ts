@@ -1,5 +1,6 @@
 /**
- * ADR 0384 Phase 1 — the server-side section→HTML renderer's drift gates.
+ * ADR 0384 Phase 1 — the server-side section→HTML renderer's drift gates
+ * (tracker TST-BAA-1).
  *
  * 1. COVERAGE: every entry in the closed SECTION_TYPES vocabulary MUST render
  *    (a new CMS section type without a server branch is a red build — the
@@ -8,10 +9,19 @@
  *    against an expected-HTML snapshot — a semantic change to either renderer
  *    is reconciled deliberately, never silently.
  * 3. SAFETY: escaping, unsafe-link degradation, unknown-type fallback.
+ * 4. PARITY: `headingSlug` here and the SPA's `cms/headingSlug.ts` derive the
+ *    same anchor id — both functions are called, so a drift in EITHER is red.
+ *
+ * Red when (sabotage-witnessed, wave 60): `escapeHtml` drops the `'` escape;
+ * `isSafeHref` admits `javascript:`; a `###` line inside a multi-line block
+ * becomes `<h3>`; `pageBodyHtml` skips an unrenderable section instead of
+ * returning null; the slug cap moves off 64; the `form` branch is removed;
+ * prose `<h3>` text bypasses `inlineMarkdownHtml` (raw HTML).
  */
 import { describe, expect, it } from 'vitest';
 import { SECTION_TYPES, type Section } from '../src/features/cms/cmsService.js';
 import { escapeHtml, headingSlug, inlineMarkdownHtml, pageBodyHtml, sectionHtml } from '../src/features/publishing/sectionHtml.js';
+import { headingSlug as spaHeadingSlug } from '../../../frontend/react/src/features/cms/headingSlug.js';
 
 // R2-D10 — KEEP IN LOCKSTEP with the frontend copy of these cases
 // (frontend/react/src/features/cms/__tests__/headingSlug.test.tsx): the SPA and
@@ -27,6 +37,8 @@ const SLUG_PARITY_CASES: Array<[string, string]> = [
 describe('headingSlug parity (R2-D10)', () => {
   it.each(SLUG_PARITY_CASES)('%s → %s', (text, slug) => {
     expect(headingSlug(text)).toBe(slug);
+    // The other side of the parity is READ, not copied: the SPA function itself.
+    expect(spaHeadingSlug(text)).toBe(slug);
   });
 });
 
@@ -81,12 +93,13 @@ describe('ADR 0384 sectionHtml — coverage', () => {
     for (const type of SECTION_TYPES) {
       const html = sectionHtml(fixture(type), OPTS);
       expect(html, `sectionHtml must handle section type "${type}"`).not.toBeNull();
-      expect(html).toContain('<');
     }
   });
 
   it('returns null for an unknown/future type → page-level SPA fallback', () => {
-    const bogus = { sectionId: 's', type: 'holo-deck', data: {} } as unknown as Section;
+    // A type outside the closed union cannot be written as a typed literal; it
+    // arrives the way a future row does — parsed from storage.
+    const bogus: Section = JSON.parse('{"sectionId":"s","type":"holo-deck","data":{}}');
     expect(sectionHtml(bogus, OPTS)).toBeNull();
     expect(pageBodyHtml([fixture('hero'), bogus], OPTS)).toBeNull();
   });
@@ -178,10 +191,12 @@ describe('ADR 0384 sectionHtml — golden fixture', () => {
   });
 
   it('columns layouts: steps → <ol>, stats → <dl>', () => {
-    const steps = sectionHtml({ sectionId: 's', type: 'columns', data: { heading: 'How', layout: 'steps', columns: [{ title: 'A', text: 'a' }] } } as Section, OPTS);
+    const stepsSection: Section = { sectionId: 's', type: 'columns', data: { heading: 'How', layout: 'steps', columns: [{ title: 'A', text: 'a' }] } };
+    const steps = sectionHtml(stepsSection, OPTS);
     expect(steps).toContain('<ol>');
     expect(steps).toContain('01. <h3>A</h3>');
-    const stats = sectionHtml({ sectionId: 's', type: 'columns', data: { layout: 'stats', columns: [{ title: '42', text: 'answers' }] } } as Section, OPTS);
+    const statsSection: Section = { sectionId: 's', type: 'columns', data: { layout: 'stats', columns: [{ title: '42', text: 'answers' }] } };
+    const stats = sectionHtml(statsSection, OPTS);
     expect(stats).toContain('<dl>');
     expect(stats).toContain('<dt>42</dt><dd>answers</dd>');
   });
@@ -189,7 +204,10 @@ describe('ADR 0384 sectionHtml — golden fixture', () => {
 
 // ADR 0813 — KEEP IN LOCKSTEP with frontend/react/src/features/cms/__tests__/proseBlocks.test.tsx.
 describe('ADR 0813 sectionHtml — prose blocks', () => {
-  const rich = (text: string): string => sectionHtml({ sectionId: 's', type: 'richText', data: { text } } as Section, OPTS) ?? '';
+  const rich = (text: string): string => {
+    const s: Section = { sectionId: 's', type: 'richText', data: { text } };
+    return sectionHtml(s, OPTS) ?? '';
+  };
 
   it('renders subheadings, both list kinds and quotes; paragraphs are unchanged', () => {
     const html = rich('Intro with **bold**.\n\n### A subheading\n\n- one [link](https://example.com)\n- two\n\n1. first\n2. second\n\n> quoted *line*\n> continues\n\nA closing paragraph.');
@@ -214,7 +232,8 @@ describe('ADR 0813 sectionHtml — prose blocks', () => {
 
 describe('ADR 0384 sectionHtml — safety', () => {
   it('escapes HTML in every text position (no raw pass-through)', () => {
-    const html = sectionHtml({ sectionId: 's', type: 'hero', data: { heading: '<script>alert(1)</script>', subheading: 'x' } } as Section, OPTS);
+    const hero: Section = { sectionId: 's', type: 'hero', data: { heading: '<script>alert(1)</script>', subheading: 'x' } };
+    const html = sectionHtml(hero, OPTS);
     expect(html).not.toContain('<script>');
     expect(html).toContain('&lt;script&gt;');
   });
@@ -234,7 +253,8 @@ describe('ADR 0384 sectionHtml — safety', () => {
   });
 
   it('CTA with unusable URL degrades to the escaped label', () => {
-    const html = sectionHtml({ sectionId: 's', type: 'cta', data: { label: 'Click <b>me</b>', url: 'javascript:x' } } as Section, OPTS);
+    const cta: Section = { sectionId: 's', type: 'cta', data: { label: 'Click <b>me</b>', url: 'javascript:x' } };
+    const html = sectionHtml(cta, OPTS);
     expect(html).not.toContain('<a ');
     expect(html).toContain('Click &lt;b&gt;me&lt;/b&gt;');
   });

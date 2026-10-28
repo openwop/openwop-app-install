@@ -249,6 +249,10 @@ export interface ConversationProviderConfig {
    *  can resolve the conversation's ConversationMeta (owner-subject knowledge +
    *  a board's injected strategy context are keyed by the chat sessionId). */
   chatSessionId?: string;
+  /** ADR 0975 D8 — the agent this conversation is opened with, carried as
+   *  `metadata.agentScope`. A host may admit a narrowly-scoped caller (the
+   *  KickTodo operator, for the Challenge Author) on it; it grants nothing alone. */
+  agentScope?: string;
 }
 
 /** How long to wait for the conversation gate to suspend before giving up. */
@@ -497,7 +501,9 @@ export async function openConversationSession(cfg: ConversationProviderConfig = 
     workflowId: CONVERSATION_WORKFLOW_ID,
     inputs,
     ...(cfg.tenantId ? { tenantId: cfg.tenantId } : {}),
-    ...(cfg.chatSessionId ? { metadata: { chatSessionId: cfg.chatSessionId } } : {}),
+    ...(cfg.chatSessionId || cfg.agentScope
+      ? { metadata: { ...(cfg.chatSessionId ? { chatSessionId: cfg.chatSessionId } : {}), ...(cfg.agentScope ? { agentScope: cfg.agentScope } : {}) } }
+      : {}),
   });
   await waitForGateOpen(runId, CONVERSATION_GATE_NODE_ID);
   return { runId, nodeId: CONVERSATION_GATE_NODE_ID };

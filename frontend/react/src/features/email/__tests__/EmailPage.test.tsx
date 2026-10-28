@@ -31,6 +31,8 @@ const getEmailSettings = vi.hoisted(() => vi.fn<typeof EC.getEmailSettings>(asyn
 const getProviderStatus = vi.hoisted(() => vi.fn<typeof EC.getProviderStatus>(async () => ({ providers: [], defaultProvider: null, senderAddress: 'news@acme.test' })));
 
 vi.mock('../emailClient.js', () => ({
+  // ADR 0955 D7 — the page's sending-health card (a healthy sender).
+  getSendingHealth: async () => ({ state: null, window: { sent: 0, hardBounces: 0, complaints: 0 }, thresholds: { minSends: 500, complaintRate: 0.001, hardBounceRate: 0.02 }, canResume: false }),
   CONTACT_STAGES: ['lead', 'qualified', 'customer', 'churned'],
   listOrgs,
   listTemplates,
@@ -43,6 +45,7 @@ vi.mock('../emailClient.js', () => ({
   sendCampaign: vi.fn(),
   listSends,
   listSegments,
+  listTopics: async () => ({ topics: [], max: 20 }),
   getEmailSettings,
   putEmailSettings: vi.fn(),
   getProviderStatus,

@@ -9,6 +9,12 @@
  * retired. Its run page therefore read `!snapshot.pinned` as always true and could
  * never unpin. The host lane keys a run by its bare id; the protocol lane returns
  * it tenant-bound.
+ *
+ * Breaks it (round-1 probes, witnessed): unpin ignored (8fw2g2-rrp-unpin), the
+ * read hard-coding `pinned` (rrp-read), the read dropping `removalAt`
+ * (rrp-removal). `removalAt` is now pinned to completedAt + the suite's 30-day
+ * TTL (± 0.1 d), and the cross-tenant 404 body is compared with the 404 for an
+ * id that exists nowhere — identical bodies are the "no existence oracle" claim.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -43,21 +49,31 @@ async function makeTerminalRun(): Promise<string> {
   const create = await j<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({ workflowId: wfId, inputs: {} }) });
   expect(create.status).toBe(201);
   const runId = create.body.runId;
+  let status = '';
   for (let i = 0; i < 60; i++) {
-    const snap = await j<{ status: string }>(`/runs/${encodeURIComponent(runId)}`);
-    if (snap.body.status === 'completed') break;
+    status = (await j<{ status: string }>(`/runs/${encodeURIComponent(runId)}`)).body.status;
+    if (status === 'completed') break;
     await new Promise((r) => setTimeout(r, 100));
   }
+  // The poll must not exit silently into a non-terminal run (no removalAt then).
+  expect(status, `run ${runId} never completed`).toBe('completed');
   return runId;
 }
 const readPin = (runId: string, auth?: Record<string, string>) => j<Retention>(`/host/openwop-app/runs/${bare(runId)}/pin`, {}, auth);
 
 describe('run retention pin (ADR 0371 P5)', () => {
   it('the read projects removalAt after a terminal transition, unpinned by default', async () => {
+    const before = Date.now();
     const runId = await makeTerminalRun();
+    const after = Date.now();
     const r = await readPin(runId);
     expect(r.status).toBe(200);
-    expect(r.body.removalAt).toBeTruthy(); // default 30d stamp
+    // completedAt + the 30-day TTL this suite sets (± 0.1 day of slack for the run's own duration).
+    const DAY = 86_400_000;
+    const at = Date.parse(String(r.body.removalAt));
+    expect(Number.isFinite(at), `removalAt ${r.body.removalAt} is not a timestamp`).toBe(true);
+    expect(at).toBeGreaterThanOrEqual(before + 29.9 * DAY);
+    expect(at).toBeLessThanOrEqual(after + 30.1 * DAY);
     expect(r.body.pinned).toBe(false);
   });
 
@@ -86,6 +102,15 @@ describe('run retention pin (ADR 0371 P5)', () => {
     const runId = await makeTerminalRun();
     expect((await readPin(runId)).status, 'positive control: the owner reads it').toBe(200);
     const anon = { cookie: `__session=${signSession(mintAnonSession())}` };
-    expect((await readPin(runId, anon)).status).toBe(404);
+    const foreign = await readPin(runId, anon);
+    expect(foreign.status).toBe(404);
+    // No existence oracle: the refusal for a REAL foreign run reads exactly like
+    // the refusal for an id that exists nowhere (ids normalised out of the body).
+    const ghostId = '00000000-0000-4000-8000-000000000000';
+    const ghost = await readPin(ghostId, anon);
+    expect(ghost.status).toBe(404);
+    const scrub = (body: unknown, id: string): string => JSON.stringify(body).split(id).join('<id>');
+    expect(scrub(foreign.body, bare(runId))).toBe(scrub(ghost.body, ghostId));
+    expect(JSON.stringify(foreign.body)).not.toContain('pinned');
   });
 });

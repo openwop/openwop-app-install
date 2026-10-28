@@ -3,6 +3,15 @@
  * edit route returns its version as `ETag` (and `etag` in the body), honours
  * `If-Match` with `409 conflict` + `details.reason: 'stale_write'`, and the
  * profile PUT merges (an omitted field is kept; `null` or `[]` clears).
+ * Tracker: TST-BSW-2 (docs/steward/TEST-ASSESSMENT.md). The service-level
+ * checks and the injected races live in `adr0775-p4-stale-write-guards`; this
+ * file owns the ROUTE wiring.
+ *
+ * Red when (sabotage-witnessed, wave 60): a route stops passing `If-Match` to
+ * its service (roster PATCH, profile PUT); the user-agent PATCH skips its
+ * version check; a read's `ETag` header stops matching its body `etag`
+ * (roster GET, user-agent PATCH); the profile PUT stops turning `null` or `[]`
+ * into a clear; the roster list stops carrying each row's own version.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -71,10 +80,13 @@ describe('roster PATCH', () => {
   });
 
   it('lists carry each row\'s etag', async () => {
-    await rosterMember('Etag List');
-    const list = await call<{ roster: { etag?: string }[] }>('/host/openwop-app/roster');
+    const id = await rosterMember('Etag List');
+    const read = await call<{ etag: string }>(`/host/openwop-app/roster/${encodeURIComponent(id)}`);
+    const list = await call<{ roster: { rosterId: string; etag?: string }[] }>('/host/openwop-app/roster');
     expect(list.body.roster.length).toBeGreaterThan(0);
     expect(list.body.roster.every((e) => typeof e.etag === 'string')).toBe(true);
+    // The row's OWN version, the one a PATCH from the list view echoes.
+    expect(list.body.roster.find((e) => e.rosterId === id)?.etag).toBe(read.body.etag);
   });
 });
 
@@ -106,6 +118,10 @@ describe('agent profile PUT', () => {
     });
     expect(stale.status).toBe(409);
     expect(stale.body.details?.reason).toBe('stale_write');
+    // The refused PUT left the profile as the second write saved it.
+    const after = await call<{ hitl?: string[] }>(`/host/openwop-app/agents/${id}/profile`);
+    expect(after.status).toBe(200);
+    expect(after.body.hitl).toEqual(['refund', 'delete']);
   });
 });
 
@@ -125,5 +141,11 @@ describe('user-agent PATCH', () => {
     const stale = await call<{ details?: { reason?: string } }>(path, { method: 'PATCH', headers: { 'If-Match': a.etag! }, body: JSON.stringify({ systemPrompt: 'v4' }) });
     expect(stale.status).toBe(409);
     expect(stale.body.details?.reason).toBe('stale_write');
+    // The refused PATCH changed nothing: the version `b` saved is still current
+    // (a write under it is accepted) and the prompt is still `v3`. (The GET
+    // inventory projection carries no system prompt, so read it off a write.)
+    const again = await call<{ systemPrompt: string }>(path, { method: 'PATCH', headers: { 'If-Match': b.etag! }, body: JSON.stringify({ label: 'Etag Writer 2' }) });
+    expect(again.status).toBe(200);
+    expect(again.body.systemPrompt).toBe('v3');
   });
 });

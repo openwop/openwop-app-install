@@ -17,6 +17,7 @@ import { getRetentionHold, RetentionHoldError } from '../../host/retentionHold.j
 import {
   mergeConsentCategories, getConsent, listConsent, getPolicy, setPolicy, deleteSubject, readmitSubject, getErasureStatus, visitorDefaultRegime,
   type DefaultMode,
+  offeredVisitorChoices,
 } from './consentService.js';
 import { mintPublicSubjectToken, verifyPublicSubjectToken } from './publicSubjectToken.js';
 import { requireCategories } from './surface.js';
@@ -219,7 +220,14 @@ export function registerConsentRoutes(deps: RouteDeps): void {
       const tenantId = await resolvePublicTenant(req.params.orgId);
       const { mode } = visitorDefaultRegime(await getPolicy(tenantId), visitorRegionOf(req));
       res.setHeader('Cache-Control', 'private, no-store');
-      res.json({ regime: mode });
+      // ADR 0951 D1 — the optional choices this site asks about (session recording
+      // only when the org has replay ON and storage configured). The banner shows
+      // nothing it was not told is offered, so the recorder can never be consented
+      // to on a site that cannot record.
+      // Omitted when nothing optional is offered, so a site without replay keeps the
+      // ADR 0860 regime-only response exactly.
+      const choices = await offeredVisitorChoices(tenantId);
+      res.json({ regime: mode, ...(choices.length > 0 ? { choices } : {}) });
     } catch (err) { next(err); }
   });
 
@@ -237,7 +245,7 @@ export function registerConsentRoutes(deps: RouteDeps): void {
       // apply to this request, never the bare policy mode.
       const { mode } = visitorDefaultRegime(await getPolicy(tenantId), visitorRegionOf(req));
       res.setHeader('Cache-Control', 'private, no-store');
-      res.json({ recorded: false, defaultMode: mode, categories: { necessary: true, analytics: mode === 'opt-out', marketing: false } });
+      res.json({ recorded: false, defaultMode: mode, categories: { necessary: true, analytics: mode === 'opt-out', marketing: false, 'analytics.replay': false } });
     } catch (err) { next(err); }
   });
 

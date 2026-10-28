@@ -382,10 +382,11 @@ export async function recordHeartbeat(tenantId: string, rosterId: string): Promi
     const current = await getRosterEntry(tenantId, rosterId); // ADR 0379 P1 — fail-closed
     if (!current) return null;
     const entry = { ...current, lastHeartbeatAt: nowIso() };
-    if (await roster.compareAndSwap(current, entry)) {
-      await bumpRosterVersion();
-      return entry;
-    }
+    // ADR 0963 D5 — no roster-token bump: `lastHeartbeatAt` is pass state, not
+    // membership or config. Bumping here made every pass that heartbeat anyone
+    // force the daemon's next tick to re-list every tenant (ADR 0804 defeated);
+    // the daemon now corrects its cached listing from the pass itself.
+    if (await roster.compareAndSwap(current, entry)) return entry;
   }
   throw staleWriteError('agent', undefined);
 }

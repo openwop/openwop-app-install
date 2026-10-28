@@ -63,7 +63,8 @@ describe('URL ingest (ADR 0351 P4)', () => {
 describe('heading-path enrichment (ADR 0351 P4)', () => {
   it('validates the knob; embedded text carries the heading path while hit text stays raw', async () => {
     const col = await createCollection(T, ORG, 'u1', { name: 'E' });
-    await expect(setRetrievalConfig(T, ORG, col.collectionId, 'u1', { enrichment: 'llm' }))
+    // 'llm' was the invalid example here until ADR 0904 D7 made it a real value.
+    await expect(setRetrievalConfig(T, ORG, col.collectionId, 'u1', { enrichment: 'bogus' }))
       .rejects.toMatchObject({ httpStatus: 400 });
     await setRetrievalConfig(T, ORG, col.collectionId, 'u1', { enrichment: 'heading-path' });
 

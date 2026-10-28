@@ -32,16 +32,49 @@ import { runStreamTokenGrant } from './runStreamToken.js';
 /** The snapshot fields that carry a run's payload. */
 export const RUN_PAYLOAD_FIELDS = ['inputs', 'variables', 'channels', 'configurable'] as const;
 
+/**
+ * ADR 0979 D1 — the rule itself, so a second store holding a copy of run output
+ * (the tenant memory ledger) decides with THIS function rather than a lookalike.
+ *
+ *   - `all` with the grant that decided it. `wildcard`, `personal` and
+ *     `no-presence` are the tenant-level grants; `admin` is `host:members:manage`.
+ *   - otherwise the caller's opaque principal: the same spelling
+ *     `ownerStampFromRequest` stamps (`callerSubject`), so a run's creator always
+ *     matches on the lane that created it.
+ *
+ * ADR 0979 H2, measured and DROPPED: the pre-code review proposed matching every
+ * spelling (`callerSubjectSpellings`). The state that would need it does not
+ * exist: an OIDC bind re-keys EVERY lane of that subject to the canonical
+ * `user:<id>` (`middleware/auth.ts`, the bearer lane resolves `boundUserId`), so
+ * no request presents `oidc:<sub>` once a canonical-stamped run can exist. The
+ * arm would only have added a `resolveCallerUser` (which can create a User row)
+ * to every read. The real gap runs the other way and stays open (AKM2-R1): a run
+ * stamped `oidc:<sub>` BEFORE the bind is not matched afterwards, and that legacy
+ * spelling is deliberately not aliased in shared workspaces (principal ids are
+ * not issuer-qualified). Pinned by `test/adr0979-oidc-spelling.test.ts`.
+ */
+export type RunPayloadAccess =
+  | { all: true; grant: 'wildcard' | 'personal' | 'no-presence' | 'admin' }
+  | { all: false; principals: ReadonlySet<string> };
+
+export async function runPayloadAccess(req: Request, tenantId: string = tenantOf(req)): Promise<RunPayloadAccess> {
+  if (req.principal?.tenants?.includes('*')) return { all: true, grant: 'wildcard' };
+  if (isOwnPersonalWorkspace(req) && tenantId === tenantOf(req)) return { all: true, grant: 'personal' };
+  if (!membershipDefinesPresence(tenantId)) return { all: true, grant: 'no-presence' };
+  const subject = callerSubject(req);
+  if ((await decideProtocolAuthorization(tenantId, subject, 'host:members:manage')).allowed) return { all: true, grant: 'admin' };
+  return { all: false, principals: new Set(subject !== undefined ? [opaquePrincipal(subject)] : []) };
+}
+
 /** Decide, once per request, which runs in `tenantId` the caller may read the
  *  payload of. Defaults to the caller's active tenant. */
 export async function runPayloadReader(req: Request, tenantId: string = tenantOf(req)): Promise<(run: Pick<RunRecord, 'tenantId' | 'metadata'>) => boolean> {
-  if (req.principal?.tenants?.includes('*')) return () => true;
-  if (isOwnPersonalWorkspace(req) && tenantId === tenantOf(req)) return () => true;
-  if (!membershipDefinesPresence(tenantId)) return () => true;
-  const subject = callerSubject(req);
-  if ((await decideProtocolAuthorization(tenantId, subject, 'host:members:manage')).allowed) return () => true;
-  const me = subject !== undefined ? opaquePrincipal(subject) : undefined;
-  return (run) => me !== undefined && runOwner(run)?.principal === me;
+  const access = await runPayloadAccess(req, tenantId);
+  if (access.all) return () => true;
+  return (run) => {
+    const owner = runOwner(run)?.principal;
+    return owner !== undefined && access.principals.has(owner);
+  };
 }
 
 /** A copy of `snapshot` without the payload fields. */

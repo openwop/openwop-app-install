@@ -10,7 +10,7 @@
 
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { OpenwopError } from '../../types.js';
-import { optionalCleanString, safeUrl, escapeXml } from '../../host/boundedStrings.js';
+import { contentUrl, optionalCleanContent, escapeXml } from '../../host/boundedStrings.js';
 import { getOrg } from '../../host/accessControlService.js';
 import { resolveMediaAsset } from '../../host/inMemorySurfaces.js';
 import { createLogger } from '../../observability/logger.js';
@@ -19,12 +19,13 @@ import { getPage, getPublishedBySlug, getVersion, listPages, getContentLanguageS
 // in `putSeo`). Publishing already depends on cms for its page reads.
 import { liveEditRefusal, refuseLiveEdit } from '../cms/contentApproval.js';
 import { negotiateLocale } from '../../host/i18n/index.js';
-import { resolveSubjectDisplays } from '../../host/subjectDisplay.js';
+import { resolveOperatorDisplayNames, resolveSubjectDisplays } from '../../host/subjectDisplay.js';
+import { SYSTEM_SITE_ORG, SYSTEM_SITE_TENANT } from '../../host/systemSite.js';
 import { userRef } from '../../host/conversationStore.js';
 // ADR 0236 (campaign gap D1) — the visitor-scoped experiment assignment seam.
 // Publishing COMPOSES the CMS experiment config (read-only) and the ONE consent
 // rule (ADR 0020, the analytics beacon's gate) — it never stores anything.
-import { assignVariantForVisitor, findRunningExperiment } from '../cms/pageExperimentsService.js';
+import { assignVisitorArm, findRunningExperiment } from '../cms/pageExperimentsService.js';
 import { visitorAnalyticsAllowed, type VisitorConsentContext } from '../consent/visitorConsent.js';
 import { TtlLruCache, publicListTtlMs } from './publicReadCache.js';
 import { vendorPublicBase } from '../featureRoute.js';
@@ -119,7 +120,7 @@ export async function putSeo(
   const ogImageToken = await validateOgImageToken(input.ogImageToken, tenantId);
   const canonical = input.canonicalUrl == null || input.canonicalUrl === ''
     ? undefined
-    : safeUrl(String(input.canonicalUrl), MAX.url);
+    : contentUrl(String(input.canonicalUrl), MAX.url, 'canonicalUrl');
   if (input.canonicalUrl && !canonical) {
     throw new OpenwopError('validation_error', '`canonicalUrl` must be a safe http(s) URL.', 400, { field: 'canonicalUrl' });
   }
@@ -128,10 +129,10 @@ export async function putSeo(
     tenantId,
     orgId,
     pageId,
-    ...defined('metaTitle', optionalCleanString(input.metaTitle, MAX.metaTitle)),
-    ...defined('metaDescription', optionalCleanString(input.metaDescription, MAX.metaDescription)),
-    ...defined('ogTitle', optionalCleanString(input.ogTitle, MAX.ogTitle)),
-    ...defined('ogDescription', optionalCleanString(input.ogDescription, MAX.ogDescription)),
+    ...defined('metaTitle', optionalCleanContent(input.metaTitle, MAX.metaTitle, 'metaTitle')),
+    ...defined('metaDescription', optionalCleanContent(input.metaDescription, MAX.metaDescription, 'metaDescription')),
+    ...defined('ogTitle', optionalCleanContent(input.ogTitle, MAX.ogTitle, 'ogTitle')),
+    ...defined('ogDescription', optionalCleanContent(input.ogDescription, MAX.ogDescription, 'ogDescription')),
     ...defined('ogImageToken', ogImageToken),
     ...defined('canonicalUrl', canonical),
     noindex: input.noindex === true,
@@ -213,7 +214,7 @@ export async function publicPageBySlug(
     try {
       const experiment = await findRunningExperiment(tenantId, orgId, hit.page.pageId);
       if (experiment && (await visitorAnalyticsAllowed(tenantId, visitorKey, visitorConsent ?? { tokenSubject: undefined, region: null }))) {
-        const variant = assignVariantForVisitor(experiment, visitorKey);
+        const variant = await assignVisitorArm(experiment, visitorKey);
         if (variant && variant.versionId === null) {
           experimentStamp = { experimentId: experiment.experimentId, variant: variant.key };
         } else if (variant && variant.versionId !== null) {
@@ -346,9 +347,16 @@ export function __resetPublicReadCaches(): void {
  *  display name via the ONE subject-display seam (ADR 0192 D2) — never a second
  *  name store. Keyed by `pageId`; an unresolvable principal degrades inside the
  *  seam to a humanized id, never a raw ref. */
-async function resolveAuthorNames(tenantId: string, posts: readonly Page[]): Promise<Map<string, { id: string; name: string }>> {
+async function resolveAuthorNames(tenantId: string, orgId: string, posts: readonly Page[]): Promise<Map<string, { id: string; name: string }>> {
   const refs = posts.map((p) => userRef(p.authorId ?? p.createdBy));
   const displays = await resolveSubjectDisplays(tenantId, refs);
+  // The system site is the host operator's own site and only superadmins
+  // author there, but their user records live in their personal tenants, so
+  // the tenant-scoped lookup above never finds them. Name the author when
+  // they are an allowlisted operator; anyone else keeps no byline.
+  const operatorNames = tenantId === SYSTEM_SITE_TENANT && orgId === SYSTEM_SITE_ORG
+    ? await resolveOperatorDisplayNames([...new Set(posts.map((p) => p.authorId ?? p.createdBy))])
+    : new Map<string, string>();
   const out = new Map<string, { id: string; name: string }>();
   posts.forEach((p, i) => {
     const id = p.authorId ?? p.createdBy;
@@ -357,8 +365,15 @@ async function resolveAuthorNames(tenantId: string, posts: readonly Page[]): Pro
     // to the principal silently revokes that on the one surface where it is
     // read by anyone on the internet. If the seam somehow returns nothing, emit
     // no byline at all rather than an identifier.
-    const name = displays.get(refs[i]!)?.displayName;
-    out.set(p.pageId, { id, ...(name ? { name } : { name: '' }) });
+    // The seam's humanized fallback (an 8-char hash) is fine in an in-app
+    // roster but means nothing on a public page, so an unresolved author gets
+    // no byline either. It happens whenever the author's user record lives in
+    // another tenant: a superadmin publishing on the system site is resolved
+    // in `host:site`, where they have no record, and the post read
+    // "By 0b39f331".
+    const display = displays.get(refs[i]!);
+    const name = display && !display.fallback ? display.displayName : (operatorNames.get(id) ?? '');
+    out.set(p.pageId, { id, name });
   });
   return out;
 }
@@ -497,7 +512,7 @@ async function buildFeed(orgId: string, baseUrl: string, opts: FeedOptions): Pro
     all.filter(({ seo }) => !seo?.noindex).sort((a, b) => (feedTs(a.page) < feedTs(b.page) ? 1 : -1)),
     orgId, opts.surface,
   );
-  const authors = opts.enriched ? await resolveAuthorNames(tenantId, rows.map((r) => r.page)) : undefined;
+  const authors = opts.enriched ? await resolveAuthorNames(tenantId, orgId, rows.map((r) => r.page)) : undefined;
   const items = rows
     .map(({ page, seo }) => {
       const link = publicPageUrl(baseUrl, orgId, page);
@@ -506,7 +521,7 @@ async function buildFeed(orgId: string, baseUrl: string, opts: FeedOptions): Pro
       let extra = '';
       if (opts.enriched) {
         const creator = authors?.get(page.pageId);
-        if (creator) extra += `\n      <dc:creator>${escapeXml(creator.name)}</dc:creator>`;
+        if (creator?.name) extra += `\n      <dc:creator>${escapeXml(creator.name)}</dc:creator>`;
         for (const cat of [page.category, ...(page.tags ?? [])].filter((c): c is string => !!c)) {
           extra += `\n      <category>${escapeXml(cat)}</category>`;
         }
@@ -625,7 +640,7 @@ export async function listPublicBlog(orgId: string, filter?: { tag?: string; cat
     [...rows].sort((a, b) => (postDate(a.page) < postDate(b.page) ? 1 : -1)),
     orgId, 'blog',
   );
-  const authors = await resolveAuthorNames(tenantId, paired.map(({ page }) => page));
+  const authors = await resolveAuthorNames(tenantId, orgId, paired.map(({ page }) => page));
   // R2-BLOG-3 — the excerpt (and the reading estimate derived from the same
   // sections) honors Accept-Language through the SAME RFC 0103 negotiation the
   // page view uses, so a localized site's cards match the localized body a

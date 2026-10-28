@@ -78,10 +78,18 @@ export const SEAM_CALL_SITES: ReadonlyArray<{ file: string; effectKind: string; 
   { file: 'src/host/inMemorySurfaces.ts', effectKind: 'blob-write', seam: 'storage.blob-put' },
   { file: 'src/features/billing/stripeApi.ts', effectKind: 'payment', seam: 'provider.stripe' },
   { file: 'src/features/commerce/ucpBuyer/ucpBuyerService.ts', effectKind: 'payment', seam: 'provider.ucp-merchant' },
+  { file: 'src/features/kb/embedBudget.ts', effectKind: 'network-egress', seam: 'http.kb-paid-embedding' },
+  { file: 'src/features/kb/parsers/documentAi.ts', effectKind: 'network-egress', seam: 'http.kb-document-ai' },
+  { file: 'src/features/kb/vertexReranker.ts', effectKind: 'network-egress', seam: 'http.kb-vertex-ranking' },
   { file: 'src/subruns/subRunDispatcher.ts', effectKind: 'dispatch', seam: 'queue.sub-run-dispatch' },
   { file: 'src/notifications/emitter.ts', effectKind: 'notification', seam: 'queue.notification-emit' },
   { file: 'src/host/smtpEgress.ts', effectKind: 'email', seam: 'smtp.send' },
   { file: 'src/host/runStarter.ts', effectKind: 'dispatch', seam: 'queue.run-start' },
+  { file: 'src/features/campaign-orchestration/agentTools.ts', effectKind: 'dispatch', seam: 'queue.run-start' },
+  // ADR 0954 P3: pre-reservation guards narrow the SAME existing run/inbox
+  // owners, just as the campaign ignition guard does. No parallel emitter.
+  { file: 'src/features/crm/leadIntel/speedToLead.ts', effectKind: 'dispatch', seam: 'queue.run-start' },
+  { file: 'src/features/crm/leadIntel/speedToLead.ts', effectKind: 'notification', seam: 'queue.notification-emit' },
 ];
 
 export const SEAM_ROWS: readonly SeamRow[] = [
@@ -91,6 +99,12 @@ export const SEAM_ROWS: readonly SeamRow[] = [
     note: 'brokeredPost/brokeredFetch — provider calls that ride the credential broker.' },
   { seam: 'http.compensation-forward', kind: 'http', guarded: true, guardedBy: GUARDED_BY, branchReFires: true,
     note: 'The compensation seam forward + inverse legs. Compensation is itself an effect and re-enters the guard.' },
+  { seam: 'http.kb-paid-embedding', kind: 'http', guarded: true, guardedBy: GUARDED_BY, branchReFires: true,
+    note: 'ADR 0904: shared embedding/context admission rejects replay before reserving the daily counter or issuing a paid request. Classified KB search/RAG nodes serve their recorded outputs.' },
+  { seam: 'http.kb-document-ai', kind: 'http', guarded: true, guardedBy: GUARDED_BY, branchReFires: true,
+    note: 'ADR 0904: Document AI admission rejects replay before reserving pages or issuing the paid parse request.' },
+  { seam: 'http.kb-vertex-ranking', kind: 'http', guarded: true, guardedBy: GUARDED_BY, branchReFires: true,
+    note: 'ADR 0904: Vertex ranking admission rejects replay before reserving a query or issuing the paid ranking request. Classified KB search/RAG nodes serve their recorded outputs.' },
   { seam: 'webhook.delivery', kind: 'webhook-fanout', guarded: true, guardedBy: GUARDED_BY, branchReFires: true,
     note: 'The undici egress dispatcher behind webhook delivery. replay.md: delivery of a replay fork’s re-emitted events is suppressed unconditionally at the worker.' },
   { seam: 'storage.blob-put', kind: 'storage', guarded: true, guardedBy: GUARDED_BY, branchReFires: true },
@@ -111,5 +125,5 @@ export const SEAM_ROWS: readonly SeamRow[] = [
   // agent-runner re-issues on `:fork`). It was unlisted, so a fork started a
   // duplicate real run and the suite could not see the seam.
   { seam: 'queue.run-start', kind: 'queue', guarded: true, guardedBy: GUARDED_BY, branchReFires: true,
-    note: 'host/runStarter.ts startWorkflowRun — every host-initiated run launch (agent tools, schedules, approvals).' },
+    note: 'host/runStarter.ts startWorkflowRun — every host-initiated run launch (agent tools, schedules, approvals), including the campaign tool guard before its ignition reservation.' },
 ];

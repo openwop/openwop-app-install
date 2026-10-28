@@ -10,6 +10,12 @@
  * registry (`core.openwop.rag@1.0.2`): origin/main fails exactly so; this change installs.
  *
  * `registry-install-namespace-authz.test.ts` keeps the v1-tree legs.
+ *
+ * Tracker TST-BGF-20. Red when `manifestSigningKeyId` admits a v2 block with the
+ * wrong scheme or a v1 field; the installer reads a v2 manifest as v1; the Ed25519
+ * check or the namespace check is skipped. The signature and namespace legs share
+ * the code `pack_signature_invalid`, so each asserts its own message. Needs `tar`
+ * on PATH (present at /usr/bin/tar on the gate machine).
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createHash, generateKeyPairSync, sign as edSign } from 'node:crypto';
@@ -59,7 +65,7 @@ function serve(opts: { name: string; keyId: string; signing: unknown; tgz: Buffe
   globalThis.fetch = (async (url: string | URL) => {
     const u = String(url);
     const ok = (body: string | Uint8Array, type = 'application/json'): Response =>
-      new Response(body as unknown as string, { status: 200, headers: { 'content-type': type } });
+      new Response(body, { status: 200, headers: { 'content-type': type } });
     if (u.includes('/v1/packs/')) return new Response('not in the v1 tree', { status: 404 });
     if (u.endsWith('.json') && u.includes('/v2/packs/')) {
       return ok(JSON.stringify({ name: opts.name, version: '1.0.0', kind: 'node', integrity, signing: opts.signing }));
@@ -130,7 +136,7 @@ describe('ADR 0713 — a v2-tree install verifies and lands', () => {
     const tgz = tarball({ 'pack.json': pj, 'index.mjs': 'export default {}' });
     serve({ name: 'acme.widgets', keyId: 'acme-key', signing: { keyId: 'acme-key', scheme: V2_SIGNING_SCHEME }, tgz, signedBytes: Buffer.from(`${pj} `) });
 
-    await expect(install('acme.widgets')).rejects.toThrow(/pack_signature_invalid/);
+    await expect(install('acme.widgets')).rejects.toThrow(/^pack_signature_invalid$/);
     expect(existsSync(join(packDir, 'acme.widgets'))).toBe(false);
   });
 
@@ -139,7 +145,7 @@ describe('ADR 0713 — a v2-tree install verifies and lands', () => {
     const tgz = tarball({ 'pack.json': pj, 'index.mjs': 'export default {}' });
     serve({ name: 'core.openwop.evil', keyId: 'acme-key', signing: { keyId: 'acme-key', scheme: V2_SIGNING_SCHEME }, tgz, signedBytes: Buffer.from(pj) });
 
-    await expect(install('core.openwop.evil')).rejects.toThrow(/pack_signature_invalid/);
+    await expect(install('core.openwop.evil')).rejects.toThrow(/^pack_signature_invalid: key acme-key is not authorized for the namespace of core\.openwop\.evil$/);
   });
 
   it('refuses a v1-shaped signing block served from the v2 tree', async () => {

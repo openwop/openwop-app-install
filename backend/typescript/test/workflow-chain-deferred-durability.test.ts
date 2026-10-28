@@ -9,6 +9,12 @@
  * them at run-start via `ensureMintedTemplatesRegistered` so `getTemplate` resolves on
  * any instance. This asserts that re-registration path directly (a template that was
  * NEVER minted in this process becomes resolvable from metadata alone).
+ *
+ * Sabotage-witnessed (wave 64): dropping the re-register (8fw5g1-dd-reregister → case 1),
+ * the array guard (dd-tolerant → case 2) and the metadata carry (dd-metadata-carry →
+ * case 3). Case 3 does NOT witness re-registration: `expandChain` itself registers the
+ * minted template in-process (workflowChainPackLoader.ts `registerMintedTemplate`), so
+ * its claim is the metadata CARRY that a different instance re-registers from.
  */
 import { describe, it, expect } from 'vitest';
 import { getTemplate, ensureMintedTemplatesRegistered } from '../src/host/promptStore.js';
@@ -33,7 +39,9 @@ describe('RFC 0124 — minted-template durability (re-register from metadata)', 
     ensureMintedTemplatesRegistered(meta);
 
     const found = getTemplate('chainmint-neverseen-abcdef-node-system');
-    expect(found && found !== 'ambiguous').toBeTruthy();
+    if (found === null || found === 'ambiguous') throw new Error(`expected one resolved template, got ${String(found)}`);
+    expect(found.template.text).toBe('Brief on {{some_prefixed_topic}}.');
+    expect(found.template.version).toBe('1.0.0');
   });
 
   it('is idempotent and tolerant of absent / malformed metadata', () => {
@@ -44,13 +52,17 @@ describe('RFC 0124 — minted-template durability (re-register from metadata)', 
     };
     ensureMintedTemplatesRegistered(meta);
     expect(() => ensureMintedTemplatesRegistered(meta)).not.toThrow(); // idempotent re-mint
+    // …and the double register left ONE resolvable template, not an ambiguity.
+    const once = getTemplate('chainmint-idem-xyz');
+    if (once === null || once === 'ambiguous') throw new Error(`re-mint left ${String(once)}`);
+    expect(once.template.text).toBe('x');
     expect(() => ensureMintedTemplatesRegistered(undefined)).not.toThrow();
     expect(() => ensureMintedTemplatesRegistered(null)).not.toThrow();
     expect(() => ensureMintedTemplatesRegistered({ mintedPromptTemplates: 'nope' })).not.toThrow();
     expect(() => ensureMintedTemplatesRegistered({ mintedPromptTemplates: [42, null, {}] })).not.toThrow();
   });
 
-  it('a deferred-expanded workflow carries re-registerable minted templates on metadata', () => {
+  it('a deferred-expanded workflow carries its minted template on metadata (what another instance re-registers from)', () => {
     const chain: WorkflowChain = {
       chainId: 'test.durable',
       version: '1.0.0',
@@ -60,11 +72,16 @@ describe('RFC 0124 — minted-template durability (re-register from metadata)', 
       dag: { nodes: [{ id: 'gen', typeId: 'core.ai.chatCompletion', config: { systemPrompt: 'On {{params.topic}}.' } }] },
     };
     const def = expandChain(chain, { deferred: true, params: { topic: 'X' } });
-    const minted = def.metadata?.mintedPromptTemplates as Array<{ templateId: string }>;
+    const minted = def.metadata?.mintedPromptTemplates;
+    if (!Array.isArray(minted)) throw new Error('deferred expansion carried no mintedPromptTemplates');
     expect(minted.length).toBe(1);
+    const carried = minted[0] as { templateId?: unknown; text?: unknown };
+    expect(typeof carried.templateId).toBe('string');
+    // The carried body is the lifted prompt (the param prefixed into a variable), not empty.
+    expect(String(carried.text)).toMatch(/^On \{\{[a-z0-9_]*topic\}\}\.$/);
     // Re-registration from the definition metadata is a no-op-safe idempotent call
     // (executeRun does exactly this at run-start for every run).
     expect(() => ensureMintedTemplatesRegistered(def.metadata)).not.toThrow();
-    expect(getTemplate(minted[0].templateId)).toBeTruthy();
+    expect(getTemplate(String(carried.templateId))).toBeTruthy();
   });
 });

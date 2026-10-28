@@ -31,9 +31,9 @@ const VALID: ChallengePlan = {
   outcomes: [{ outcomeId: 'o1', measurableOutcome: 'Five 25-minute focus blocks completed per week', method: 'completed check-ins' }],
   achievements: [{ achievementId: 'a1', observableEvidence: 'A completed 25-minute block with a note', outcomeIds: ['o1'] }],
   days: [
-    { day: 1, stableActivityId: 'd1-first-block', title: 'One small block', actionInstruction: 'Run one 10-minute focus block.', userFacingWhy: 'A small win proves the system.', estimatedMinutes: 10, achievementIds: ['a1'], evidencePolicy: 'attestation' },
-    { day: 2, stableActivityId: 'd2-full-block', title: 'One full block', actionInstruction: 'Run one 25-minute block.', userFacingWhy: 'Full length builds the muscle.', estimatedMinutes: 25 * 0 + 20, achievementIds: ['a1'], evidencePolicy: 'note' },
-    { day: 7, stableActivityId: 'd7-review', title: 'Review the week', actionInstruction: 'Review which blocks worked.', userFacingWhy: 'Consolidation locks in the habit.', estimatedMinutes: 10, achievementIds: ['a1'], evidencePolicy: 'note', isRecovery: true },
+    { day: 1, stableActivityId: 'd1-first-block', title: 'One small block', actionInstruction: 'Run one 10-minute focus block.', userFacingWhy: 'A small win proves the system.', estimatedMinutes: 10, achievementIds: ['a1'], evidencePolicy: 'attestation', claimRefs: [] },
+    { day: 2, stableActivityId: 'd2-full-block', title: 'One full block', actionInstruction: 'Run one 25-minute block.', userFacingWhy: 'Full length builds the muscle.', estimatedMinutes: 25 * 0 + 20, achievementIds: ['a1'], evidencePolicy: 'note', claimRefs: [] },
+    { day: 7, stableActivityId: 'd7-review', title: 'Review the week', actionInstruction: 'Review which blocks worked.', userFacingWhy: 'Consolidation locks in the habit.', estimatedMinutes: 10, achievementIds: ['a1'], evidencePolicy: 'note', isRecovery: true, claimRefs: [] },
   ],
 };
 

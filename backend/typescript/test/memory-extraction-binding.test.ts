@@ -3,6 +3,7 @@
  * consent gate and the real note store.
  *
  * Guards: (1) no grant ⇒ no LLM call and no note (fail-closed at the binding, not only the op);
+ * the run shape the lane accepts (ADR 0982 D1) comes from `helpers/personalChatRun.ts`;
  * (2) every fact the binding writes is `source:'auto-extract'` ⇒ `contentTrust:'untrusted'` at
  * all three read altitudes (durable projection, recall recency, RAG vector metadata), while a
  * user-typed note in the same scope stays trusted; (3) the legacy `[auto-extracted] ` prefix is
@@ -33,6 +34,10 @@ import {
   NOTE_TAG,
 } from '../src/host/subjectMemory.js';
 import { personSubject } from '../src/host/subject.js';
+import { personalChat } from './helpers/personalChatRun.js';
+import type { ExtractorResult } from '../src/features/memory-auto-extract/memoryExtractor.js';
+
+const facts = (...f: string[]) => async (): Promise<ExtractorResult> => ({ status: 'ok', facts: f.map((fact) => ({ fact, category: 'other' as const })), rejected: 0 });
 
 const T = 'mxb-tenant';
 beforeAll(async () => {
@@ -42,17 +47,13 @@ beforeAll(async () => {
 
 describe('extractConversationMemory', () => {
   it('FAIL-CLOSED: no grant ⇒ no LLM call, no note stored', async () => {
-    const extract = vi.fn(async () => ['the user prefers dark mode']);
-    const r = await extractConversationMemory(T, 'nogrant-user', 'chat', extract);
-    expect(r.skipped).toBe('no-consent');
+    const p = await personalChat('mxb-nogrant');
+    const extract = vi.fn(facts('the user prefers dark mode'));
+    const r = await extractConversationMemory(await p.run(), ['chat'], extract);
+    expect(r).toEqual({ status: 'skipped', reason: 'no-consent' });
     expect(extract).not.toHaveBeenCalled();
-    expect(await countSubjectNotes(T, personSubject('nogrant-user'))).toBe(0);
+    expect(await countSubjectNotes(p.home, personSubject(p.userId))).toBe(0);
   });
-
-  // CUT (wave 12 /grade-tests): the bare-id positive case `with consent, extracts + stores notes
-  // on the user subject (auto-extracted)` lived here. It was redundant with
-  // `memory-extraction-grant-key.test.ts` › `BORN RED`, which drives the same path with the REAL
-  // `user:<hash>` id shape — probe w12g3-subjectref-double reds both. ADR 0666:54 cites its old lines.
 });
 
 /**
@@ -64,22 +65,22 @@ describe('extractConversationMemory', () => {
  * projection, and the RAG/vector projection.
  */
 describe('AGMEM-2 — auto-extracted facts are UNTRUSTED at every read altitude', () => {
-  const U = 'trust-user';
-  const subj = personSubject(U);
+  // ADR 0982 D1 — the lane writes only in the person's own tenant, keyed on the canonical id.
+  let T2 = '';
+  let subj = personSubject('unset');
 
   beforeAll(async () => {
-    // ADR 0666 D1 — the grant subject is the subject the binding is CALLED with, verbatim (the
-    // binding no longer re-prefixes `user:`). A bare id is used here because this suite tests the
-    // trust plumbing; the real `user:<hash>` key contract is pinned in
-    // `memory-extraction-grant-key.test.ts`.
-    await setExtractionGrant(T, U, true, U);
-    await extractConversationMemory(T, U, 'transcript', async () => ['the deploy token is rotated weekly']);
+    const p = await personalChat('mxb-trust');
+    T2 = p.home;
+    subj = personSubject(p.userId);
+    await setExtractionGrant(p.home, p.userId, true, p.userId);
+    await extractConversationMemory(await p.run(), ['transcript'], facts('the deploy token is rotated weekly'));
     // A fact the PERSON typed, in the same scope, for the discrimination arm.
-    await addSubjectNote(T, subj, 'I prefer concise briefings');
+    await addSubjectNote(p.home, subj, 'I prefer concise briefings');
   });
 
   it('the durable projection labels the model-authored fact untrusted + auto-extract', async () => {
-    const notes = await listSubjectNotes(T, subj);
+    const notes = await listSubjectNotes(T2, subj);
     const auto = notes.find((n) => n.content.includes('deploy token'));
     const typed = notes.find((n) => n.content.includes('concise briefings'));
     expect(auto?.contentTrust).toBe('untrusted');
@@ -91,7 +92,7 @@ describe('AGMEM-2 — auto-extracted facts are UNTRUSTED at every read altitude'
   });
 
   it('provenance is DATA, not an English prefix glued into the content', async () => {
-    const notes = await listSubjectNotes(T, subj);
+    const notes = await listSubjectNotes(T2, subj);
     // The scope holds exactly the auto-extracted fact + the typed note; without this the loop
     // below asserts nothing over an empty list.
     expect(notes).toHaveLength(2);
@@ -99,7 +100,7 @@ describe('AGMEM-2 — auto-extracted facts are UNTRUSTED at every read altitude'
   });
 
   it('the recall port fences it — recency AND RAG both report untrusted', async () => {
-    const port = createSubjectMemoryPort(T);
+    const port = createSubjectMemoryPort(T2);
     const scope = subjectMemoryScope(subj);
     const recency = await port.read(scope);
     const autoR = recency.find((e) => e.content.includes('deploy token'));
@@ -174,5 +175,25 @@ describe('AGMEM-2 backlog — the legacy prefix is honoured as untrusted (heuris
     const notes = await listSubjectNotes(T, other);
     expect(notes[0]?.contentTrust).toBe('trusted');
     expect(notes[0]?.source).toBe('user');
+  });
+});
+
+/**
+ * ADR 0982 D6 / architect A4 — two closes that learn the same fact concurrently converge on ONE
+ * row. Each read the scope before the other wrote, so only the idempotency key stands between
+ * them; a case-variant twin hits `addSubjectNote`'s 409, which the binding counts as a duplicate
+ * instead of failing the close. Witnessed: rethrowing the `conflict` reds it.
+ */
+describe('ADR 0982 A4 — concurrent closes, one row', () => {
+  it('"Keeps bees" and "keeps bees." racing each other store one note, and neither close fails', async () => {
+    const p = await personalChat('mxb-race');
+    await setExtractionGrant(p.home, p.userId, true, p.userId);
+    const [a, b] = await Promise.all([
+      extractConversationMemory(await p.run(), ['I keep bees'], facts('Keeps bees')),
+      extractConversationMemory(await p.run(), ['I keep bees'], facts('keeps bees.')),
+    ]);
+    expect([a.status, b.status].sort()).toEqual(['nothing-new', 'written']);
+    expect([a, b].find((o) => o.status === 'nothing-new')).toEqual({ status: 'nothing-new', duplicates: 1, suppressed: 0, budgetFull: false });
+    expect(await listSubjectNotes(p.home, personSubject(p.userId))).toHaveLength(1);
   });
 });

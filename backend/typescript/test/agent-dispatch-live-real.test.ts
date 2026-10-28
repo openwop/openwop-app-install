@@ -9,10 +9,15 @@
  * conformance `mock` provider (pinned through modelClassResolver).
  *
  * createApp installs the invocation-log / event-log / policy singletons the
- * adapter needs; we don't open an HTTP listener.
+ * adapter needs; we don't open an HTTP listener. ONE boot for the file: each
+ * case programs the mock under its own nodeId, so nothing leaks between cases.
+ *
+ * Tracker TST-BKX-3. Red when the structured result is replaced by plain
+ * content, the `_confidence` escalation is dropped, or the dispatch result
+ * starts carrying the turn's credentialRef — each sabotage-witnessed (w65).
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import type { HostAdapterSuite } from '../src/host/index.js';
 import { createAiProvidersAdapter } from '../src/aiProviders/aiProvidersHost.js';
@@ -21,13 +26,12 @@ import { getAgentRegistry, type ResolvedAgentManifest } from '../src/executor/ag
 import { runAgentDispatchLive } from '../src/host/agentDispatch.js';
 
 let app: Awaited<ReturnType<typeof createApp>>;
-let port = 19600;
 
-beforeEach(async () => {
+beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
-  app = await createApp({ port: port++, storageDsn: 'memory://', serviceName: 't', serviceVersion: '0', enableConsoleTracer: false });
+  app = await createApp({ port: 19600, storageDsn: 'memory://', serviceName: 't', serviceVersion: '0', enableConsoleTracer: false });
 });
-afterEach(async () => {
+afterAll(async () => {
   await (app.locals.storage as { close: () => Promise<void> }).close();
 });
 
@@ -94,20 +98,19 @@ describe('runAgentDispatchLive — real callAI pipeline via mock provider', () =
     expect(result.confidence).toBe(0.2);
   });
 
-  it('SR-1: no cleartext credential appears in the result (intent check)', async () => {
-    // Intent/regression guard: the mock path carries no credential, so this
-    // cannot fail today — it pins the contract that a dispatch result never
-    // serializes secret material. The real credential-redaction (credentialRef
-    // hashing) is covered on a keyed provider by the opt-in managed test.
+  it('SR-1: a turn credentialRef never appears in the dispatch result', async () => {
+    // The turn is dispatched WITH a secret-shaped credentialRef; the result a
+    // caller persists or forwards must not carry it in any field.
     const nodeId = 'agent.dispatch.sr1';
+    const SECRET_REF = 'byok:sk-live-0123456789abcdef';
     registerAgent('t.sr1');
     programMock(nodeId, [{ content: '{"answer":"ok"}', stopReason: 'end_turn' }]);
     const result = await runAgentDispatchLive(
       { agentId: 't.sr1' },
-      { callAI: realCallAI(nodeId, []), modelOptions: { provider: 'mock', model: nodeId } },
+      { callAI: realCallAI(nodeId, []), modelOptions: { provider: 'mock', model: nodeId }, credentialRef: SECRET_REF },
     );
     expect(result.status).toBe('completed');
-    const serialized = JSON.stringify(result);
-    expect(serialized).not.toMatch(/apiKey|sk-|secret/i);
+    expect(result.result).toEqual({ answer: 'ok' });
+    expect(JSON.stringify(result)).not.toContain('sk-live-0123456789abcdef');
   });
 });

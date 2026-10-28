@@ -30,7 +30,6 @@
 src/features/comments/__tests__/commentsDeepLink.test.tsx
 src/features/dashboard/__tests__/customizeUpgrade.test.tsx
 src/features/dashboard/__tests__/uxUpgradeAug.test.tsx
-src/features/evals/__tests__/ArenaPage.test.tsx
 src/features/marketplace/__tests__/buyScopeGate.test.tsx
 src/features/projects/__tests__/charterUnsavedGuard.test.tsx
 src/features/projects/__tests__/deleteReceipt.test.tsx

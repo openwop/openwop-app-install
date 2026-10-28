@@ -15,6 +15,10 @@
  * bearers (principal `oidc:<sub>`), the same harness as the ADR 0774 D5 witness,
  * because the identity-spelling half is only observable through it.
  *
+ * TST-BNA-3. Red when: `requireTenantWrite` admits a viewer, the shared
+ * predicate reads only ONE identity spelling, or a workforce cutover overlay is
+ * read without the tenant key (w65 probes).
+ *
  * @see docs/adr/0775-agents-roster-authority-and-work-twin-chains.md
  */
 
@@ -30,7 +34,7 @@ import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { listMembers } from '../src/host/accessControlService.js';
 import { getRosterEntry } from '../src/host/rosterService.js';
 import { getChart } from '../src/host/orgChartService.js';
-import { seedWorkforceEntities } from '../src/host/workforceService.js';
+import { getWorkforce, seedWorkforceEntities } from '../src/host/workforceService.js';
 
 function b64url(buf: Buffer | string): string {
   return Buffer.from(buf).toString('base64').replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
@@ -89,7 +93,16 @@ afterAll(async () => {
   for (const k of ['OPENWOP_OIDC_ISSUER', 'OPENWOP_OIDC_AUDIENCE', 'OPENWOP_OIDC_JWKS_URL']) delete process.env[k];
 });
 
-interface Res<T = any> { status: number; body: T }
+/** Every body field a case reads, all optional (each call site narrows by assertion). */
+interface Body {
+  workspaceId?: string;
+  rosterId?: string;
+  status?: string;
+  workforces?: Array<{ workforceId: string; status: string }>;
+  details?: { requiredScope?: string };
+  error?: string | { details?: { requiredScope?: string } };
+}
+interface Res { status: number; body: Body | undefined }
 /** A bearer-carrying client with a cookie jar (the SPA shape: bearer + __session). */
 type Client = { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; patch: (p: string, b?: unknown) => Promise<Res>; put: (p: string, b?: unknown) => Promise<Res>; del: (p: string) => Promise<Res> };
 function client(token: string): Client {
@@ -114,7 +127,7 @@ function client(token: string): Client {
       const m = /(__session=[^;]+)/.exec(sc);
       if (m) cookie = m[1];
     }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    const out = res.status === 204 ? undefined : ((await res.json().catch(() => undefined)) as Body | undefined);
     return { status: res.status, body: out };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b), put: (p, b) => call('PUT', p, b), del: (p) => call('DELETE', p) };
@@ -139,7 +152,8 @@ async function sharedWorkspace(tag: string): Promise<{ ws: string; owner: Client
   const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   const owner = await oidcCaller(`ar-${tag}-owner-${stamp}`);
   const viewer = await oidcCaller(`ar-${tag}-viewer-${stamp}`);
-  const ws = (await owner.c.post(WS, { name: `AR ${tag} ${stamp}` })).body.workspaceId as string;
+  const ws = (await owner.c.post(WS, { name: `AR ${tag} ${stamp}` })).body?.workspaceId ?? '';
+  expect(ws).not.toBe('');
   expect((await owner.c.post(`${WS}/${encodeURIComponent(ws)}/switch`)).status).toBe(200);
   // MEASURED (ADR 0774): the owner of a workspace an unbound caller created is
   // keyed by the LEGACY spelling — the union is what admits them.
@@ -155,10 +169,13 @@ describe('ADR 0775 D1 — agent-area writes need workspace:write', () => {
     const { ws, owner, viewer } = await sharedWorkspace('viewer');
     const made = await owner.post(`${H}/roster`, { persona: 'Owner Made', agentRef: { agentId: 'user.owner-made' } });
     expect(made.status, JSON.stringify(made.body)).toBe(201);
-    const rosterId = made.body.rosterId as string;
+    const rosterId = made.body?.rosterId ?? '';
+    expect(rosterId).toMatch(/^host:/);
     const chart = await owner.put(`${H}/org-chart`, { departments: [{ departmentId: 'd1', name: 'Ops', roles: [{ roleId: 'r1', name: 'Lead' }] }], members: [{ rosterId, departmentId: 'd1', roleId: 'r1', reportsTo: null }] });
     expect(chart.status, JSON.stringify(chart.body)).toBe(200);
 
+    const wfBefore = (await getWorkforce(ws, HERO))?.status;
+    expect(wfBefore).toBeTruthy();
     const refusals: Array<[string, Promise<Res>]> = [
       ['POST roster', viewer.post(`${H}/roster`, { persona: 'Viewer Made', agentRef: { agentId: 'user.viewer-made' } })],
       ['PATCH roster', viewer.patch(`${H}/roster/${encodeURIComponent(rosterId)}`, { label: 'hijacked' })],
@@ -182,11 +199,15 @@ describe('ADR 0775 D1 — agent-area writes need workspace:write', () => {
     for (const [label, p] of refusals) {
       const r = await p;
       expect(r.status, `${label}: ${JSON.stringify(r.body)}`).toBe(403);
-      expect(r.body?.details?.requiredScope ?? r.body?.error?.details?.requiredScope, label).toBe('workspace:write');
+      const err = r.body?.error;
+      expect(r.body?.details?.requiredScope ?? (typeof err === 'object' ? err.details?.requiredScope : undefined), label).toBe('workspace:write');
     }
     // Nothing moved: the member, its label and the chart are intact.
     const after = await getRosterEntry(ws, rosterId);
-    expect(after?.label).not.toBe('hijacked');
+    expect(after, 'the viewer DELETE did not land').toMatchObject({ persona: 'Owner Made' });
+    expect(after?.label).toBeUndefined();
+    // …and the workspace's cutover decision did not move either.
+    expect((await getWorkforce(ws, HERO))?.status).toBe(wfBefore);
     expect((await getChart(ws))?.members.map((m) => m.rosterId)).toEqual([rosterId]);
     // Reads stay tenant-scoped: chatting with / looking at an agent is a read.
     expect((await viewer.get(`${H}/roster`)).status).toBe(200);
@@ -197,7 +218,8 @@ describe('ADR 0775 D1 — agent-area writes need workspace:write', () => {
     const stamp = Date.now();
     const owner = await oidcCaller(`ar-owner2-${stamp}`);
     const editor = await oidcCaller(`ar-editor-${stamp}`);
-    const ws = (await owner.c.post(WS, { name: `AR2 ${stamp}` })).body.workspaceId as string;
+    const ws = (await owner.c.post(WS, { name: `AR2 ${stamp}` })).body?.workspaceId ?? '';
+    expect(ws).not.toBe('');
     expect((await owner.c.post(`${WS}/${encodeURIComponent(ws)}/switch`)).status).toBe(200);
     expect((await owner.c.post(`${H}/roster`, { persona: 'By Owner', agentRef: { agentId: 'user.by-owner' } })).status).toBe(201);
     expect((await owner.c.post(`${H}/orgs/${encodeURIComponent(ws)}/members`, { displayName: 'editor', subject: editor.canonical, roles: ['editor'] })).status).toBe(201);
@@ -218,16 +240,17 @@ describe('ADR 0775 D2 — a workforce cutover is the tenant\'s own', () => {
   it('tenant A piloting a workforce does not change what tenant B sees', async () => {
     const a = await oidcCaller(`ar-wf-a-${Date.now()}`);
     const b = await oidcCaller(`ar-wf-b-${Date.now()}`);
-    const seed = (await b.c.get(`${H}/workforces/${HERO}`)).body.status as string;
+    const seed = (await b.c.get(`${H}/workforces/${HERO}`)).body?.status ?? '';
+    expect(seed).not.toBe('');
     const target = seed === 'piloting' ? 'shadow' : 'piloting';
     const patched = await a.c.patch(`${H}/workforces/${HERO}`, { status: target });
     expect(patched.status, JSON.stringify(patched.body)).toBe(200);
-    expect(patched.body.status).toBe(target);
+    expect(patched.body?.status).toBe(target);
     // A sees its own decision, on the item AND in the list.
-    expect((await a.c.get(`${H}/workforces/${HERO}`)).body.status).toBe(target);
-    expect(((await a.c.get(`${H}/workforces`)).body.workforces as Array<{ workforceId: string; status: string }>).find((w) => w.workforceId === HERO)?.status).toBe(target);
+    expect((await a.c.get(`${H}/workforces/${HERO}`)).body?.status).toBe(target);
+    expect((await a.c.get(`${H}/workforces`)).body?.workforces?.find((w) => w.workforceId === HERO)?.status).toBe(target);
     // B does not: before ADR 0775 this read `target` — the write was global.
-    expect((await b.c.get(`${H}/workforces/${HERO}`)).body.status).toBe(seed);
-    expect(((await b.c.get(`${H}/workforces`)).body.workforces as Array<{ workforceId: string; status: string }>).find((w) => w.workforceId === HERO)?.status).toBe(seed);
+    expect((await b.c.get(`${H}/workforces/${HERO}`)).body?.status).toBe(seed);
+    expect((await b.c.get(`${H}/workforces`)).body?.workforces?.find((w) => w.workforceId === HERO)?.status).toBe(seed);
   });
 });

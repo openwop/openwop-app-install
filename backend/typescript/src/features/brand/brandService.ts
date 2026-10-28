@@ -15,7 +15,7 @@ import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { getGovernancePolicy } from '../../host/governanceService.js';
 import { createLogger } from '../../observability/logger.js';
 import { OpenwopError } from '../../types.js';
-import { cleanString, optionalCleanString, safeUrl } from '../../host/boundedStrings.js';
+import { cleanContent, cleanString, contentUrl, optionalCleanContent, optionalCleanString } from '../../host/boundedStrings.js';
 import {
   BRAND_CHANNELS,
   BRAND_COLOR_KEYS,
@@ -28,6 +28,7 @@ import {
   type Brand,
   type BrandChannel,
   type BrandColorKey,
+  type BrandCreativeLocks,
   type BrandGovernance,
   type BrandIdentity,
   type BrandTheme,
@@ -63,6 +64,8 @@ export interface BrandInput {
   channelVoiceRules?: unknown;
   governance?: unknown;
   identity?: unknown;
+  /** ADR 0946 D4 — `null` clears the locks. */
+  creativeLocks?: unknown;
   status?: unknown;
 }
 
@@ -182,6 +185,50 @@ export function sanitizeGovernance(raw: unknown): BrandGovernance {
   };
 }
 
+// ── Creative locks (ADR 0946 D4) ─────────────────────────────────────────────
+// The renderer compares these against its resolved `#hex` tokens and font
+// families, so colours are hex only (lowercased) and fonts are family names.
+
+const LOCK_HEX = /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i;
+const LOCK_LIST_MAX = 24;
+const pct = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 100 ? v : null);
+
+function lockColours(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  return [...new Set(raw.filter((c): c is string => typeof c === 'string' && LOCK_HEX.test(c.trim())).map((c) => c.trim().toLowerCase()))].slice(0, LOCK_LIST_MAX);
+}
+
+/** A closed-world creative-locks facet, or undefined when absent/cleared.
+ *  Out-of-range numbers fall back to the renderer's own bounds (scale 1.25,
+ *  offset 10%), never to "unbounded". */
+export function sanitizeCreativeLocks(raw: unknown): BrandCreativeLocks | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const l = raw as Record<string, unknown>;
+  const b = (l.overrideBounds && typeof l.overrideBounds === 'object' ? l.overrideBounds : {}) as Record<string, unknown>;
+  const maxScale = typeof b.maxScale === 'number' && Number.isFinite(b.maxScale) && b.maxScale >= 1 && b.maxScale <= 1.25 ? b.maxScale : 1.25;
+  const maxOffsetPct = typeof b.maxOffsetPct === 'number' && Number.isFinite(b.maxOffsetPct) && b.maxOffsetPct >= 0 && b.maxOffsetPct <= 10 ? b.maxOffsetPct : 10;
+  const out: BrandCreativeLocks = {
+    textColours: lockColours(l.textColours),
+    backgroundColours: lockColours(l.backgroundColours),
+    fonts: [...new Set(strList(l.fonts, FONT_MAX).filter((f) => FONT_STACK.test(f)))].slice(0, LOCK_LIST_MAX),
+    overrideBounds: { maxScale, maxOffsetPct },
+  };
+  const logo = l.logo && typeof l.logo === 'object' ? l.logo as Record<string, unknown> : null;
+  if (logo) {
+    const zones = (Array.isArray(logo.zones) ? logo.zones : []).slice(0, 8).flatMap((z) => {
+      if (!z || typeof z !== 'object') return [];
+      const r = z as Record<string, unknown>;
+      const [x, y, w, h] = [pct(r.x), pct(r.y), pct(r.w), pct(r.h)];
+      return x !== null && y !== null && w !== null && h !== null && w > 0 && h > 0 && x + w <= 100 && y + h <= 100 ? [{ x, y, w, h }] : [];
+    });
+    const minPx = typeof logo.minPx === 'number' && Number.isFinite(logo.minPx) ? Math.max(0, Math.min(2000, Math.round(logo.minPx))) : 0;
+    out.logo = { required: logo.required === true, zones, minPx };
+  }
+  const disclaimer = cleanString(l.requiredDisclaimer, TEXT_MAX);
+  if (disclaimer) out.requiredDisclaimer = disclaimer;
+  return out;
+}
+
 // ── Identity facet (ADR 0170) ────────────────────────────────────────────────
 // These values are injected into `:root` AND inlined into a serve-time `<style>`
 // block (Phase 5), so the validators below double as CSS-injection controls:
@@ -213,10 +260,10 @@ function safeFontStack(raw: unknown): string {
 
 /** A bounded asset URL: https / root-relative / small `data:image` only. */
 function safeBrandAsset(raw: unknown): string {
-  const v = cleanString(raw, ASSET_MAX);
+  const v = cleanContent(raw, ASSET_MAX, 'asset');
   if (!v) return '';
   if (ASSET_DATA.test(v)) return v; // safe image data URI (favicon SVG, etc.)
-  return safeUrl(v, ASSET_MAX); // https / mailto / relative; dangerous schemes → ''
+  return contentUrl(v, ASSET_MAX, 'asset'); // https / mailto / relative; dangerous schemes → ''
 }
 
 /** Drop empty-string keys so an identity object never stores blanks. */
@@ -275,9 +322,9 @@ function sanitizeIdentity(raw: unknown): BrandIdentity | undefined {
 
   const wordmarkRaw = (r.wordmark && typeof r.wordmark === 'object' ? r.wordmark : {}) as Record<string, unknown>;
   const wordmark = compact({
-    pre: cleanString(wordmarkRaw.pre, NAME_MAX),
-    emphasis: cleanString(wordmarkRaw.emphasis, NAME_MAX),
-    sub: cleanString(wordmarkRaw.sub, NAME_MAX),
+    pre: cleanContent(wordmarkRaw.pre, NAME_MAX, 'wordmark.pre'),
+    emphasis: cleanContent(wordmarkRaw.emphasis, NAME_MAX, 'wordmark.emphasis'),
+    sub: cleanContent(wordmarkRaw.sub, NAME_MAX, 'wordmark.sub'),
   });
 
   const logoRaw = (r.logo && typeof r.logo === 'object' ? r.logo : {}) as Record<string, unknown>;
@@ -301,14 +348,14 @@ function sanitizeIdentity(raw: unknown): BrandIdentity | undefined {
     serif: safeFontStack(typoRaw.serif),
     sans: safeFontStack(typoRaw.sans),
     mono: safeFontStack(typoRaw.mono),
-    fontsHref: safeUrl(typoRaw.fontsHref, ASSET_MAX),
+    fontsHref: contentUrl(typoRaw.fontsHref, ASSET_MAX, 'fontsHref'),
   });
 
   const domainsRaw = (r.domains && typeof r.domains === 'object' ? r.domains : {}) as Record<string, unknown>;
   const domains = compact({
     primaryDomain: cleanString(domainsRaw.primaryDomain, NAME_MAX),
-    homeUrl: safeUrl(domainsRaw.homeUrl, TEXT_MAX),
-    repoUrl: safeUrl(domainsRaw.repoUrl, TEXT_MAX),
+    homeUrl: contentUrl(domainsRaw.homeUrl, TEXT_MAX, 'homeUrl'),
+    repoUrl: contentUrl(domainsRaw.repoUrl, TEXT_MAX, 'repoUrl'),
   });
 
   const policyRaw = (r.chromePolicy && typeof r.chromePolicy === 'object' ? r.chromePolicy : {}) as Record<
@@ -317,18 +364,18 @@ function sanitizeIdentity(raw: unknown): BrandIdentity | undefined {
   >;
   const chromePolicy = compact({
     showPoweredBy: typeof policyRaw.showPoweredBy === 'boolean' ? policyRaw.showPoweredBy : undefined,
-    customFooter: cleanString(policyRaw.customFooter, TEXT_MAX),
-    customCopyright: cleanString(policyRaw.customCopyright, NAME_MAX),
+    customFooter: cleanContent(policyRaw.customFooter, TEXT_MAX, 'customFooter'),
+    customCopyright: cleanContent(policyRaw.customCopyright, NAME_MAX, 'customCopyright'),
   });
 
   const identity = compact({
-    productName: optionalCleanString(r.productName, NAME_MAX),
+    productName: optionalCleanContent(r.productName, NAME_MAX, 'productName'),
     wordmark,
-    tagline: optionalCleanString(r.tagline, NAME_MAX),
-    footerText: optionalCleanString(r.footerText, TEXT_MAX),
-    instanceName: optionalCleanString(r.instanceName, NAME_MAX),
-    assistantName: optionalCleanString(r.assistantName, NAME_MAX),
-    documentTitle: optionalCleanString(r.documentTitle, NAME_MAX),
+    tagline: optionalCleanContent(r.tagline, NAME_MAX, 'tagline'),
+    footerText: optionalCleanContent(r.footerText, TEXT_MAX, 'footerText'),
+    instanceName: optionalCleanContent(r.instanceName, NAME_MAX, 'instanceName'),
+    assistantName: optionalCleanContent(r.assistantName, NAME_MAX, 'assistantName'),
+    documentTitle: optionalCleanContent(r.documentTitle, NAME_MAX, 'documentTitle'),
     logo,
     colors: Object.keys(colors).length ? colors : undefined,
     typography,
@@ -377,6 +424,7 @@ export async function createBrand(
   if (!name) throw new OpenwopError('validation_error', 'A brand name is required.', 400, { field: 'name' });
   const now = new Date().toISOString();
   const identity = sanitizeIdentity(input.identity);
+  const creativeLocks = sanitizeCreativeLocks(input.creativeLocks);
   const id = randomUUID();
   const parentBrandId = optionalCleanString(input.parentBrandId, NAME_MAX);
   if (parentBrandId) await assertParentInOrg(tenantId, orgId, id, parentBrandId);
@@ -394,6 +442,7 @@ export async function createBrand(
     channelVoiceRules: sanitizeChannelRules(input.channelVoiceRules),
     governance: sanitizeGovernance(input.governance),
     ...(identity ? { identity } : {}),
+    ...(creativeLocks ? { creativeLocks } : {}),
     createdBy,
     createdAt: now,
     updatedAt: now,
@@ -420,7 +469,10 @@ export async function ensureBrand(
   input: BrandInput,
 ): Promise<Brand> {
   const existing = await getBrand(tenantId, brandId);
-  if (existing) return existing;
+  if (existing) {
+    if (existing.orgId !== orgId) throw new OpenwopError('conflict', 'This brand id belongs to another organization.', 409, { brandId });
+    return existing;
+  }
   const now = new Date().toISOString();
   const identity = sanitizeIdentity(input.identity);
   const brand: Brand = {
@@ -440,7 +492,11 @@ export async function ensureBrand(
     createdAt: now,
     updatedAt: now,
   };
-  await brands.put(brand);
+  if (!(await brands.putIfAbsent(brand))) {
+    const winner = await getBrand(tenantId, brandId);
+    if (!winner || winner.orgId !== orgId) throw new OpenwopError('conflict', 'The brand changed while it was being created.', 409, { brandId });
+    return winner;
+  }
   return brand;
 }
 
@@ -486,7 +542,15 @@ export async function updateBrand(
     if (nextIdentity) next.identity = nextIdentity;
     else delete next.identity;
   }
-  await brands.put(next);
+  // ADR 0946 D4 — creative locks: whole-field replace; null or garbage clears.
+  if (input.creativeLocks !== undefined) {
+    const nextLocks = sanitizeCreativeLocks(input.creativeLocks);
+    if (nextLocks) next.creativeLocks = nextLocks;
+    else delete next.creativeLocks;
+  }
+  if (!(await brands.compareAndSwap(existing, next))) {
+    throw new OpenwopError('conflict', 'This brand changed while it was being saved. Reload and reapply your edits.', 409, { brandId });
+  }
   // BRAND-CODE-7 — best-effort audit (see createBrand).
   try { await recordBrandAudit(tenantId, next.id, actor, existing, next); }
   catch (e) { log.warn('brand audit write failed (update) — mutation applied, trail incomplete', { brandId: next.id, error: e instanceof Error ? e.message : String(e) }); }
@@ -590,7 +654,7 @@ const brandAudit = new DurableCollection<BrandAuditRow>('brand:audit', (r) => `$
 const AUDIT_CAP = 500;
 // ADR 0891 (grade BR2CD-2): `name` and `identity` too — the app brand's super-admin
 // edits are identity edits, and without them D9's attributed actor was never written.
-const AUDIT_FIELDS = ['name', 'keyPhrases', 'channelVoiceRules', 'governance', 'positioning', 'voiceProfile', 'identity'] as const;
+const AUDIT_FIELDS = ['name', 'keyPhrases', 'channelVoiceRules', 'governance', 'positioning', 'voiceProfile', 'identity', 'creativeLocks'] as const; // ADR 0946 D4 — lock changes are guardrail changes
 
 /** Record a guardrail-relevant diff (no-op when nothing relevant changed). */
 export async function recordBrandAudit(tenantId: string, brandId: string, actor: string, before: Partial<Brand> | null, after: Partial<Brand>): Promise<void> {

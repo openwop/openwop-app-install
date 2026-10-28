@@ -24,6 +24,12 @@ import {
   type BudgetRecommendation, type CampaignForecast, type OrgRef, type AttributionReport, type PacingReport,
   planBudget, type BudgetPlanDto,
 } from './campaignIntelClient.js';
+import { MultiTouchSection } from './MultiTouchSection.js';
+import { ReconciliationSection } from './ReconciliationSection.js';
+import { AdMapSection } from './AdMapSection.js';
+import { ReallocationPlansPanel } from './ReallocationPlansPanel.js';
+import { SpendCapsPanel } from './SpendCapsPanel.js';
+import { StagedAlertAction, isStagedAction } from './StagedAlertAction.js';
 
 // CMPUX-15: currency is threaded from the read model (per-row for attribution +
 // pacing, report-level otherwise) — no hardcoded USD.
@@ -82,11 +88,16 @@ export function CampaignIntelPage(): JSX.Element {
   // ?org=&campaign= — honor the org one-shot and scroll to + highlight the row.
   const [orgId, setOrgId] = useState(() => searchParams.get('org') ?? '');
   const focusCampaign = searchParams.get('campaign');
+  // ADR 0952 D4 — an alert's staged action and the cap it is about.
+  const stagedAction = searchParams.get('stage');
+  const focusCap = searchParams.get('cap');
+  const [plansRefresh, setPlansRefresh] = useState(0);
   const focusRef = useRef<HTMLLIElement | null>(null);
   const [budget, setBudget] = useState<BudgetRecommendation | null>(null);
   const [forecasts, setForecasts] = useState<CampaignForecast[] | null>(null);
   const [attribution, setAttribution] = useState<AttributionReport | null>(null);
   const [pacing, setPacing] = useState<PacingReport | null>(null);
+  const stagedCampaignName = pacing?.rows.find((r) => r.campaignId === focusCampaign)?.name;
   // R3 CI-SP-8 remainder — the anomaly detector (ADR 0357 P2), built-but-
   // unreachable until now. null = not loaded/failed (named in sectionsFailed).
   const [anomalies, setAnomalies] = useState<Anomaly[] | null>(null);
@@ -165,6 +176,8 @@ export function CampaignIntelPage(): JSX.Element {
   // pacing row's currency re-labelled the mixed org's figures, resurrecting
   // the exact defect round 1 fixed. Unknown renders unlabelled too.
   const currencyMixed = attribution?.currencyMixed === true;
+  // ADR 0956 D1 — the session-last-click column, when the backend sends it.
+  const hasSessionLastClick = (attribution?.rows ?? []).some((r) => r.sessionLastClick !== undefined);
   const currencyUnknown = attribution === null;
   const unlabelled = currencyMixed || currencyUnknown;
   // R2 CI-SP-9 — the honest "data through" marker: the newest spend date the
@@ -231,6 +244,16 @@ export function CampaignIntelPage(): JSX.Element {
               {focusCampaign && pacing && !pacing.rows.some((r) => r.campaignId === focusCampaign) ? (
                 <Notice variant="info">{t('focusCampaignGone')}</Notice>
               ) : null}
+              {/* ADR 0952 D3 — reallocation plans awaiting approval or applied;
+                  renders nothing until a plan exists. */}
+              {orgId && isStagedAction(stagedAction) ? (
+                <StagedAlertAction action={stagedAction} orgId={orgId} campaignId={focusCampaign}
+                  {...(stagedCampaignName ? { campaignName: stagedCampaignName } : {})}
+                  onProposed={() => setPlansRefresh((n) => n + 1)} />
+              ) : null}
+              {orgId ? <ReallocationPlansPanel orgId={orgId} refreshKey={plansRefresh} /> : null}
+              {/* ADR 0952 D2 — hard spend caps. */}
+              {orgId ? <SpendCapsPanel orgId={orgId} campaigns={(pacing?.rows ?? []).map((r) => ({ id: r.campaignId, name: r.name }))} focusCapId={focusCap} /> : null}
               {/* ADR 0357 P1 — goal-based planning: deterministic math, labeled
                   confidence. CS-UX-16: rendered regardless of `hasData` so a
                   data-less org still discovers the planner — submitting without
@@ -396,7 +419,7 @@ export function CampaignIntelPage(): JSX.Element {
                   <p className="muted u-fs-13 u-mt-0">{t('attributionHint')}</p>
                   <div className="table-scroll table--stack">
                   <table className="u-w-full">
-                    <thead><tr className="muted u-fs-13"><th scope="col" className="u-text-left u-py-2">{t('colCampaign')}</th><th scope="col" className="u-text-right u-py-2">{t('colSpend')}</th><th scope="col" className="u-text-right u-py-2">{t('colPlatformConv')}</th><th scope="col" className="u-text-right u-py-2">{t('colWebConv')}</th><th scope="col" className="u-text-right u-py-2">{t('colCpa')}</th></tr></thead>
+                    <thead><tr className="muted u-fs-13"><th scope="col" className="u-text-left u-py-2">{t('colCampaign')}</th><th scope="col" className="u-text-right u-py-2">{t('colSpend')}</th><th scope="col" className="u-text-right u-py-2">{t('colPlatformConv')}</th><th scope="col" className="u-text-right u-py-2">{t('colWebConv')}</th>{hasSessionLastClick ? <th scope="col" className="u-text-right u-py-2">{t('colSessionLastClick')}</th> : null}<th scope="col" className="u-text-right u-py-2">{t('colCpa')}</th></tr></thead>
                     <tbody>
                       {attribution.rows.map((r) => (
                         <tr key={r.campaignId}>
@@ -404,6 +427,7 @@ export function CampaignIntelPage(): JSX.Element {
                           <td className="u-text-right u-py-2"><span className="data-stack-label">{t('colSpend')}</span>{money(r.spend, r.currency)}</td>
                           <td className="u-text-right u-py-2"><span className="data-stack-label">{t('colPlatformConv')}</span>{formatNumber(r.platformConversions)}</td>
                           <td className="u-text-right u-py-2"><span className="data-stack-label">{t('colWebConv')}</span>{formatNumber(r.webConversions)}</td>
+                          {hasSessionLastClick ? <td className="u-text-right u-py-2"><span className="data-stack-label">{t('colSessionLastClick')}</span>{formatNumber(r.sessionLastClick ?? 0)}</td> : null}
                           <td className="u-text-right u-py-2"><span className="data-stack-label">{t('colCpa')}</span>{r.webConversions > 0 ? money(r.attributedCpa, r.currency) : <><span aria-hidden="true">—</span><span className="sr-only">{t('cpaNotApplicable')}</span></>}</td>
                         </tr>
                       ))}
@@ -411,8 +435,13 @@ export function CampaignIntelPage(): JSX.Element {
                   </table>
                   </div>
                   {attribution.unattributedConversions > 0 ? <p className="muted u-fs-13 u-mb-0">{t('unattributed', { count: attribution.unattributedConversions })}</p> : null}
+                  {hasSessionLastClick ? <p className="muted u-fs-13 u-mb-0">{t('sessionLastClickNote', { days: attribution.lookbackDays ?? 30 })}</p> : null}
                 </section>
               ) : null}
+
+              {orgId && attribution ? <MultiTouchSection orgId={orgId} /> : null}
+              {orgId && attribution ? <ReconciliationSection orgId={orgId} /> : null}
+              {orgId && attribution ? <AdMapSection orgId={orgId} /> : null}
 
               {forecasts && forecasts.length > 0 ? (
                 <section className="surface-card">

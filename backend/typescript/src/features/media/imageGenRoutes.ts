@@ -29,7 +29,7 @@ import { NATIVE_IMAGE_PROVIDERS, IMAGE_OP_SUPPORT } from '../../providers/dispat
 import { resolveSecret, listSecretRefs } from '../../byok/secretResolver.js';
 import { resolveMediaAsset } from '../../host/inMemorySurfaces.js';
 import * as mediaStorage from './mediaStorage.js';
-import { withOrgCapacity, createAsset, findAssetByContentHash, getAsset, mergeAssetMetadataOnDedup, viewAsset, type MediaAssetLineage } from './mediaService.js';
+import { withOrgCapacity, createAsset, findAssetByContentHash, getAsset, mergeAssetMetadataOnDedup, viewAsset, groundingForGenerated, stampGroundingIfAbsent, type MediaAssetLineage } from './mediaService.js';
 import { sniffImageType } from '../../host/allowedUploadMime.js';
 
 const MAX = { prompt: 4_000, model: 200, n: 4 } as const;
@@ -145,9 +145,13 @@ export function registerImageGenRoutes(deps: RouteDeps): void {
         if (!contentType) continue;
         const contentHash = createHash('sha256').update(Buffer.from(entry.contentBase64, 'base64')).digest('hex');
         const lineage = { generatedBy: 'ai', prompt: prompt.slice(0, 500), provider, ...(optionalString(body.model) ? { model: optionalString(body.model) } : {}), op: 'generate' };
+        // ADR 0945 D4 — the write-once provenance stamp (full-prompt hash, the
+        // model the adapter actually dispatched), from the adapter's record.
+        const grounding = await groundingForGenerated(tenantId, orgId, entry.aiOrigin, { claimedLineage: lineage });
         const existing = await findAssetByContentHash(tenantId, orgId, contentHash);
         if (existing) {
-          assets.push(viewAsset(await mergeAssetMetadataOnDedup(existing, {})));
+          const stamped = grounding ? await stampGroundingIfAbsent(existing, grounding) : existing;
+          assets.push(viewAsset(await mergeAssetMetadataOnDedup(stamped, {})));
           continue;
         }
         const asset = await withOrgCapacity(tenantId, orgId, entry.bytes, async () => {
@@ -164,6 +168,7 @@ export function registerImageGenRoutes(deps: RouteDeps): void {
             tags: ['ai-generated'],
             uploadedBy: user.userId,
             lineage,
+            ...(grounding ? { grounding } : {}),
             contentHash,
           });
         });
@@ -191,6 +196,9 @@ export function registerImageGenRoutes(deps: RouteDeps): void {
     if (!source) throw new OpenwopError('not_found', 'Asset not found.', 404, { assetId: req.params.assetId });
     const entry = await resolveMediaAsset(source.serveToken);
     if (!entry || entry.tenantId !== tenantId) throw new OpenwopError('not_found', 'Asset bytes unavailable.', 404, {});
+    // ADR 0945 D4 — the source is KNOWN here: pin it by id and the hash of the
+    // bytes actually sent, so the audit trail survives the source's deletion.
+    const sourceSha = createHash('sha256').update(Buffer.from(entry.contentBase64, 'base64')).digest('hex');
 
     const provider = optionalString(body.provider) ?? 'replicate';
     const allowMock = provider === 'mock' && process.env.OPENWOP_TEST_SEAM_ENABLED === 'true';
@@ -233,8 +241,13 @@ export function registerImageGenRoutes(deps: RouteDeps): void {
       const contentType = sniffImageType(Buffer.from(out.contentBase64, 'base64')); // ADR 0818 §2
       if (!contentType) continue;
       const contentHash = createHash('sha256').update(Buffer.from(out.contentBase64, 'base64')).digest('hex');
+      const grounding = await groundingForGenerated(tenantId, orgId, out.aiOrigin, { claimedLineage: { ...derived.lineage, generatedBy: 'ai', provider }, source: { asset: source, sha256: sourceSha } });
       const existing = await findAssetByContentHash(tenantId, orgId, contentHash);
-      if (existing) { assets.push(viewAsset(await mergeAssetMetadataOnDedup(existing, {}))); continue; }
+      if (existing) {
+        const stamped = grounding ? await stampGroundingIfAbsent(existing, grounding) : existing;
+        assets.push(viewAsset(await mergeAssetMetadataOnDedup(stamped, {})));
+        continue;
+      }
       const asset = await withOrgCapacity(tenantId, orgId, out.bytes, async () => {
         const stored = await mediaStorage.put(tenantId, { contentBase64: out.contentBase64, contentType });
         return createAsset({
@@ -247,6 +260,7 @@ export function registerImageGenRoutes(deps: RouteDeps): void {
           tags: ['ai-generated'],
           uploadedBy: user.userId,
           lineage: { ...derived.lineage, derivedFrom: source.assetId, generatedBy: 'ai', provider },
+          ...(grounding ? { grounding } : {}),
           contentHash,
         });
       });

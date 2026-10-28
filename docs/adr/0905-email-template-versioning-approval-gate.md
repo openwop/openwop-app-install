@@ -1,6 +1,6 @@
 # ADR 0905 — Email: versioned templates, a version-pinned send approval, transactional templates, subscription topics
 
-**Status:** Accepted (2026-10-17) — plan only, no code. Architect-reviewed (§ Architect review). Live spend, vendor accounts and IAM wait on § Open decisions for David.
+**Status:** Accepted (2026-10-17); **P0–P2b implemented and deployed** (2026-10-19, see § Implementation record); P2c, P3, P4 and the 0922 follow-up in review. P5 waits on Open decision 3. Architect-reviewed (§ Architect review).
 **Date:** 2026-10-17
 **Feature:** `email` (extends ADRs 0019, 0193, 0217, 0227, 0655, 0848, 0895). New toggle
 `email-approval-gate` (P2).
@@ -139,6 +139,16 @@ live template. This fixes the mid-send-edit defect independently of approval and
   is a continuation, `emailService.ts:533-536`; refusing it would strand every in-flight send the
   moment the gate turns on); the send then stamps `sendPin` from the **approved** pin (D2). Resend of a
   `sent` campaign requires a fresh approval cycle.
+  **Correction (2026-10-21, recovery):** the first send check alone does not
+  authorize a retry against a different campaign row. Send admission re-reads and
+  fences the original review snapshot, generation, template and audience before
+  creating or adopting a pin. A withdrawn/invalidated/newer review or already
+  completed generation refuses without modifying it. Continuations re-check their
+  exact pin/generation, and completion cannot overwrite a newer generation/review
+  or downgrade a peer's completed send. Campaign CAS is the admission boundary;
+  separate template/settings writes and their invalidation are not one transaction.
+  Storage-barrier witnesses are authored in `adr0905-p2-send-approval.test.ts`;
+  executable validation remains pending the serialized recovery gate.
 - **Notifications:** the existing approval notification path (`emailApprovalDelivery`,
   ADR 0010 emit seam) carries "approval requested" — MyndHyve's `approval_requested` /
   `approval_escalated` templates map here, not to new sends.
@@ -195,6 +205,17 @@ it never widens consent (ADR 0655). The check is a narrowing argument **inside t
 `consentService.ts`), and the topic rows register a subject eraser (ADR 0464). "Unsubscribe from everything" stays the existing full
 marketing opt-out and **never touches transactional mail** (MyndHyve wart fixed). Topics are
 internal state, provider-agnostic; nothing is mirrored to SendGrid ASM.
+
+**Correction (2026-10-21, recovery):** an unsubscribe may bypass the suppression
+check for transactional mail only while the canonical suppression reason is
+`unsubscribed`. Public opt-outs use fresh-read CAS and never downgrade a bounce,
+complaint or manual hold; unreadable/malformed identity refuses. Topic writes use
+consent's existing before/after erasure barrier. Merge provenance is non-identifying.
+Preference tokens bind their topic org at mint; legacy unbound links keep channel
+controls only. Reads/writes follow CRM's tenant-checked current survivor, with a
+post-write owner check/retry so a concurrent merge cannot strand a refusal. The
+new HTTP/storage-barrier and real-send witnesses in `adr0905-p4-topics.test.ts`
+are authored; executable validation remains pending the serialized recovery gate.
 
 **D8 — Keep opaque unsubscribe tokens; do not port HMAC.** Existing `tok:<uuid>` rows are
 revocable, carry no PII and never expire — strictly better than MyndHyve's 30-day HMAC with the
@@ -309,6 +330,29 @@ SendGrid key) is an operator config step after P3, not a code dependency.
 
 **P5 — platform product-updates list.** (S, 1 d) · David: **yes** — Open decision 3 (product scope).
 
+## Implementation record
+
+Every PR lands red-first (its first commit is the failing test) and had an
+`/architect` pass before coding.
+
+| Phase | PR | Merge / state | Notes |
+|---|---|---|---|
+| P0 send pin + delete guard | #4918 | `9cfa71aa7` | pin carries the bytes; refused sends stay draft; legacy `sending` pinned on first continuation |
+| P1 template versions | #4922 | `4eabb1395` | **Correction to D1:** a rename alone does NOT create a version (the name is not delivered content; a version would stale a review for nothing) |
+| P2a self-check hoist | #4941 | `dc4ec1de2` | identity core in `host/approvalSelfCheck.ts`; CMS behaviour unchanged |
+| P2b approval kind + gate | #4928 | `9e4220fe3` | **Correction to D3:** a `sending` campaign that holds this generation's pin always continues under the gate, including one started before the gate was turned on (E4, slightly wider than the ADR sentence). The gate read is an allowlisted `resolveToggle` (ADR 0819 §1: OFF loosens a restriction) |
+| **Deployed** | — | `9e4220fe3` on rev `01015-cvf` (rollback `01014-g6j`) | 2026-10-19; `email-approval-gate` OFF (EM0905-1) |
+| P2c review UI + agent/node lane | #4929 | in review | `submit-for-review` node served on replay (real-executor witness); steward manifest + parity + safe-mode census updated |
+| P4 topics | #4933 | in review | **Correction to D7:** an `unsubscribed` suppression no longer blocks transactional mail (EMWF-18) — the D7 claim was not true in code before this |
+| P3 seam | #4932 | in review | registry in `host/transactionalEmail.ts`; transport registered by `email`; commerce → email import removed |
+| P3 senders | #4942 commerce · #4972 invitations · #4973 approval notices · #4974 e-sign · #4975 booking | in review | delivery unchanged per sender; e-sign legal notice stays verbatim English (counsel-owned). `billing/funnelWeeklySummary` and seller-payout-failed send no email on this host — nothing to migrate |
+| Follow-up for ADR 0922 | #5020 | in review | opt-in `refuseIfSent` → 409 `template_sent` (send hold CAS on the template row); approved sends re-check the approval's hash inside that CAS (409 `approval_stale`); `campaignsUsingTemplate()` |
+| P5 platform list | — | not built | Open decision 3 |
+
+**Not expressible in code:** "ON in the MyndHyve distribution" (D4). There is no
+`distributions/myndhyve.json`, and distribution manifests carry no toggle status, so
+this is an operator toggle flip (`docs/steward/TODO.md` EM0905-1).
+
 ## Tests
 
 Per-phase tests are named in the implementation plan above. Every phase lands red-first:
@@ -343,3 +387,51 @@ the failing test is committed before the fix, so each PR shows the defect and it
 **Boundaries:** one approval queue, one egress, one transactional seam, one consent evaluator.
 **RFC (Track B):** confirmed host-extension **because** E1 was resolved without a protocol scope.
 **Verdict:** Accepted as a plan.
+
+## Recovery correction — send review identity and write ambiguity, 2026-10-21
+
+The P2/P2c implementation originally compared the current send pin with the
+approval row, but accepted no digest of the review the person actually saw.
+A sender/audience repin could therefore change that row while retaining the
+same template `contentHash`. It also reread the approval before its resolution
+CAS, and an actorless workflow omitted its causing member from separation of
+duties. These are corrections to D3/D5, within the existing host extension.
+
+The approval now stores a separate `emailSend.reviewHash` over campaign/template
+identity and version, template content hash, sender, audience definition hash,
+subject, body and format. Approval requires that exact displayed digest in the
+existing `expectedContentHash` request field; rejection remains possible without
+it. Legacy rows require resubmission. Both the approval inbox and unified review
+card show the same pinned content and echo this digest. Recipient count remains
+an estimate; membership, consent and suppression still resolve at send time.
+
+Resolution CAS uses the exact approval snapshot whose pin, authority and digest
+were checked. Every creation and repin also receives a fresh opaque host ownership
+revision outside the semantic digest: an identical concurrent submission cannot
+be mistaken for the old request during compensation. Campaign transition also checks the original cycle, approval ID
+and pin, then verifies its own outcome and decision attribution. Compensation is
+awaited and can reopen only that exact resolved approval, while its subject is
+still under that review. The campaign mutation helper returns the row it actually
+CAS-wrote, so a later send, withdrawal or read fault cannot turn a successful
+write into a failed decision. A lost write acknowledgement is reconciled against
+the decision's exact cycle/pin/outcome/decider/timestamp before any compensation.
+Unreadable or already closed subjects retain an ambiguous resolved approval
+rather than resurrecting a review after a possible committed effect.
+
+Submission captures the actual repin result and verifies the mirrored cycle/pin;
+it refuses a lost repin instead of falling through and closing another submission.
+A failed new mirror closes only the exact newly created approval. A committed
+mirror followed by an acknowledgement fault is recognized without rejecting it.
+An unreadable mirror remains recoverable by resubmission; no failure is reported
+as a validated send or delivery.
+
+Actorless workflow submissions union the trusted `runOrgScopeSubject` into
+`submitterCauses`, alongside the existing `submitters` list for self-approval
+refusal only. The cause never becomes `submittedBy` or selects a notification
+actor or recipient. An explicit actor takes precedence, and subject erasure covers both
+lists. No send/approve method or new scope is added to the workflow surface.
+
+New HTTP, unified-card, exact-row CAS, write-acknowledgement, compensation-fault,
+actorless real-executor and erasure witnesses are authored. They have **not run**;
+focused and full validation remain pending behind the single resource-monitored
+test slot. This correction does not mark the ADR's later email phases complete.

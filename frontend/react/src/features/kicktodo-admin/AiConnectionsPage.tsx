@@ -17,6 +17,7 @@ import { PageHeader } from '../../ui/PageHeader.js';
 import { StateCard } from '../../ui/StateCard.js';
 import { Notice } from '../../ui/Notice.js';
 import { getCalendarStatus } from '../../client/kicktodoIntegrationsClient.js';
+import { FactoryKeyCard } from './FactoryKeyCard.js';
 
 export function AiConnectionsPage(): JSX.Element {
   const { t } = useTranslation('kicktodo-admin');
@@ -63,6 +64,9 @@ export function AiConnectionsPage(): JSX.Element {
           <p className="muted u-fs-13">{t('calendarDescription')}</p>
         </section>
       )}
+
+      {/* ADR 0910 D8 — the Factory's dedicated key; the Keys page cannot write its ref. */}
+      <FactoryKeyCard />
 
       {/* Provider/BYOK health + delivery live at their own platform authority. */}
       <section className="surface-card" aria-label={t('providerHeading')}>

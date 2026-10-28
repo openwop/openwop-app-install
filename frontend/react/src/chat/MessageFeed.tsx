@@ -556,6 +556,13 @@ export function MessageFeed({
                 {...(onReconfigureBYOK ? { onReconfigureBYOK } : {})}
                 {...channelProps}
               />}
+          {/* ADR 0992 D9 — after the last imported message: imported history is for
+              reading; the model never saw it (the next turn starts a fresh run). */}
+          {m.meta?.imported && displayMessages[i + 1]?.meta?.imported !== true && (
+            <div className="msgfeed-imported-divider" role="note">
+              <span className="msgfeed-imported-note">{t('importedNotice')}</span>
+            </div>
+          )}
           {/* Inline comments (ADR 0021 extension) — a collapsed affordance on a
               settled user/assistant turn. Skipped while streaming (no anchor yet)
               and for system/workflow_run bubbles. Loads its thread only on

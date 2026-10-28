@@ -14,9 +14,18 @@
  * test here MUST cover a pattern listed there.
  *
  * Docker requirement: testcontainers needs a running Docker daemon.
- * The entire suite soft-skips when Docker isn't reachable, so dev
- * machines without Docker keep `npm test` green while CI (with Docker)
- * exercises the full coverage.
+ *
+ * LANES (corrected /grade-tests wave 61): this file does NOT run in the default
+ * gate — `npm run ci` sets `OPENWOP_SKIP_TESTCONTAINERS=1`. It runs only in
+ * `ci:full`'s live lane, which sets `OPENWOP_STORAGE_PARITY_LIVE=1`.
+ *   - `OPENWOP_STORAGE_PARITY_LIVE=1`: Docker is REQUIRED. The probe is
+ *     bypassed and the container is started unconditionally, so a missing
+ *     daemon FAILS the suite instead of skipping it (`scripts/ci.sh` promised
+ *     exactly this; until wave 61 the file never read the flag, so the live
+ *     lane on a Docker-less machine skipped every case green — the H59 class).
+ *     It also overrides `OPENWOP_SKIP_TESTCONTAINERS`.
+ *   - Flag unset: probe for Docker and, when absent, skip LOUDLY (a console
+ *     warning naming the flag), the way `pgvector-live.test.ts` does.
  *
  * Boot cost: pulling postgres:16-alpine on first run is ~80 MB / 30s.
  * Subsequent runs hit the local image cache.
@@ -60,8 +69,23 @@ function isDockerReachable(): boolean {
 
 let container: StartedPostgreSqlContainer | null = null;
 let storage: Storage | null = null;
+/** `ci:full`'s live lane: Docker is required, never probed (see the header). */
+const forceLive = process.env.OPENWOP_STORAGE_PARITY_LIVE === '1';
 /** Resolved at COLLECTION time so `it.skipIf` below sees the real answer. */
-const dockerAvailable = isDockerReachable();
+const dockerAvailable = forceLive || isDockerReachable();
+if (!dockerAvailable) {
+  // Module scope, not `beforeAll`: vitest runs no hooks for a file whose every
+  // case is skipped, so a warning there would never print.
+  const reason = process.env.OPENWOP_SKIP_TESTCONTAINERS === '1'
+    ? 'OPENWOP_SKIP_TESTCONTAINERS=1 (the default `npm run ci` gate)'
+    : 'Docker is not reachable';
+  // Straight to stderr: vitest's console capture drops output from a file
+  // whose every case is skipped (measured wave 61), so `console.warn` was silent.
+  process.stderr.write(
+    `[parity-testcontainers] SKIPPING every real-Postgres parity case: ${reason}. `
+      + 'Nothing in this file was verified. Set OPENWOP_STORAGE_PARITY_LIVE=1 to REQUIRE Docker (ci:full live lane).\n',
+  );
+}
 
 const baseTime = '2026-05-18T10:00:00.000Z';
 
@@ -121,14 +145,8 @@ function mkWebhook(id: string): WebhookSubscriptionRecord {
 }
 
 beforeAll(async () => {
-  if (!dockerAvailable) {
-    // eslint-disable-next-line no-console
-    console.warn(
-      '[parity-testcontainers] Docker not reachable — skipping real-Postgres parity tests. '
-        + 'Set OPENWOP_SKIP_TESTCONTAINERS=1 to suppress this notice in CI environments that intentionally exclude Docker.',
-    );
-    return;
-  }
+  if (!dockerAvailable) return; // announced at module scope (a skipped file runs no hooks)
+  // Under forceLive this throws when Docker is absent: the suite fails loudly.
   container = await new PostgreSqlContainer('postgres:16-alpine').start();
   storage = await openPostgresStorage(container.getConnectionUri());
 }, 120_000); // 2-minute timeout for first-run image pull
@@ -245,6 +263,10 @@ describe('Postgres parity (real DB): events monotonic sequence — CTE-RETURNING
     await s.appendEvent({ runId: run.runId, type: 'node.completed', payload: { artifactId: 'a-2' }, timestamp: baseTime, eventId: 'pg-ef2' });
     await s.appendEvent({ runId: run.runId, type: 'artifact.created', payload: { artifactId: 'a-2', n: 3 }, timestamp: baseTime, eventId: 'pg-ef3' });
     expect((await s.findFirstEventByPayload(run.runId, 'artifact.created', 'artifactId', 'a-2'))?.payload).toEqual({ artifactId: 'a-2', n: 3 });
+    await s.appendEvent({ runId: run.runId, nodeId: 'target', type: 'artifact.created', payload: { artifactId: 'a-2', n: 4 }, timestamp: baseTime, eventId: 'pg-ef4' });
+    await s.appendEvent({ runId: run.runId, nodeId: 'other', type: 'artifact.created', payload: { artifactId: 'a-2', n: 5 }, timestamp: baseTime, eventId: 'pg-ef5' });
+    expect((await s.findFirstEventByPayload(run.runId, 'artifact.created', 'artifactId', 'a-2', { newestFirst: true }))?.eventId).toBe('pg-ef5');
+    expect((await s.findFirstEventByPayload(run.runId, 'artifact.created', 'artifactId', 'a-2', { newestFirst: true, nodeId: 'target' }))?.eventId).toBe('pg-ef4');
     expect(await s.findFirstEventByPayload(run.runId, 'artifact.created', 'artifactId', 'nope')).toBeNull();
   });
 
@@ -292,7 +314,9 @@ describe('Postgres parity (real DB): idempotency — INSERT-ON-CONFLICT-RETURNIN
  * ADR 0549 P0 — the HTTP ledger against a REAL Postgres.
  *
  * This is the only place the Postgres claim path is honestly exercised.
- * `test/storage-postgres.test.ts` runs on pg-mem, which does not faithfully
+ * `test/storage-postgres.test.ts` runs on pg-mem (and, since grade-tests wave 61,
+ * holds no `Storage` double — only the `listAudit` builder and the migrated
+ * `audit_log` schema), and pg-mem does not faithfully
  * implement `ON CONFLICT DO NOTHING ... RETURNING` (it returns the proposed
  * row whether or not the conflict fired), and the production adapter decides
  * claimed-vs-existing precisely on that rowCount. A green pg-mem run therefore
@@ -733,8 +757,9 @@ describe('Postgres parity (real DB): ADR 0549 H56 atomic admission', () => {
  *
  * Added H59 (2026-08-18). The P0 gate row promised "two-instance CAS ... in
  * SQLite/Postgres"; what existed was a sequential If-Match test on SQLite and
- * NOTHING on Postgres. `storage-postgres.test.ts` stubs `putWorkspaceFile` with
- * a `throw new Error('not exercised')` under pg-mem, and its comment claimed
+ * NOTHING on Postgres. `storage-postgres.test.ts`'s hand-written pg-mem double
+ * (deleted in grade-tests wave 61) stubbed `putWorkspaceFile` with a
+ * `throw new Error('not exercised')`, and its comment claimed
  * this file covered the race — it did not: `grep -c workspace` here was 0.
  *
  * These legs use the PRODUCTION `workspaceEtag`, so a version/content mismatch

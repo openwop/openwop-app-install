@@ -7,6 +7,11 @@
  * decision is actually taken: with a platform `deny` on the write class, a tool the model
  * calls is refused and never executes. Each has a control (no rule ⇒ the same call runs),
  * so a green run cannot mean "the tool never ran for some other reason".
+ *
+ * TST-BWA-1 (grade-tests w62): the run-lane ctx is a typed `NodeContext` (no cast).
+ * Red when `firewall` is dropped from the run-lane deps (`agentRunnerNode.ts`), from the
+ * dispatch-lane deps (`liveDispatchLane.ts`), or from the core loop hand-off in
+ * `agentDispatch.ts` (`deps.firewall`) — each turns its "platform deny" case red.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -68,12 +73,14 @@ afterAll(async () => {
 });
 beforeEach(() => { executed.length = 0; round = 0; });
 
+let runSeq = 0;
 async function runLane(): Promise<void> {
-  const ctx = {
-    tenantId: 'default', runId: `run-lane-${Math.random()}`, inputs: { agentId: AGENT, task: 'do it', credentialRef: 'managed:openwop-free' },
-    config: { offerTools: [PROBE] }, configurable: {}, emit: async () => {},
+  const ctx: NodeContext = {
+    tenantId: 'default', runId: `run-lane-${runSeq++}`, nodeId: 'agent', attempt: 1, secrets: {},
+    inputs: { agentId: AGENT, task: 'do it', credentialRef: 'managed:openwop-free' },
+    config: { offerTools: [PROBE] }, configurable: {}, emit: async () => ({ eventId: '', sequence: 0 }),
     callAI: async () => ({ data: 'done' }), callAIWithTools: scriptedToolRound,
-  } as unknown as NodeContext;
+  };
   await agentRunnerNode.execute(ctx);
 }
 

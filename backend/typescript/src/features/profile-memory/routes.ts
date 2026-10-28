@@ -24,7 +24,7 @@
 import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { resolveCallerUser } from '../users/usersGuards.js';
-import { addSubjectNote, listSubjectNotes, removeSubjectNote, countRecallOnlyEntries, type MemorySubject } from '../../host/subjectMemory.js';
+import { addSubjectNote, listSubjectNotes, removeSubjectNote, countRecallOnlyEntries, forgetLearnedFact, type MemorySubject } from '../../host/subjectMemory.js';
 
 export function registerProfileMemoryRoutes(deps: RouteDeps): void {
   const { app } = deps;
@@ -59,6 +59,13 @@ export function registerProfileMemoryRoutes(deps: RouteDeps): void {
   app.delete(`${BASE}/:noteId`, async (req, res, next) => {
     try {
       const user = await resolveCallerUser(req);
+      // ADR 0982 D6 — read the row first: deleting a LEARNED fact also tells the extraction lane
+      // never to learn it again. `removeSubjectNote` deletes by id and cannot know the source.
+      const learned = (await listSubjectNotes(user.tenantId, selfSubject(user.userId)))
+        .find((n) => n.id === req.params.noteId && n.source === 'auto-extract');
+      // Tombstone FIRST (MAE2CD-5): if it failed after the delete, a retry would 404 and the
+      // tombstone would never be written. A tombstone for a fact still present is harmless.
+      if (learned) await forgetLearnedFact(user.tenantId, selfSubject(user.userId), learned.content);
       const outcome = await removeSubjectNote(user.tenantId, selfSubject(user.userId), req.params.noteId);
       if (!outcome.removed) throw new OpenwopError('not_found', 'Memory not found.', 404, { noteId: req.params.noteId });
       // ADR 0666 D2 follow-up — 204 only when the recall index was ALSO cleared. When it was

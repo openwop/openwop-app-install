@@ -11,9 +11,15 @@
  * release-on-abort over a real http server + real client sockets so a future
  * Node/Express bump that breaks teardown delivery fails CI instead of leaking
  * slots in production.
+ *
+ * What breaks it (sabotage-witnessed, /grade-tests wave 61, 8fw3g1-sse-*-real):
+ * the release on close and the onClose wiring. The wait for the server to see
+ * the disconnect is a bounded POLL on the real condition (a new stream fits),
+ * not a fixed sleep; a 200 probe holds a slot, so each poll attempt aborts its
+ * own probe.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
@@ -73,8 +79,6 @@ function probeStatus(): Promise<{ status: number; abort: () => void }> {
   });
 }
 
-const settle = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
-
 describe('sseChannel over real sockets', () => {
   it('client disconnect RELEASES the cap slot (the production leak)', async () => {
     const a = await openStream();
@@ -83,13 +87,13 @@ describe('sseChannel over real sockets', () => {
 
     a.abort();
     b.abort();
-    // Give the server a heartbeat interval + a tick to observe the socket
-    // close and run teardown. If req.on('close') never fires for a completed
-    // bodyless GET, the slots stay consumed and the probe below 429s forever.
-    await settle(300);
-
-    const after = await probeStatus();
-    expect(after.status).toBe(200); // slot released → a new stream fits
-    after.abort();
+    // Poll until the server has observed the socket close and run teardown.
+    // If req.on('close') never fires for a completed bodyless GET, the slots
+    // stay consumed and every probe 429s until the bound.
+    await vi.waitFor(async () => {
+      const after = await probeStatus();
+      after.abort();
+      expect(after.status).toBe(200); // slot released → a new stream fits
+    }, { timeout: 3000, interval: 25 });
   });
 });

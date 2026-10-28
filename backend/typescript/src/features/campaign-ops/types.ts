@@ -13,6 +13,10 @@ export type ClientStatus = 'active' | 'paused' | 'archived';
 export type ClientMode = 'preview' | 'live';
 
 /** ADR 0921 D1 — a client account over an existing org. */
+/** ADR 0962 D7. `auto-within-caps` is not offered (Q1 open). */
+export type ExternalAgentsAccess = 'off' | 'read' | 'request';
+export const EXTERNAL_AGENTS_LEVELS: readonly ExternalAgentsAccess[] = ['off', 'read', 'request'];
+
 export interface ClientAccount {
   tenantId: string;
   /** The client org — the ONLY isolation key. Never the workspace root. */
@@ -21,19 +25,70 @@ export interface ClientAccount {
   status: ClientStatus;
   /** ADR 0926 D3 — new clients start in preview (nothing is written). */
   mode: ClientMode;
-  /** ADR 0924 D4 — v1 supports `agency` only. */
-  approvalPolicy: 'agency';
+  /** ADR 0924 D4 — `agency` (P0) or `client` (P1: a client approver decides
+   *  through the portal). `client_and_agency` is P2. */
+  approvalPolicy: ApprovalPolicyMode;
   /** ADR 0927 D2 — demo rows. */
   synthetic?: true;
+  /** ADR 0962 D7 — what outside agents (MCP) may do for this client. Absent ⇒ `off`. */
+  externalAgents?: ExternalAgentsAccess;
   createdAt: string;
   createdBy: string;
   updatedAt: string;
 }
 
-export type DestinationKind = 'openwop.cms.page';
-export const DESTINATION_KINDS: readonly DestinationKind[] = ['openwop.cms.page'];
+export type ApprovalPolicyMode = 'agency' | 'client';
+export const APPROVAL_POLICY_MODES: readonly ApprovalPolicyMode[] = ['agency', 'client'];
 
-export type AssetLocator = { pageId: string };
+/**
+ * ADR 0924 D5 (P1) — a person at the client who decides change sets through the
+ * portal. NOT an org member and never a session: they act only through a sharing
+ * link minted for one change set. Shaped as ADR 0958's `ExternalCollaborator` of
+ * kind `client-stakeholder`. Since ADR 0958 P1 it is the agency-facing VIEW of
+ * that collaborator (`approverId` = `collaboratorId`); the row is the collaborator.
+ */
+export interface ClientApprover {
+  tenantId: string;
+  orgId: string;
+  approverId: string;
+  kind: 'client-stakeholder';
+  /** PII, declared: shown to the agency only, never on the public page or an approval row. */
+  email: string;
+  displayName: string;
+  /** `suspended` is set through the ADR 0958 collaborators panel. */
+  status: 'active' | 'suspended' | 'revoked';
+  mode: 'link-only';
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+  revokedAt?: string;
+  revokedBy?: string;
+}
+
+/** ADR 0924 D5 — one approval link: (change set, approver). The sharing link row
+ *  holds the token; this row records who sent it, which is the agency authority
+ *  the approved change is written under (a client approver has none). */
+export interface ApprovalLinkRecord {
+  tenantId: string;
+  orgId: string;
+  changeSetId: string;
+  approverId: string;
+  /** ADR 0958 P1 — the `decide` grant behind the link. Absent on a pre-P1 record,
+   *  whose link is not honoured (it is re-sent). */
+  grantId?: string;
+  sentBy: string;
+  sentAt: string;
+}
+
+export type DestinationKind = 'openwop.cms.page' | 'openwop.email.template';
+export const DESTINATION_KINDS: readonly DestinationKind[] = ['openwop.cms.page', 'openwop.email.template'];
+
+/** ADR 0922 D3 — a CMS page of the client org. */
+export type PageLocator = { pageId: string };
+/** ADR 0922 D5 — an ADR 0905 email template of the client org, plus the campaigns
+ *  that send it (checked, with every campaign referencing it, before a write). */
+export type TemplateLocator = { templateId: string; campaignIds?: string[] };
+export type AssetLocator = PageLocator | TemplateLocator;
 
 /** ADR 0922 D1 — one asset of one client. */
 export interface CampaignAsset {
@@ -72,6 +127,9 @@ export type WriteRefusal =
   | 'edit_mismatch'       // `before` / `find` no longer matches the source
   | 'not_authorized'      // the acting user lacks the destination's own authority
   | 'publish_blocked'     // the destination refused the content (e.g. a live page's publish blockers)
+  | 'email_already_sent'  // ADR 0922 D5: a campaign sending or sent this template; sent email is never changed
+  | 'destination_unavailable' // the destination's own feature is off for this tenant
+  | 'creative_blocked'    // ADR 0945 D5 — the edit puts AI creative that failed the publish gate on the page
   | 'asset_gone';
 
 export type WriteOutcome =
@@ -152,6 +210,8 @@ export interface ChangeRequest {
   duplicateOverride?: { reason: string; by: string; at: string };
   changeSetId?: string;
   runIds: string[];
+  /** ADR 0962 D6 — set when an outside agent (MCP) made the request. */
+  via?: { protocol: 'mcp'; runId?: string };
   createdBy: string;
   createdAt: string;
   updatedAt: string;
@@ -187,4 +247,35 @@ export interface ChangeSet {
   createdBy: string;
   createdAt: string;
   updatedAt: string;
+}
+
+/**
+ * ADR 0943 D2 — a client's replacement for the agent a chain pins on its
+ * agent-runner nodes. Keyed by the PINNED agent id (no role vocabulary in code),
+ * optionally narrowed to one workflow or one node of it. Frozen into each run at
+ * start; never read live by a running node.
+ */
+export interface ClientAgentBinding {
+  tenantId: string;
+  /** The client — the only isolation key. */
+  orgId: string;
+  /** Hash of (pinnedAgentId, workflowId?, nodeId?): one row per scope. */
+  bindingId: string;
+  /** The chain's default pin this binding replaces. */
+  pinnedAgentId: string;
+  workflowId?: string;
+  nodeId?: string;
+  /** The replacement (a pack agent or a tenant agent). */
+  agentId: string;
+  /** ADR 0943 D6 — optional model pin; `credentialRef` must be a stored key of the tenant. */
+  model?: { provider: string; model: string; credentialRef?: string };
+  updatedAt: string;
+  updatedBy: string;
+}
+
+/** ADR 0943 D2 — what a run carries per bound node (`run.metadata['openwop-app.agentBindings']`). */
+export interface FrozenAgentBinding {
+  agentId: string;
+  bindingId: string;
+  model?: { provider: string; model: string; credentialRef?: string };
 }

@@ -12,11 +12,17 @@
  *    fires on a CROSSING below the threshold and not on a further drop.
  *  - Every edge into the effect node carries a condition (the effect-reject
  *    ratchet only looks behind approval gates, so it cannot see these plays).
+ *
+ * Tracker TST-BHD-2. Red when (sabotage-witnessed, wave 62): a play's own tasks count
+ * against the score (HIGH-1); task ids stop being deterministic (a re-run duplicates);
+ * the owner is not assigned; a further drop while already red re-fires the rescue; a
+ * same-score save emits a health-changed event; or a due account with no CRM link is
+ * written to instead of skipped.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { getSetCookies } from './headerCookies.js';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
@@ -71,14 +77,11 @@ interface Task { taskId: string; title: string; status: string; companyId?: stri
 interface RunSnapshot { status: string; error?: { code: string; message: string } }
 
 async function pollRun(owner: Client, runId: string): Promise<RunSnapshot> {
-  let snap: RunSnapshot = { status: 'pending' };
-  for (let i = 0; i < 120; i++) {
-    const r = await owner.get<RunSnapshot>(`/runs/${runId}`);
-    snap = r.body;
-    if (['completed', 'failed', 'cancelled'].includes(snap.status)) break;
-    await new Promise((res) => setTimeout(res, 25));
-  }
-  return snap;
+  return vi.waitFor(async () => {
+    const snap = (await owner.get<RunSnapshot>(`/runs/${runId}`)).body;
+    expect(['completed', 'failed', 'cancelled']).toContain(snap.status);
+    return snap;
+  }, { timeout: 10_000, interval: 25 });
 }
 
 async function run(owner: Client, chainId: string, params: Record<string, unknown>): Promise<RunSnapshot> {
@@ -163,19 +166,23 @@ describe('ADR 0882 D7 — csm-ops.renewal-runway', () => {
     expect(acct.status).toBe(201);
     const snap = await run(owner, 'csm-ops.renewal-runway', { days: 90 });
     expect(snap.status).toBe('failed');
-    expect(JSON.stringify(snap.error)).toMatch(/no-crm-link|no_play_targets/);
+    // BOTH halves: the typed refusal AND the reason the account was skipped (an OR of
+    // the two could not tell a skipped account from a failed write).
+    expect(snap.error?.code).toMatch(/(^|\.)no_play_targets$/);
+    expect(snap.error?.message).toContain('no-crm-link');
   });
 });
 
+/** Wait until at least `want` (≥ 1) runs of this binding exist and all have settled. */
 async function runsForBinding(tenantId: string, bindingId: string, want: number): Promise<RunRecord[]> {
-  let found: RunRecord[] = [];
-  for (let i = 0; i < 160; i++) {
+  if (want < 1) throw new Error('runsForBinding waits for at least one run; assert absence after a positive control');
+  return vi.waitFor(async () => {
     const runs = await storage.listRuns({ tenantId, limit: 50 });
-    found = runs.filter((r) => (r.metadata as { hostEvent?: { bindingId?: string } } | undefined)?.hostEvent?.bindingId === bindingId);
-    if (found.length >= want && found.every((r) => r.status !== 'pending' && r.status !== 'running')) break;
-    await new Promise((res) => setTimeout(res, 25));
-  }
-  return found;
+    const found = runs.filter((r) => (r.metadata as { hostEvent?: { bindingId?: string } } | undefined)?.hostEvent?.bindingId === bindingId);
+    expect(found.length).toBeGreaterThanOrEqual(want);
+    expect(found.every((r) => r.status !== 'pending' && r.status !== 'running')).toBe(true);
+    return found;
+  }, { timeout: 10_000, interval: 25 });
 }
 
 describe('ADR 0882 D5/D6 — csm-ops.red-account-rescue, bound to host.csm.account.health-changed', () => {
@@ -207,7 +214,15 @@ describe('ADR 0882 D5/D6 — csm-ops.red-account-rescue, bound to host.csm.accou
     registerWorkflow(expanded);
     const binding = await createHostEventBinding({ tenantId, eventType: 'host.csm.account.health-changed', workflowId: expanded.workflowId, createdBy: userId });
     expect((await owner.patch(`/host/openwop-app/csm/accounts/${encodeURIComponent(accountId)}`, { healthScore: 30 })).status).toBe(200);
-    await new Promise((res) => setTimeout(res, 300));
-    expect(await runsForBinding(tenantId, binding.bindingId, 0)).toHaveLength(0);
+    // Positive control: a CHANGING save (30 → 25, already red) does emit — one run,
+    // which completes without a ladder. Exactly one run proves the same-score save
+    // above added none (the pipeline is live, so its absence is not a slow bus).
+    expect((await owner.patch(`/host/openwop-app/csm/accounts/${encodeURIComponent(accountId)}`, { healthScore: 25 })).status).toBe(200);
+    const runs = await runsForBinding(tenantId, binding.bindingId, 1);
+    expect(runs).toHaveLength(1);
+    // …and that one run is the 25 save's (a run for the same-score save would be the
+    // FIRST to appear, so this also catches it when the wait returns early).
+    const fired = (runs[0]!.metadata as { triggerData?: { payload?: { healthScore?: number } } } | undefined)?.triggerData?.payload?.healthScore;
+    expect(fired).toBe(25);
   });
 });

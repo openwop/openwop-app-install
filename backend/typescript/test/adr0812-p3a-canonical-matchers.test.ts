@@ -11,7 +11,13 @@
  *
  * Each case drives a BARE express app with no negotiator and no auth, so an
  * unversioned URL reaches the mount directly, as it will after P3b. Each one goes
- * red against the old `/v1`-only code.
+ * red against the old `/v1`-only code. Tracker: TST-BVC-2.
+ *
+ * Red when (wave 60 probes w60g4-p3a-*): the seam guard, a raw-body parser or
+ * a large-upload parser is mounted on `/v1` only; the bound-id tenant check is
+ * skipped; a browser `/v1` navigation or a protocol client falls through to
+ * the page; a `/v1` spelling counts as public; the credential-optional read
+ * admits a write; a source mount or middleware regex is keyed on `/v1`.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -60,12 +66,10 @@ describe('ADR 0812 P3a — test-seam and packs-test guards (GC-1)', () => {
     registerPackTestRoutes(app);
     // No route below this answers 404, so a missed guard reads as 404, not 401.
     const base = await listen(app);
-    for (const bare of ['/host/sample/anything', '/host/openwop-app/test/mock-ai/program', '/packs-test/reset']) {
-      for (const path of [bare]) {
-        const r = await fetch(`${base}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
-        expect(r.status, `${path} must be guarded`).toBe(401);
-        expect(((await r.json()) as { details?: { reason?: string } }).details?.reason, path).toBe('anonymous_principal_refused');
-      }
+    for (const path of ['/host/sample/anything', '/host/openwop-app/test/mock-ai/program', '/packs-test/reset']) {
+      const r = await fetch(`${base}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+      expect(r.status, `${path} must be guarded`).toBe(401);
+      expect(((await r.json()) as { details?: { reason?: string } }).details?.reason, path).toBe('anonymous_principal_refused');
     }
   });
 });
@@ -93,11 +97,9 @@ describe('ADR 0812 P3a — scoped body parsers', () => {
       '/host/openwop-app/public-email/events',
     ];
     const body = JSON.stringify({ id: 'evt_1' });
-    for (const bare of webhooks) {
-      for (const path of [bare]) {
-        const r = (await (await fetch(`${base}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body })).json()) as { rawLen: number | null };
-        expect(r.rawLen, `${path} raw body`).toBe(Buffer.byteLength(body));
-      }
+    for (const path of webhooks) {
+      const r = (await (await fetch(`${base}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body })).json()) as { rawLen: number | null };
+      expect(r.rawLen, `${path} raw body`).toBe(Buffer.byteLength(body));
     }
     // Twilio posts urlencoded to the inbound prefix: same capture.
     for (const path of ['/host/openwop-app/connections-inbound/x']) {
@@ -123,12 +125,10 @@ describe('ADR 0812 P3a — scoped body parsers', () => {
       '/host/openwop-app/canvas-packs/d1',
     ];
     const body = JSON.stringify({ pad: 'x'.repeat(2 * 1024 * 1024) });
-    for (const bare of large) {
-      for (const path of [bare]) {
-        const res = await fetch(`${base}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body });
-        expect(res.status, path).toBe(200);
-        expect(((await res.json()) as { parsed: boolean }).parsed, `${path} parsed by its scoped parser`).toBe(true);
-      }
+    for (const path of large) {
+      const res = await fetch(`${base}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body });
+      expect(res.status, path).toBe(200);
+      expect(((await res.json()) as { parsed: boolean }).parsed, `${path} parsed by its scoped parser`).toBe(true);
     }
   });
 });
@@ -137,7 +137,7 @@ describe('ADR 0812 P3a — v2Identity bound-id guard (tenant isolation)', () => 
   it('checks and strips a bound id on both spellings', async () => {
     const app = express();
     app.use((req: Request, _res: Response, next: NextFunction) => {
-      (req as unknown as Record<symbol, unknown>)[Symbol.for('openwop.protocol.major')] = 2;
+      Object.defineProperty(req, Symbol.for('openwop.protocol.major'), { value: 2, writable: true, configurable: true });
       (req as Request & { tenantId?: string }).tenantId = 'tenant-a';
       next();
     });
@@ -163,10 +163,9 @@ describe('ADR 0812 P3a — v2Identity bound-id guard (tenant isolation)', () => 
 describe('ADR 0812 P3a hotfix — a browser navigation to a bare /runs/<id> is the SPA page, not the wire', () => {
   it('a text/html navigation falls through; a protocol client and the /v1 spelling are still guarded', async () => {
     // Major 1 is retired, which is what makes a BARE id a 400 (the shape that broke the SPA).
-    {
     const app = express();
     app.use((req: Request, _res: Response, next: NextFunction) => {
-      (req as unknown as Record<symbol, unknown>)[Symbol.for('openwop.protocol.major')] = 2;
+      Object.defineProperty(req, Symbol.for('openwop.protocol.major'), { value: 2, writable: true, configurable: true });
       (req as Request & { tenantId?: string }).tenantId = 'tenant-a';
       next();
     });
@@ -193,7 +192,6 @@ describe('ADR 0812 P3a hotfix — a browser navigation to a bare /runs/<id> is t
     expect((await fetch(`${base}${V1}/runs/tenant-b%2F${opaque}`, { headers: browser })).status).toBe(403);
     // …and a protocol client presenting a BARE id on a retired-v1 host is still refused.
     expect((await fetch(`${base}/runs/${opaque}`, { headers: { accept: 'application/json' } })).status).toBe(400);
-    }
   });
 });
 
@@ -219,7 +217,8 @@ describe('ADR 0812 P3a — path predicates', () => {
     }
     expect(__isSseExemptPathForTests('/host/openwop-app/public-forms/f1/submit')).toBe(false);
     expect(isCredentialOptionalRead('GET', '/content/pages/home')).toBe(true);
-    expect(isCredentialOptionalRead('POST', '/content/pages')).toBe(false);
+    // The same path, so only the METHOD can refuse the write.
+    expect(isCredentialOptionalRead('POST', '/content/pages/home')).toBe(false);
   });
 });
 

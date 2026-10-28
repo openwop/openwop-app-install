@@ -36,12 +36,12 @@ let sid: string;
 const ENV_KEYS = ['OPENWOP_STORAGE_DSN', 'OPENWOP_AUTH_DISABLE_COOKIES', 'OPENWOP_API_KEYS'] as const;
 const savedEnv = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
 
-async function req(path: string, init: RequestInit = {}, token: string | null = OWNER_TOKEN): Promise<{ status: number; text: string; ct: string }> {
+async function req(path: string, init: RequestInit = {}, token: string | null = OWNER_TOKEN): Promise<{ status: number; text: string; ct: string; headers: Record<string, string> }> {
   const res = await fetch(`${BASE}${path}`, {
     ...init,
     headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), 'content-type': 'application/json', ...(init.headers ?? {}) },
   });
-  return { status: res.status, text: await res.text(), ct: res.headers.get('content-type') ?? '' };
+  return { status: res.status, text: await res.text(), ct: res.headers.get('content-type') ?? '', headers: Object.fromEntries(res.headers.entries()) };
 }
 const j = (path: string, init: RequestInit = {}): ReturnType<typeof req> => req(path, init, OWNER_TOKEN);
 const asPeer = (path: string, init: RequestInit = {}): ReturnType<typeof req> => req(path, init, PEER_TOKEN);
@@ -70,6 +70,8 @@ describe('chat-export route', () => {
     expect(r.ct).toContain('markdown');
     expect(r.text).toContain('# Export me');
     expect(r.text).toContain('hello export');
+    // ADR 0992 D9 — the download is named after the conversation, not its UUID.
+    expect(r.headers['content-disposition']).toBe('attachment; filename="export-me.md"');
   });
 
   it('renders the openwop-v1 JSON with ?format=json', async () => {
@@ -78,7 +80,7 @@ describe('chat-export route', () => {
     const body = JSON.parse(r.text) as { version: string; conversation: { sessionId: string; title: string }; messages: Array<{ role: string; content: string }> };
     expect(body.version).toBe('openwop-v1');
     expect(body.conversation).toMatchObject({ sessionId: sid, title: 'Export me' });
-    expect(body.messages).toEqual([expect.objectContaining({ role: 'user', content: 'hello export' })]);
+    expect(body.messages).toEqual([expect.objectContaining({ role: 'user', content: 'hello export', text: 'hello export', speaker: 'User' })]);
   });
 
   it('404s a non-existent conversation', async () => {
@@ -106,13 +108,12 @@ describe('chat-export route', () => {
     expect(JSON.parse(r.text)).toMatchObject({ error: 'validation_error', details: { field: 'format' } });
   });
 
-  // BLOCKED-ON-PRODUCT (wave 24, filed to grade-code): `importParser.ts` throws a plain
-  // `Error` with `.code='validation_error'`, not an `OpenwopError`, so the error
-  // envelope middleware maps it to `500 internal_error`. The correct outcome is a 400
-  // `validation_error`. This case asserts the CORRECT outcome and is `it.fails` until the
-  // parser throws an `OpenwopError` (or the route maps it) — then flip it to `it`.
-  it.fails('a malformed openwop body is 400 validation_error, not 500 (BLOCKED-ON-PRODUCT)', async () => {
-    const r = await j('/host/openwop-app/chat-export/import', { method: 'POST', body: JSON.stringify({ format: 'openwop', data: {} }) });
+  // TST-CHT-17 (wave 24): until 2026-10-27 `importParser.ts` threw a plain `Error` with
+  // `.code='validation_error'`, which the error envelope does not map, so a malformed body
+  // answered `500 internal_error`. The parser now throws `OpenwopError(…, 400)` (kept by
+  // ADR 0992 D7, which also types the archive case); both formats are pinned here.
+  it.each(['openwop', 'chatgpt'] as const)('a malformed %s body is 400 validation_error, not 500', async (format) => {
+    const r = await j('/host/openwop-app/chat-export/import', { method: 'POST', body: JSON.stringify({ format, data: {} }) });
     expect(r.status).toBe(400);
     expect(JSON.parse(r.text)).toMatchObject({ error: 'validation_error' });
   });

@@ -189,6 +189,21 @@ describe('BLOCKER 2 — the doors that turn a user-supplied collectionId into a 
     expect((await getAgentKnowledge(tenantId, agentId, { subject: member })).collections).toHaveLength(1);
   });
 
+  it('ADR 0979 D3 (AGKM-10): the workflow retrieve node reads as the run\'s actor — the member\'s run is served, the intruder\'s run and an actorless run are not', async () => {
+    const { tenantId, collectionId, member, intruder } = await boundFixture();
+    const agentId = `agent-node-${n++}`;
+    await upsertAgentProfile(tenantId, agentId, { roleKey: 'kb-agent', autonomy: { level: 'review', specLevel: 'recommend' }, capabilities: ['knowledge'] });
+    await bindToAgent(tenantId, agentId, collectionId, { subject: member }, 'preauthorized');
+    const node = async (scope: { actingUserId?: string; orgScopeSubject?: string }): Promise<{ hasResults: boolean; chunks: unknown[] }> =>
+      (await buildAgentKnowledgeSurface({ tenantId, runId: `run:node-${n++}`, ...scope }).retrieve!({ agentId, query: 'acme merger codename' })) as { hasResults: boolean; chunks: unknown[] };
+    // Positive control first: the binding is live and searchable from a run.
+    expect((await node({ actingUserId: member })).hasResults, 'the member\'s run reads the corpus').toBe(true);
+    // Before ADR 0979 both of these read the project corpus pre-authorized.
+    expect((await node({ actingUserId: intruder })).chunks, 'a non-member\'s run gets no chunk text').toEqual([]);
+    expect((await node({})).chunks, 'an actorless run gets no subject-bound corpus').toEqual([]);
+    expect((await node({ orgScopeSubject: member })).chunks, 'the causing member is an org floor, never a subject that grants').toEqual([]);
+  });
+
   it('profile-memory: the intruder cannot bind a bound corpus to their own profile (404); the member can, and reads it as themselves', async () => {
     const { tenantId, collectionId, member, intruder } = await boundFixture();
     await expect(bindToProfile(tenantId, intruder, collectionId)).rejects.toMatchObject({ httpStatus: 404 });

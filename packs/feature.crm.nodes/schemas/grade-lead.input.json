@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.crm.nodes/1.15.0/grade-lead.input.json",
+  "title": "CrmGradeLeadInput",
+  "description": "Read from the merged `{ ...ctx.config, ...ctx.inputs }` bag. The dispatch route pins `modelId` + `modelVersion` so a replay grades under the same model version. `orgId` and `contactId` are required by the surface (a typed refusal), not by this schema: the node reads `{...config, ...inputs}`.",
+  "type": "object",
+  "properties": {
+    "orgId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "contactId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "modelId": {
+      "type": "string"
+    },
+    "modelVersion": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": true
+}

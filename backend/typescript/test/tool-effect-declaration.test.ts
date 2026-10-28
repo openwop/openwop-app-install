@@ -4,10 +4,15 @@
  * way); this pins the VALUES: every registered tool is 'read' or 'write', every
  * pure compute tool is 'read', and a fixed sample of known readers and writers
  * holds — so a blanket default in either direction turns red.
+ *
+ * Floors MEASURED 2026-10-23 after createApp: 211 tools, 63 write, 148 read
+ * (9 projected compute tools). Each floor is the measured value minus a small
+ * margin. Wave 61: "every pure compute tool is 'read'" was claimed but not
+ * asserted (probe ed-compute vacuous); it is now asserted per projected id.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
-import { builtinAgentToolIds, builtinAgentTool } from '../src/host/agentToolProvider.js';
+import { builtinAgentToolIds, builtinAgentTool, PROJECTABLE_COMPUTE_NODE_TYPE_IDS } from '../src/host/agentToolProvider.js';
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -26,14 +31,19 @@ const KNOWN: Record<string, 'read' | 'write'> = {
 };
 
 describe('tool effect declaration (ADR 0784)', () => {
-  it('every registered tool declares read or write, and both kinds exist', () => {
+  it('every registered tool declares read or write, every pure compute tool is read, and both kinds exist', () => {
     const ids = builtinAgentToolIds();
-    expect(ids.length).toBeGreaterThan(150);
+    expect(ids.length).toBeGreaterThanOrEqual(207);
     const bad = ids.filter((id) => !['read', 'write'].includes(builtinAgentTool(id)?.effect as string));
     expect(bad).toEqual([]);
     const writes = ids.filter((id) => builtinAgentTool(id)!.effect === 'write').length;
-    expect(writes).toBeGreaterThan(40);
-    expect(ids.length - writes).toBeGreaterThan(40);
+    expect(writes).toBeGreaterThanOrEqual(61);
+    expect(ids.length - writes).toBeGreaterThanOrEqual(143);
+    // Every projected compute node (named `openwop:<typeId>`, the way
+    // computeNodeTool names it) is registered and is a READ.
+    expect(PROJECTABLE_COMPUTE_NODE_TYPE_IDS.length).toBeGreaterThan(0);
+    const compute = Object.fromEntries(PROJECTABLE_COMPUTE_NODE_TYPE_IDS.map((t) => [t, builtinAgentTool(`openwop:${t}`)?.effect]));
+    expect(compute).toEqual(Object.fromEntries(PROJECTABLE_COMPUTE_NODE_TYPE_IDS.map((t) => [t, 'read'])));
   });
 
   it('pins a sample of known readers and writers', () => {

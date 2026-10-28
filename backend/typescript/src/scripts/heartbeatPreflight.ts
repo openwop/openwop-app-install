@@ -28,6 +28,8 @@
  *   --json          machine-readable output (else a human summary)
  */
 
+import { isHeldForReview } from '../host/cardRunRecovery.js';
+import { isWorkTwinMockArchive } from '../host/workflowTemplates.js';
 import { dirname, resolve as resolvePath } from 'node:path';
 import { initHostExtPersistence } from '../host/hostExtPersistence.js';
 import { openStorage } from '../storage/index.js';
@@ -111,7 +113,9 @@ async function main(): Promise<void> {
         // the loop will refuse (grade-code KSCD-7).
         const todo = todoColumnOf(board);
         if (!todo || !workingColumnOf(board)) continue;
-        const cards = (await listCards(board.id)).filter((c) => c.columnId === todo.id && !c.workItemId);
+        // ADR 0963 D3 — and held cards (restored after a stopped or failed run),
+        // which the loop does not pick until a person releases them.
+        const cards = (await listCards(board.id)).filter((c) => c.columnId === todo.id && !c.workItemId && !isHeldForReview(c));
         for (const card of cards) {
           // Mirror runHeartbeatOnce: armed = card/column workflow; else the D2 bare
           // fallback (ALWAYS proposes — safe). Skip unarmed cards when no fallback.
@@ -119,6 +123,7 @@ async function main(): Promise<void> {
           const isBareFallback = !explicitWorkflowId;
           const workflowId = explicitWorkflowId ?? (fallbackRegistered ? '(agent-turn fallback)' : undefined);
           if (!workflowId) continue; // unarmed + no fallback ⇒ heartbeat skips it entirely
+          if (isWorkTwinMockArchive(workflowId)) continue; // ADR 0963 D8 — never auto-picked
 
           // The SAME policy chain the daemon uses — agentProfile never/hitl/allowlist +
           // connection readiness — so the classification can't drift from real behavior.

@@ -7,7 +7,7 @@
  * provider selection — is verifiable without a real key. (The live provider call itself is
  * verify-with-key.)
  */
-import { describe, expect, it, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, expect, it, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
@@ -33,6 +33,8 @@ import { composeChatContext, TOOL_GROUNDED_COMMITMENTS } from '../src/host/chatC
 import { hostExtStorage } from '../src/host/hostExtPersistence.js';
 import { subscribeConversationMessages } from '../src/host/chatMessageBus.js';
 import type { VoiceAuthoritySnapshot } from '../src/features/voice/voiceAuthority.js';
+import * as hostExt from '../src/host/hostExtPersistence.js';
+import { registerFeatureAgentTool } from '../src/host/agentToolProvider.js';
 /** ADR 0893 D4 — a live call holds its opener's authority snapshot; this one passes every check while `voice` is ON. */
 const ALLOW_AUTHORITY: VoiceAuthoritySnapshot = { tenantId: 'default', toggleSubject: { tenantId: 'default' }, lane: 'wildcard', scopeEscape: true };
 
@@ -44,6 +46,29 @@ const put = (p: string, b: unknown) => fetch(`${BASE}${p}`, { method: 'PUT', hea
 const get = (p: string) => fetch(`${BASE}${p}`, { headers: H });
 const RT = '/host/openwop-app/voice/realtime';
 const setVoice = (status: 'on' | 'off') => saveConfig({ ...voiceFeature.toggleDefault!, status }, 'test');
+const VOICE_OFF = 'Voice mode is not enabled for this tenant.';
+
+/**
+ * SHUFFLE SAFETY (wave 63): several describes scope a session to the user-authored
+ * "Vox" agent. It used to be created inside ONE case and read by three others, so
+ * under `--sequence.shuffle` those ran against a missing agent. It is now created
+ * once, on first use, by whichever case needs it first, and every case uses the id
+ * the create MINTED (two hand-spelled variants used to be in play).
+ */
+let voxAgentId: Promise<string> | undefined;
+function ensureVox(): Promise<string> {
+  voxAgentId ??= (async () => {
+    const create = await post('/host/openwop-app/agents', {
+      persona: 'Vox Context Probe',
+      label: 'Vox',
+      modelClass: 'chat',
+      systemPrompt: 'PERSONA-MARKER-0199: You are Vox, the renewals specialist for this workspace.',
+    });
+    expect(create.status, 'the Vox agent is created exactly once per file run').toBe(201);
+    return ((await create.json()) as { agentId: string }).agentId; // ADR 0379 P2 — the minted id
+  })();
+  return voxAgentId;
+}
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -116,10 +141,13 @@ describe('ADR 0141 RT-1 — realtime session bootstrap', () => {
 
   it('404s the session when the voice toggle is OFF', async () => {
     await setVoice('off');
-    expect((await post(`${RT}/session`, {})).status).toBe(404);
+    const res = await post(`${RT}/session`, {});
+    expect(res.status).toBe(404);
+    expect(((await res.json()) as { message?: string }).message).toBe(VOICE_OFF);
   });
 });
 
+const RTV3_TOOL = 'openwop:probe.rtv3-capture';
 describe('ADR 0141 RT-2 — tool bridge (allowlist + firewall gate)', () => {
   // RTV-2/RTV-3: obtain a host-issued session id; /tool-call uses the bound agent + that key.
   async function openGeminiSession(agentId?: string): Promise<string> {
@@ -143,12 +171,27 @@ describe('ADR 0141 RT-2 — tool bridge (allowlist + firewall gate)', () => {
     await setVoice('on');
     const res = await post(`${RT}/tool-call`, { sessionId: 'rts_forged-not-issued', callId: 'c1', name: 'openwop:knowledge.search', arguments: {} });
     expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject({ error: 'forbidden', message: 'A valid realtime session (from POST /session) is required.' });
   });
 
   it('RTV-3: the client-body agentId is IGNORED — the bound agent governs the allowlist', async () => {
-    const hostSessionId = await openGeminiSession('no-such-agent'); // session bound to an empty-allowlist agent
-    // Even naming a different agent in the body, the host uses the session's bound agent → denied.
-    const res = await post(`${RT}/tool-call`, { sessionId: hostSessionId, agentId: 'some-broad-agent', callId: 'c2', name: 'openwop:knowledge.search', arguments: {} });
+    // A REAL broad agent whose allowlist DOES hold the tool: a route that honoured the
+    // body's agentId would answer `ok`. (Round 1 named an unregistered 'some-broad-agent',
+    // whose allowlist is empty, so honouring the body was ALSO denied — 8fw4g1-vr-bodyagent
+    // stayed green.)
+    registerFeatureAgentTool({
+      contentTrust: 'trusted',
+      effect: 'read', // test probe (ADR 0784)
+      def: { name: RTV3_TOOL, description: 'test probe — answers ok', inputSchema: { type: 'object' } },
+      run: async () => ({ content: 'rtv3-ok' }),
+    });
+    getAgentRegistry().register({
+      agentId: 'probe.rtv3.broad-agent', persona: 'Broad Probe', modelClass: 'chat',
+      systemPrompt: 'broad', toolAllowlist: [RTV3_TOOL], packName: 'test.rtv3', packVersion: '0.0.1',
+    });
+    __clearAgentIdentityCache();
+    const hostSessionId = await openGeminiSession('no-such-agent'); // session bound to an agent WITHOUT the tool
+    const res = await post(`${RT}/tool-call`, { sessionId: hostSessionId, agentId: 'probe.rtv3.broad-agent', callId: 'c2', name: RTV3_TOOL, arguments: {} });
     expect(res.status).toBe(200);
     expect((await res.json() as { status: string }).status).toBe('denied');
   });
@@ -162,7 +205,9 @@ describe('ADR 0141 RT-2 — tool bridge (allowlist + firewall gate)', () => {
 
   it('404s the tool bridge when the voice toggle is OFF', async () => {
     await setVoice('off');
-    expect((await post(`${RT}/tool-call`, { name: 'openwop:knowledge.search' })).status).toBe(404);
+    const res = await post(`${RT}/tool-call`, { name: 'openwop:knowledge.search' });
+    expect(res.status).toBe(404);
+    expect(((await res.json()) as { message?: string }).message).toBe(VOICE_OFF);
   });
 });
 
@@ -274,8 +319,8 @@ describe('ADR 0141 RT-4 — OpenAI sideband (host-owned session: tools + transcr
     try {
       const live: SidebandSession = { callId: 'rtc_live', tenantId: 'default', authority: ALLOW_AUTHORITY, conversationId };
       await handleSidebandEvent(live, { type: 'response.audio_transcript.done', transcript: 'Booked.' });
-      // The publish is fire-and-forget over the host-ext pub/sub — let the microtasks drain.
-      await new Promise((r) => setTimeout(r, 30));
+      // The publish is fire-and-forget over the host-ext pub/sub — wait for the frame itself.
+      await vi.waitFor(() => expect(frames).toHaveLength(1));
       const msgs = await storage.listChatSessionMessages(conversationId);
       expect(msgs.map((m) => m.content)).toContain('Booked.');
       expect(JSON.parse(msgs[0]?.meta ?? '{}')).toMatchObject({ source: 'voice-realtime' });
@@ -300,15 +345,21 @@ describe('ADR 0141 RT-4 — OpenAI sideband (host-owned session: tools + transcr
   it('400s /openai/connect when OpenAI is not the configured provider', async () => {
     await setVoice('on');
     await put(`${RT}/config`, { provider: 'gemini-live', credentialRef: 'rt-sb-key' });
-    expect((await post(`${RT}/openai/connect`, { sdp: 'v=0' })).status).toBe(400);
+    const res = await post(`${RT}/openai/connect`, { sdp: 'v=0' });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: 'invalid_request', message: 'OpenAI Realtime is not the configured provider for this tenant.' });
   });
 
   it('transcript stream requires a conversationId (400) and IDOR-safe 404s an unknown conversation', async () => {
     await setVoice('on');
     // Missing param → 400 before any stream is opened.
-    expect((await get(`${RT}/messages/stream`)).status).toBe(400);
+    const missing = await get(`${RT}/messages/stream`);
+    expect(missing.status).toBe(400);
+    expect(await missing.json()).toMatchObject({ error: 'validation_error', message: '`conversationId` is required.' });
     // Unknown session → 404 (existence gate; never opens a stream for an arbitrary id).
-    expect((await get(`${RT}/messages/stream?conversationId=nope-not-real`)).status).toBe(404);
+    const unknown = await get(`${RT}/messages/stream?conversationId=nope-not-real`);
+    expect(unknown.status).toBe(404);
+    expect(await unknown.json()).toMatchObject({ error: 'not_found', message: 'Conversation not found.' });
   });
 
   it('transcript stream DELIVERS a chat.message frame when the sideband persists a turn (GRADE — success path)', async () => {
@@ -317,6 +368,16 @@ describe('ADR 0141 RT-4 — OpenAI sideband (host-owned session: tools + transcr
     const nowIso = new Date().toISOString();
     await hostExtStorage().createChatSession({ sessionId: conversationId, tenantId: 'default', title: 'Voice SSE', createdAt: nowIso, updatedAt: nowIso, messageCount: 0 });
 
+    // The real attach signal: the route's subscription on this conversation's channel.
+    // (This used to be a fixed 100 ms sleep before driving the transcript.)
+    const realSubscribe = hostExt.subscribeHostExtEvent;
+    let attached!: () => void;
+    const subscribed = new Promise<void>((r) => { attached = r; });
+    const spy = vi.spyOn(hostExt, 'subscribeHostExtEvent').mockImplementation(async (...args: Parameters<typeof realSubscribe>) => {
+      const unsub = await realSubscribe(...args);
+      if (String(args[0]).endsWith(conversationId)) attached();
+      return unsub;
+    });
     // Open the stream and hold it; read frames incrementally with a hard timeout.
     const ac = new AbortController();
     const res = await fetch(`${BASE}${RT}/messages/stream?conversationId=${conversationId}`, { headers: H, signal: ac.signal });
@@ -334,8 +395,9 @@ describe('ADR 0141 RT-4 — OpenAI sideband (host-owned session: tools + transcr
       }
     })();
 
-    // Give the subscription a beat to attach, then drive a sideband transcript.
-    await new Promise((r) => setTimeout(r, 100));
+    // Wait for the subscription to attach, then drive a sideband transcript.
+    await subscribed;
+    spy.mockRestore();
     const live: SidebandSession = { callId: 'rtc_sse', tenantId: 'default', authority: ALLOW_AUTHORITY, conversationId };
     await handleSidebandEvent(live, { type: 'response.audio_transcript.done', transcript: 'Frame me.' });
 
@@ -384,14 +446,7 @@ describe('ADR 0199 P1 — composed instructions (the RT-2 persona half, finally)
   it('a scoped agent session carries its authored persona + the spoken addendum, not the old placeholder', async () => {
     await setVoice('on');
     // A user-authored agent with a DISTINCTIVE prompt body.
-    const create = await post('/host/openwop-app/agents', {
-      persona: 'Vox Context Probe',
-      label: 'Vox',
-      modelClass: 'chat',
-      systemPrompt: 'PERSONA-MARKER-0199: You are Vox, the renewals specialist for this workspace.',
-    });
-    expect([200, 201, 409]).toContain(create.status); // 409 = re-run in same store
-    const agentId = ((await create.json()) as { agentId: string }).agentId; // ADR 0379 P2 — use the minted id (now user.<slug>)
+    const agentId = await ensureVox();
 
     await setSecret('rt-gemini-ctx', 'gk-test', { tenantId: 'default' });
     await put(`${RT}/config`, { provider: 'gemini-live', credentialRef: 'rt-gemini-ctx' });
@@ -406,6 +461,10 @@ describe('ADR 0199 P1 — composed instructions (the RT-2 persona half, finally)
 
   it('an unscoped session gets the generic scaffold + addendum (never a raw placeholder)', async () => {
     await setVoice('on');
+    // Its own provider config: the tenant config is shared, and under shuffle the case
+    // before this one may have set `off` (round-2 shuffle seed 303 caught the sibling below).
+    await setSecret('rt-gemini-unscoped', 'gk-test', { tenantId: 'default' });
+    await put(`${RT}/config`, { provider: 'gemini-live', credentialRef: 'rt-gemini-unscoped' });
     const res = await post(`${RT}/session`, {});
     expect(res.status).toBe(200);
     const j = await res.json() as { realtime: { instructions?: string } };
@@ -426,11 +485,12 @@ describe('ADR 0277 — agent identity normalization (rosterId ↔ agentId dualit
       modelClass: 'chat',
       systemPrompt: 'PERSONA-MARKER-0277: You are Marbury, an advisor persona.',
     });
-    expect([200, 201, 409]).toContain(create.status);
+    expect(create.status, 'created once: only this case authors Marbury').toBe(201);
+    const marburyId = ((await create.json()) as { agentId: string }).agentId;
     // …wrapped by a standing ROSTER entry — the id the voice picker actually sends.
     const entry = await createRosterEntry({
       tenantId: 'default', persona: 'Marbury Advisor Probe',
-      agentRef: { agentId: 'user.marbury-advisor-probe' },
+      agentRef: { agentId: marburyId },
     });
     expect(entry.rosterId.startsWith('host:')).toBe(true);
 
@@ -520,7 +580,7 @@ describe('ADR 0277 — agent identity normalization (rosterId ↔ agentId dualit
     expect(degraded.every((b) => /^[a-z_]+$/.test(b))).toBe(true);
     expect(degraded).not.toContain('conversation');
     // A whole session (resolvable persona) omits the field entirely.
-    const wholeRes = await post(`${RT}/session`, { agentId: 'user.vox-context-probe' });
+    const wholeRes = await post(`${RT}/session`, { agentId: await ensureVox() });
     expect(wholeRes.status).toBe(200);
     expect((await wholeRes.json() as { degraded?: string[] }).degraded).toBeUndefined();
   });
@@ -567,6 +627,9 @@ describe('ADR 0199 P1 — conversation-context visibility gate (review finding)'
   it('an ownerless (legacy) conversation stays tenant-visible — its block composes', async () => {
     await setVoice('on');
     const convId = 'conv-legacy-open';
+    // Its own provider config (shuffle seed 303 ran this after a case that set `off`).
+    await setSecret('rt-gemini-legacy', 'gk-test', { tenantId: 'default' });
+    await put(`${RT}/config`, { provider: 'gemini-live', credentialRef: 'rt-gemini-legacy' });
     await ensureConversationMeta('default', convId, { type: 'group' });
     // CORRECTED by ADVB-1 (2026-08-19): this used to seed the block as a
     // PERSISTED `injectedContextBlock` and assert that the snapshot reaches the
@@ -580,7 +643,7 @@ describe('ADR 0199 P1 — conversation-context visibility gate (review finding)'
     try {
       // The injected block reaches the scaffold through the AGENT compose branch
       // (board chats always address an agent) — scope to the Vox agent.
-      const res = await post(`${RT}/session`, { conversationId: convId, agentId: 'user.default.vox-context-probe' });
+      const res = await post(`${RT}/session`, { conversationId: convId, agentId: await ensureVox() });
       expect(res.status).toBe(200);
       const j = await res.json() as { realtime: { instructions?: string } };
       expect(j.realtime.instructions ?? '').toContain('OPEN-BOARD-BLOCK-0199');
@@ -596,7 +659,7 @@ describe('ADR 0199 P2 — voice preamble (work snapshot)', () => {
     const entry = await createRosterEntry({
       tenantId: 'default',
       persona: 'Snapshot Probe',
-      agentRef: { agentId: 'user.vox-context-probe' },
+      agentRef: { agentId: await ensureVox() },
       workflows: ['wf-renewals-digest'],
     });
     await setSecret('rt-gemini-p2', 'gk-test', { tenantId: 'default' });

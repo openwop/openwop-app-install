@@ -26,7 +26,7 @@ import { getKnowledgeBackend } from './knowledgeSurface.js';
 import { neutralizeUntrusted, fenceUntrustedItems } from './untrustedContent.js';
 import { getSubjectKnowledge } from './subjectKnowledge.js';
 import { createSubjectMemoryPort, subjectMemoryScope } from './subjectMemory.js';
-import { resolveAgentMemoryScope } from './agentMemoryAdapter.js';
+import { resolveAgentMemory, resolveAgentMemoryScope, type AgentMemoryResolution, type AgentMemoryScopeContext } from './agentMemoryAdapter.js';
 import type { Subject } from './subject.js';
 import { createLogger } from '../observability/logger.js';
 
@@ -260,14 +260,48 @@ export async function resolveAgentKnowledgeRetrieve(
   tenantId: string,
   agentId: string,
   memory: AgentMemoryPort,
-  actor?: { userId?: string | undefined } | undefined,
+  /** The acting participant and, ADR 0944 D2, the lane's resolved client binding. */
+  actor?: AgentMemoryScopeContext | undefined,
   /** ADR 0643 R3 (Blocker 2) — an HTTP read passes the READER; run/chat lanes omit it. */
   caller?: SubjectCaller,
+  /** ADR 0944 D5 — a client run's designated collections, as frozen in its
+   *  context snapshot (`host/runClientKnowledge.ts`), searched beside the
+   *  agent's own binding. */
+  clientCollectionIds: readonly string[] = [],
 ): Promise<AgentKnowledgeRetrieve | undefined> {
   const profile = await getAgentProfile(tenantId, agentId);
   if (!profile || !(profile.capabilities ?? []).includes('knowledge')) return undefined;
   const memoryScope = resolveAgentMemoryScope(profile, actor);
-  return resolveSubjectKnowledgeRetrieve(tenantId, profile.knowledge, memory, memoryScope, caller);
+  return resolveSubjectKnowledgeRetrieve(tenantId, withClientCollections(profile.knowledge, clientCollectionIds), memory, memoryScope, caller);
+}
+
+/** Union a client's collections into an agent's binding, making sure the KB
+ *  source is searched for them. Unchanged when there are none. */
+function withClientCollections(binding: SubjectKnowledgeBinding | undefined, clientCollectionIds: readonly string[]): SubjectKnowledgeBinding | undefined {
+  if (clientCollectionIds.length === 0) return binding;
+  const collectionIds = [...new Set([...(binding?.collectionIds ?? []), ...clientCollectionIds])];
+  const sources = binding?.retrieval?.sources;
+  return {
+    ...binding,
+    collectionIds,
+    ...(sources && !sources.includes('kb') ? { retrieval: { ...binding?.retrieval, sources: [...sources, 'kb'] } } : {}),
+  };
+}
+
+/**
+ * ADR 0944 D3 — the memory binding a DISPATCH lane hands `runAgentDispatchLive`
+ * (`memoryScope` + whether it may be written + the degradation label), from the
+ * same profile field and resolver the knowledge composition above uses, so a
+ * lane's recall and its turn-summary write can never name different scopes. An
+ * absent profile is a default-scope agent (the pre-ADR 0442 behaviour).
+ */
+export async function resolveDispatchMemory(
+  tenantId: string,
+  profileId: string,
+  ctx: AgentMemoryScopeContext,
+): Promise<AgentMemoryResolution> {
+  const profile = await getAgentProfile(tenantId, profileId);
+  return resolveAgentMemory(profile ?? { profileId }, ctx);
 }
 
 /**
@@ -354,7 +388,7 @@ export function resolveSubjectKnowledgeRetrieve(
     // Read it per call, and report ABSENCE as a source failure — a corpus that
     // was never searched is not a corpus that returned nothing.
     const backend = getKnowledgeBackend();
-    const out: Array<{ content: string; title?: string; kind: 'kb' | 'memory'; contentTrust: 'trusted' | 'untrusted' }> = [];
+    const out: Array<{ content: string; title?: string; kind: 'kb' | 'memory'; contentTrust: 'trusted' | 'untrusted'; id?: string }> = [];
 
     // KB collections — cited docs (ADR 0011). Each chunk carries its document's
     // content-trust (ADR 0038 §C) so dispatch fences untrusted (provider/trigger-
@@ -399,6 +433,7 @@ export function resolveSubjectKnowledgeRetrieve(
               title: chunk.documentTitle,
               kind: 'kb',
               contentTrust: chunk.contentTrust === 'untrusted' ? 'untrusted' : 'trusted',
+              id: chunk.chunkId,
             });
           }
         }
@@ -420,7 +455,7 @@ export function resolveSubjectKnowledgeRetrieve(
       try {
         const entries = await memory.read(memoryScope, query);
         for (const e of entries.slice(0, topK)) {
-          out.push({ content: e.content, kind: 'memory', contentTrust: e.contentTrust === 'untrusted' ? 'untrusted' : 'trusted' });
+          out.push({ content: e.content, kind: 'memory', contentTrust: e.contentTrust === 'untrusted' ? 'untrusted' : 'trusted', ...(e.id ? { id: e.id } : {}) });
         }
       } catch {
         onSourceError?.('memory'); // see the `kb` leg above (KB-UX-3)

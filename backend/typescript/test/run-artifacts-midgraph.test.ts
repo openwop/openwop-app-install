@@ -6,6 +6,12 @@
  * The executor now captures such nodes as durable run-artifacts at completion. Verifies:
  * a mid-graph outputRole node IS captured; a mid-graph node WITHOUT outputRole is NOT;
  * and the capture survives a LATER node failing.
+ *
+ * Breaks it (round-1 probes, witnessed): the capture branch removed
+ * (8fw2g2-rmg-capture reds cases 1 + 3) or the `outputRole` filter dropped
+ * (rmg-role reds case 2). Case 2 also asserts the TERMINAL node was captured
+ * (Seam B), so its `null` for `mid` is the filter, not a capture path that
+ * never ran. Run ids are deterministic per case.
  */
 
 import { describe, expect, it, beforeAll } from 'vitest';
@@ -39,7 +45,7 @@ beforeAll(() => {
 async function newRun(workflowId: string): Promise<RunRecord> {
   const now = new Date().toISOString();
   const run: RunRecord = {
-    runId: `run-${Math.random().toString(36).slice(2)}`,
+    runId: `run-${workflowId}`,
     workflowId, tenantId: 'demo', status: 'pending', inputs: {}, metadata: {}, configurable: {}, createdAt: now, updatedAt: now,
   };
   await storage.insertRun(run);
@@ -78,7 +84,11 @@ describe('ADR 0083 follow-up — mid-graph capture', () => {
       ],
       edges: [{ edgeId: 'e1', sourceNodeId: 'mid', targetNodeId: 'end' }],
     };
-    await executeRun(storage, run, def);
+    const result = await executeRun(storage, run, def);
+    expect(result.status).toBe('completed');
+    // Positive control: capture DID run for this run — the terminal node is there (Seam B)…
+    expect(await getRunArtifact(`${run.runId}:end`)).not.toBeNull();
+    // …so the missing mid-graph row is the outputRole filter.
     expect(await getRunArtifact(`${run.runId}:mid`)).toBeNull(); // not a declared deliverable
   });
 

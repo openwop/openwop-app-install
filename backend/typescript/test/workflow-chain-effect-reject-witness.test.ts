@@ -219,7 +219,7 @@ async function simulate(
   resume: Record<string, unknown>,
 ): Promise<Map<string, string>> {
   const entry = listChains().find((c) => c.chain.chainId === chainId)!;
-  const def = expandChain(entry.chain, { params: {} });
+  const def = expanded(entry.chain);
   const graph = buildGraph(def);
   const snap = freshSnapshot(def);
 
@@ -241,6 +241,17 @@ async function simulate(
     if (!moved) break;
   }
   return new Map([...def.nodes].map((n) => [n.nodeId, String(snap.nodeState.get(n.nodeId))]));
+}
+
+/** `expandChain` is pure + deterministic (RFC 0013 §expansion), so each chain is
+ *  expanded ONCE per file. Before this, every corpus-wide case re-expanded every
+ *  chain (grade-tests wave 64: 5 cases × the whole corpus). The cache is keyed by
+ *  chainId and filled after `beforeAll` loaded the registry. */
+const expandedCache = new Map<string, ReturnType<typeof expandChain>>();
+function expanded(chain: ReturnType<typeof listChains>[number]['chain']): ReturnType<typeof expandChain> {
+  let def = expandedCache.get(chain.chainId);
+  if (!def) { def = expandChain(chain, { params: {} }); expandedCache.set(chain.chainId, def); }
+  return def;
 }
 
 /** Node ids are pack-prefixed after expansion; recover the authored suffix. */
@@ -270,7 +281,7 @@ function reachableFromGate(def: ReturnType<typeof expandChain>): Set<string> {
 function governedEffectNodes(): { chainId: string; nodeId: string }[] {
   const out: { chainId: string; nodeId: string }[] = [];
   for (const { chain } of listChains()) {
-    const def = expandChain(chain, { params: {} });
+    const def = expanded(chain);
     if (!def.nodes.some((n) => n.typeId === GATE)) continue;
     const reachable = reachableFromGate(def);
     for (const n of def.nodes) {
@@ -301,7 +312,7 @@ async function behaviouralEscapes(): Promise<string[]> {
 function structuralUngated(): string[] {
   const out: string[] = [];
   for (const { chain } of listChains()) {
-    const def = expandChain(chain, { params: {} });
+    const def = expanded(chain);
     if (!def.nodes.some((n) => n.typeId === GATE)) continue;
     const reachable = reachableFromGate(def);
     for (const n of def.nodes) {
@@ -363,10 +374,7 @@ const BRANCH_MASKED = new Set<string>([]);
  * PROVEN skipped-on-reject by the behavioural leg below).
  */
 const TRANSITIVELY_SAFE = new Set<string>([
-  'campaign-journeys.re-engage-contact::send',
   'campaign-journeys.re-engage-contact::task',
-  'campaign-journeys.welcome-series::followup',
-  'campaign-journeys.welcome-series::welcome',
   'finance.expense-approval::flag',
   'finance.invoice-ap::notify',
   'it-support.incident-triage::notify',
@@ -396,8 +404,14 @@ const NOTIFY_OF_OUTCOME = new Set<string>([
 
 describe('ADR 0582 — the generalized reject witness (shrink-only ratchet)', () => {
   it('the corpus has gate-governed effect nodes to witness (anti-vacuity floor)', () => {
-    expect(listChains().length, 'the registry failed to load — every assertion below would be vacuous').toBeGreaterThan(50);
-    expect(governedEffectNodes().length, 'no effect node is downstream of a core.chat.approvalGate — enumeration broken').toBeGreaterThanOrEqual(30);
+    // Floors at the MEASURED values (grade-tests wave 64, 2026-10-24, HEAD
+    // 19d13e682, under vitest's per-worker pack dir): 244 loaded chains and 52
+    // gate-governed effect nodes. They were `> 50` and `>= 30` — a loader that
+    // silently dropped four-fifths of the corpus would have stayed green. Raise
+    // them when the corpus grows; a drop below means the loader or the
+    // enumeration lost chains.
+    expect(listChains().length, 'the registry failed to load — every assertion below would be vacuous').toBeGreaterThanOrEqual(244);
+    expect(governedEffectNodes().length, 'no effect node is downstream of a core.chat.approvalGate — enumeration broken').toBeGreaterThanOrEqual(52);
   });
 
   it('drives the REAL gate: a reject yields approved:false', async () => {
@@ -581,7 +595,7 @@ describe('ADR 0582 — the generalized reject witness (shrink-only ratchet)', ()
       const [chainId, node] = k.split('::');
       const entry = listChains().find((c) => c.chain.chainId === chainId);
       if (!entry) { failures.push(`${k}: chain not loaded`); continue; }
-      const def = expandChain(entry.chain, { params: {} });
+      const def = expanded(entry.chain);
       const target = def.nodes.find((n) => bare(n.nodeId) === node);
       if (!target) { failures.push(`${k}: node not found`); continue; }
 

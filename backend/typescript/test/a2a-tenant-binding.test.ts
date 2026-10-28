@@ -9,6 +9,19 @@
  * `DurableCollection` over `memory://` storage and the runs are real runs —
  * a stubbed store would be asserting the stub's isolation, not the host's.
  *
+ * CancelTask is DOUBLE-GUARDED, by design: `a2aService.cancelTask` first reads
+ * the record through `getA2aTaskFor(…, 'strict')` (outer guard: a foreign
+ * record reads as missing), then re-checks `run.tenantId !== principal.tenantId`
+ * on the backing run (inner guard). Removing either alone stays green (wave 58
+ * probe `tb-cancelrunguard`: vacuous, as predicted); removing both reds the
+ * CancelTask case (`tb-cancelboth-r2`).
+ *
+ * Tracker TST-BG1-12. Red when (probe-witnessed, wave 58): `readableBy` lets a
+ * bound record cross tenants, or drops the strict or the legacy arm; the
+ * `tenant` hint selects the tenant; ListTasks reads beyond the tenant slice; the
+ * message claim loses its denormalized `tenantId` (teardown misses it); both
+ * CancelTask guards go.
+ *
  * @see spec/v1/a2a-integration.md §"A2A 1.0 versioned composition" §E
  */
 

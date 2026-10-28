@@ -96,3 +96,30 @@ export async function assessWorkflowAvailability(
     return { workflowId, known: true, demo, runnable: true };
   }));
 }
+
+/**
+ * ADR 0979 D2 — did this run's output come from a node that MAKES UP output?
+ * True when a COMPLETED node is the mock-AI node (version suffix stripped, as a
+ * chain-pack typeId carries `@0.1.0`) or recorded a placeholder marker: `stub:
+ * true`, or `engine: 'stub' | 'demo'` (the two shapes `core.web.search` returns
+ * with no live search provider, and the ones KickTodo already refuses as
+ * evidence, `kicktodo-creator/creatorService.ts`). The executor writes no
+ * run summary for such a run: a memory entry is a durable record, and under the
+ * scope cap each fabricated row evicts a real one.
+ *
+ * NOT detected, stated: a fabricating step inside a `core.subWorkflow` child (the
+ * child's own summary is skipped) or a dynamically spawned node.
+ */
+export function runOutputWasFabricated(
+  nodes: ReadonlyArray<{ nodeId: string; typeId: string }>,
+  nodeState: ReadonlyMap<string, string>,
+  nodeOutputs: ReadonlyMap<string, Record<string, unknown> | undefined>,
+): boolean {
+  for (const n of nodes) {
+    if (nodeState.get(n.nodeId) !== 'completed') continue;
+    if (n.typeId.replace(/@.*$/, '') === MOCK_AI_TYPE_ID) return true;
+    const out = nodeOutputs.get(n.nodeId);
+    if (out?.stub === true || out?.engine === 'stub' || out?.engine === 'demo') return true;
+  }
+  return false;
+}

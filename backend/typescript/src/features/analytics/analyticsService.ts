@@ -36,7 +36,12 @@ function stripQueryAndFragment(v: string | undefined): string | undefined {
 export type EventType = 'pageview' | 'event' | 'conversion';
 const EVENT_TYPES: readonly EventType[] = ['pageview', 'event', 'conversion'];
 
-export interface Utm { source?: string; medium?: string; campaign?: string; term?: string; content?: string }
+export interface Utm {
+  source?: string; medium?: string; campaign?: string; term?: string; content?: string;
+  /** ADR 0956 D6 — `utm_id`: the ad reference `buildTrackedUrl` stamps on a
+   *  published ad's landing link, so a landing session joins back to its ad. */
+  id?: string;
+}
 export interface ClickIds { fbclid?: string; gclid?: string; ttclid?: string; li_fat_id?: string }
 
 export interface AnalyticsEvent {
@@ -148,7 +153,7 @@ export async function recordEvent(input: { tenantId: string; orgId: string; raw:
   const name = cap(r.name); if (name) e.name = name;
   const sessionKey = cap(r.sessionKey); if (sessionKey) e.sessionKey = sessionKey;
   const referrer = stripQueryAndFragment(cap(r.referrer)); if (referrer) e.referrer = referrer;
-  const utm = pick(r.utm, ['source', 'medium', 'campaign', 'term', 'content'] as const); if (utm) e.utm = utm;
+  const utm = pick(r.utm, ['source', 'medium', 'campaign', 'term', 'content', 'id'] as const); if (utm) e.utm = utm;
   const clickIds = pick(r.clickIds, ['fbclid', 'gclid', 'ttclid', 'li_fat_id'] as const); if (clickIds) e.clickIds = clickIds;
   const owx = cap(r.owx); if (owx) e.owx = owx;
   // ADR 0236 (D1) — optional bounded experiment stamp {id, variant}; both parts
@@ -254,6 +259,17 @@ export async function listConversions(tenantId: string, orgId: string): Promise<
   // tenant instead of a full cross-tenant `events.list()`.
   const all = await events.listForTenantIndexed(tenantId);
   return all.filter((e) => e.orgId === orgId && e.type === 'conversion');
+}
+
+/** ADR 0956 D1 — what the attribution join and the touch paths read, in ONE
+ *  tenant-indexed scan: every conversion, plus every event that is a marketing
+ *  touch (it carries UTMs, an ad click id, or an email-click token). Uncapped
+ *  for the same reason as `listConversions` (AUDIT-1). Paths are computed from
+ *  these rows at read time, so the analytics eraser and retention purger are
+ *  the only copies to clean — there is no derived touch store. */
+export async function listAttributionEvents(tenantId: string, orgId: string): Promise<AnalyticsEvent[]> {
+  const all = await events.listForTenantIndexed(tenantId);
+  return all.filter((e) => e.orgId === orgId && (e.type === 'conversion' || e.utm !== undefined || e.clickIds !== undefined || e.owx !== undefined));
 }
 
 /** UX_UPGRADE-analytics AN-G1 — the reporting window, as an ISO lower bound.
@@ -697,11 +713,31 @@ registerRetentionPurger({
   async purge(tenantId, classification, cutoffIso) {
     if (!tenantId || classification !== 'confidential-pii') return 0;
     // Analytics ages on `ts` (event time); map it onto the helper's `updatedAt` slot.
-    return purgeRowsByAge('analytics', await events.listForTenantIndexed(tenantId), tenantId, cutoffIso,
+    const outcome = await purgeRowsByAge('analytics', await events.listForTenantIndexed(tenantId), tenantId, cutoffIso,
       (e) => ({ tenantId: e.tenantId, updatedAt: e.ts, id: e.eventId }),
       (id) => events.delete(id));
+    // ADR 0949 P2a — experiment results over these events must know some are
+    // gone (the CDP purger's watermark, ADR 0949 P1b).
+    if (outcome.deleted > 0) await advanceRetentionWatermark(tenantId, cutoffIso);
+    return outcome;
   },
 });
+
+/** ADR 0949 P2a — per tenant, the newest retention cutoff that deleted events.
+ *  A subject erasure is not recorded: it removes one person, not a time range. */
+const watermarks = new DurableCollection<{ tenantId: string; purgedBefore: string }>(
+  'analytics:retention-watermark', (w) => w.tenantId, undefined, (w) => w.tenantId,
+);
+
+async function advanceRetentionWatermark(tenantId: string, cutoffIso: string): Promise<void> {
+  const cur = await watermarks.get(tenantId);
+  if (!cur || cur.purgedBefore < cutoffIso) await watermarks.put({ tenantId, purgedBefore: cutoffIso });
+}
+
+/** Events recorded before this instant may have been purged (null: none were). */
+export async function analyticsEventsRetainedSince(tenantId: string): Promise<string | null> {
+  return (await watermarks.get(tenantId))?.purgedBefore ?? null;
+}
 
 /** Test-only: clear the event store. */
 export async function __resetAnalyticsStore(): Promise<void> { await events.__clear(); }

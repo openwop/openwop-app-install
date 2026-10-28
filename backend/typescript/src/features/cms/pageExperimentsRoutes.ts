@@ -27,6 +27,7 @@ import {
   startExperiment,
   stopExperiment,
   updateExperiment,
+  experimentGates,
 } from './pageExperimentsService.js';
 
 export function registerPageExperimentRoutes(deps: RouteDeps): void {
@@ -135,6 +136,16 @@ export function registerPageExperimentRoutes(deps: RouteDeps): void {
       );
       if (!result) notFound(req.params.experimentId);
       res.json(result);
+    } catch (err) { next(err); }
+  });
+
+  // ADR 0950 P0 — the promotion gate checklist (read-only; promote warns on it).
+  app.get(`${BASE}/:experimentId/gates`, async (req, res, next) => {
+    try {
+      const { orgId, tenantId } = await requireCmsScope(req, 'workspace:read');
+      const report = await experimentGates(tenantId, orgId, req.params.pageId, req.params.experimentId, launchSubjectOf(req));
+      if (!report) notFound(req.params.experimentId);
+      res.json(report);
     } catch (err) { next(err); }
   });
 

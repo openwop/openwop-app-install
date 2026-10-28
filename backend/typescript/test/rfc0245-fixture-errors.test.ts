@@ -13,8 +13,12 @@
  *  - the second: no `error`, and `status` is not "error" (suite 2.46.18 relaxed this
  *    leg; it no longer requires `outcome`, which RFC 0064 §F keeps optional);
  *  - `fixtureMissCount` 0.
- * Sabotage (run by hand, recorded in ADR 0929): serving the entry as a success
- * reds the first-return case.
+ * Sabotage-witnessed (wave 64, probes 8fw5g1-rf-*): serving the entry as a success
+ * (`rf-served-error`), retrying it live (`rf-never-live`), `status: 'ok'` on the
+ * served failure (`rf-status-error`), echoing the payload into `message`
+ * (`rf-no-echo`), dropping the advert (`rf-advert`), the create-time refusal
+ * (`rf-refusal`), the boolean check (`rf-iserror-type`), `suiteFeatures`
+ * (`rf-features`) and promotion (`rf-promote`) each turn their case red.
  */
 import { vi } from 'vitest';
 
@@ -104,11 +108,14 @@ describe('RFC 0245 §B — the tool boundary', () => {
     let live = 0;
     const ic = fixtureInterceptor({ ...task(), fixtures: { ...task().fixtures, onMiss: 'live' } }, { allowLive: true, agentId: 'a' });
     const exec = ic.wrap(async () => { live += 1; return { content: 'LIVE' }; });
-    const first = await exec({ name: TOOL, input: { orderId: 'o-1' } } as Parameters<typeof exec>[0]);
+    const first = await exec({ name: TOOL, input: { orderId: 'o-1' } });
     expect(first.isError).toBe(true);
-    expect(first.errorCode).toBeTruthy();
-    const second = await exec({ name: TOOL, input: { orderId: 'o-1' } } as Parameters<typeof exec>[0]);
+    // The fixture's content carries no top-level `code`/`error`, so the live lane's
+    // derivation yields exactly the generic code.
+    expect(first.errorCode).toBe('tool_execution_failed');
+    const second = await exec({ name: TOOL, input: { orderId: 'o-1' } });
     expect(second.isError).toBeFalsy();
+    expect(second.content).toBe('{"status":"shipped"}');
     expect(ic.misses()).toBe(0);
     expect(live, 'a matched isError entry is never retried live, whatever onMiss says').toBe(0);
   });
@@ -168,7 +175,7 @@ describe('RFC 0245 — the replay leg, end to end (the conformance judge, host s
     const s = await send('GET', `/runs/${runId}/eval-summary`, V2);
     const t = ((s.json['tasks'] as Array<Record<string, unknown>>) ?? []).find((x) => x['taskId'] === 'recovers');
     expect(t, s.text.slice(0, 300)).toBeTruthy();
-    expect(t!['fixtureMissCount'] ?? 0).toBe(0);
+    expect(t!['fixtureMissCount']).toBe(0);
   });
 });
 
@@ -177,7 +184,7 @@ describe('RFC 0245 (optional) — run→suite promotion keeps a failure a failur
     const task = buildTaskFromRun({ taskId: 't', input: {}, boundary: [
       { tool: TOOL, input: { orderId: 'o-1' }, result: '{"error":"upstream_down"}', isError: true },
       { tool: TOOL, input: { orderId: 'o-1' }, result: '{"status":"shipped"}', isError: false },
-    ] as Parameters<typeof buildTaskFromRun>[0]['boundary'] });
+    ] });
     expect(task.fixtures?.toolResponses?.map((r) => r.isError === true)).toEqual([true, false]);
   });
 });

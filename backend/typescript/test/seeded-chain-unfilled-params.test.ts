@@ -32,7 +32,6 @@ import {
   findUnfilledExpansionParams,
   reloadWorkflowChainPacks,
 } from '../src/host/workflowChainPackLoader.js';
-import type { WorkflowDefinition } from '../src/executor/types.js';
 
 /** Ratchet ceiling, measured 2026-07-31 against 169 loaded chains. NEVER raise
  *  this to make a red build green — a new chain shipping unfillable required
@@ -147,8 +146,109 @@ import type { WorkflowDefinition } from '../src/executor/types.js';
  *  change-set hash pinned in the run stamp; `internal: true`. A param-less copy
  *  cannot carry out anything: its one node's surface call refuses an empty `orgId`,
  *  and refuses any run whose stamp does not name that approval and hash
- *  (`not_the_approved_run`). A declared +1, not a silent raise. */
-const CEILING = 127;
+ *  (`not_the_approved_run`). A declared +1, not a silent raise.
+ *
+ *  127 → 128 (2026-10-20, ADR 0949 P4): `experiments.optimize-loop` :: orgId,
+ *  experimentId. The operator schedules it for ONE running Optimize experiment
+ *  (the Experiments page names the `exp:` id). A param-less copy cannot
+ *  reallocate anything: its one node's surface call refuses an empty `orgId` or
+ *  `experimentId` with a typed `validation_error` before any read or write. A
+ *  declared +1, not a silent raise.
+ *
+ *  128 → 129 (2026-10-20, ADR 0954 P1): `crm-ops.grade-lead` :: orgId, contactId.
+ *  Started only by the Leads route, which pins the model version and stamps the run
+ *  (`crmLeadIntel`) and the lead's pending run first; `internal: true`. A
+ *  param-less copy grades nothing: its one node's surface call refuses a run whose
+ *  stamp does not name that client and lead (`wrong_client`). A declared +1.
+ *
+ *  129 → 130 (2026-10-24 recovery, ADR 0950 P2): `experiments.promote` ::
+ *  orgId, experimentId. This internal chain is launched by startPromotion with
+ *  an authoritative promotion reservation and both required inputs. Neither
+ *  target has an honest host default. A param-less invocation fails at its
+ *  FIRST node with validation_error before any effect; the real loader/starter/
+ *  executor witness in adr0950-p2-promote-chain.test.ts proves this, and the
+ *  existing ownership witnesses refuse hand-launched mutations of another run.
+ *  This accounts only for the newly declared internal chain, not new debt in
+ *  an existing chain.
+ *
+ *  130 → 131 (2026-10-25 recovery, ADR 0954 P2): `crm-ops.route-lead` ::
+ *  orgId, contactId, routingEpoch. The client Leads route supplies all three
+ *  with a frozen model/definition/cause and a primary run/epoch reservation;
+ *  `internal: true`. The param-less real starter/executor witness in
+ *  adr0954-p1-lead-grade.test.ts fails at its FIRST grade node with typed
+ *  validation_error, runs no route node and changes no lead profile. This is
+ *  the one new internal chain, not an admission for an existing chain.
+ *
+ *  131 → 132 (2026-10-25 recovery, ADR0954 P4): crm-ops.qualify-lead ::
+ *  orgId, contactId. Neither has an honest default. The real trusted starter /
+ *  executor witness in adr0954-p4-lead-qualification.test.ts invokes this
+ *  internal chain without params, proves exactly its first evidence node fails
+ *  validation_error, no assessor/grade node starts, no provider is called and
+ *  no lead profile changes. The client Qualify route supplies the frozen
+ *  binding/model/definition/cause reservation. This counts only that one new
+ *  declared chain and does not admit a regression in an existing chain.
+ *
+ *  132 → 138 (2026-10-20, ADR 0962 P1): `campaign-studio.mcp.{list,get,performance,
+ *  pending-gates,run-status,explain}` :: clientId (+ campaignId / runId). MCP TOOL
+ *  PROJECTIONS, the 119 → 122 family: their params arrive as the tool call's
+ *  `arguments`, AJV-validated against the tool's inputSchema before the run starts,
+ *  and every chain is `internal: true`. A param-less from-chain copy fails CLOSED at
+ *  its only node: `bindExternalRead` refuses an empty `clientId` (typed
+ *  `validation_error`) before any read. A declared +6 for one family, not a silent
+ *  raise.
+ *
+ *  138 → 139 (2026-10-20, ADR 0962 P2): `campaign-studio.mcp.request-change` ::
+ *  clientId, text. The same MCP-projection family; a param-less copy fails closed at
+ *  `bindExternal` (typed `validation_error`) before any write. A declared +1.
+ *
+ *  139 → 142 (2026-10-25, ADR 0955 P5): the three new per-client journey blueprints
+ *  `campaign-journeys.{welcome-email-sms, post-webinar, abandoned-signup}` ::
+ *  contactId, orgId, senderEmail, triggerEventName. MEASURED: the pack goes from 3 to
+ *  6 chains and the count from 139 to exactly 142, with no existing chain newly
+ *  affected. They are the `welcome-series` pattern, already counted. The params are
+ *  per-client CONFIGURATION with no honest default (which client, which verified
+ *  sender, which host event starts it), and `contactId` rides the trigger payload at
+ *  run time. A param-less copy cannot send: its trigger names no event, its first
+ *  step (`enroll`) refuses without a contact (typed `validation_error`), and every
+ *  send sits behind the `#signoff` gate and a per-channel eligibility check. A
+ *  declared +3 for one family, not a silent raise.
+ *
+ *  142 → 143 (2026-10-20, ADR 0952 P3; renumbered onto main's 142 in the
+ *  2026-10-25 integration): `campaign-intel.reallocate` :: orgId, the
+ *  same family as its three `campaign-sync.*` siblings above: there is no honest
+ *  default for "which org's budgets". A param-less copy changes nothing: its first
+ *  node reads an empty store, and `propose-reallocation` refuses an empty `orgId`
+ *  (typed `validation_error`) before any budget read or approval. Nothing is
+ *  applied without a human approval in any case. A declared +1, not a silent raise.
+ *
+ *  143 → 144 (2026-10-20, ADR 0952 P7): `campaign-sync.catalog-feed` :: orgId, the
+ *  same family again: no honest default for "which org's catalog". A param-less copy
+ *  sends nothing: `pushCatalog` returns `invalid` for an empty `orgId`
+ *  before any catalog read or vendor call. A declared +1, not a silent raise.
+ *
+ *  144 → 147 (2026-10-26, ADR 0948 P2): the first funnel blueprint and its two step
+ *  sub-chains, `funnels.blueprint.lead-magnet` :: campaignId, name, orgId,
+ *  `funnels.step.optin` :: briefId, formId, orgId and `funnels.step.thankyou` ::
+ *  briefId, orgId. MEASURED: exactly +3, no existing chain newly affected. These are
+ *  per-client inputs with no honest default (which client, which confirmed brief,
+ *  which sign-up form); the real launch path is the generate route, which fills
+ *  orgId/briefId/campaignId and validates the rest against the chain's schema. A
+ *  param-less copy writes nothing: each step's first node, `get-brief`, fails
+ *  `not_found` without a brief, before any model call or page draft, and the parent
+ *  fails with it (`onChildFailure: fail-parent`) before `create`. A declared +3 for
+ *  one family, not a silent raise.
+ *
+ *  147 → 152 (2026-10-26, ADR 0948, tripwire): `funnels.blueprint.tripwire` ::
+ *  campaignId, name, orgId and its four new step sub-chains `funnels.step.{sales,
+ *  checkout, upsell, downsell}` :: briefId, orgId, productId (+ bumpProductId on
+ *  checkout). MEASURED: exactly +5, the lead-magnet family above, no other chain newly
+ *  affected. Same reason: per-client inputs with no honest default (which client,
+ *  brief and products); generate fills orgId/briefId/campaignId and validates the
+ *  rest. A param-less copy writes nothing: each step's `get-brief` fails `not_found`
+ *  before any model call or page draft, and the parent fails before `create`; a bad
+ *  product id is refused by the funnels write (offers are org-checked). A declared +5
+ *  for one family, not a silent raise. */
+const CEILING = 152;
 
 /** ADR 0507 — the EMBEDDED family, invisible until the detector was widened. These
  *  freeze to `''` rather than `undefined`, so the node SUCCEEDS on truncated input
@@ -166,9 +266,13 @@ beforeAll(() => {
   reloadWorkflowChainPacks();
   const chains = listChains();
   total = chains.length;
+  // All three accumulators reset together, so a re-run of this hook can never
+  // count a chain twice.
   affected = [];
+  wholeValue = [];
+  embedded = [];
   for (const { chain } of chains) {
-    const def = expandChain(chain, {}) as unknown as WorkflowDefinition;
+    const def = expandChain(chain, {});
     const unfilled = findUnfilledExpansionParams(def);
     if (unfilled.length > 0) {
       const row = { chainId: chain.chainId, params: [...new Set(unfilled.map((u) => u.param))].sort() };
@@ -182,8 +286,10 @@ beforeAll(() => {
 describe('from-chain-instantiable chains carrying unfilled required params', () => {
   it('the pack registry actually loaded — a zero count must not read as "clean"', () => {
     // Without this the whole file passes vacuously on an empty registry, which
-    // is precisely how a ratchet silently stops ratcheting.
-    expect(total).toBeGreaterThan(100);
+    // is precisely how a ratchet silently stops ratcheting. Floor = the MEASURED
+    // loaded-chain count, 244 on 2404797bf (2026-10-22). Whole-value 127 and
+    // embedded 36 measured the same day: both ceilings sit exactly at the truth.
+    expect(total).toBeGreaterThanOrEqual(244);
   });
 
   it(`whole-value family does not exceed the ${CEILING}-chain ceiling`, () => {
@@ -210,7 +316,7 @@ describe('from-chain-instantiable chains carrying unfilled required params', () 
     // Guards the detector against the opposite failure: flagging everything.
     const found = listChains().find((c) => c.chain.chainId === 'research.web-brief');
     expect(found, 'research.web-brief must be loaded for this to mean anything').toBeTruthy();
-    const def = expandChain(found!.chain, { params: { query: 'walking 20 minutes a day' } }) as unknown as WorkflowDefinition;
+    const def = expandChain(found!.chain, { params: { query: 'walking 20 minutes a day' } });
     expect(findUnfilledExpansionParams(def)).toHaveLength(0);
   });
 });

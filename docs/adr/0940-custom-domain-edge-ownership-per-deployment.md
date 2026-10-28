@@ -113,3 +113,30 @@ The P3 step order is the runbook. It also goes into `myndhyve-app`
 - [Unbounce: connecting your domain](https://documentation.unbounce.com/hc/en-us/articles/203661044);
   [Leadpages: custom domains](https://leadpages.com/product/custom-domains); GoHighLevel domain setup
   ([third-party guide](https://consultevo.com/gohighlevel-add-domain-dns-setup/)).
+
+
+## Recovery correction — P2 concurrency and recovery (2026-10-21)
+
+The initial P2 implementation recorded a fingerprint but then used
+`set-default-service`, whose own fresh read could overwrite a newer operator
+change. The same unconditional command made its saved rollback unsafe.
+
+P2 now captures one JSON snapshot and changes only `defaultService` with a
+Compute API PATCH carrying that original fingerprint. A 412 stops the handoff.
+The helper verifies the exact project/region/serverless NEG service, HTTP
+backend scheme and sole group, including the already-target path. It waits
+for the asynchronous operation and compares the full writable map before
+issuing a rollback receipt. Rollback uses the saved post-apply fingerprint;
+a newer change is preserved.
+
+A private recovery directory records the pinned context before sending.
+A fully written immutable request record is published create-if-absent;
+concurrent resumes all use its winning nonzero request ID and body. Ambiguous
+responses resume through `repoint --resume <directory>` with that same request.
+No new fingerprint is adopted to force success. Already-restored rollback
+reports its observed state without another write. Credentials remain only in
+process memory and HTTPS headers.
+
+The source and mocked-cloud witnesses received independent review. Execution
+and the combined merge gate are still pending; no live edge was repointed.
+P3–P5 remain the operations in the original plan.

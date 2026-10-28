@@ -11,6 +11,11 @@
  *
  * Shrinking is allowed only by editing the table (a removed caller must be removed
  * here too, so the table never vouches for code that no longer exists).
+ *
+ * Tracker TST-BHC-3. Red when (sabotage-witnessed, wave 62): a new chat-message write
+ * call appears in src. Case 3 is a SOURCE PIN (a behaviour-preserving respelling of
+ * the gate call also reds it); the behaviour it stands for is S7/S8 in
+ * adr0879-channels-security, which go red when a run-lane gate leg is removed.
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';

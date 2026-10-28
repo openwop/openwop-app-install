@@ -43,7 +43,9 @@ import {
   workingColumnOf,
   type KanbanCard,
 } from './kanbanService.js';
-import { reconcileStrandedCards } from './cardRunRecovery.js';
+import { isHeldForReview, reconcileStrandedCards } from './cardRunRecovery.js';
+import { isWorkTwinMockArchive } from './workflowTemplates.js';
+import { isAnonTenantId } from './requestSubject.js';
 import { createApproval, hasPendingApprovalForCard } from './approvalService.js';
 import { emitEscalationNotifications } from './escalationNotify.js';
 import { checkAutonomousRunBudget, runBudgetConfigWithLimit } from './runBudgetService.js';
@@ -56,10 +58,28 @@ const POLL_INTERVAL_MS = 30_000;
 /** Most members auto-checked per pass (backstop against a large fleet flooding
  *  the dispatcher in one tick). */
 const CHECK_BATCH = 50;
+/** ADR 0963 D2 — most members EXAMINED per pass (served, or skipped after a
+ *  point read / a lost claim). Bounds a tick's work now that a skipped member
+ *  no longer consumes a batch slot. */
+const MAX_EXAMINED = 200;
 /** Per-(roster, slot) claim keys are only needed for the concurrent-poll
  *  window; prune older ones each tick so the idempotency table stays bounded. */
 const CLAIM_KEY_PREFIX = 'heartbeat:';
 const CLAIM_PRUNE_AGE_MS = 10 * 60_000;
+/** ADR 0963 (grade-code) — how long a tenant the budget refused is skipped
+ *  before ANY of its members is examined again. The claim precedes the budget
+ *  check, so without this every tick burned one more of that tenant's slot
+ *  claims and the burnt members piled up at the head of the stalest-first order
+ *  (R refused tenants × k ticks reached MAX_EXAMINED and served nobody). */
+const BUDGET_REFUSED_BACKOFF_MS = 5 * 60_000;
+/** Per-instance: tenant → time its members may be examined again. A throttle,
+ *  never a decision — a restart only costs one extra burnt claim per tenant. */
+const budgetRefusedUntil = new Map<string, number>();
+/** Test-only. */
+export function __resetHeartbeatBudgetBackoff(): void { budgetRefusedUntil.clear(); }
+/** At most one "saturated" warning per instance per this long. */
+const SATURATION_WARN_EVERY_MS = 10 * 60_000;
+let lastSaturationWarnAt = 0;
 
 export interface HeartbeatResult {
   picked: boolean;
@@ -78,6 +98,12 @@ export interface HeartbeatResult {
     | 'no_runnable_workflow'
     | 'policy_denied'
     | 'awaiting_approval'
+    /** ADR 0963 D3 — every To Do card is held after a stop or a failure and
+     *  waits for a person to clear its note. */
+    | 'held'
+    /** ADR 0963 D8 — every runnable card names a Work-Twin mock archive
+     *  (`tmpl.*`), which the loop never runs or proposes (ADR 0939). */
+    | 'mock_archive'
     /** ADR 0774 D1 — the agent's board has a To Do lane but no in-progress
      *  (`working`/`doing`) lane, so a pick could not be claimed and would be
      *  started again on every pass. The loop refuses rather than repeat. */
@@ -122,7 +148,7 @@ export async function runHeartbeatOnce(deps: StartRunDeps, entry: RosterEntry): 
   let skipCause: HeartbeatResult['reason'] | undefined;
   const noteCause = (cause: NonNullable<HeartbeatResult['reason']>): void => {
     const rank: Record<string, number> = {
-      no_working_lane: 5, awaiting_approval: 4, policy_denied: 3, no_runnable_workflow: 2, empty_board: 1,
+      no_working_lane: 7, awaiting_approval: 6, held: 5, policy_denied: 4, mock_archive: 3, no_runnable_workflow: 2, empty_board: 1,
     };
     if (!skipCause || (rank[cause] ?? 0) > (rank[skipCause] ?? 0)) skipCause = cause;
   };
@@ -165,12 +191,17 @@ export async function runHeartbeatOnce(deps: StartRunDeps, entry: RosterEntry): 
     const boardCards = restored > 0 ? await listCards(board.id) : allCards;
     // ADR 0774 D2 (`KSTWF-15`) — a WorkItem-backed card belongs to the ADR 0738
     // dispatcher; letting this loop start it too would run it on two engines.
-    const candidates = boardCards.filter((c) => c.columnId === todoColumn.id && !c.workItemId);
+    const todoCards = boardCards.filter((c) => c.columnId === todoColumn.id && !c.workItemId);
+    // ADR 0963 D3 — a card restored after a stop or a failure is HELD: the loop
+    // does not retry what stopped; a person releases it by clearing the note.
+    // The same predicate gates the ranking preview, so it ranks what this picks.
+    const candidates = todoCards.filter((c) => !isHeldForReview(c));
     // ADR 0534 P2 — rank the candidates when a compiler is registered. Absent,
     // throwing, or misbehaving ⇒ the literal pre-0534 order (insertion order),
-    // never a degraded ranking.
-    const cards = await orderWorkCandidates(candidates, passNow, entry.tenantId);
-    if (cards.length === 0) noteCause('empty_board');
+    // never a degraded ranking. ADR 0963 D6 — the decisions are THIS pass's,
+    // held in a local, never in module state another pass can overwrite.
+    const { cards, decisions } = await rankWorkCandidates(candidates, passNow, entry.tenantId);
+    if (cards.length === 0) noteCause(todoCards.length > 0 ? 'held' : 'empty_board');
     for (const card of cards) {
       // ADR 0313 D2 — a BARE card (no card/column workflow) on an agent-owned
       // board falls back to the registered agent-turn workflow, but ALWAYS
@@ -180,6 +211,10 @@ export async function runHeartbeatOnce(deps: StartRunDeps, entry: RosterEntry): 
       const fallback = explicitWorkflowId ? null : agentTurnFallback();
       const workflowId = explicitWorkflowId ?? fallback?.workflowId;
       if (!workflowId) { noteCause('no_runnable_workflow'); continue; }
+      // ADR 0963 D8 — never run or propose a Work-Twin mock archive on the
+      // loop's own initiative: it fabricates "completed" work, and the user
+      // paused those schedules (ADR 0939). A person can still run one by hand.
+      if (mockArchiveGuard && isWorkTwinMockArchive(workflowId)) { noteCause('mock_archive'); continue; }
       const isBareFallback = fallback !== null;
 
       // "Agents propose, humans dispose": a review-mode member doesn't start the
@@ -308,8 +343,8 @@ export async function runHeartbeatOnce(deps: StartRunDeps, entry: RosterEntry): 
             // breaks replay determinism outright. Absent when no compiler ranked
             // (toggle off, or a fail-open), so the stamp never claims a decision
             // that did not happen.
-            ...(workSelectionDecisionFor(card.id)
-              ? { workSelection: workSelectionStamp(card.id) }
+            ...(decisions.has(card.id)
+              ? { workSelection: workSelectionStamp(decisions, card.id) }
               : {}),
           },
         });
@@ -402,52 +437,50 @@ export function registerWorkSelectionCompiler(fn: WorkSelectionCompiler | null):
   workSelectionCompiler = fn;
 }
 
-/** The last ranking decision, keyed by card id, for the pass in flight. Read by
- *  the run stamp in P3; absent when no compiler ran. */
-let lastPicks: Map<string, WorkSelectionPick> = new Map();
-
-/** The ranking decision for a card in the current pass, if one was computed. */
-export function workSelectionDecisionFor(cardId: string): WorkSelectionPick | undefined {
-  return lastPicks.get(cardId);
-}
+/** One pass's ranking decisions, keyed by card id. Empty when no compiler ranked. */
+export type WorkSelectionDecisions = ReadonlyMap<string, WorkSelectionPick>;
 
 /**
  * Rank the candidates, or return them untouched. Every failure mode — no
  * compiler, a throw, or a result that is not a permutation of the input — falls
- * back to the input order.
+ * back to the input order with NO decisions.
  *
  * The permutation check is not paranoia: the contract is ORDER, not filter, so a
  * compiler that drops a card would silently make work unreachable, which is the
  * same class of bug as the strand ADR 0535 fixes.
+ *
+ * ADR 0963 D6 — the decisions are returned to the caller, never kept in module
+ * state: a module-level map was reassigned by every concurrent pass (a manual
+ * Check now beside the daemon), erasing a decision between its ranking and the
+ * run stamp that records it.
  */
-export async function orderWorkCandidates(
+export async function rankWorkCandidates(
   cards: KanbanCard[],
   now: number,
   tenantId: string,
-): Promise<KanbanCard[]> {
-  lastPicks = new Map();
-  if (!workSelectionCompiler || cards.length === 0) return cards;
+): Promise<{ cards: KanbanCard[]; decisions: WorkSelectionDecisions }> {
+  const none = { cards, decisions: new Map<string, WorkSelectionPick>() };
+  if (!workSelectionCompiler || cards.length === 0) return none;
   try {
     const picks = await workSelectionCompiler(cards, now, { tenantId });
-    if (picks === null) return cards; // toggle off for this tenant — not a fault
+    if (picks === null) return none; // toggle off for this tenant — not a fault
     if (picks.length !== cards.length) {
       log.warn('work-selection compiler did not return a permutation; using insertion order', {
         got: picks.length, expected: cards.length,
       });
-      return cards;
+      return none;
     }
     const seen = new Set(picks.map((p) => p.card.id));
     if (seen.size !== cards.length || !cards.every((c) => seen.has(c.id))) {
       log.warn('work-selection compiler returned unknown or duplicate cards; using insertion order');
-      return cards;
+      return none;
     }
-    for (const pick of picks) lastPicks.set(pick.card.id, pick);
-    return picks.map((p) => p.card);
+    return { cards: picks.map((p) => p.card), decisions: new Map(picks.map((p) => [p.card.id, p])) };
   } catch (err) {
     log.warn('work-selection compiler threw; using insertion order', {
       error: err instanceof Error ? err.message : String(err),
     });
-    return cards;
+    return none;
   }
 }
 
@@ -462,8 +495,8 @@ export function setWorkSelectionPolicyId(id: string | null): void {
 
 /** The replay-frozen form of a ranking decision. Plain JSON — `run.metadata` is
  *  read verbatim on `:fork`, so nothing here may be a live reference. */
-export function workSelectionStamp(cardId: string): Record<string, unknown> | null {
-  const pick = lastPicks.get(cardId);
+export function workSelectionStamp(decisions: WorkSelectionDecisions, cardId: string): Record<string, unknown> | null {
+  const pick = decisions.get(cardId);
   if (!pick) return null;
   return {
     ...(workSelectionPolicyId ? { policy: workSelectionPolicyId } : {}),
@@ -472,9 +505,17 @@ export function workSelectionStamp(cardId: string): Record<string, unknown> | nu
     scores: { ...pick.scores },
     /** How many candidates it was ranked against — a rank of 1 of 1 says much
      *  less than 1 of 40, and the difference is invisible without this. */
-    candidates: lastPicks.size,
+    candidates: decisions.size,
   };
 }
+
+/** ADR 0963 D8 — test-only escape. The seeded demo (the ten Work-Twins) is ALL
+ *  mock archive, so the suites that exercise heartbeat / approval MECHANICS over
+ *  that demo turn the guard off; the guard itself is pinned by
+ *  `heartbeat-loop-adr0963.test.ts` and `agents-example-data.test.ts`. No
+ *  production path may call this (`adr0963-mock-archive-seam.test.ts`). */
+let mockArchiveGuard = true;
+export function __setMockArchiveGuardForTest(on: boolean): void { mockArchiveGuard = on; }
 
 /** ADR 0313 D1 — the host default cadence for members that never configured a
  *  heartbeat. Env-tunable; `0` disables the host default (opt-in only, the
@@ -570,9 +611,17 @@ function isHeartbeatDue(entry: RosterEntry, now: number, admin?: ResolvedHeartbe
 
 /**
  * Run one autonomous-heartbeat pass across all tenants: every enabled member
- * with a positive `heartbeatIntervalMs` that is due gets its "Check now" run
- * once across the fleet (per-(roster, slot) claim). Returns the number this
- * instance ran. Exported for deterministic tests — pass a fixed `now`.
+ * that is due gets its "Check now" run once across the fleet (per-member, per-
+ * slot claim). Returns the number this instance picked work for. Exported for
+ * deterministic tests — pass a fixed `now`.
+ *
+ * ADR 0963 D1/D2 — FAIR across the fleet. Before this, the claim key was the
+ * persona-scoped `rosterId` (one tenant's `host:ava` took the slot for all 801
+ * tenants that have one) and the batch was the first 50 due entries in listing
+ * order, where a skipped member stayed due AND stayed at the head. Prod served
+ * 36 of 10,488 enabled members. Now: the claim is per (tenant, member); due
+ * members are served stalest-first; only members actually served count toward
+ * `CHECK_BATCH`; and a tenant the budget refused this pass costs nothing more.
  *
  * `listTenants` enumerates tenant ids to scan (the roster store lists per
  * tenant). Injected so tests can scope it; the daemon derives it from the
@@ -582,31 +631,49 @@ export async function processDueHeartbeats(
   deps: StartRunDeps,
   listTenants: () => Promise<string[]>,
   now: number = Date.now(),
-  listEntries?: () => Promise<readonly RosterEntry[]>,
+  listEntries?: (() => Promise<readonly RosterEntry[]>) & { note?: (entry: RosterEntry) => void },
 ): Promise<number> {
   // ADR 0318 — resolve the host-wide admin override ONCE per pass (fail-open to
   // env). Threaded into every due-check + slot calc so the whole pass agrees.
   const admin = await resolveHeartbeatAdminConfig();
   const candidates = listEntries ? await listEntries() : await listAllRosterEntries(listTenants);
-  const dueEntries = candidates.filter((entry) => isHeartbeatDue(entry, now, admin));
+  // ADR 0963 D9 (USER decision 2026-10-19: "signed-in only") — the autonomous
+  // daemon never serves an anonymous demo sandbox. Those were 10,382 of the
+  // 10,482 enabled members in prod, all seeded, and ~99% of the loop's capacity.
+  // The manual "Check now" (routes/agentOps.ts) does not come through here and
+  // still works for an anonymous visitor.
+  const dueEntries = stalestFirst(candidates.filter((entry) => !isAnonTenantId(entry.tenantId) && isHeartbeatDue(entry, now, admin)));
+  // ADR 0963 D5 — tell the cached listing what this pass learned, so the next
+  // tick orders and filters on it instead of re-listing every tenant.
+  const note = (entry: RosterEntry): void => listEntries?.note?.(entry);
 
   let ran = 0;
-  for (const candidate of dueEntries.slice(0, CHECK_BATCH)) {
+  let served = 0;
+  let examined = 0;
+  for (const candidate of dueEntries) {
+    if (served >= CHECK_BATCH || examined >= MAX_EXAMINED) break;
+    // ADR 0963 D2 — a tenant the budget refused recently: skip its members
+    // before any I/O and without counting them, so an over-budget tenant can
+    // neither fill this pass nor burn a fresh slot claim on every tick.
+    if ((budgetRefusedUntil.get(candidate.tenantId) ?? 0) > now) continue;
+    examined += 1;
     // EVID-5 — the candidate may come from a cached listing. Act only on the
     // entry as stored NOW: re-read it, and skip it if it is gone or no longer
     // due (another instance may have run it since the list was taken).
     const entry = listEntries ? await getRosterEntry(candidate.tenantId, candidate.rosterId) : candidate;
-    if (!entry || !isHeartbeatDue(entry, now, admin)) continue;
+    if (!entry) continue;
+    note(entry);
+    if (!isHeartbeatDue(entry, now, admin)) continue;
     // Quantize to the interval so concurrent instances claim the same slot key.
     // ADR 0313 — the SAME effective cadence as the due check (never disagree).
     const interval = effectiveHeartbeatIntervalMs(entry, admin) || POLL_INTERVAL_MS;
     const slot = Math.floor(now / interval);
-    const claimKey = `${CLAIM_KEY_PREFIX}${entry.rosterId}:${slot}`;
-    const claim = await deps.storage.claimOnce(claimKey, new Date(now).toISOString());
-    if (!claim.claimed) continue; // another instance is running this slot
+    const claim = await deps.storage.claimOnce(heartbeatClaimKey(entry, slot), new Date(now).toISOString());
+    if (!claim.claimed) continue; // another instance is running this member's slot
     // Autonomous-run budget: skip an auto-heartbeat that would exceed the
     // tenant's ceiling (manual "Check now" is never throttled). lastHeartbeatAt
-    // isn't stamped, so it retries next window once budget frees. ADR 0318 — the
+    // isn't stamped, so the member keeps its place at the head of the stalest-
+    // first order and is served as soon as the budget frees. ADR 0318 — the
     // admin override (runs/hour) supersedes the env cap when set.
     const budget = await checkAutonomousRunBudget(
       deps.storage,
@@ -615,13 +682,16 @@ export async function processDueHeartbeats(
       admin?.runBudgetPerHour != null ? runBudgetConfigWithLimit(admin.runBudgetPerHour) : undefined,
     );
     if (!budget.allowed) {
+      budgetRefusedUntil.set(entry.tenantId, now + BUDGET_REFUSED_BACKOFF_MS);
       log.warn('autonomous heartbeat skipped — tenant over run budget', {
         rosterId: entry.rosterId, tenantId: entry.tenantId, current: budget.current, limit: budget.limit,
       });
       continue;
     }
+    served += 1;
     try {
       const result = await runHeartbeatOnce(deps, entry);
+      if (result.lastHeartbeatAt) note({ ...entry, lastHeartbeatAt: result.lastHeartbeatAt });
       if (result.picked) {
         ran++;
         log.info('autonomous heartbeat picked a task', {
@@ -637,7 +707,38 @@ export async function processDueHeartbeats(
       });
     }
   }
+  // ADR 0963 D2 — the loop's capacity is finite (CHECK_BATCH per tick per
+  // instance). When a CAP stopped the pass with members still due, say so: a
+  // backlog that only shows up as "my agent never ran" is the failure this
+  // replaced. Only a cap counts (a budget refusal or a lost claim is not
+  // saturation), and at most once per window, since in a saturated fleet it
+  // would otherwise fire on every tick.
+  const capped = (served >= CHECK_BATCH || examined >= MAX_EXAMINED) && dueEntries.length > examined;
+  if (capped && now - lastSaturationWarnAt >= SATURATION_WARN_EVERY_MS) {
+    lastSaturationWarnAt = now;
+    log.warn('heartbeat pass saturated', { due: dueEntries.length, served, examined });
+  }
   return ran;
+}
+
+/** ADR 0963 D1 — the slot claim fences ONE member: (tenant, roster id). Roster
+ *  ids are persona-scoped (ADR 0379), so a key without the tenant let one
+ *  workspace's agent take the slot for every workspace with the same persona. */
+function heartbeatClaimKey(entry: RosterEntry, slot: number): string {
+  return `${CLAIM_KEY_PREFIX}${entry.tenantId}:${entry.rosterId}:${slot}`;
+}
+
+/** ADR 0963 D2 — never-checked members first, then the longest-unchecked;
+ *  ties by (tenant, roster id) so every instance orders identically. Parses
+ *  each timestamp once (the comparator would otherwise re-parse ~n·log n). */
+function stalestFirst(entries: RosterEntry[]): RosterEntry[] {
+  const at = (e: RosterEntry): number => (e.lastHeartbeatAt ? Date.parse(e.lastHeartbeatAt) || 0 : 0);
+  return entries
+    .map((entry) => ({ entry, t: at(entry) }))
+    .sort((a, b) => a.t - b.t
+      || (a.entry.tenantId < b.entry.tenantId ? -1 : a.entry.tenantId > b.entry.tenantId ? 1 : 0)
+      || (a.entry.rosterId < b.entry.rosterId ? -1 : a.entry.rosterId > b.entry.rosterId ? 1 : 0))
+    .map(({ entry }) => entry);
 }
 
 /** Delete this daemon's stale per-(roster, slot) claim keys so the idempotency
@@ -671,24 +772,39 @@ export const ROSTER_RELIST_BACKSTOP_MS = 5 * 60_000;
  * still acts on a fresh read of the entry (`processDueHeartbeats`) and is fenced
  * by the per-slot claim, so a stale listing can only delay a heartbeat by at
  * most the backstop, never run one twice or run a deleted member.
+ *
+ * ADR 0963 D5 — `note(entry)` replaces one cached entry with what a pass just
+ * read or stamped. Stamping a heartbeat no longer moves the token (it moved on
+ * every pass that did anything, so this cache re-listed every tick), so the pass
+ * corrects the cache itself. Another instance's stamps reach it at the next
+ * relist; until then such a member costs one point read and is noted.
  */
 export function cachedRosterEntries(
   listTenants: () => Promise<string[]>,
   clock: () => number = Date.now,
-): () => Promise<readonly RosterEntry[]> {
+): (() => Promise<readonly RosterEntry[]>) & { note: (entry: RosterEntry) => void } {
   let cache: RosterEntry[] | null = null;
+  let indexOf = new Map<string, number>();
+  const keyOf = (e: RosterEntry): string => `${e.tenantId}\u0000${e.rosterId}`;
   let seenToken: string | null = null;
   let listedAt = 0;
-  return async () => {
+  const list = async (): Promise<readonly RosterEntry[]> => {
     const token = await readRosterVersion(); // token FIRST, list SECOND
     const now = clock();
     if (cache === null || token !== seenToken || now - listedAt >= ROSTER_RELIST_BACKSTOP_MS) {
       cache = await listAllRosterEntries(listTenants);
+      indexOf = new Map(cache.map((e, i) => [keyOf(e), i]));
       seenToken = token;
       listedAt = now;
     }
     return cache;
   };
+  const note = (entry: RosterEntry): void => {
+    if (!cache) return;
+    const i = indexOf.get(keyOf(entry));
+    if (i !== undefined) cache[i] = entry;
+  };
+  return Object.assign(list, { note });
 }
 
 export interface HeartbeatDaemon {

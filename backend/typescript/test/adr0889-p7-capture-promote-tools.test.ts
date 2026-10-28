@@ -1,6 +1,16 @@
 /**
  * ADR 0889 P7 — opt-in tool-boundary capture (D9), promote-a-run-to-a-case,
- * and the three agent-eval chat tools (D8).
+ * and the three agent-eval chat tools (D8) (TST-BPA).
+ *
+ * Red when (sabotage-witnessed, wave 65): the capture-setting key stops using the
+ * agent's storage spelling ⇒ "a switch flipped…"; capture wraps with the switch off ⇒
+ * "is OFF by default"; a captured input skips the secret/free-text passes, or a
+ * promoted task stops failing on a fixture miss ⇒ "ON: records each call…"; the per-run
+ * cap admits one more call ⇒ "caps the calls…"; promote keeps a result as a raw string ⇒
+ * "buildTaskFromRun without…"; promote accepts a run with no capture ⇒ "a run with
+ * nothing captured…"; the run tool drops its acting-user check ⇒ "are registered…";
+ * list-suites skips the route predicate ⇒ "list-suites reads…"; get-summary drops the
+ * tenant check ⇒ "get-summary never reveals…".
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -14,6 +24,8 @@ import { maybeCaptureExecuteTool, listRunBoundary, MAX_CALLS_PER_RUN } from '../
 import { buildTaskFromRun } from '../src/host/evals/promoteRun.js';
 import { builtinAgentTool } from '../src/host/agentToolProvider.js';
 import { putEvalSuite, validateEvalSuite } from '../src/host/evals/suiteStore.js';
+import type { BundleScope } from '../src/host/inMemorySurfaces.js';
+import type { ExecuteAgentTool } from '../src/host/agentDispatch.js';
 
 let server: Server; let base = '';
 const V2 = { Authorization: 'Bearer dev-token', 'Content-Type': 'application/json', 'OpenWOP-Version': '2' };
@@ -50,18 +62,19 @@ describe('ADR 0889 D9 — opt-in tool-boundary capture', () => {
     // the canonical `vendor.openwop-app.*` one. Both must hit the same setting.
     expect((await send('PUT', '/host/openwop-app/agent-evals/capture/feature.evals.agents.spelling', { enabled: true })).status).toBe(200);
     let n = 0;
-    const inner = async () => { n += 1; return { content: '{"ok":true}' }; };
+    const inner: ExecuteAgentTool = async () => { n += 1; return { content: '{"ok":true}' }; };
     const wrapped = await maybeCaptureExecuteTool(inner, { tenantId: 'default', runId: 'r-spelling', agentId: 'vendor.openwop-app.evals.agents.spelling' });
     expect(wrapped).not.toBe(inner);
-    await wrapped({ id: 'c1', name: 'crm.lookup', input: { id: 'A1' } } as Parameters<typeof wrapped>[0]);
+    await wrapped({ name: 'crm.lookup', input: { id: 'A1' } });
     expect(n).toBe(1);
     const capture = await send('GET', '/host/openwop-app/agent-evals/capture/feature.evals.agents.spelling');
     expect((capture.json['runs'] as Array<{ runId: string; calls: number }>).find((r) => r.runId === 'r-spelling')?.calls).toBe(1);
   });
 
   it('is OFF by default: the lane executor is returned unchanged and nothing is recorded', async () => {
-    const inner = async () => ({ content: 'x' });
-    const wrapped = await maybeCaptureExecuteTool(inner, { tenantId: 'default', runId: 'r-off', agentId: AGENT });
+    // An agent no other case switches on, so the default is what is read.
+    const inner: ExecuteAgentTool = async () => ({ content: 'x' });
+    const wrapped = await maybeCaptureExecuteTool(inner, { tenantId: 'default', runId: 'r-off', agentId: 'eval.capture-never-on' });
     expect(wrapped).toBe(inner);
   });
 
@@ -102,12 +115,18 @@ describe('ADR 0889 D9 — opt-in tool-boundary capture', () => {
     expect((await send('PUT', `/host/openwop-app/agent-evals/capture/${AGENT}`, { enabled: true })).status).toBe(200);
     const exec = await maybeCaptureExecuteTool(async () => ({ content: '{}' }), { tenantId: 'default', runId: 'r-cap', agentId: AGENT });
     for (let i = 0; i < MAX_CALLS_PER_RUN + 5; i += 1) await exec({ name: 't', input: { i } });
-    expect(await listRunBoundary('default', 'r-cap')).toHaveLength(MAX_CALLS_PER_RUN);
+    expect(MAX_CALLS_PER_RUN).toBe(50);
+    expect(await listRunBoundary('default', 'r-cap')).toHaveLength(50);
   });
 
   it('a run with nothing captured cannot be promoted (typed 400)', async () => {
+    await putEvalSuite('default', validateEvalSuite({
+      suiteId: 'test.acme.evals.empty-promote', version: '1.0.0', modes: ['golden'],
+      tasks: [{ taskId: 'seed', input: {}, expected: { kind: 'golden', match: { strategy: 'contains', value: 'x' } } }],
+    }), 'user:owner');
     const created = await send('POST', '/runs', { workflowId: 'conformance-noop', inputs: {} });
-    const r = await send('POST', '/host/openwop-app/agent-evals/suites/test.acme.evals.promoted@1.0.0/tasks', { fromRunId: String(created.json['runId']) });
+    expect(created.status, created.text.slice(0, 200)).toBe(201);
+    const r = await send('POST', '/host/openwop-app/agent-evals/suites/test.acme.evals.empty-promote@1.0.0/tasks', { fromRunId: String(created.json['runId']) });
     expect(r.status).toBe(400);
     expect((r.json['details'] as Record<string, unknown>)['reason']).toBe('nothing_captured');
   });
@@ -126,9 +145,15 @@ describe('ADR 0889 D8 — agent-eval chat tools', () => {
     const summary = builtinAgentTool('openwop:agent-evals.get-summary')!;
     expect(list && run && summary).toBeTruthy();
     expect(run.safeModeApproval).toBeTruthy();
-    expect(JSON.parse((await list.run({}, { tenantId: 'default' } as never)).content)).toEqual({ items: [] });
-    expect((await run.run({ suiteRef: 'x', agentId: 'y' }, { tenantId: 'default' } as never)).isError).toBe(true);
-    expect((await summary.run({ runId: 'nope' }, { tenantId: 'default' } as never)).isError).toBe(true);
+    const noActor: BundleScope = { tenantId: 'default' };
+    expect(JSON.parse((await list.run({}, noActor)).content)).toEqual({ items: [] });
+    const refusedRun = await run.run({ suiteRef: 'x', agentId: 'y' }, noActor);
+    expect(refusedRun.isError).toBe(true);
+    // The run tool's OWN refusal, not the scope gate's (which answers with its own code).
+    expect(JSON.parse(refusedRun.content).error).toBe('acting_user_required');
+    const refusedSummary = await summary.run({ runId: 'nope' }, noActor);
+    expect(refusedSummary.isError).toBe(true);
+    expect(JSON.parse(refusedSummary.content).error).toBe('not_found');
   });
 
   it('list-suites reads the same store the route does, under the route\'s predicate (review M3)', async () => {
@@ -138,10 +163,15 @@ describe('ADR 0889 D8 — agent-eval chat tools', () => {
       suiteId: 'test.acme.evals.mine', version: '1.0.0', modes: ['golden'],
       tasks: [{ taskId: 't', input: {}, expected: { kind: 'golden', match: { strategy: 'contains', value: 'x' } } }],
     }), 'user:u-1');
-    const own = JSON.parse((await list.run({}, { tenantId: 'user:u-1', actingUserId: 'u-1', personalTenant: 'user:u-1' } as never)).content) as { items: Array<{ ref: string }> };
+    const own = JSON.parse((await list.run({}, { tenantId: 'user:u-1', actingUserId: 'u-1', personalTenant: 'user:u-1' })).content) as { items: Array<{ ref: string }> };
     expect(own.items.map((i) => i.ref)).toContain('test.acme.evals.mine@1.0.0');
-    // … a non-member of the workspace does not, so the tool fails EMPTY like the route refuses.
-    const outsider = JSON.parse((await list.run({}, { tenantId: 'default', actingUserId: 'u-1' } as never)).content) as { items: unknown[] };
+    // … a non-member of the workspace does not, so the tool fails EMPTY like the route
+    // refuses. The workspace holds a suite of its own, so an ungated read would list it.
+    await putEvalSuite('default', validateEvalSuite({
+      suiteId: 'test.acme.evals.default-seed', version: '1.0.0', modes: ['golden'],
+      tasks: [{ taskId: 't', input: {}, expected: { kind: 'golden', match: { strategy: 'contains', value: 'x' } } }],
+    }), 'user:owner');
+    const outsider = JSON.parse((await list.run({}, { tenantId: 'default', actingUserId: 'u-1' })).content) as { items: unknown[] };
     expect(outsider.items).toEqual([]);
   });
 
@@ -157,7 +187,7 @@ describe('ADR 0889 D8 — agent-eval chat tools', () => {
     });
     await hostExtStorage().insertRun(evalRun('m10-tenant-a', 'default'));
     await hostExtStorage().insertRun(evalRun('m10-tenant-b', 'user:u-9'));
-    const scopeB = { tenantId: 'user:u-9', actingUserId: 'u-9', personalTenant: 'user:u-9' } as never;
+    const scopeB: BundleScope = { tenantId: 'user:u-9', actingUserId: 'u-9', personalTenant: 'user:u-9' };
     // Positive control: the same caller reads its own tenant's eval run.
     const own = await summary.run({ runId: 'm10-tenant-b' }, scopeB);
     expect(own.isError, own.content).toBeFalsy();

@@ -13,7 +13,7 @@ import JSZip from 'jszip';
 import { createHash } from 'node:crypto';
 import { OpenwopError } from '../../../types.js';
 import { storeMediaAsset } from '../../../host/inMemorySurfaces.js';
-import { scrubSecretShaped } from '../../../host/redactSecrets.js';
+import { refuseCredential } from '../../../host/boundedStrings.js';
 import { generate, EXPORT_TARGETS, type ExportTarget, type AppModel, type ComponentNode } from './generators.js';
 import { preflightExport, type PreflightNote } from './preflight.js';
 import { generateOpenApi } from './openapiGen.js';
@@ -111,17 +111,21 @@ export function generateScrubbed(state: unknown, target: ExportTarget): { app: A
     throw new OpenwopError('validation_error', `Export exceeds the ${MAX_FILES}-file cap.`, 413, { fileCount: files.length, max: MAX_FILES });
   }
   let total = 0;
-  const scrubbedFiles = files.map((f) => {
-    // Scrub any secret-shaped token a user typed into a text prop before it lands in
-    // downloadable/pushed source (the export-security invariant); then account + cap size.
-    const scrubbed = scrubSecretShaped(f.content);
-    total += Buffer.byteLength(scrubbed, 'utf8');
+  const checkedFiles = files.map((f) => {
+    // The export-security invariant: a credential a user typed into a text prop
+    // never lands in downloadable/pushed source. The export is REFUSED, naming
+    // the file, rather than rewritten: rewriting every 40+ character run (the
+    // log scrub) silently corrupted URLs, hashes and integrity strings in the
+    // generated code. Long opaque runs pass through byte for byte.
+    const path = sanitizePath(f.path);
+    refuseCredential(f.content, `files.${path}`);
+    total += Buffer.byteLength(f.content, 'utf8');
     if (total > MAX_TOTAL_BYTES) {
       throw new OpenwopError('validation_error', `Generated source exceeds the ${Math.floor(MAX_TOTAL_BYTES / (1024 * 1024))} MiB cap.`, 413, { max: MAX_TOTAL_BYTES });
     }
-    return { path: sanitizePath(f.path), content: scrubbed };
+    return { path, content: f.content };
   });
-  return { app, files: scrubbedFiles, warnings, preflight };
+  return { app, files: checkedFiles, warnings, preflight };
 }
 
 /**

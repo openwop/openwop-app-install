@@ -16,7 +16,13 @@
  * install flow per RFC 0028 §B — that's a separate slice; this module
  * leaves a `packTemplates` slot that the pack-install path can populate.
  *
- * Persistence: in-memory only. State wipes on process restart, matching
+ * ADR 0993 D5 — the `user` layer is NOT here any more. It was a process-global
+ * map, so tenants shared it and it vanished on restart; user templates now live
+ * in `tenantPromptTemplates.ts` (durable, tenant-keyed). This module keeps only
+ * the GLOBAL, immutable layers (host fixtures, packs, chain-minted), which is
+ * why `getTemplate` can stay synchronous.
+ *
+ * Persistence (global layers): in-memory only. State wipes on process restart, matching
  * the workflow-engine sample's "non-durable" posture for every host
  * surface (see ARCHITECTURE.md §"Path to real backends"). Production
  * hosts swap this module for a storage-adapter-backed implementation.
@@ -95,13 +101,9 @@ const FIXTURES_DIR = join(
   'prompt-templates',
 );
 
-// Layered storage. Lookup precedence: user → pack → host (mutating
-// endpoints only see `user`; reads collapse all three).
+// Layered storage (global only — ADR 0993 D5). Lookup precedence: pack → host.
 const hostTemplates = new Map<string, StoredTemplate>();
 const packTemplates = new Map<string, StoredTemplate>();
-const userTemplates = new Map<string, Map<string, StoredTemplate>>();
-// userTemplates is keyed by templateId → (versionString → entry) so
-// PUT can snapshot prior versions per RFC 0028 §A.
 
 let initialized = false;
 
@@ -139,21 +141,17 @@ export interface ListFilter {
   source?: 'host' | 'pack' | 'user';
 }
 
-/** List templates matching the supplied filter. */
+/** List the GLOBAL templates matching the supplied filter (tenant templates: `tenantPromptTemplates`). */
 export function listTemplates(filter: ListFilter = {}): PromptTemplate[] {
   ensurePromptStoreInitialized();
   const candidates: PromptTemplate[] = [];
-  // User layer: take the latest version of each templateId.
-  for (const versions of userTemplates.values()) {
-    const latest = pickLatest([...versions.values()]);
-    if (latest) candidates.push(latest.template);
-  }
   for (const entry of packTemplates.values()) candidates.push(entry.template);
   for (const entry of hostTemplates.values()) candidates.push(entry.template);
   return candidates.filter((t) => applyFilter(t, filter));
 }
 
-function applyFilter(t: PromptTemplate, f: ListFilter): boolean {
+/** Exported for the RFC 0249 installed layer, which lists through the same filter (ADR 0972 D4). */
+export function applyFilter(t: PromptTemplate, f: ListFilter): boolean {
   if (f.kind && t.kind !== f.kind) return false;
   if (f.tag && !(t.tags ?? []).includes(f.tag)) return false;
   if (f.modelClass && t.modelHints?.modelClass !== f.modelClass) return false;
@@ -161,7 +159,7 @@ function applyFilter(t: PromptTemplate, f: ListFilter): boolean {
   return true;
 }
 
-function semverCompare(a: string, b: string): number {
+export function semverCompare(a: string, b: string): number {
   const pa = a.split('.').map(Number);
   const pb = b.split('.').map(Number);
   for (let i = 0; i < 3; i++) {
@@ -170,9 +168,6 @@ function semverCompare(a: string, b: string): number {
   return 0;
 }
 
-function pickLatest(entries: StoredTemplate[]): StoredTemplate | undefined {
-  return entries.slice().sort((a, b) => semverCompare(b.template.version, a.template.version))[0];
-}
 
 export interface GetResult {
   template: PromptTemplate;
@@ -180,7 +175,9 @@ export interface GetResult {
   source: 'host' | 'pack' | 'user';
 }
 
-/** Fetch a single template by templateId. Optional `version` pins;
+/** Fetch a single GLOBAL template by templateId (host fixtures, chain mints,
+ *  packs). A reference made from inside a tenant resolves through
+ *  `tenantPromptTemplates.resolveTenantTemplate`, never this alone. Optional `version` pins;
  *  optional `libraryId` disambiguates when multiple installed packs
  *  ship the same templateId. Returns `null` when not found,
  *  `'ambiguous'` when multiple matches require disambiguation. */
@@ -189,18 +186,7 @@ export function getTemplate(
   opts: { version?: string; libraryId?: string } = {},
 ): GetResult | null | 'ambiguous' {
   ensurePromptStoreInitialized();
-  // User layer first.
-  const userVersions = userTemplates.get(templateId);
-  if (userVersions) {
-    if (opts.version) {
-      const entry = userVersions.get(opts.version);
-      if (entry) return { template: entry.template, etag: entry.etag, source: 'user' };
-    } else {
-      const latest = pickLatest([...userVersions.values()]);
-      if (latest) return { template: latest.template, etag: latest.etag, source: 'user' };
-    }
-  }
-  // Pack layer next — multiple packs MAY ship the same templateId;
+  // Pack layer first — multiple packs MAY ship the same templateId;
   // libraryId disambiguates.
   const packMatches: StoredTemplate[] = [];
   for (const entry of packTemplates.values()) {
@@ -263,45 +249,11 @@ export function ensureMintedTemplatesRegistered(metadata: unknown): void {
   }
 }
 
-export type CreateOutcome =
-  | { ok: true; etag: string; locationVersion: string }
-  | { ok: false; code: 'conflict' | 'invalid' | 'forbidden'; message: string };
-
-/** Create a new user-source template. Fails when a user template with
- *  the same (templateId, version) pair already exists, or when the
- *  templateId collides with a host-source or pack-source template
- *  (those are read-only namespaces). */
-export function createUserTemplate(template: PromptTemplate): CreateOutcome {
+/** Is `templateId` owned by an immutable GLOBAL layer (host fixture, chain mint
+ *  or pack)? The tenant writer refuses these ids (ADR 0993 D5). */
+export function isGlobalTemplateId(templateId: string): boolean {
   ensurePromptStoreInitialized();
-  if (hostTemplates.has(template.templateId)) {
-    return {
-      ok: false,
-      code: 'forbidden',
-      message: `templateId '${template.templateId}' collides with a host-built-in template`,
-    };
-  }
-  if (packMatchesId(template.templateId)) {
-    return {
-      ok: false,
-      code: 'forbidden',
-      message: `templateId '${template.templateId}' collides with a pack-sourced template`,
-    };
-  }
-  const versions = userTemplates.get(template.templateId) ?? new Map<string, StoredTemplate>();
-  if (versions.has(template.version)) {
-    return {
-      ok: false,
-      code: 'conflict',
-      message: `template ${template.templateId}@${template.version} already exists`,
-    };
-  }
-  const stamped: PromptTemplate = {
-    ...template,
-    meta: { ...(template.meta ?? {}), source: 'user' },
-  };
-  versions.set(template.version, buildStored(stamped));
-  userTemplates.set(template.templateId, versions);
-  return { ok: true, etag: buildStored(stamped).etag, locationVersion: template.version };
+  return hostTemplates.has(templateId) || packMatchesId(templateId);
 }
 
 function packMatchesId(templateId: string): boolean {
@@ -309,69 +261,6 @@ function packMatchesId(templateId: string): boolean {
     if (entry.template.templateId === templateId) return true;
   }
   return false;
-}
-
-export type UpdateOutcome =
-  | { ok: true; template: PromptTemplate; etag: string }
-  | { ok: false; code: 'not_found' | 'forbidden' | 'conflict' | 'invalid'; message: string };
-
-/** Replace a user-source template. Submitted version MUST be strictly
- *  greater than the stored max version (SemVer-compared). Pack and host
- *  templates are read-only (403). */
-export function updateUserTemplate(templateId: string, template: PromptTemplate): UpdateOutcome {
-  ensurePromptStoreInitialized();
-  if (template.templateId !== templateId) {
-    return {
-      ok: false,
-      code: 'invalid',
-      message: `body templateId '${template.templateId}' does not match path '${templateId}'`,
-    };
-  }
-  if (hostTemplates.has(templateId)) {
-    return { ok: false, code: 'forbidden', message: 'host-built-in templates are read-only' };
-  }
-  if (packMatchesId(templateId)) {
-    return { ok: false, code: 'forbidden', message: 'pack-sourced templates are read-only' };
-  }
-  const versions = userTemplates.get(templateId);
-  if (!versions || versions.size === 0) {
-    return { ok: false, code: 'not_found', message: `no such template '${templateId}'` };
-  }
-  const currentLatest = pickLatest([...versions.values()])!;
-  if (semverCompare(template.version, currentLatest.template.version) <= 0) {
-    return {
-      ok: false,
-      code: 'conflict',
-      message: `submitted version '${template.version}' must be strictly greater than stored '${currentLatest.template.version}'`,
-    };
-  }
-  const stamped: PromptTemplate = {
-    ...template,
-    meta: { ...(template.meta ?? {}), source: 'user' },
-  };
-  const stored = buildStored(stamped);
-  versions.set(template.version, stored);
-  return { ok: true, template: stamped, etag: stored.etag };
-}
-
-export type DeleteOutcome =
-  | { ok: true }
-  | { ok: false; code: 'not_found' | 'forbidden'; message: string };
-
-/** Delete a user-source template (all versions). */
-export function deleteUserTemplate(templateId: string): DeleteOutcome {
-  ensurePromptStoreInitialized();
-  if (hostTemplates.has(templateId)) {
-    return { ok: false, code: 'forbidden', message: 'host-built-in templates cannot be deleted' };
-  }
-  if (packMatchesId(templateId)) {
-    return { ok: false, code: 'forbidden', message: 'pack-sourced templates cannot be deleted' };
-  }
-  if (!userTemplates.has(templateId)) {
-    return { ok: false, code: 'not_found', message: `no such template '${templateId}'` };
-  }
-  userTemplates.delete(templateId);
-  return { ok: true };
 }
 
 /** Pack-install hook (used by the future RFC 0028 §B install flow).
@@ -407,11 +296,4 @@ export function installPackTemplates(
     installed++;
   }
   return { installed, rejected };
-}
-
-/** Test seam — clears the user layer (host layer survives since it's
- *  loaded from disk). Used by conformance lifecycle scenarios that
- *  need to start with a clean mutable namespace. */
-export function clearUserTemplatesForTest(): void {
-  userTemplates.clear();
 }

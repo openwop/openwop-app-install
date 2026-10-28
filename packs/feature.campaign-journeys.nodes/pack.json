@@ -1,8 +1,8 @@
 {
   "name": "feature.campaign-journeys.nodes",
-  "version": "1.3.1",
+  "version": "1.9.0",
   "kind": "node",
-  "description": "Campaign Journeys guard verbs — `enroll` (idempotent one-run-per-journey-per-contact guard; a re-fired trigger fails with already_enrolled instead of double-sending) and `eligibility` (the consent + suppression + has-email composite every send step passes first; outputs the contact's email for the downstream send). journey-depth read verbs: `engagement` (opened/clicked → EdgeCondition branching), `frequency-gate` (per-contact send-count cap over the ledger), `segment-members` (capped segment fan-out source for core.dispatch). Over ctx.features['campaign-journeys']; contact resolves from inputs or the triggering event payload.",
+  "description": "Campaign Journeys guard verbs — `enroll` (idempotent one-run-per-journey-per-contact guard; a re-fired trigger fails with already_enrolled instead of double-sending) and `eligibility` (the consent + suppression + has-email composite every send step passes first; outputs the contact's email for the downstream send). `channel-eligibility` (ADR 0955: the one per-channel check — email or SMS, a client's sender, consent + topic opt-out + channel- and sender-scoped suppression). `next-send-window` (ADR 0955 D4: waits, as a durable timer, for the client's send window in every zone the recipient may be in) and `send-sms` (one journey text from the client's own number, typed failures, never sent outside the window or to someone who replied STOP). journey-depth read verbs: `engagement` (opened/clicked → EdgeCondition branching), `frequency-gate` (per-contact send-count cap over the ledger), `segment-members` (capped segment fan-out source for core.dispatch). Over ctx.features['campaign-journeys']; contact resolves from inputs or the triggering event payload.",
   "author": "openwop",
   "license": "Apache-2.0",
   "engines": {
@@ -12,10 +12,11 @@
     {
       "typeId": "feature.campaign-journeys.nodes.enroll",
       "category": "coordination",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "role": "action",
       "label": "Journey Enrollment Guard",
-      "description": "Idempotent enrollment: succeeds once per (journeyId, contactId); a repeat fails with `already_enrolled` so event redelivery can never double-send. Inputs: { journeyId, contactId? (else trigger payload) }."
+      "description": "Idempotent enrollment: succeeds once per (journeyId, contactId) — per client when `orgId` is given (ADR 0955); a repeat fails with `already_enrolled` so event redelivery can never double-send. Inputs: { journeyId, contactId? (else trigger payload), orgId? (the client; required once the workspace has clients), channel?, purpose?, topicId? }.",
+      "x-paletteCategory": "journey"
     },
     {
       "typeId": "feature.campaign-journeys.nodes.eligibility",
@@ -23,7 +24,47 @@
       "version": "1.0.0",
       "role": "read",
       "label": "Journey Eligibility Check",
-      "description": "Consent + suppression + has-email composite. Ineligible fails with the reason (consent | suppressed | no_email | contact_not_found); eligible outputs { email, name } for the send step. Inputs: { contactId? (else trigger payload) }."
+      "description": "Consent + suppression + has-email composite. Ineligible fails with the reason (consent | suppressed | no_email | contact_not_found); eligible outputs { email, name } for the send step. Inputs: { contactId? (else trigger payload) }.",
+      "x-paletteCategory": "journey"
+    },
+    {
+      "typeId": "feature.campaign-journeys.nodes.channel-eligibility",
+      "category": "data",
+      "version": "1.1.0",
+      "role": "read",
+      "label": "Channel Eligibility Check",
+      "description": "ADR 0955 — may this contact be sent this message on this channel from this client's sender? Address (email, or the E.164 phone for SMS), consent and topic opt-out, channel- and sender-scoped suppression. Ineligible fails with the reason (contact_not_found | no_address | consent | consent_unreadable | suppressed | suppression_unreadable | topic_opt_out); eligible outputs { channel, address, to, name } (and `email` on the email channel, the legacy gate's output name). For SMS to a client, consent is that client's own grant (ADR 0955 Q7). With `stopOnSuppressed: true`, a SUPPRESSED contact (unsubscribed or bounced) succeeds with { eligible: false, stopped: 'suppressed' } so a journey can end cleanly; every other reason still fails. Inputs: { orgId, channel, purpose?, topicId?, stopOnSuppressed?, contactId? (else trigger payload) }.",
+      "x-paletteCategory": "journey"
+    },
+    {
+      "typeId": "feature.campaign-journeys.nodes.next-send-window",
+      "category": "control",
+      "version": "1.0.0",
+      "role": "action",
+      "label": "Wait for Send Window",
+      "description": "ADR 0955 — inside the client's send window: outputs { sendAt, zones, basis } at once. Outside it: waits (a durable timer, frozen at suspend, inherited by a fork) until the next instant inside the window in every zone the recipient may be in, then outputs. Typed failures: timezone_unknown (set the client's default timezone), window_unreachable, contact_not_found. Inputs: { orgId, channel? ('sms' | 'email'), contactId? (else trigger payload) }.",
+      "x-paletteCategory": "journey"
+    },
+    {
+      "typeId": "feature.campaign-journeys.nodes.send-sms",
+      "category": "integration",
+      "version": "1.1.0",
+      "role": "side-effect",
+      "capabilities": [
+        "side-effectful"
+      ],
+      "label": "Send Journey SMS",
+      "description": "ADR 0955 — one marketing (or transactional) text from the client's own bound number. Checks the campaign-journeys.sms toggle, SMS consent and topic opt-out, STOP, the send window (waits outside it, then re-checks) and the body (marketing: a 'Reply STOP' instruction, at most 10 segments). Every refusal is a typed failure (sms_disabled, not_eligible, quiet_hours, timezone_unknown, no_sender, sms_body_invalid, or the adapter's code). Outputs { sent, channel, sid }. Body: inline `text`, or a PINNED SMS template version `{templateId, templateVersion}` from the ADR 0905 store (never the live template). Inputs: { orgId, text | templateId+templateVersion, purpose?, topicId?, contactId? (else trigger payload) }.",
+      "x-paletteCategory": "journey"
+    },
+    {
+      "typeId": "feature.campaign-journeys.nodes.send-time",
+      "category": "control",
+      "version": "1.0.0",
+      "role": "action",
+      "label": "Pick Send Time",
+      "description": "ADR 0955 — choose when this contact is most likely to read: their modal hour-of-week from 90 days of opens and clicks (at least 5), else their modal hour, else the default time; clamped into the client's send window, at most 24 h out; then wait (a durable timer a fork inherits). When the time is now: outputs the explanation { sendAt, basis, histogram, zone }. When it waits: the explanation is recorded on the suspension (`explain`), and after the wait it outputs { sendAt (when it fired), waited: true }. Typed failures: contact_not_found, timezone_unknown. Inputs: { orgId, channel?, defaultTime? ('HH:MM'), contactId? (else trigger payload) }.",
+      "x-paletteCategory": "journey"
     },
     {
       "typeId": "feature.campaign-journeys.nodes.engagement",
@@ -31,7 +72,8 @@
       "version": "1.0.0",
       "role": "read",
       "label": "Journey Engagement Check",
-      "description": "ADR 0243 — did the contact open/click? Outputs { opened, clicked, openCount, clickCount } for an EdgeCondition ({path:'opened', op:'truthy'}) to branch the next send. LIVE read. Inputs: { contactId? (else trigger payload), campaignId? }."
+      "description": "ADR 0243 — did the contact open/click? Outputs { opened, clicked, openCount, clickCount } for an EdgeCondition ({path:'opened', op:'truthy'}) to branch the next send. LIVE read. Inputs: { contactId? (else trigger payload), campaignId? }.",
+      "x-paletteCategory": "journey"
     },
     {
       "typeId": "feature.campaign-journeys.nodes.frequency-gate",
@@ -39,7 +81,8 @@
       "version": "1.0.0",
       "role": "read",
       "label": "Journey Frequency Gate",
-      "description": "ADR 0243 — per-contact send-count cap over the email ledger. Outputs { withinCap, sentCount }; an EdgeCondition ({path:'withinCap', op:'truthy'}) gates the send so a capped contact is skipped. Inputs: { contactId? (else trigger payload), windowDays? (30), maxSends? (1) }."
+      "description": "ADR 0243 — per-contact send-count cap over the email ledger. Outputs { withinCap, sentCount }; an EdgeCondition ({path:'withinCap', op:'truthy'}) gates the send so a capped contact is skipped. Inputs: { contactId? (else trigger payload), windowDays? (30), maxSends? (1) }.",
+      "x-paletteCategory": "journey"
     },
     {
       "typeId": "feature.campaign-journeys.nodes.segment-members",
@@ -47,7 +90,8 @@
       "version": "1.0.0",
       "role": "read",
       "label": "Journey Segment Members",
-      "description": "ADR 0243 — capped segment fan-out source. Outputs { contactIds, total, truncated } for a downstream core.dispatch (RFC 0118) node to fan out over (each → a per-member journey child run). Capped at 5000 (truncated surfaces the drop). Inputs: { segmentId }."
+      "description": "ADR 0243 — capped segment fan-out source. Outputs { contactIds, total, truncated } for a downstream core.dispatch (RFC 0118) node to fan out over (each → a per-member journey child run). Capped at 5000 (truncated surfaces the drop). Inputs: { segmentId }.",
+      "x-paletteCategory": "journey"
     },
     {
       "typeId": "feature.campaign-journeys.nodes.segment-winback-plan",
@@ -55,15 +99,17 @@
       "version": "1.0.0",
       "role": "pure",
       "label": "Segment Winback Plan (supervisor)",
-      "description": "ADR 0255 / RFC 0126 — the data-driven segment-winback supervisor. Projects the upstream segment-members `contactIds` into a `next-worker` OrchestratorDecision that fans ONE `childWorkflowId` out over N contacts, each child receiving its own `contactId` via RFC 0126 `nextWorkerInputs` (+ shared per-child params forwarded verbatim). Output { decisions, agentId, dispatched } mirrors core.orchestrator.supervisor so a downstream core.dispatch (fanOutPolicy:'parallel', perItemInput) consumes it. Pure + deterministic (replay-stable); empty segment → clean terminate. Inputs: { contactIds, childWorkflowId, ...sharedChildParams }."
+      "description": "ADR 0255 / RFC 0126 — the data-driven segment-winback supervisor. Projects the upstream segment-members `contactIds` into a `next-worker` OrchestratorDecision that fans ONE `childWorkflowId` out over N contacts, each child receiving its own `contactId` via RFC 0126 `nextWorkerInputs` (+ shared per-child params forwarded verbatim). Output { decisions, agentId, dispatched } mirrors core.orchestrator.supervisor so a downstream core.dispatch (fanOutPolicy:'parallel', perItemInput) consumes it. Pure + deterministic (replay-stable); empty segment → clean terminate. Inputs: { contactIds, childWorkflowId, ...sharedChildParams }.",
+      "x-paletteCategory": "journey"
     },
     {
       "typeId": "feature.campaign-journeys.nodes.split",
       "category": "control",
-      "version": "1.0.0",
-      "role": "pure",
+      "version": "1.1.0",
+      "role": "read",
       "label": "Journey Experiment/Holdout Split",
-      "description": "ADR 0267 / CDP-E — deterministically buckets the contact into control/treatment (via the shared variantAssignment primitive, keyed on contactId → replay-stable). Outputs { arm, control, treatment, bucket } so an EdgeCondition ({path:'control', op:'truthy'}) routes the two arms for a holdout experiment. Inputs: { contactId? (else trigger payload), experimentId?, holdoutPct? (10) }."
+      "description": "ADR 0267 / CDP-E — deterministically buckets the contact into control/treatment (via the shared variantAssignment primitive, keyed on contactId → replay-stable). Outputs { arm, control, treatment, bucket } so an EdgeCondition ({path:'control', op:'truthy'}) routes the two arms for a holdout experiment. Inputs: { contactId? (else trigger payload), experimentId?, holdoutPct? (10) }.",
+      "x-paletteCategory": "journey"
     }
   ],
   "runtime": {

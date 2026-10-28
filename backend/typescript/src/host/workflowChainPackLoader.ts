@@ -809,6 +809,35 @@ function liveChain<T extends { packName: string; packVersion: string }>(entry: T
   return entry && !isPackRevoked(entry.packName, entry.packVersion) ? entry : null;
 }
 
+/**
+ * ADR 0959 P0 — validate chain documents that are NOT a host-installed pack (a tenant's
+ * playbook version) by the SAME rules the loader applies to a pack: the manifest schema (v1 or v2, chosen as the loader chooses)
+ * over a one-off manifest, the sibling sub-chain cycle check, RFC 0133 composition, and the
+ * RFC 0177 §E.1 node-pin rule — strictly (no legacy unpinned waiver: tenant data is new).
+ * Returns the first problem, or null. No second schema, no second rule set.
+ */
+export function validateChainDocuments(chains: unknown): { code: string; message: string } | null {
+  const manifest = { name: 'private.playbooks.document', version: '0.0.0', kind: 'workflow-chain', engines: { openwop: '>=1.0.0 <3.0.0' }, chains };
+  // The loader's own tree choice: an exact-pinned node reference is a v2 shape (ADR 0766 D5).
+  let validate: ValidateFunction;
+  try {
+    validate = manifestValidator(chainManifestSchemaTree(manifest));
+  } catch (e) {
+    return { code: 'workflow_chain_pack_schema_unavailable', message: e instanceof Error ? e.message : String(e) };
+  }
+  if (!validate(manifest)) return { code: 'workflow_chain_pack_manifest_invalid', message: JSON.stringify(validate.errors) };
+  const docs = chains as WorkflowChain[];
+  const cycle = detectSubChainCycles(docs);
+  if (cycle.length) return { code: 'sub_chain_cycle', message: `sub-chain cycle among chains: ${cycle.join(' → ')}` };
+  for (const chain of docs) {
+    const compositionErr = validateChainComposition(chain);
+    if (compositionErr) return compositionErr;
+    const pins = chainPinFindings(chain);
+    if (pins.length > 0) return { code: pins.some((f) => f.problem !== 'unpinned') ? 'workflow_chain_pin_invalid' : 'workflow_chain_unpinned', message: describePinFindings(pins) };
+  }
+  return null;
+}
+
 /** Resolve a loaded chain by id (null = absent, or its pack version is revoked). */
 export function getChain(chainId: string): { packName: string; packVersion: string; chain: WorkflowChain; category?: string } | null {
   return liveChain(CHAINS.get(chainId));
@@ -1763,6 +1792,49 @@ export function expandChain(authoredChain: WorkflowChain, opts: ExpandOptions = 
     variables = [...(variables ?? []), ...produced];
   }
 
+  // ADR 0964 D2 — a `core.subWorkflow` / `core.dispatch` `inputMapping` reads the
+  // PARENT's bag by name, but Path A freezes params into config (no variables) and
+  // deferred mode materializes them under PREFIXED names, so a mapped param reached
+  // the child as `undefined` in both. The forwarded value goes into the bag at run
+  // start (executor, `applyForwardedParams`) under its bare name — NOT as a declared
+  // variable, which would make it a per-run input the run form prompts for and a
+  // caller could override, splitting the parent's frozen value from the child's:
+  //   Path A    → `metadata.forwardedParams`      {param: frozen value}
+  //   deferred  → `metadata.forwardedParamAliases` {param: materialized variable name}
+  // Only params some inputMapping names. A sensitive mapped param fails closed in
+  // Path A (it would put the secret at rest in the bag, SR-1); deferred mode
+  // aliases it (the bag already holds the per-run value).
+  const mappedParams = new Set<string>();
+  {
+    const collect = (im: unknown): void => {
+      if (!im || typeof im !== 'object' || Array.isArray(im)) return;
+      for (const source of Object.values(im as Record<string, unknown>)) {
+        if (typeof source === 'string' && Object.prototype.hasOwnProperty.call(paramProps, source)) mappedParams.add(source);
+      }
+    };
+    for (const n of chain.dag.nodes) {
+      // Both nodes that hand a child its inputs from the parent bag (RFC 0022).
+      if (n.typeId !== 'core.subWorkflow' && n.typeId !== 'core.dispatch') continue;
+      const cfg = (n.config ?? {}) as { inputMapping?: unknown; perWorkerInputMappings?: unknown };
+      collect(cfg.inputMapping);
+      if (cfg.perWorkerInputMappings && typeof cfg.perWorkerInputMappings === 'object') {
+        for (const m of Object.values(cfg.perWorkerInputMappings as Record<string, unknown>)) collect(m);
+      }
+    }
+  }
+  let forwardedParams: Record<string, unknown> | undefined;
+  let forwardedParamAliases: Record<string, string> | undefined;
+  for (const name of [...mappedParams].sort()) {
+    if (deferred) {
+      (forwardedParamAliases ??= {})[name] = varNameOf(name);
+      continue;
+    }
+    if (sensitiveParams.has(name)) {
+      throw new OpenwopError('validation_error', `sensitive_param_not_deferrable: parameter '${name}' is marked x-openwop-sensitive and is passed to a sub-chain by an inputMapping, which would put the secret at rest in the run bag (SR-1). Use deferred mode.`, 422, { param: name, where: 'sub-chain inputMapping' });
+    }
+    if (resolvedParams[name] !== undefined) (forwardedParams ??= {})[name] = resolvedParams[name];
+  }
+
   // ── RFC 0157 §B / expansion step 9b — the chain-level POLICY ──
   //
   //   parent has none          ⇒ COPY the chain's;
@@ -1820,6 +1892,8 @@ export function expandChain(authoredChain: WorkflowChain, opts: ExpandOptions = 
       // Run-creation maps a `configurable` override (keyed by the bare name) onto
       // the variable bag through this alias (host/variablesRuntime).
       ...(deferredAliases ? { deferredParameterAliases: deferredAliases } : {}),
+      ...(forwardedParams ? { forwardedParams } : {}),
+      ...(forwardedParamAliases ? { forwardedParamAliases } : {}),
       // RFC 0124 G3 — the PromptTemplates minted by the inline-prompt-body lift.
       // Carried on the definition so it is self-contained: a host loading this
       // workflow re-registers them (host/promptStore.registerMintedTemplate) so the
@@ -1891,8 +1965,18 @@ export interface SubChainDeps {
    *  (env `OPENWOP_CHAIN_SUBCHAINS=0` flips it off to witness the negative scenario). */
   supported: boolean;
   /** Optional resolver for an EXTERNAL `{packName,chainId,version}` ref; sibling
-   *  refs resolve via the in-process chain registry (`getChain`). */
-  resolveExternal?: (ref: { packName: string; chainId: string; version: string }) => WorkflowChain | null;
+   *  refs resolve via the in-process chain registry (`getChain`). `parent` is the
+   *  chain whose node holds the ref (ADR 0959 D2: a playbook resolves in the
+   *  version that owns the parent). */
+  resolveExternal?: (ref: { packName: string; chainId: string; version: string }, parent: WorkflowChain) => WorkflowChain | null | Promise<WorkflowChain | null>;
+  /** ADR 0959 D2 — when supplied, a SIBLING string ref resolves here INSTEAD of the
+   *  global registry (which holds one version per chainId host-wide, P-G1/P-G2), so
+   *  a playbook's child is the version the playbook pinned, never the host's newest. */
+  resolveSibling?: (ref: string, parent: WorkflowChain) => WorkflowChain | null | Promise<WorkflowChain | null>;
+  /** ADR 0959 D2 — the child workflow id; default `mintChildWorkflowId`. A playbook
+   *  keys its children on (tenant, playbook, version, chainId): tenant-authored chain
+   *  ids can repeat across playbooks with different content. */
+  mintChildId?: (tenantId: string, child: WorkflowChain) => string;
 }
 
 /** RFC 0133 §1.3 step 2 — the deterministic, TENANT-SCOPED, version-pinned,
@@ -1911,13 +1995,21 @@ export function mintChildWorkflowId(tenantId: string, childChainId: string, vers
   return subWorkflowId(tenantId, childChainId, version);
 }
 
-function resolveSubChainRef(ref: string, chain: WorkflowChain, deps: SubChainDeps): WorkflowChain | null {
-  // Sibling: a string ref → a declared subChains sibling chainId → the registry.
+async function resolveSubChainRef(ref: string, chain: WorkflowChain, deps: SubChainDeps): Promise<WorkflowChain | null> {
+  const ext = (chain.subChains ?? []).map((s) => s.ref).find((r) => typeof r === 'object' && r.chainId === ref);
+  // ADR 0959 D2 — a caller with its own sibling resolver resolves EXACTLY: an external
+  // ref only through `resolveExternal`, a sibling only through `resolveSibling`, never
+  // the global registry's one-version-per-id.
+  if (deps.resolveSibling) {
+    if (ext && typeof ext === 'object') return deps.resolveExternal ? deps.resolveExternal(ext, chain) : null;
+    return deps.resolveSibling(ref, chain);
+  }
+  // Default (the from-chain route), unchanged: a string ref → the registry (which also
+  // answers an external ref by chainId, unversioned — P-G2, a logged follow-up), then
+  // the declared external entry through `resolveExternal`.
   const found = getChain(ref);
   if (found) return found.chain;
-  // External: the declared subChains entry for this ref carries {packName,chainId,version}.
-  const ext = (chain.subChains ?? []).map((s) => s.ref).find((r) => typeof r === 'object' && r.chainId === ref);
-  if (ext && typeof ext === 'object' && deps.resolveExternal) return deps.resolveExternal(ext);
+  if (ext && typeof ext === 'object' && deps.resolveExternal) return deps.resolveExternal(ext, chain);
   return null;
 }
 
@@ -1968,10 +2060,10 @@ export async function coRegisterSubChains(
   for (const node of nodesWithRef) {
     const ref = String((node.config as Record<string, unknown>).subChainRef);
     if (!refToChildId.has(ref)) {
-      const childChain = resolveSubChainRef(ref, chain, deps);
+      const childChain = await resolveSubChainRef(ref, chain, deps);
       if (!childChain) throw new SubChainError('sub_chain_unresolved', `sub-chain ref "${ref}" could not be resolved`);
       // Recurse FIRST (grandchildren register before this child), then this child.
-      const childId = mintChildWorkflowId(opts.tenantId, childChain.chainId, childChain.version);
+      const childId = deps.mintChildId ? deps.mintChildId(opts.tenantId, childChain) : mintChildWorkflowId(opts.tenantId, childChain.chainId, childChain.version);
       // §Correction (code-review HIGH #3) — carry the config REPORT into children.
     // "Workflows nest" is first-class here, so a child is exactly where an
     // unnoticed expansion recurs. Children expand with `params: {}` BY DESIGN

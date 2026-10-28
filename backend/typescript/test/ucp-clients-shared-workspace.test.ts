@@ -28,11 +28,12 @@ let BASE = '';
 let server: http.Server;
 let n = 0;
 
-interface Res<T = Record<string, any>> { status: number; body: T }
+/** A typed response: each call site names the body shape it reads (no `any`). */
+interface Res<T> { status: number; body: T }
 
 function client() {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res<any>> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
@@ -42,9 +43,12 @@ function client() {
     const single = res.headers.get('set-cookie');
     const setCookies: string[] = typeof h.getSetCookie === 'function' ? h.getSetCookie() : single ? [single] : [];
     for (const sc of setCookies) { const m = /(__session=[^;]+)/.exec(sc); if (m) cookie = m[1]!; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    return { status: res.status, body: (res.status === 204 ? undefined : await res.json().catch(() => undefined)) as T };
   };
-  return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b) };
+  return {
+    get: <T>(p: string) => call<T>('GET', p),
+    post: <T>(p: string, b?: unknown) => call<T>('POST', p, b),
+  };
 }
 type Client = ReturnType<typeof client>;
 
@@ -56,22 +60,22 @@ async function signIn(c: Client, email: string): Promise<void> {
 /** A REAL `ws:` shared workspace, created + switched into through the routes — the
  *  switch is what makes active !== personal. The workspace root is itself an org. */
 async function sharedWorkspace(c: Client): Promise<string> {
-  const ws = await c.post('/host/openwop-app/workspaces', { name: `UCP WS ${n++}` });
+  const ws = await c.post<{ workspaceId: string }>('/host/openwop-app/workspaces', { name: `UCP WS ${n++}` });
   expect(ws.status, JSON.stringify(ws.body)).toBe(201);
   expect(ws.body.workspaceId, 'must be a real shared workspace').toMatch(/^ws:/);
   const sw = await c.post(`/host/openwop-app/workspaces/${encodeURIComponent(ws.body.workspaceId)}/switch`);
   expect(sw.status, JSON.stringify(sw.body)).toBe(200);
-  return ws.body.workspaceId as string;
+  return ws.body.workspaceId;
 }
 
 /** Invite a second human into the workspace root org and have them accept — the real
  *  two-member path (the workspace root IS an org, orgId === tenantId === ws). */
 async function joinAsMember(owner: Client, ws: string, joiner: Client, email: string, role: string): Promise<void> {
-  const invite = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(ws)}/invites`, { email, role });
+  const invite = await owner.post<{ token?: string }>(`/host/openwop-app/orgs/${encodeURIComponent(ws)}/invites`, { email, role });
   expect(invite.status, JSON.stringify(invite.body)).toBe(201);
   expect(invite.body.token, 'the dev/test invite path must expose the token').toBeTruthy();
   await signIn(joiner, email);
-  const accepted = await joiner.post('/host/openwop-app/orgs/invitations/accept', { token: invite.body.token });
+  const accepted = await joiner.post('/host/openwop-app/orgs/invitations/accept', { token: invite.body.token! });
   expect(accepted.status, JSON.stringify(accepted.body)).toBe(201);
   const sw = await joiner.post(`/host/openwop-app/workspaces/${encodeURIComponent(ws)}/switch`);
   expect(sw.status, JSON.stringify(sw.body)).toBe(200);
@@ -107,16 +111,16 @@ describe('GC-5 — commerce/ucp admin routes act in the tenant the gate authoriz
     const b = client();
     await joinAsMember(a, ws, b, `ucp-b-${n++}@acme.test`, 'editor');
 
-    const created = await a.post(clientsPath(ws), { name: 'Agent A', scopes: ['catalog:read'] });
+    const created = await a.post<{ clientId: string }>(clientsPath(ws), { name: 'Agent A', scopes: ['catalog:read'] });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
     expect(created.body.clientId).toBeTruthy();
 
-    const list = await b.get(clientsPath(ws));
+    const list = await b.get<{ clients: Array<{ clientId: string }> }>(clientsPath(ws));
     expect(list.status, JSON.stringify(list.body)).toBe(200);
     // Before the fix B read their OWN home-tenant partition, so this list was empty
     // no matter what A had written — every member held a private invisible copy.
     expect(
-      (list.body.clients ?? []).map((c: { clientId: string }) => c.clientId),
+      list.body.clients.map((c) => c.clientId),
       'member B must see the org client A provisioned, not a private copy',
     ).toContain(created.body.clientId);
   });

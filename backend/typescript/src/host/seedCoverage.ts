@@ -27,6 +27,12 @@ const SEEDED = new Set<string>(DEMO_FEATURE_TOGGLE_IDS);
  * terse; the point is that the exclusion was a decision, not an oversight.
  */
 export const ACKNOWLEDGED_UNSEEDED: Readonly<Record<string, string>> = {
+  'campaign-playbooks':
+    'ADR 0959 stores an agency’s own published methods and approved client installations. A fabricated method or rollout would misrepresent client configuration and approval history; the library intentionally starts empty until an agency authors a real playbook.',
+  'campaign-autopilot':
+    'ADR 0961 has no entity store: its preflight reads the existing campaign, brief and workflow data, and launch starts a real drafting run. Those underlying campaign surfaces already have demo data; seeding a launch would manufacture active orchestration rather than a static example.',
+  experiments:
+    'Decide-mode experiments (ADR 0949 P2a) — a verdict is a statistical claim about REAL traffic. Seeding exposures and conversions would fabricate a winner (or an SRM halt) the product would then present as evidence, and a seeded locked plan would sit unlaunchable on a page with no visitors. The legacy CMS demo experiment (demoContentMarketingSeed) already shows the surface.',
   'claude-code':
     'Claude Code pairing (ADR 0785) — every row is a REAL credential ceremony: a paired device row points at a live developer key, and a pairing row is a ten-minute device-code exchange. Seeding either would mint working keys for a fabricated machine (a credential nobody holds) or leave expired codes that age out within a day. A demo pairs a real companion in under a minute.',
   'work-selection':
@@ -94,6 +100,9 @@ export const ACKNOWLEDGED_UNSEEDED: Readonly<Record<string, string>> = {
   'knowledge-sync': 'BYOK connector sync — no credential minting / seed',
   // Derived / self-populating analytics.
   'campaign-intel': 'derived attribution/pacing — self-populates from campaign activity',
+  // ADR 0953 P0 — posts are drafted by people or by campaign-channels runs (P3); a
+  // seeded post would read as a real scheduled post to a real account.
+  'social-publishing': 'user-authored posts to the org\'s own social accounts — no demo data',
   // ADR 0599 — this exemption used to read "derived insights — self-populates".
   // Nothing populated and nothing COULD: all three chains died `invalid_config`
   // at their first node from the ADR 0082 rebuild until ADR 0599. A coverage

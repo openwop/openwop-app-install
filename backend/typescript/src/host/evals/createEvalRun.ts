@@ -7,6 +7,8 @@
  *   - the agent resolves through the SAME tenant gate as dispatch (404 for
  *     absent and not-yours alike — no cross-tenant existence leak);
  *   - requested modes ⊆ suite.modes ∩ host modes, else `400 validation_error`;
+ *   - RFC 0251 (ADR 0983): `evalModes` / `baselineRunId` ride the body ROOT; an
+ *     unusable baseline is ONE uniform refusal that never echoes the id;
  *   - a suite using an RFC 0244 feature the host does not advertise ⇒ `400`
  *     naming the field (RFC 0244 §G) — never graded as if the field were absent;
  *   - the scripted mock is test-seam only (`403` otherwise — runs.md §ai).
@@ -35,6 +37,12 @@ import { AGENT_SUITE_KIND, isAgentEvalRun, runAgentEval, type AgentEvalMeta } fr
 import { evalSuiteCapability, rfc0244WireAvailable } from './evalCapability.js';
 import { resolveFixtureSuite, scriptedEvalAgentFor } from './fixtureSuites.js';
 import { storedRunId } from './runIds.js';
+import { parseFixtureRuns, resolveRecordedFixtures, type SourceRunReader } from './recordedFixtures.js';
+import { dropFrozenFixtures, freezeRecordedFixtures, type FrozenFixtureSet } from './toolBoundary.js';
+
+/** taskId → source run of each frozen set (the run metadata keeps only these ids). */
+const storedSources = (sets: Record<string, FrozenFixtureSet>): Record<string, string> =>
+  Object.fromEntries(Object.entries(sets).map(([taskId, f]) => [taskId, f.sourceRunId]));
 import { canonicalRequestDigest, idempotencyLeaseMs, RUNS_IDEMPOTENT_ENDPOINT, type IdempotentEndpoint } from '../idempotentResponse.js';
 import { runWireUrls } from '../runWireUrls.js';
 
@@ -81,9 +89,19 @@ export interface CreateEvalRunInput {
   hostSuite?: Pick<HostAdapterSuite, 'providerPolicyResolver'>;
   body: Record<string, unknown>;
   tenantId: string;
+  /** The negotiated major of an HTTP create. Under 2 the `configurable` spelling of
+   *  `evalModes` / `baselineRunId` is refused (ADR 0983 D2); in-host callers omit it. */
+  wireMajor?: 1 | 2;
   /** The `/runs` handler's claim; `endpoint` is ITS ledger literal, so a key replayed
    *  across the workflow and eval branches is one claim, not two. */
   idempotency?: { key: string; claimToken: string; endpoint: IdempotentEndpoint };
+  /** ADR 0987 D2 — concurrency admission counted inside the run insert (the
+   *  `/runs` handler passes the caller's scope; in-host callers omit it). A full
+   *  scope throws `AdmissionRefusedError` and nothing is written. */
+  admission?: { key: string; cap: number };
+  /** RFC 0252 (ADR 0984) — reads a `fixtureRuns` source as THIS caller may (the
+   *  run read's scope, tenant and payload checks). Absent ⇒ every source is refused. */
+  readSourceRun?: SourceRunReader;
 }
 
 export interface CreateEvalRunResponse {
@@ -144,10 +162,32 @@ export async function createAgentEvalRun(input: CreateEvalRunInput): Promise<Cre
   for (const k of Object.keys(configurable)) {
     if (!EVAL_CONFIGURABLE_KEYS.has(k)) bad(`configurable.${k}`, `configurable.${k} is not supported on an eval run (supported: ${[...EVAL_CONFIGURABLE_KEYS].join(', ')}).`, 'unsupported_configurable');
   }
-  const requested = Array.isArray(configurable.evalModes) ? (configurable.evalModes as unknown[]) : suite.modes;
+  // ADR 0983 D1/D2 — RFC 0251 puts both on the body ROOT. Under major 2 the old
+  // `configurable` spelling was a bypass of the closed v2 body, so it is refused;
+  // major 1 (open `configurable`) and the in-host callers keep it, with its old rules.
+  if (input.wireMajor === 2) {
+    for (const k of ['evalModes', 'baselineRunId'] as const) {
+      if (configurable[k] !== undefined) bad(`configurable.${k}`, `Send ${k} at the body root (RFC 0251), not in configurable.`, 'moved_to_root');
+    }
+  }
+  const rootModes = body.evalModes;
+  const rootBaseline = body.baselineRunId;
+  if (rootModes !== undefined && (!Array.isArray(rootModes) || rootModes.length === 0 || rootModes.some((m) => typeof m !== 'string') || new Set(rootModes).size !== rootModes.length)) {
+    bad('evalModes', 'evalModes must be a non-empty array of distinct modes.');
+  }
+  const modesField = rootModes !== undefined ? 'evalModes' : 'configurable.evalModes';
+  const modesIn = rootModes ?? configurable.evalModes;
+  const requested = Array.isArray(modesIn) ? (modesIn as unknown[]) : suite.modes;
   for (const m of requested) {
-    if (!suite.modes.includes(m as EvalMode)) bad('configurable.evalModes', `Mode ${String(m)} is not declared by suite ${suiteRefStr}.`);
-    if (!IMPLEMENTED_MODES.includes(m as EvalMode)) bad('configurable.evalModes', `Mode ${String(m)} is not advertised by this host (agents.evalSuite.modes).`);
+    if (!suite.modes.includes(m as EvalMode)) bad(modesField, `Mode ${String(m)} is not declared by suite ${suiteRefStr}.`);
+    if (!IMPLEMENTED_MODES.includes(m as EvalMode)) bad(modesField, `Mode ${String(m)} is not advertised by this host (agents.evalSuite.modes).`);
+  }
+  // RFC 0251 §B — on the wire spelling a baseline and `regression` come together.
+  if (rootBaseline !== undefined && !requested.includes('regression')) {
+    bad('baselineRunId', 'baselineRunId needs regression in evalModes.', 'baseline_without_regression');
+  }
+  if (Array.isArray(rootModes) && rootModes.includes('regression') && rootBaseline === undefined && configurable.baselineRunId === undefined) {
+    bad('evalModes', 'regression in evalModes needs a baselineRunId.', 'regression_without_baseline');
   }
 
   // Host limits + RFC 0244 §G: a feature this host does not advertise is refused.
@@ -160,21 +200,44 @@ export async function createAgentEvalRun(input: CreateEvalRunInput): Promise<Cre
   if (f.fixtureMatching && cap.fixtureMatching !== true) bad('tasks.fixtures', 'This host does not advertise agents.evalSuite.fixtureMatching.');
   if (f.fixtureErrors && cap.fixtureErrors !== true) bad(firstIsErrorField(suite), 'This host does not advertise agents.evalSuite.fixtureErrors (RFC 0245 §C).');
 
-  // Baseline (regression): an AGENT eval run of THIS tenant over the SAME suite id
-  // (review L3 — pairing by taskId across different suites is a meaningless verdict).
+  // Baseline (regression): a COMPLETED agent eval run of THIS tenant whose summary
+  // graded the SAME suiteId (review L3 — pairing across suites is meaningless;
+  // EVD-3 / EVAL-4 — a baseline with no summary produced no verdict).
+  // ADR 0983 D3 (RFC 0251 §C) — every unusable value is ONE refusal, never echoing
+  // the id: unknown, foreign or malformed (`storedRunId` → null), not an eval run,
+  // another suite, not completed. A foreign run must read exactly as an unknown id,
+  // or `scoreDelta` would leak its aggregate.
+  // Architect finding: compare the summary's suiteId, never `suiteRef` — a fixture
+  // run's ref is the conformance URI, not `suiteId@version`.
   let baselineRunId: string | undefined;
-  if (typeof configurable.baselineRunId === 'string') {
-    const id = storedRunId(configurable.baselineRunId, tenantId);
+  const baselineIn = rootBaseline ?? configurable.baselineRunId;
+  if (baselineIn !== undefined) {
+    const id = typeof baselineIn === 'string' ? storedRunId(baselineIn, tenantId) : null;
     const base = id ? await storage.getRun(id) : null;
-    if (!base || base.tenantId !== tenantId || !isAgentEvalRun(base)) bad('configurable.baselineRunId', 'Baseline run not found.', 'baseline_not_found');
-    const baseRef = (base.metadata?.eval as AgentEvalMeta).suiteRef;
-    if (baseRef.split('@')[0] !== suite.suiteId) bad('configurable.baselineRunId', `Baseline run graded suite ${baseRef}, not ${suite.suiteId}.`, 'baseline_other_suite');
-    // EVD-3 / EVAL-4 — a baseline with no summary (failed, cancelled, still running)
-    // produced NO verdict, and the CLI gate read "no verdict" as "not regressed".
-    if (base.status !== 'completed' || !base.metadata?.evalSummary) {
-      bad('configurable.baselineRunId', `Baseline run is ${base.status} with no eval summary; pick a completed eval run.`, 'baseline_not_completed', { status: base.status });
+    const baseSummary = base?.metadata?.evalSummary as { suiteId?: unknown } | undefined;
+    if (!base || base.tenantId !== tenantId || !isAgentEvalRun(base) || base.status !== 'completed' || !baseSummary || baseSummary.suiteId !== suite.suiteId) {
+      bad(rootBaseline !== undefined ? 'baselineRunId' : 'configurable.baselineRunId', 'The baseline run cannot be used.', 'baseline_unusable');
     }
     baselineRunId = base.runId;
+  }
+
+  // RFC 0252 (ADR 0984) — tasks whose fixtures come from a recorded run. Every
+  // refusal is before the run exists; an unusable source is one uniform refusal.
+  let fixtureRuns: Record<string, string> | undefined;
+  let recordedFixtures: AgentEvalMeta['recordedFixtures'];
+  // ADR 0984 D7 — record-derived tasks: frozen in the governed store, not in metadata.
+  let storedFixtures: Record<string, FrozenFixtureSet> | undefined;
+  if (body.fixtureRuns !== undefined) {
+    if (cap.recordedFixtures !== true) bad('fixtureRuns', 'This host does not advertise agents.evalSuite.recordedFixtures.');
+    if (requested.includes('live-shadow')) bad(modesField, 'A live-shadow eval ignores fixtures, so it cannot take fixtureRuns.');
+    fixtureRuns = parseFixtureRuns(body.fixtureRuns, new Map(suite.tasks.map((t) => [t.taskId, t.fixtures])));
+    const resolvedFx = await resolveRecordedFixtures(fixtureRuns, input.readSourceRun, agentId, { allowErrors: cap.fixtureErrors === true, actingUserId: caller.actingUserId });
+    recordedFixtures = {};
+    for (const [taskId, entries] of Object.entries(resolvedFx.byTask)) {
+      const rec = resolvedFx.fromRecord[taskId];
+      if (rec) (storedFixtures ??= {})[taskId] = { ...rec, entries };
+      else recordedFixtures[taskId] = entries;
+    }
   }
 
   // Model: `configurable.ai` pin, or the scripted mock (test seams only).
@@ -203,6 +266,8 @@ export async function createAgentEvalRun(input: CreateEvalRunInput): Promise<Cre
     suiteDigest: digest,
     agentId,
     ...(baselineRunId ? { baselineRunId } : {}),
+    ...(fixtureRuns ? { fixtureRuns, recordedFixtures } : {}),
+    ...(storedFixtures ? { recordedFixturesStored: storedSources(storedFixtures) } : {}),
     ...(Object.keys(model).length > 0 ? { model } : {}),
     ...(mock ? { mock } : {}),
     rfc0244Wire: rfc0244WireAvailable(),
@@ -244,7 +309,10 @@ export async function createAgentEvalRun(input: CreateEvalRunInput): Promise<Cre
     if (lock.lockedByUs) ourLock = lock.row;
   }
   try {
+    // Frozen BEFORE the row exists, so the trial (started after the insert) finds them.
+    if (storedFixtures) await freezeRecordedFixtures(tenantId, run.runId, storedFixtures);
     await withRunLimit(tenantId, () => insertRunWithStartContext(storage, run, {
+      ...(input.admission ? { admission: input.admission } : {}),
       ...(input.idempotency
         ? {
             idempotencyCommit: {
@@ -262,6 +330,7 @@ export async function createAgentEvalRun(input: CreateEvalRunInput): Promise<Cre
   } catch (err) {
     // EVD-9 — a refused insert (run limit, quota) must not leave a draft locked forever.
     if (ourLock) await unlockEvalSuite(ourLock);
+    if (storedFixtures) await dropFrozenFixtures(tenantId, run.runId, storedSources(storedFixtures)).catch(() => undefined);
     throw err;
   }
 

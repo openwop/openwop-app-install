@@ -25,15 +25,22 @@ const templateHref = (tpl: EmailTemplate, orgId: string): string =>
 /** The contextual one-liner, from REAL stored fields only (rule 6): the subject
  *  line is what a recipient actually sees, so it is the honest sub-line. */
 export function templateSubLine(tpl: EmailTemplate, t: TFunction): string {
+  // ADR 0955 D8 — an SMS template has no subject; its first words are what the person reads.
+  if (tpl.format === 'sms') {
+    const text = tpl.body.trim().replace(/\s+/g, ' ');
+    return text.length > 80 ? `${text.slice(0, 79)}…` : text;
+  }
   return tpl.subject.trim() || t('subNoSubject');
 }
 
 function TemplateChips({ tpl, t }: { tpl: EmailTemplate; t: TFunction }): JSX.Element | null {
   // 'text' is the default and absent-format back-compat value — chipping the
   // common case would be noise, so only markdown announces itself.
-  return (tpl.format ?? 'text') === 'markdown'
-    ? <span className="chip chip--muted">{t('formatMarkdown')}</span>
-    : null;
+  // ADR 0955 D8 — SMS announces itself too: it is a different channel, not a body style.
+  const format = tpl.format ?? 'text';
+  if (format === 'markdown') return <span className="chip chip--muted">{t('formatMarkdown')}</span>;
+  if (format === 'sms') return <span className="chip chip--muted">{t('formatSms')}</span>;
+  return null;
 }
 
 /** Compact, store-backed timestamp (rule 10). Renders NOTHING when the store

@@ -132,17 +132,24 @@ describe('fireEffectSeam (RFC 0173 §C.2)', () => {
   it('an unknown seam is REFUSED, not silently recorded', async () => {
     const res = await fire({ seam: 'not.a.declared.seam' });
     expect(res.status).toBe(400);
-    expect(JSON.stringify(res.json)).toMatch(/unknown seam/);
+    expect(JSON.stringify(res.json)).toContain('unknown seam \\"not.a.declared.seam\\"');
   });
 
   it('closed-world validates the body, and 404s when the seam surface is off', async () => {
-    expect((await fire({})).status).toBe(400);
-    expect((await fire({ seam: '' })).status).toBe(400);
-    expect((await fire({ seam: SEAM_ROWS[0]?.seam, receiverUrl: 5 })).status).toBe(400);
+    // Each refusal by its OWN message: two of these share a status and a validator,
+    // so a status-only check passes on whichever refusal fires first (wave 47).
+    const refused = async (body: unknown, status: number, message: string): Promise<void> => {
+      const r = await fire(body);
+      expect(r.status, JSON.stringify(r.json)).toBe(status);
+      expect(JSON.stringify(r.json)).toContain(message);
+    };
+    await refused({}, 400, 'seam must be a non-empty string');
+    await refused({ seam: '' }, 400, 'seam must be a non-empty string');
+    await refused({ seam: SEAM_ROWS[0]?.seam, receiverUrl: 5 }, 400, 'receiverUrl must be a string when present');
     const prev = process.env.OPENWOP_TEST_SEAM_ENABLED;
     try {
       process.env.OPENWOP_TEST_SEAM_ENABLED = 'false';
-      expect((await fire({ seam: SEAM_ROWS[0]?.seam })).status).toBe(404);
+      await refused({ seam: SEAM_ROWS[0]?.seam }, 404, 'The conformance seam surface is not enabled on this host.');
     } finally { process.env.OPENWOP_TEST_SEAM_ENABLED = prev; }
   });
 });

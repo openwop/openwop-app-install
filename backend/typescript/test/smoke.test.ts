@@ -1,13 +1,23 @@
 /**
- * Smoke tests covering the golden path: discovery → create run →
- * stream events → cancel → fork → BYOK strip-on-persist.
+ * Smoke tests covering the golden path: discovery (the major-2 document and
+ * its version literal), auth on a protected route, create → complete a run,
+ * the Idempotency-Key replay, and BYOK strip-on-persist.
+ *
+ * (An older header also promised "stream events → cancel → fork"; nothing here
+ * tests those — they live in their own suites. Corrected in /grade-tests
+ * wave 61.)
+ *
+ * What breaks it (sabotage-witnessed, 8fw3g1-smk-*): the strip (twin of
+ * test/byok-redaction.test.ts "redacts across nested objects and arrays" — a
+ * protected double, kept), the idempotency replay. Waits are on the real
+ * condition (`vi.waitFor`), never a fixed sleep; run secrets are cleared in
+ * `finally` so a failed case cannot leak one into a later strip.
  */
 
-import { describe, expect, it, beforeAll, afterAll } from 'vitest';
+import { describe, expect, it, beforeAll, afterAll, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
-import { preferredVersion } from '../src/middleware/protocolVersion.js';
 import {
   setRunSecrets,
   stripSecretsFromPersisted,
@@ -75,14 +85,24 @@ async function jsonFetch<T = unknown>(
   return { status: res.status, body: (await res.json()) as T };
 }
 
+async function waitTerminal(runId: string): Promise<RunSnapshotBody> {
+  let last: RunSnapshotBody | undefined;
+  await vi.waitFor(async () => {
+    last = (await jsonFetch<RunSnapshotBody>(`/runs/${runId}`)).body;
+    expect(['completed', 'failed', 'cancelled']).toContain(last.status);
+  }, { timeout: 10_000, interval: 25 });
+  return last!;
+}
+
 describe('discovery', () => {
   it('serves /.well-known/openwop with capabilities', async () => {
     // ADR 0812 P3c-0 — the major-2 document. v1's `capabilities.interrupts.kinds`
     // has no v2 seat; the v2 `interrupt` record is the advertisement.
     const { status, body } = await jsonFetch<DiscoveryBody>('/.well-known/openwop', { headers: { 'OpenWOP-Version': '2' } });
     expect(status).toBe(200);
-    // `protocolVersion` is `preferredVersion` (1.1 while v1 is still served, 2.0 after the cut).
-    expect(body.protocolVersion).toBe(preferredVersion());
+    // A literal, not `preferredVersion()` (an expectation computed by the
+    // product moves with it): v1 is retired, so the preferred version is 2.0.
+    expect(body.protocolVersion).toBe('2.0');
     expect(body.protocolVersions).toContain('2.0');
     expect(body.interrupt?.status).toBe('experimental');
     expect(body.interrupt?.tokenAlgs ?? []).toContain('hs256');
@@ -108,15 +128,9 @@ describe('run lifecycle', () => {
     expect(typeof create.body.runId).toBe('string');
     const runId = create.body.runId;
 
-    // Poll for terminal status.
-    let final: RunSnapshotBody | null = null;
-    for (let i = 0; i < 20; i++) {
-      await new Promise((r) => setTimeout(r, 50));
-      const snap = await jsonFetch<RunSnapshotBody>(`/runs/${runId}`);
-      final = snap.body;
-      if (['completed', 'failed', 'cancelled'].includes(snap.body.status)) break;
-    }
-    expect(final?.status).toBe('completed');
+    // Wait for a TERMINAL status (not a fixed number of polls), then assert it.
+    const final = await waitTerminal(runId);
+    expect(final.status).toBe('completed');
   });
 
   it('replays the same response for an Idempotency-Key', async () => {
@@ -131,9 +145,9 @@ describe('run lifecycle', () => {
       }),
     });
     expect(first.status).toBe(201);
-    // Wait briefly for the inline dispatch to finish so the cached
-    // response is final (not __pending__) before the second request.
-    await new Promise((r) => setTimeout(r, 100));
+    // Wait for the inline dispatch to finish so the cached response is final
+    // (not __pending__) before the second request.
+    await waitTerminal(first.body.runId);
     const second = await jsonFetch<CreateRunBody>('/runs', {
       method: 'POST',
       headers,
@@ -156,17 +170,20 @@ describe('BYOK strip-on-persist invariant', () => {
   }
   it('replaces secret values with credentialRef placeholders', () => {
     setRunSecrets('test-run-1', { mySecret: 'super-confidential-value' });
-    const before: NestedPayload = {
-      nested: { token: 'super-confidential-value' },
-      arr: ['public', 'super-confidential-value'],
-      safe: 'no-secrets-here',
-    };
-    const after = stripSecretsFromPersisted<NestedPayload>(before);
-    expect(after.nested.token).toBe('<<redacted:mySecret>>');
-    expect(after.arr[1]).toBe('<<redacted:mySecret>>');
-    expect(after.arr[0]).toBe('public');
-    expect(after.safe).toBe('no-secrets-here');
-    clearRunSecrets('test-run-1');
+    try {
+      const before: NestedPayload = {
+        nested: { token: 'super-confidential-value' },
+        arr: ['public', 'super-confidential-value'],
+        safe: 'no-secrets-here',
+      };
+      const after = stripSecretsFromPersisted<NestedPayload>(before);
+      expect(after.nested.token).toBe('<<redacted:mySecret>>');
+      expect(after.arr[1]).toBe('<<redacted:mySecret>>');
+      expect(after.arr[0]).toBe('public');
+      expect(after.safe).toBe('no-secrets-here');
+    } finally {
+      clearRunSecrets('test-run-1');
+    }
   });
 
   it('passes through when no run secrets are set', () => {

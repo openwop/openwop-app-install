@@ -12,6 +12,18 @@
  *   - A4 approve→execute / reject→no effect, AND the no-secret floor survives the
  *     approve path: a DELIVERABLE (ADR 0308) held write fails closed on approve and
  *     the approval RE-OPENS (approval is not a secret-reach bypass).
+ *
+ * TST-BQR-20. Red when: the anon tool loop ignores a `capped` hold or the cap
+ * compare is off by one; the approval id stops being the deterministic
+ * (run, tool-call) key, or a retried create resurrects a DECIDED row; a decide
+ * crosses tenants, skips the workspace:write check, or does not re-open on a
+ * failed deferred write (incl. a tool result with `isError`); erasure stops
+ * cancelling a pending hold or stops redacting principal/captured/args/
+ * destination; a reject stops redacting the declined lead. NOTE: `holdHook`
+ * below MIRRORS the inline hook in features/chat-widget/publicGateway.ts:202
+ * (not exported), so the gateway's own cap-first ordering is NOT pinned here
+ * (grade-code row G2-GATEWAY-CAPFIRST-1). The A1 create is double-guarded
+ * (`existing` read + CAS-from-null); the reprobe breaks the shared id instead.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -151,9 +163,14 @@ describe('ADR 0469 A1 — the hold is idempotent (deterministic business key)', 
   it('a retried create with the same run + tool-call index reuses the row', async () => {
     const base = { tenantId: 'acme', orgId: 'org-1', widgetId: 'wgt-1', principal: 'anon:sess-abc', runId: 'run-x', toolCallIdx: 0, tool: { name: READ } };
     const a = await createAnonSurfaceWriteApproval(base);
-    const b = await createAnonSurfaceWriteApproval(base);
-    expect(a.approvalId).toBe(b.approvalId);
     expect(a.approvalId).toBe('appr:anon:run-x:0');
+    // Decide it, then retry the create: the retry must return the DECIDED row,
+    // never resurrect a fresh pending one.
+    await getAnonSurfaceWriteApprovalHandler()!('acme', a.approvalId, 'rejected', { decidedByUserId: 'op-1' });
+    const b = await createAnonSurfaceWriteApproval(base);
+    expect(b.approvalId).toBe('appr:anon:run-x:0');
+    expect(b.status).toBe('rejected');
+    expect((await getApproval('appr:anon:run-x:0'))?.status).toBe('rejected');
   });
 });
 
@@ -170,7 +187,9 @@ describe('ADR 0469 A4 — approve→execute, reject→no effect, no-secret floor
   it('APPROVE of a DELIVERABLE held write fails closed (ADR 0308) and RE-OPENS — approval is not a secret-reach bypass', async () => {
     const appr = await createAnonSurfaceWriteApproval({ tenantId: 'acme', orgId: 'org-1', widgetId: 'wgt-1', principal: 'anon:sess-d', runId: 'run-d', toolCallIdx: 0, tool: { name: DELIVERABLE, args: { title: 'x' } } });
     const handler = getAnonSurfaceWriteApprovalHandler();
-    await expect(handler!('acme', appr.approvalId, 'approved', { decidedByUserId: 'op-1' })).rejects.toThrow();
+    // The deliverable fails closed in the provider (no acting user) → a typed failure.
+    await expect(handler!('acme', appr.approvalId, 'approved', { decidedByUserId: 'op-1' }))
+      .rejects.toMatchObject({ code: 'internal_error', message: 'The queued action could not be performed.' });
     // The failed deferred execution re-opened the approval — it never claims "approved".
     expect((await getApproval(appr.approvalId))?.status).toBe('pending');
   });
@@ -195,6 +214,7 @@ describe('ADR 0469 A4 — approve→execute, reject→no effect, no-secret floor
     const appr = await createAnonSurfaceWriteApproval({ tenantId: 'acme', orgId: 'org-1', widgetId: 'wgt-1', principal: 'anon:sess-t', runId: 'run-t', toolCallIdx: 0, tool: { name: READ } });
     const handler = getAnonSurfaceWriteApprovalHandler();
     expect(await handler!('other-tenant', appr.approvalId, 'approved', { decidedByUserId: 'op-1' })).toBeNull();
+    expect((await getApproval(appr.approvalId))?.status).toBe('pending'); // untouched
   });
 });
 

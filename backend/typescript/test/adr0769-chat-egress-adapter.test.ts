@@ -9,8 +9,17 @@
  * inReplyTo), and the host-derived dedup key — the pack's own key embeds
  * `Date.now()`, so a retry of the same (run, node, content) must still enqueue
  * once, while a different run enqueues again.
+ *
+ * Red when (wave 60 probes, tracker TST-BRB-1): the device tenant check, the revoked
+ * or channel refusal is dropped; the host key gains the clock, loses the run or the
+ * text; `inReplyTo` is not mapped; a url-only media item is dropped; or the composed
+ * adapter loses its SMS half.
+ *
+ * Double guard, recorded: a retry is deduplicated by `priorSend` (the fast path) AND
+ * by `reserveSend` answering `duplicate` (the winner path, `chatEgressAdapter.ts`);
+ * dropping either alone stays green, dropping both reds the retry case.
  */
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createApp } from '../src/index.js';
@@ -59,9 +68,19 @@ describe('ADR 0769 — dispatchEgressEnvelope via messaging.chatSend', () => {
 
   it('a retry of the same (run, node, content) enqueues ONCE despite the pack\'s Date.now key', async () => {
     const before = (await queued('rly_a')).length;
-    const first = await send('ten-a', 'run-retry', { connectorInstanceId: 'rly_a', text: 'once' });
-    await new Promise((r) => setTimeout(r, 5)); // the pack's key changes; the host's must not
-    const second = await send('ten-a', 'run-retry', { connectorInstanceId: 'rly_a', text: 'once' });
+    // Fake only Date: the pack's own key embeds Date.now(), so the second send carries
+    // a DIFFERENT pack key one second later; the host-derived key must not move.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    let first: Awaited<ReturnType<typeof send>>;
+    let second: Awaited<ReturnType<typeof send>>;
+    try {
+      vi.setSystemTime(new Date('2026-06-01T12:00:00.000Z'));
+      first = await send('ten-a', 'run-retry', { connectorInstanceId: 'rly_a', text: 'once' });
+      vi.setSystemTime(new Date('2026-06-01T12:00:01.000Z'));
+      second = await send('ten-a', 'run-retry', { connectorInstanceId: 'rly_a', text: 'once' });
+    } finally {
+      vi.useRealTimers();
+    }
     expect(second.outputs).toMatchObject({ success: true, messageId: first.outputs.messageId, deduplicated: true });
     expect((await queued('rly_a')).length).toBe(before + 1);
   });
@@ -86,6 +105,20 @@ describe('ADR 0769 — dispatchEgressEnvelope via messaging.chatSend', () => {
   it('refuses a revoked relay and a channel the relay does not carry', async () => {
     expect((await send('ten-a', 'run-3', { connectorInstanceId: 'rly_rev', text: 'hi' })).outputs).toEqual({ success: false, error: 'connector_revoked' });
     expect((await send('ten-a', 'run-3', { connectorInstanceId: 'rly_a', text: 'hi', channel: 'signal' })).outputs).toEqual({ success: false, error: 'channel_mismatch' });
+  });
+});
+
+describe('ADR 0769 — the envelope → relay media mapping', () => {
+  it('a media item that carries only `url` (no `ref`) is enqueued with that url', async () => {
+    const m = makeMessagingAdapter({ storage, tenantId: 'ten-a', runId: 'run-media-url' });
+    const out = await m.dispatchEgressEnvelope({
+      connectorInstanceId: 'rly_a', nodeId: 'send-media',
+      envelope: { channel: 'whatsapp', delivery: { conversationId: 'conv-media' }, content: { text: 'see attached', media: [{ url: 'https://x.test/only-url.png' }] } },
+    });
+    expect(out).toMatchObject({ success: true, relayId: 'rly_a' });
+    const egress = (await queued('rly_a')).find((e) => e.egressId === out.messageId);
+    expect(egress, 'the enqueued envelope').toBeDefined();
+    expect(egress!.media).toEqual([{ url: 'https://x.test/only-url.png' }]);
   });
 });
 

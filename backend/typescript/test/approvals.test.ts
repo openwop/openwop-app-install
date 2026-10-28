@@ -16,6 +16,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
+import { __setMockArchiveGuardForTest } from '../src/host/heartbeatService.js';
 import { getNotificationEmitter } from '../src/notifications/emitter.js';
 
 let server: http.Server;
@@ -23,6 +24,9 @@ let BASE: string;
 const TOKEN = 'dev-token';
 
 beforeAll(async () => {
+  // ADR 0963 D8 — the seeded twins are all mock archive; this file tests the
+  // loop's mechanics over them, so the archive guard is off here (and pinned elsewhere).
+  __setMockArchiveGuardForTest(false);
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   const app = await createApp({
     port: 0,
@@ -37,6 +41,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  __setMockArchiveGuardForTest(true);
   await new Promise<void>((res) => server.close(() => res()));
 });
 

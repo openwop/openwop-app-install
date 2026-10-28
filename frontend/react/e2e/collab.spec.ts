@@ -34,11 +34,11 @@ import { login, enableToggle, API } from './support/session';
  * `useCollab.ts` → red), and awareness reaching the other client (hiding
  * `.cv-presence__peer` → red; the render alone is also `CollabPresence.test.tsx`'s).
  *
- * This spec passes ALONE in ~3.3s and fails under `--workers=2`: it drives two
- * live browser clients through a real WebSocket, and under concurrent machine
- * load their sync assertions miss. That is a parallelism artifact, not a product
- * defect — #2746 fixed the actual breakage (a canvas deep link stopped resolving
- * when #2718 made `?org=` required).
+ * Correction 2026-10-27: the old "parallelism artifact, not a product defect"
+ * claim was too strong (already retracted in ADR 0509 on 2026-08-02). The exact
+ * `bet replieda` undo corruption reproduces in two synchronous production-schema
+ * editors without a browser/network. See docs/steward/COLLAB-UNDO-INVESTIGATION.md.
+ * #2746 fixed a separate deep-link defect; it did not establish undo correctness.
  *
  * `@serial` moves it out of `npm run test:e2e` (which is `--grep-invert @serial`)
  * and into `npm run test:e2e:serial` (`--workers=1`). It therefore STILL RUNS on
@@ -143,12 +143,11 @@ test.describe('realtime canvas collaboration (ADR 0359)', { tag: '@serial' }, ()
     // keypress made it pass 4/4, i.e. the delay itself was the fix. That
     // Heisenbug is why this is a WAIT, not a retry.
     //
-    // This does NOT make the spec load-proof (see ADR 0509 Phase 2 — it drives
-    // two live WebSocket clients and is advisory for that reason). It removes ONE
-    // specific race, and it stops the failure PRESENTING as a CRDT/undo defect:
-    // chasing that reading cost a full investigation, including reading
-    // y-prosemirror internals, before the data said the corruption predates the
-    // undo entirely.
+    // Correction 2026-10-27: this check only establishes the end of one DOM node,
+    // not the end of the editor. Prepending also exposes a real repeated-character
+    // attribution bug: complete text syncs, then another author's undo mangles it.
+    // Preserve the assertions below; moving the caret alone would not repair that
+    // product defect. See docs/steward/COLLAB-UNDO-INVESTIGATION.md.
     await edB.click();
     await pageB.keyboard.press('ControlOrMeta+End');
     await expect

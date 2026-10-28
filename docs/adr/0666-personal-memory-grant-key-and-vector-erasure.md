@@ -7,6 +7,12 @@ Plan input: `/grade-workflows` 2026-09-12 (`docs/steward/WORKFLOWS-ASSESSMENT.md
 Mode: **EXTEND** — no new feature-package, no new toggle. `profile-memory` is always-on (`features/profile-memory/feature.ts`); `twin-recall` keeps its existing toggle id.
 RFC verdict: **host-extension — NO new RFC.** Nothing here touches the OpenWOP wire: no run-event field, no capability flag, no `ConversationTurn` field, no endpoint contract, no normative MUST. All routes stay under `/v1/host/openwop-app/*`. D4 reads `isSideEffectingNode`, which is host replay classification, not a wire claim. **Explicitly flagged as considered and rejected:** a per-grant version stamp on a run would be RFC 0005-adjacent and is forbidden for a different reason (D6/`PKWF-6`).
 
+> **CORRECTED 2026-10-26 (ADR 0982 D2).** D1 kept the grant's WRITE side on `callerSubject` in the
+> active tenant "because real grant rows exist". Measured read-only on prod 2026-10-26: 0 grant rows
+> have ever existed. Both doors now key on the canonical `User.userId` in the home tenant, which is
+> where Personal Memory lists notes. The `callerSubject` key still mis-filed facts for an unbound
+> `oidc:` session and for any shared-workspace chat.
+
 ## Context
 
 ### `PKWF-1` — the auto-extraction consent grant is written at one key and read at another (Blocker)

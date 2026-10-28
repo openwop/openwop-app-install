@@ -1,0 +1,46 @@
+{
+  "name": "core.openwop.workflows.campaign-autonomy",
+  "version": "1.0.0",
+  "kind": "workflow-chain",
+  "description": "Campaign Studio autonomy policy (ADR 0942 D7): the daily digest of notify-after steps. One chain per workspace, scheduled host-side when a client or campaign policy asks for a daily digest. It sends each named person one notice listing the campaign steps that ran without waiting for them the day before.",
+  "author": "openwop",
+  "license": "Apache-2.0",
+  "engines": {
+    "openwop": ">=1.0.0 <3.0.0"
+  },
+  "keywords": [
+    "Marketing",
+    "Campaign Studio"
+  ],
+  "chains": [
+    {
+      "chainId": "campaign-autonomy.daily-digest",
+      "version": "1.0.0",
+      "label": "Campaign autonomy daily digest",
+      "description": "Send each person one notice listing yesterday's campaign steps that ran under a notify-after rule with a daily digest. Scheduled once a day per workspace by the host when a saved autonomy policy asks for a daily digest; safe to run again (one notice per person per day).",
+      "internal": true,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "capabilities": [],
+      "dag": {
+        "nodes": [
+          {
+            "id": "deliver",
+            "typeId": "feature.campaign-orchestration.nodes.autonomy-digest@1.0.0",
+            "name": "Deliver the daily digest",
+            "position": { "x": 0, "y": 0 },
+            "config": {}
+          }
+        ],
+        "edges": []
+      },
+      "outputs": {
+        "recipients": { "type": "number", "description": "People who got a digest." },
+        "items": { "type": "number", "description": "Steps listed across all digests." }
+      }
+    }
+  ]
+}

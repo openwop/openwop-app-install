@@ -171,6 +171,9 @@ export const messages = {
   adSpendEmpty: 'Nenhum dado de anúncios ainda.',
   commissionsEmpty: 'Nenhum demonstrativo ainda.',
   leaderboardEmpty: 'Nenhum feedback de modelos ainda.',
+  // ADR 0986 — the tile shows the score it sorts by, not the raw win rate.
+  leaderboardTileMeta_one: '{{score}} de confiança · {{count}} avaliador',
+  leaderboardTileMeta_other: '{{score}} de confiança · {{count}} avaliadores',
   promotionsEmpty: 'Nenhuma promoção ativa.',
   suggestionsEmpty: 'Nenhuma sugestão no momento.',
   campaignsEmpty: 'Nenhuma campanha em andamento.',

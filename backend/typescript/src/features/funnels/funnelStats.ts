@@ -13,11 +13,15 @@
  * the authed rebuild route.
  */
 import { DurableCollection } from '../../host/hostExtPersistence.js';
-import { MIN_SESSIONS_PER_VARIANT, Z_95, twoProportionZ } from '../../host/variantAssignment.js';
+import { MIN_SESSIONS_PER_VARIANT } from '../../host/variantAssignment.js';
+import type { LegacyResultHealth } from '../../host/experiments/legacyHealth.js';
+import { projectLegacyResults, type SignificanceWithheld } from '../../host/experiments/legacyProjection.js';
+import { foldDailyCells, readExperimentRollup, totalsByArm, writeExperimentRollup, type UnitObservation } from '../../host/experiments/rollup.js';
 import { createLogger } from '../../observability/logger.js';
-import { listCollectedEvents } from '../cdp/collectService.js';
+import { collectedEventsRetainedSince, listCollectedEvents, type CollectedEvent } from '../cdp/collectService.js';
 import { listOrders } from '../commerce/commerceService.js';
-import { getFunnel, listFunnels, listFunnelScopes, type Funnel } from './funnelsService.js';
+import { getFunnel, listFunnels, listFunnelScopes, type Funnel, type StepExperiment } from './funnelsService.js';
+import { resolveStepExperiment } from './stepExperimentsEngine.js';
 import { tenantFeatureCheck } from '../../host/tenantFeatureGate.js';
 
 const log = createLogger('funnels.stats');
@@ -89,7 +93,10 @@ export async function rebuildFunnelStats(tenantId: string, orgId: string): Promi
   // the per-event fallthrough below and are counted once via submissionId
   // (live, load-bearing code, not belt-and-braces).
   const seenVisitor = new Set<string>();
-  for (const evt of await listCollectedEvents(tenantId, EVENT_WINDOW)) {
+  // ADR 0949 P1b — one read of the tenant's events serves both rollups: the day
+  // stats keep their disclosed window; experiment rollups use every event (E-2).
+  const allEvents = await listCollectedEvents(tenantId, Number.MAX_SAFE_INTEGER);
+  for (const evt of allEvents.slice(0, EVENT_WINDOW)) {
     if (evt.eventType !== 'funnel.step_viewed' && evt.eventType !== 'funnel.step_completed') continue;
     const p = evt.payload as { orgId?: unknown; funnelId?: unknown; stepId?: unknown; submissionId?: unknown; visitor?: unknown };
     if (p.orgId !== orgId || typeof p.funnelId !== 'string' || typeof p.stepId !== 'string') continue;
@@ -131,6 +138,14 @@ export async function rebuildFunnelStats(tenantId: string, orgId: string): Promi
     }
   }
   for (const row of rows.values()) await stats.put(row);
+  // ADR 0949 P1b — the step experiments' daily rollups, from the same read.
+  const retainedSince = await collectedEventsRetainedSince(tenantId);
+  for (const f of funnels) {
+    for (const step of f.steps) {
+      const exp = await resolveStepExperiment(tenantId, orgId, f.funnelId, step.stepId, step.experiment);
+      if (exp) await rebuildStepExperimentRollup(tenantId, orgId, step.stepId, exp, allEvents, retainedSince);
+    }
+  }
   return rows.size;
 }
 
@@ -190,16 +205,50 @@ export function startFunnelStatsSweep(): { stop: () => void } | null {
   return { stop: () => { clearInterval(timer); started = false; } };
 }
 
-// ── Step-experiment results (Phase 4 — a READ-TIME projection over the
-//    stamped funnel events; the 0236 shape, the SHARED z-test) ────────────────
+// ── Step-experiment results (Phase 4; ADR 0949 P1b — over the daily rollup,
+//    through the shared projection) ──────────────────────────────────────────
+
+/** Per-unit observations for one step experiment: a unit is a consented visitor
+ *  stamped with this experiment. Its arm and cohort day come from its FIRST
+ *  stamped view; it converts if a stamped completion exists. A completion with
+ *  no stamped view is not counted (the legacy projection counted it, which could
+ *  report more conversions than sessions). */
+export function stepExperimentUnits(events: readonly CollectedEvent[], stepId: string, experimentId: string): UnitObservation[] {
+  const exposures = new Map<string, { arm: string; at: string }>();
+  const converted = new Set<string>();
+  for (const evt of events) {
+    if (evt.eventType !== 'funnel.step_viewed' && evt.eventType !== 'funnel.step_completed') continue;
+    const pl = evt.payload as { stepId?: unknown; visitor?: unknown; experiment?: { experimentId?: unknown; variant?: unknown } };
+    if (pl.stepId !== stepId || pl.experiment?.experimentId !== experimentId) continue;
+    if (typeof pl.visitor !== 'string' || !pl.visitor || typeof pl.experiment?.variant !== 'string') continue;
+    if (evt.eventType === 'funnel.step_completed') { converted.add(pl.visitor); continue; }
+    const seen = exposures.get(pl.visitor);
+    if (!seen || evt.at < seen.at) exposures.set(pl.visitor, { arm: pl.experiment.variant, at: evt.at });
+  }
+  return [...exposures].map(([unit, e]) => ({ arm: e.arm, firstExposureAt: e.at, converted: converted.has(unit) }));
+}
+
+/** Coverage is complete unless the source purged events from the experiment's life. */
+export function stepExperimentCoverage(exp: StepExperiment, retainedSince: string | null): 'complete' | 'partial' {
+  return retainedSince && retainedSince > exp.createdAt ? 'partial' : 'complete';
+}
+
+export async function rebuildStepExperimentRollup(
+  tenantId: string, orgId: string, stepId: string, exp: StepExperiment,
+  events: readonly CollectedEvent[], retainedSince: string | null,
+): Promise<void> {
+  const cells = foldDailyCells(tenantId, orgId, exp.experimentId, stepExperimentUnits(events, stepId, exp.experimentId));
+  await writeExperimentRollup(tenantId, orgId, exp.experimentId, cells,
+    { coverage: stepExperimentCoverage(exp, retainedSince), sourceRetainedSince: retainedSince }, new Date().toISOString());
+}
 
 export interface StepVariantResult {
   key: string;
   pageId: string | null;
   weight: number;
-  /** Distinct consented visitors served this variant (step_viewed). */
+  /** Distinct consented visitors served this variant (first stamped view). */
   sessions: number;
-  /** Distinct visitors who completed the step under this variant. */
+  /** Distinct visitors served this variant who completed the step. */
   conversions: number;
   conversionRate: number;
   zScore: number | null;
@@ -212,44 +261,37 @@ export interface StepExperimentResultsOut {
   status: 'running' | 'stopped';
   baselineKey: string;
   minSessionsPerVariant: number;
-  eventWindow: number;
   variants: StepVariantResult[];
+  /** ADR 0949 P1b (E-2) — the result reads every retained event, and says
+   *  whether the source purged any from the experiment's life. */
+  coverage: { status: 'complete' | 'partial'; retainedSince: string | null; rebuiltAt: string | null };
+  /** ADR 0949 P0 — the split check and the fixed-horizon notice. */
+  health: LegacyResultHealth;
+  /** ADR 0949 P0/P1b — set when `significant` is withheld for every variant:
+   *  a broken split (`srm`) or a source that lost events (`coverage`). */
+  significanceWithheld?: SignificanceWithheld;
 }
 
 export async function stepExperimentResults(tenantId: string, orgId: string, funnelId: string, stepId: string): Promise<StepExperimentResultsOut | null> {
   const funnel = await getFunnel(tenantId, orgId, funnelId);
   const step = funnel?.steps.find((st) => st.stepId === stepId);
-  const exp = step?.experiment;
-  if (!funnel || !step || !exp) return null;
-  const sessionsBy = new Map<string, Set<string>>();
-  const conversionsBy = new Map<string, Set<string>>();
-  for (const evt of await listCollectedEvents(tenantId, EVENT_WINDOW)) {
-    if (evt.eventType !== 'funnel.step_viewed' && evt.eventType !== 'funnel.step_completed') continue;
-    const pl = evt.payload as { stepId?: unknown; visitor?: unknown; experiment?: { experimentId?: unknown; variant?: unknown } };
-    if (pl.stepId !== stepId || pl.experiment?.experimentId !== exp.experimentId) continue;
-    if (typeof pl.visitor !== 'string' || typeof pl.experiment?.variant !== 'string') continue;
-    const v = pl.experiment.variant;
-    if (!sessionsBy.has(v)) { sessionsBy.set(v, new Set()); conversionsBy.set(v, new Set()); }
-    if (evt.eventType === 'funnel.step_viewed') sessionsBy.get(v)!.add(pl.visitor);
-    else conversionsBy.get(v)!.add(pl.visitor);
-  }
-  const baseline = exp.variants[0];
-  const baseSessions = sessionsBy.get(baseline.key)?.size ?? 0;
-  const baseConversions = conversionsBy.get(baseline.key)?.size ?? 0;
-  const variants: StepVariantResult[] = exp.variants.map((v, i) => {
-    const sessions = sessionsBy.get(v.key)?.size ?? 0;
-    const conversions = conversionsBy.get(v.key)?.size ?? 0;
-    const insufficientSample = sessions < MIN_SESSIONS_PER_VARIANT || (i > 0 && baseSessions < MIN_SESSIONS_PER_VARIANT);
-    const z = i === 0 ? null : twoProportionZ(baseConversions, baseSessions, conversions, sessions);
-    return {
-      key: v.key, pageId: v.pageId, weight: v.weight,
-      sessions, conversions,
-      conversionRate: sessions > 0 ? conversions / sessions : 0,
-      zScore: z,
-      significant: i === 0 || insufficientSample || z === null ? null : Math.abs(z) >= Z_95,
-      insufficientSample,
-    };
-  });
-  return { experimentId: exp.experimentId, status: exp.status, baselineKey: baseline.key, minSessionsPerVariant: MIN_SESSIONS_PER_VARIANT, eventWindow: EVENT_WINDOW, variants };
+  if (!funnel || !step) return null;
+  const exp = await resolveStepExperiment(tenantId, orgId, funnelId, stepId, step.experiment);
+  if (!exp) return null;
+  // A read rebuilds this experiment's rollup (idempotent; the sweep keeps it warm).
+  await rebuildStepExperimentRollup(tenantId, orgId, stepId, exp,
+    await listCollectedEvents(tenantId, Number.MAX_SAFE_INTEGER), await collectedEventsRetainedSince(tenantId));
+  const { cells, header } = await readExperimentRollup(tenantId, orgId, exp.experimentId);
+  const totals = totalsByArm(cells);
+  const projection = projectLegacyResults(
+    exp.variants.map((v) => ({ key: v.key, weight: v.weight, sessions: totals.get(v.key)?.n ?? 0, conversions: totals.get(v.key)?.sum ?? 0 })),
+    { coverageComplete: header?.coverage !== 'partial' },
+  );
+  return {
+    experimentId: exp.experimentId, status: exp.status, baselineKey: exp.variants[0]!.key, minSessionsPerVariant: MIN_SESSIONS_PER_VARIANT,
+    variants: projection.arms.map((a, i) => ({ ...a, pageId: exp.variants[i]!.pageId })),
+    coverage: { status: header?.coverage ?? 'complete', retainedSince: header?.sourceRetainedSince ?? null, rebuiltAt: header?.rebuiltAt ?? null },
+    health: projection.health,
+    ...(projection.significanceWithheld ? { significanceWithheld: projection.significanceWithheld } : {}),
+  };
 }
-

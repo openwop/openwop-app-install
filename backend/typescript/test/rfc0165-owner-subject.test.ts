@@ -9,6 +9,12 @@
  * cannot see: which lane each credential attests, that `subjectId` IS
  * `owner.principal` by construction, and that a fork keeps the source's owner
  * while `actingUserId` still re-stamps to the forker (ADR 0024).
+ *
+ * The reserved-key strip is witnessed on the product function
+ * (`stripReservedRunMetadata`, host/runDispatch.ts) as well as over HTTP: on the
+ * HTTP path the host's own owner stamp overwrites a forged key anyway
+ * (`buildRunRecord` spreads metadata then writes `owner`), so the HTTP leg alone
+ * could not see the strip (round-1 probe 8fw2g1-os-strip-owner was vacuous).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -16,6 +22,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { preferredVersion } from '../src/middleware/protocolVersion.js';
 import { LEGACY_SUBJECT_ISSUER, opaquePrincipal, runOwner, subjectChainDepth, type RunSubject } from '../src/host/runOwner.js';
+import { stripReservedRunMetadata } from '../src/host/runDispatch.js';
 
 const TOKEN = 'dev-token';
 const GRAMMAR = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/;
@@ -36,25 +43,29 @@ beforeAll(async () => {
 afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
 
 const V2 = { 'OpenWOP-Version': '2' };
-async function jf<T = unknown>(path: string, init: RequestInit = {}): Promise<{ status: number; body: T; headers: Headers }> {
-  const res = await fetch(`${BASE}${path}`, { ...init, headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}`, ...((init.headers as Record<string, string>) ?? {}) } });
+async function jf<T = unknown>(path: string, init: Omit<RequestInit, 'headers'> = {}, headers: Record<string, string> = {}): Promise<{ status: number; body: T; headers: Headers }> {
+  const res = await fetch(`${BASE}${path}`, { ...init, headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}`, ...headers } });
   const raw = res.status === 204 || res.status === 304 ? undefined : await res.json();
   return { status: res.status, body: raw as T, headers: res.headers };
 }
 
+/** Polls the run to a terminal status; there is no settle hook to await over
+ *  HTTP (honest ceiling). Throws on timeout so a stuck run is never read as a
+ *  non-terminal snapshot. */
 async function waitTerminal(runId: string): Promise<void> {
   for (let i = 0; i < 100; i++) {
     const r = await jf<{ status: string }>(`/runs/${runId}`);
     if (['completed', 'failed', 'cancelled'].includes(r.body.status)) return;
     await new Promise((r) => setTimeout(r, 50));
   }
+  throw new Error(`timed out waiting for terminal: ${runId}`);
 }
 
 describe('RFC 0165 §A — protocolVersions[] (ADR 0625)', () => {
   it('is a non-empty unique array of MAJOR.MINOR strings at the document ROOT that contains the scalar', async () => {
     // ADR 0812 P3c-0 — read the v2 document; its scalar is the host's `preferredVersion`
     // (`1.1` through the overlap, `2.0` once v1 retires), not a pinned `1.1`.
-    const doc = (await jf<{ protocolVersion: string; protocolVersions: unknown; capabilities?: Record<string, unknown> }>('/.well-known/openwop', { headers: V2 })).body;
+    const doc = (await jf<{ protocolVersion: string; protocolVersions: unknown; capabilities?: Record<string, unknown> }>('/.well-known/openwop', {}, V2)).body;
     expect(doc.protocolVersion).toBe(preferredVersion());
     expect(Array.isArray(doc.protocolVersions)).toBe(true);
     const arr = doc.protocolVersions as string[];
@@ -165,9 +176,15 @@ describe('RFC 0165 §B.3 — legacy synthesis and consistency guards (host/runOw
     expect(runOwner({ tenantId: 't1', metadata: null })).toBeUndefined();
   });
   it('a persisted stamp is emitted verbatim with subject.tenant forced to the run tenant', () => {
-    const stamp = { principal: 'abcd', principalKind: 'user', subject: { issuer: 'https://idp.example', subjectId: 'abcd', lane: 'oidc', kind: 'user' } };
+    // The stamp's subject names ANOTHER tenant: the run's tenant must win.
+    const stamp = { principal: 'abcd', principalKind: 'user', subject: { issuer: 'https://idp.example', subjectId: 'abcd', tenant: 't-elsewhere', lane: 'oidc', kind: 'user' } };
     const o = runOwner({ tenantId: 't9', metadata: { owner: stamp } })!;
-    expect(o).toEqual({ tenant: 't9', principal: 'abcd', principalKind: 'user', subject: { ...stamp.subject, tenant: 't9' } });
+    expect(o).toEqual({
+      tenant: 't9',
+      principal: 'abcd',
+      principalKind: 'user',
+      subject: { issuer: 'https://idp.example', subjectId: 'abcd', tenant: 't9', lane: 'oidc', kind: 'user' },
+    });
   });
   it('a stamp whose subjectId disagrees with the principal falls back to the legacy form rather than violate §B.2', () => {
     const o = runOwner({ tenantId: 't9', metadata: { owner: { principal: 'abcd', subject: { issuer: 'https://idp.example', subjectId: 'zzzz', lane: 'oidc', kind: 'user' } } } })!;
@@ -175,14 +192,19 @@ describe('RFC 0165 §B.3 — legacy synthesis and consistency guards (host/runOw
     expect(o.subject?.issuer).toBe(LEGACY_SUBJECT_ISSUER);
     expect(o.subject?.subjectId).toBe('abcd');
   });
-  it('a client-supplied metadata.owner is stripped at run creation (reserved key)', async () => {
+  it('a client-supplied metadata.owner is stripped at run creation (reserved key) and never survives: the host stamp wins', async () => {
     const forged = { principal: 'ffff', subject: { issuer: 'https://evil.example', subjectId: 'ffff', lane: 'saml', kind: 'user', keyClass: 'opaque-idp' } };
+    // The strip itself, on the product function the create path calls.
+    expect(stripReservedRunMetadata({ owner: forged, keep: 1 })).toEqual({ keep: 1 });
     const created = await jf<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({ workflowId, inputs: { text: 'x' }, metadata: { owner: forged } }) });
     expect([201, 202]).toContain(created.status);
     await waitTerminal(created.body.runId);
     const snap = (await jf<{ owner?: Owner }>(`/runs/${created.body.runId}`)).body;
-    expect(snap.owner?.principal).not.toBe('ffff');
+    // v2 carries no principal; the subject is the host's env-key stamp, not the forgery.
+    expect(snap.owner?.principal).toBeUndefined();
     expect(snap.owner?.subject?.issuer).toBe('urn:openwop-app:env-key');
+    expect(snap.owner?.subject?.subjectId).not.toBe('ffff');
+    expect(snap.owner?.subject?.lane).toBe('api-key');
   });
   it('actor chain depth is measured from the root subject', () => {
     const s = (d: number): RunSubject => ({ issuer: 'i', subjectId: 's', tenant: 't', lane: 'oidc', kind: 'user', ...(d > 1 ? { actor: s(d - 1) } : {}) });

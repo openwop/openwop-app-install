@@ -10,6 +10,16 @@
  *
  * `resolveAndResume` is stubbed: these legs pin WHO may reach it and with what
  * reviewer, not the resume machinery (covered by the interrupts suites).
+ *
+ * TST-BWA-5 (grade-tests w62): the fakes are typed against the real `Storage` /
+ * `HostAdapterSuite` (the two methods overridden over the app's own instances), and each
+ * refusal asserts its OWN message — three different checks answer `forbidden`. Red when the
+ * `approvals:respond` check asks a weaker scope, when the gate check stops matching node ids,
+ * when a gallery copy's chain is not resolved, when the reviewer is not passed, or when a
+ * missing `value` is accepted. DOUBLE GUARD (recorded): the `!reviewer` line is backed by
+ * `assertTenantScope`, which also refuses an absent subject — removing the line alone leaves
+ * the unidentified caller refused (as `forbidden`, with the scope message); the case pins the
+ * identified-caller message so the first guard is the one that answers.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -25,10 +35,15 @@ import { getSetCookies } from './headerCookies.js';
 import { createApp } from '../src/index.js';
 import { getNodeRegistry } from '../src/executor/nodeRegistry.js';
 import { registerAppBuilderMcpNodes, MCP_NODE_PREFIX } from '../src/features/app-builder/mcpControlNodes.js';
-import type { NodeContext } from '../src/executor/types.js';
+import type { NodeContext, NodeOutcome, WorkflowDefinition } from '../src/executor/types.js';
+import type { Storage } from '../src/storage/storage.js';
+import type { HostAdapterSuite } from '../src/host/index.js';
+import type { InterruptRecord, RunRecord } from '../src/types.js';
 
 let BASE: string;
 let server: http.Server;
+let appStorage: Storage;
+let appSuite: HostAdapterSuite;
 let n = 0;
 
 beforeAll(async () => {
@@ -37,18 +52,21 @@ beforeAll(async () => {
   process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+  appStorage = app.locals.storage as Storage;
+  appSuite = app.locals.hostSuite as HostAdapterSuite;
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 beforeEach(() => { resolved.length = 0; });
 
-function client(): { post: (p: string, b?: unknown) => Promise<{ status: number; body: any }> } {
+interface Reply<T> { status: number; body: T }
+function client(): { post: <T>(p: string, b?: unknown) => Promise<Reply<T>> } {
   let cookie = '';
   return {
-    post: async (path, body) => {
+    post: async <T>(path: string, body?: unknown): Promise<Reply<T>> => {
       const res = await fetch(`${BASE}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-      for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]!; }
-      return { status: res.status, body: await res.json().catch(() => undefined) };
+      for (const ck of getSetCookies(res.headers)) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]!; }
+      return { status: res.status, body: (await res.json().catch(() => undefined)) as T };
     },
   };
 }
@@ -62,9 +80,9 @@ async function members() {
   const ids: Record<string, string> = {};
   for (const role of ['editor', 'viewer']) {
     const c = client();
-    ids[role] = (await c.post(`${H}/test/login`, { email: `m835-${role}-${n++}@acme.test`, tenantId })).body.user.userId;
+    ids[role] = (await c.post<{ user: { userId: string } }>(`${H}/test/login`, { email: `m835-${role}-${n++}@acme.test`, tenantId })).body.user.userId;
   }
-  const orgId: string = (await owner.post(`${H}/orgs`, { name: 'Acme' })).body.orgId;
+  const orgId = (await owner.post<{ orgId: string }>(`${H}/orgs`, { name: 'Acme' })).body.orgId;
   for (const role of ['editor', 'viewer']) {
     const add = await owner.post(`${H}/orgs/${encodeURIComponent(orgId)}/members`, { displayName: role, subject: ids[role], roles: [role] });
     expect(add.status, JSON.stringify(add.body)).toBe(201);
@@ -77,28 +95,32 @@ const PREFIXED_REVIEW = 'app-builder_repair_0123456789ab_review';
 
 /** Register the nodes over a fake storage + catalog: one interrupt on a
  *  gallery copy of the repair chain, one on a gate a member added to it. */
-function nodeFor(tenantId: string): (ctx: Partial<NodeContext>) => Promise<{ status: string; error?: { code: string } }> {
-  const interrupts: Record<string, { interruptId: string; runId: string; nodeId: string; kind: string }> = {
-    'int-review': { interruptId: 'int-review', runId: 'run-1', nodeId: PREFIXED_REVIEW, kind: 'approval' },
-    'int-added': { interruptId: 'int-added', runId: 'run-1', nodeId: 'deploy-approval', kind: 'approval' },
+type Outcome = NodeOutcome & { error?: { code: string; message?: string } };
+function nodeFor(tenantId: string): (ctx: Partial<NodeContext>) => Promise<Outcome> {
+  const at = '2026-10-01T00:00:00.000Z';
+  const interrupt = (interruptId: string, runId: string, nodeId: string): InterruptRecord =>
+    ({ interruptId, runId, nodeId, kind: 'approval', token: `tok-${interruptId}`, data: {}, createdAt: at });
+  const interrupts: Record<string, InterruptRecord> = {
+    'int-review': interrupt('int-review', 'run-1', PREFIXED_REVIEW),
+    'int-added': interrupt('int-added', 'run-1', 'deploy-approval'),
     // A run of the host-default same-id chain — the one shape main ALLOWED.
-    'int-direct': { interruptId: 'int-direct', runId: 'run-2', nodeId: PREFIXED_REVIEW, kind: 'approval' },
+    'int-direct': interrupt('int-direct', 'run-2', PREFIXED_REVIEW),
   };
-  const runs: Record<string, { runId: string; tenantId: string; workflowId: string; status: string }> = {
-    'run-1': { runId: 'run-1', tenantId, workflowId: REPAIR_COPY, status: 'paused' },
-    'run-2': { runId: 'run-2', tenantId, workflowId: 'app-builder.repair', status: 'paused' },
+  const run = (runId: string, workflowId: string): RunRecord =>
+    ({ runId, tenantId, workflowId, status: 'paused', inputs: {}, metadata: {}, configurable: {}, createdAt: at, updatedAt: at });
+  const runs: Record<string, RunRecord> = { 'run-1': run('run-1', REPAIR_COPY), 'run-2': run('run-2', 'app-builder.repair') };
+  // The app's own storage and suite, with the two reads this node makes answered from the table above.
+  const storage: Storage = { ...appStorage, getInterrupt: async (id: string) => interrupts[id] ?? null, getRun: async (id: string) => runs[id] ?? null };
+  const copy: WorkflowDefinition = { workflowId: REPAIR_COPY, metadata: { expandedFrom: { chainId: 'app-builder.repair' } }, nodes: [], edges: [] };
+  const hostSuite: HostAdapterSuite = {
+    ...appSuite,
+    workflowCatalog: { ...appSuite.workflowCatalog, getWorkflow: async (id: string) => (id === REPAIR_COPY ? { workflowId: id, definition: copy } : null) },
   };
-  const storage = {
-    getInterrupt: async (id: string) => interrupts[id] ?? null,
-    getRun: async (id: string) => runs[id] ?? null,
-  };
-  const hostSuite = {
-    workflowCatalog: { getWorkflow: async (id: string) => (id === REPAIR_COPY ? { workflowId: id, definition: { workflowId: id, metadata: { expandedFrom: { chainId: 'app-builder.repair' } }, nodes: [], edges: [] } } : null) },
-  };
-  registerAppBuilderMcpNodes({ storage: storage as never, hostSuite: hostSuite as never });
+  registerAppBuilderMcpNodes({ storage, hostSuite });
   return async (ctx) => {
     const node = await getNodeRegistry().resolve(`${MCP_NODE_PREFIX}resolve-paused-task`);
-    return (await node!.execute({ runId: 'mcp-run', nodeId: 'n', tenantId, config: {}, configurable: {}, attempt: 1, secrets: {}, emit: async () => ({ eventId: '', sequence: 0 }), ...ctx } as NodeContext)) as never;
+    const full: NodeContext = { runId: 'mcp-run', nodeId: 'n', tenantId, inputs: {}, config: {}, configurable: {}, attempt: 1, secrets: {}, emit: async () => ({ eventId: '', sequence: 0 }), ...ctx };
+    return (await node!.execute(full)) as Outcome;
   };
 }
 
@@ -108,7 +130,7 @@ describe('ADR 0835 D4 — who may answer an app-builder review over MCP', () => 
     for (const interruptId of ['int-direct', 'int-review']) {
       const out = await nodeFor(m.tenantId)({ actingUserId: m.viewerId, inputs: { interruptId, value: { action: 'approve' } } });
       expect(out.status, interruptId).toBe('failure');
-      expect(out.error?.code, interruptId).toBe('forbidden');
+      expect(out.error, interruptId).toEqual({ code: 'forbidden', message: 'Your role in this workspace cannot answer reviews (approvals:respond).' });
     }
     expect(resolved).toHaveLength(0);
   });
@@ -116,7 +138,7 @@ describe('ADR 0835 D4 — who may answer an app-builder review over MCP', () => 
   it('refuses an unidentified caller', async () => {
     const m = await members();
     const out = await nodeFor(m.tenantId)({ inputs: { interruptId: 'int-direct', value: { action: 'approve' } } });
-    expect(out.error?.code).toBe('forbidden');
+    expect(out.error).toEqual({ code: 'forbidden', message: 'Resolving a review needs an identified caller.' });
     expect(resolved).toHaveLength(0);
   });
 
@@ -130,7 +152,7 @@ describe('ADR 0835 D4 — who may answer an app-builder review over MCP', () => 
   it('refuses a gate the chain does not own, even on a chain copy', async () => {
     const m = await members();
     const out = await nodeFor(m.tenantId)({ actingUserId: m.editorId, inputs: { interruptId: 'int-added', value: { action: 'approve' } } });
-    expect(out.error?.code).toBe('forbidden');
+    expect(out.error).toEqual({ code: 'forbidden', message: "Only the app-builder design and repair chains' own review gates can be resolved over MCP." });
     expect(resolved).toHaveLength(0);
   });
 
@@ -138,6 +160,7 @@ describe('ADR 0835 D4 — who may answer an app-builder review over MCP', () => 
     const m = await members();
     const out = await nodeFor(m.tenantId)({ actingUserId: m.editorId, inputs: { interruptId: 'int-review' } });
     expect(out.error?.code).toBe('validation_error');
+    expect(out.error?.message).toContain('`value` is required');
     expect(resolved).toHaveLength(0);
   });
 });

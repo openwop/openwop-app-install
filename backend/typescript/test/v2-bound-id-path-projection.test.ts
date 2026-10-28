@@ -17,22 +17,25 @@
  * and withdrawing it would be breaking), and the bare decoded `/` (what a
  * normalising proxy actually forwards). The first is the one we HAND OUT.
  *
- * Legs disjoint under sabotage — MEASURED, and the first draft of this comment
- * guessed two of the four sets wrong, which is the reason to run them:
- *   revert the EMIT side (projectBoundId → encodeURIComponent) → leg 5 alone;
- *   revert the ACCEPT side (always percent-decode)             → legs 1, 3, 6, 7;
- *   let a malformed `~` fall through instead of throwing       → leg 7 alone;
- *   make the codec idempotent (skip already-projected input)   → leg 4 alone.
- * Leg 4 is the one that most needed this: it asserts a 404, which a vacuous
- * test also gets for free, so without S-D it would have been indistinguishable
- * from a gate that cannot fail.
+ * Legs disjoint under sabotage — RE-MEASURED in grade-tests wave 63 after the
+ * ADR 0812 cut, which changed the answer. A bare id on a major-2 path is now
+ * refused `400 validation_error` too, so any sabotage that makes a `~` segment
+ * decode as BARE lands on that same status and code. The legs therefore assert
+ * the REFUSAL MESSAGE as well as the code:
+ *   revert the EMIT side (projectBoundId → encodeURIComponent) → leg 5;
+ *   revert the ACCEPT side (never unproject `~`)               → legs 1, 3, 6, 7;
+ *   let a malformed `~` fall through instead of throwing       → leg 7;
+ *   make the codec idempotent (unproject until no `~`)         → leg 4.
+ * Before this re-measure legs 3 and 7 accepted the bare-id refusal as a pass
+ * (probes 8fw4g4-bid-accept-leg3 / -leg7 / -malformed-fallthrough, all vacuous).
+ * The expected projection is derived by hand (`/` → `~2F`), never by
+ * `projectBoundId`, the encoder under test.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from '../src/index.js';
 import { projectBoundId } from '../src/host/boundIdProjection.js';
-import { preferredVersion } from '../src/middleware/protocolVersion.js';
 
 let server: http.Server; let base = '';
 beforeAll(async () => {
@@ -43,37 +46,54 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
 
-async function req(method: string, path: string, headers: Record<string, string> = {}, body?: unknown) {
+interface Body { runId?: string; status?: string; error?: string; message?: string; eventsUrl?: string; statusUrl?: string }
+async function req(method: string, path: string, headers: Record<string, string> = {}, body?: unknown): Promise<{ status: number; json: Body | undefined; text: string }> {
   const res = await fetch(`${base}${path}`, { method, headers: { Authorization: 'Bearer dev-token', 'Content-Type': 'application/json', ...headers }, body: body === undefined ? undefined : JSON.stringify(body) });
-  const text = await res.text(); let json: any; try { json = JSON.parse(text); } catch { json = undefined; }
+  const text = await res.text(); let json: Body | undefined; try { json = JSON.parse(text) as Body; } catch { json = undefined; }
   return { status: res.status, json, text };
 }
+/** The RFC 0184 projection of a `default/<opaque>` id, by hand: the opaque is
+ *  `[A-Za-z0-9._-]` (unreserved minus `~`), so only the separator escapes. */
+const byHand = (boundId: string): string => boundId.replace('/', '~2F');
+/** The bare-id refusal's own sentence (v2Identity.ts) — what a mis-decoded `~` lands on. */
+const BARE_REFUSAL = 'the bare form is not admitted';
 const V2 = { 'OpenWOP-Version': '2' };
-async function createV2(): Promise<{ runId: string; body: any }> {
+async function waitTerminal(runId: string): Promise<void> {
+  for (let i = 0; i < 100; i++) {
+    const s = (await req('GET', `/runs/${encodeURIComponent(runId)}`, V2)).json?.status;
+    if (s === 'completed' || s === 'failed') return;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  // Never return quietly: a run that never settles must fail here, not pass the reads below.
+  throw new Error(`run ${runId} did not reach a terminal status within 100 polls`);
+}
+async function createV2(): Promise<{ runId: string; body: Body }> {
   const r = await req('POST', '/runs', V2, { workflowId: 'conformance-noop', inputs: {} });
   expect(r.status, r.text.slice(0, 160)).toBe(201);
-  expect(String(r.json.runId)).toMatch(/^default\//);
-  return { runId: r.json.runId as string, body: r.json };
+  const runId = String(r.json?.runId);
+  expect(runId).toMatch(/^default\/[A-Za-z0-9._-]+$/);
+  return { runId, body: r.json ?? {} };
 }
 
 describe('the bound-id path projection (RFC 0184)', () => {
   it('1. GET /runs/{projected} answers 200 with the SAME run', async () => {
     const { runId } = await createV2();
-    const projected = projectBoundId(runId);
+    const projected = byHand(runId);
+    expect(projectBoundId(runId), 'the client encoder agrees with the hand derivation').toBe(projected);
     // Assert the encoder before blaming the host, exactly as the corpus
     // scenario does: if the segment still had something to decode, a 404 would
     // be the intermediary's fault and not the host's.
     expect(encodeURIComponent(projected), 'the projection must be all-unreserved').toBe(projected);
     const r = await req('GET', `/runs/${projected}`, V2);
     expect(r.status, r.text.slice(0, 160)).toBe(200);
-    expect(r.json.runId, 'a decoder that resolves to a DIFFERENT id is non-injective').toBe(runId);
+    expect(r.json?.runId, 'a decoder that resolves to a DIFFERENT id is non-injective').toBe(runId);
   });
 
   it('2. the percent-encoded form STILL works — this RFC adds a spelling, it does not retire one', async () => {
     const { runId } = await createV2();
     const r = await req('GET', `/runs/${encodeURIComponent(runId)}`, V2);
     expect(r.status, r.text.slice(0, 160)).toBe(200);
-    expect(r.json.runId).toBe(runId);
+    expect(r.json?.runId).toBe(runId);
   });
 
   it('3. a colon operation rides the projected segment in BOTH spellings', async () => {
@@ -81,31 +101,38 @@ describe('the bound-id path projection (RFC 0184)', () => {
     // whole thing (`~3Afork`) or append the op literally after projecting only
     // the id. Both must land on the same run; the op is split off after decode.
     for (const make of [
-      (id: string) => `${projectBoundId(id)}:fork`,
-      (id: string) => projectBoundId(`${id}:fork`),
+      (id: string) => `${byHand(id)}:fork`,
+      (id: string) => `${byHand(id)}~3Afork`,
     ]) {
       const { runId } = await createV2();
-      const r = await req('POST', `/runs/${make(runId)}`, V2, {});
-      expect([200, 201, 400, 409], `spelling ${make(runId)} must reach the fork handler, not a 404/403`).toContain(r.status);
-      expect(r.json?.error, 'the tenant guard must not misread the op suffix as part of the tenant').not.toBe('id_tenant_mismatch');
+      await waitTerminal(runId);
+      const r = await req('POST', `/runs/${make(runId)}`, V2, { mode: 'replay', fromSeq: 0 });
+      // The fork handler ran: a new run bound to the caller's tenant. Not the bare-id
+      // refusal (a `~` decoded as bare), not a 403 (the op read as part of the tenant).
+      expect(r.status, `spelling ${make(runId)}: ${r.text.slice(0, 160)}`).toBe(201);
+      expect(r.json?.runId).toMatch(/^default\//);
+      expect(r.json?.runId).not.toBe(runId);
     }
   });
 
   it('4. a DOUBLE-projected segment MUST NOT resolve — the codec is not idempotent', async () => {
     const { runId } = await createV2();
-    const twice = projectBoundId(projectBoundId(runId));
+    // `~` itself escapes to `~7E`, so a second projection is `default~7E2F<opaque>`.
+    const twice = runId.replace('/', '~7E2F');
+    expect(projectBoundId(projectBoundId(runId))).toBe(twice);
     const r = await req('GET', `/runs/${twice}`, V2);
-    // ADR 0812 P3c-0 — while v1 is served the double projection decodes to a
-    // bare-looking id that names no run (404); after the cut a bare id on a
-    // major-2 path is refused outright (400). Either way it never resolves.
-    expect(r.status, `a host that projects twice strands its own links (${twice})`).toBe(preferredVersion() === '2.0' ? 400 : 404);
+    // One decode yields `default~2F<opaque>` — a bare-looking id, refused outright
+    // at major 2 (ADR 0812 P3c-0). It never resolves to the run.
+    expect(r.status, `a host that projects twice strands its own links (${twice})`).toBe(400);
+    expect(r.json?.message).toContain(BARE_REFUSAL);
   });
 
   it('5. EMIT: the create response spells its links with the projection, never %2F', async () => {
     const { runId, body } = await createV2();
-    const projected = projectBoundId(runId);
-    for (const key of ['eventsUrl', 'statusUrl']) {
+    const projected = byHand(runId);
+    for (const key of ['eventsUrl', 'statusUrl'] as const) {
       const url = body[key];
+      expect(typeof url, `the create response carries ${key}`).toBe('string');
       if (typeof url !== 'string') continue;
       expect(url.toLowerCase(), `${key} must not carry %2F — a front door may decode it and strand every follower`).not.toContain('%2f');
       expect(url, `${key} must carry the projected id ${projected}`).toContain(projected);
@@ -131,6 +158,8 @@ describe('the bound-id path projection (RFC 0184)', () => {
       const r = await req('GET', `/runs/${bad}`, V2);
       expect(r.status, `${bad} must be refused 400: got ${r.text.slice(0, 120)}`).toBe(400);
       expect(r.json?.error).toBe('validation_error');
+      // The PROJECTION's refusal, not the bare-id one a mis-decoded `~` falls into.
+      expect(r.json?.message).toContain("'~' escape MUST be followed by two hex digits");
     }
   });
 

@@ -13,6 +13,8 @@
  * @see docs/adr/0402-crm-booking-and-esign.md
  */
 
+import { renderTransactional } from '../../host/transactionalEmail.js';
+import { BOOKING_CONFIRMED_KIND, BOOKING_CANCELLED_KIND, type BookingConfirmedData, type BookingCancelledData } from './bookingTemplates.js';
 import { OpenwopError } from '../../types.js';
 import { createLogger } from '../../observability/logger.js';
 import { getNotificationEmitter } from '../../notifications/emitter.js';
@@ -352,17 +354,16 @@ async function mintManageTokenIfMissing(booking: Booking): Promise<string | null
  *  provider carries the ICS + manage link). Never blocks the claim. */
 async function sendConfirmationEmail(link: BookingLink, booking: Booking, ics: string, manageUrl?: string): Promise<void> {
   try {
-    const body = [
-      `Your booking for "${link.title}" is confirmed.`,
-      '',
-      `When: ${new Date(booking.slotStartUtcMs).toISOString()} (UTC) — see the attached calendar invite for your local time.`,
-      booking.videoLink ? `Join: ${booking.videoLink}` : link.location ? `Where: ${link.location}` : '',
-      manageUrl ? `Reschedule or cancel: ${manageUrl}` : '',
-    ].filter(Boolean).join('\n');
+    // ADR 0905 D6 — the copy is the registered `crm.booking-confirmed` kind (4 locales).
+    const m = renderTransactional<BookingConfirmedData>(BOOKING_CONFIRMED_KIND, {
+      title: link.title, whenUtc: new Date(booking.slotStartUtcMs).toISOString(),
+      ...(booking.videoLink ? { videoLink: booking.videoLink } : link.location ? { location: link.location } : {}),
+      ...(manageUrl ? { manageUrl } : {}),
+    });
     await activeProvider().send({
       to: booking.inviteeEmail,
-      subject: `Confirmed: ${link.title}`,
-      body,
+      subject: m.subject,
+      body: m.text,
       attachments: [{ filename: 'invite.ics', content: ics, contentType: 'text/calendar' }],
     });
   } catch (err) {
@@ -501,12 +502,11 @@ async function sendConfirmationCancel(link: BookingLink, booking: Booking, nowMs
     // The CANCEL ics still rides (the old calendar entry must drop — the new
     // confirmation carries a NEW UID); only the human-readable copy changes.
     const rescheduled = rescheduledToMs !== undefined;
+    const m = renderTransactional<BookingCancelledData>(BOOKING_CANCELLED_KIND, { title: link.title, rescheduled, previousUtc: new Date(booking.slotStartUtcMs).toISOString() });
     await activeProvider().send({
       to: booking.inviteeEmail,
-      subject: rescheduled ? `Rescheduled: ${link.title}` : `Cancelled: ${link.title}`,
-      body: rescheduled
-        ? `Your booking for "${link.title}" has been rescheduled. The previous time (${new Date(booking.slotStartUtcMs).toISOString()}) is cancelled — your new confirmation is in a separate email.`
-        : `Your booking for "${link.title}" has been cancelled.`,
+      subject: m.subject,
+      body: m.text,
       attachments: [{ filename: 'invite.ics', content: icsFor(link, booking, 'CANCEL', 1, nowMs), contentType: 'text/calendar' }],
     });
   } catch (err) {

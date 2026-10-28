@@ -12,6 +12,14 @@
 #   bash scripts/test-deploy-gates.sh
 
 set -uo pipefail
+# ADR 0991 — the scripts under test publish to the real cross-machine release
+# bus by default; a test must never write to it.
+export OPENWOP_RELEASE_BUS=off
+# Isolation (2026-10-26): the merge-train runs below must not register with the
+# machine's real broker (a fake 'train 4242' reached its log) nor publish a
+# machine-wide train marker other repos' gates would wait on (scripts/lib/ci-claims.sh).
+export OPENWOP_BROKER_OBSERVE=off
+export OPENWOP_CI_CLAIMS_DIR=/dev/null/owp-ci-claims   # cannot be created: no marker is written or read
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"; [ -n "${STUB_PID:-}" ] && kill "$STUB_PID" 2>/dev/null' EXIT
@@ -231,6 +239,16 @@ rm -f "$REPO/build-meta/commit.txt"
 check "REFUSES an UNSTAMPED tree (Gate 4: missing commit.txt)" 1 "$(run_preflight)"
 printf '%s' "$OLD" > "$REPO/build-meta/commit.txt"
 check "REFUSES a STALE stamp (Gate 4: commit.txt != HEAD)" 1 "$(run_preflight)"
+# #5228 — a frontend-only deploy builds no image, so Gate 4 must not demand its
+# stamp (deploy.sh writes it only for a backend half): from a clean worktree
+# `deploy.sh --frontend-only` could never pass its own preflight.
+set_live "$NEW"
+rm -f "$REPO/build-meta/commit.txt"
+check "--frontend-only SKIPS Gate 4 (no image is built)" 0 "$(run_preflight --frontend-only)"
+check "  ...and the same unstamped tree still refuses a full deploy" 1 "$(run_preflight)"
+set_live "$OLD"
+grep -qE -- '--frontend-only\) DO_BACKEND=0; PREFLIGHT_ARGS\+=' "$ROOT/scripts/deploy.sh"
+check "  ...and deploy.sh forwards --frontend-only to preflight" 0 "$?"
 stamp_head
 
 
@@ -566,7 +584,7 @@ echo "== verify-deploy (ADR 0518) =="
 # OPENWOP_DEPLOY_* blanked: the H90 peer-build arm below would otherwise query
 # REAL gcloud on a machine where deploy.env happens to be exported, making
 # these commit-logic cases depend on the project's build history.
-V() { ( cd "$REPO" && BASE="$STUB" SHELL_CONVERGE_S=0 OPENWOP_DEPLOY_PROJECT= OPENWOP_DEPLOY_REGION= bash "$ROOT/scripts/verify-deploy.sh" "$1" >/dev/null 2>&1; echo $? ); }
+V() { ( cd "$REPO" && BASE="$STUB" SHELL_CONVERGE_S=0 FRONTEND_CONVERGE_S=0 OPENWOP_DEPLOY_PROJECT= OPENWOP_DEPLOY_REGION= bash "$ROOT/scripts/verify-deploy.sh" "$1" >/dev/null 2>&1; echo $? ); }
 printf '{"commit":"%s","stamped":true,"dirty":false}' "$NEW" > "$STUB_DIR/build-info.json"
 set_live "$NEW"
 check "PASSES when both halves report the expected commit" 0 "$(V "$NEW")"
@@ -582,6 +600,17 @@ check "FAILS on an UNSTAMPED backend (never a silent pass)" 1 "$(V "$NEW")"
 set_live "$NEW"
 printf '{"commit":"%s","stamped":true,"dirty":true}' "$NEW" > "$STUB_DIR/build-info.json"
 check "FAILS on a DIRTY frontend build even at the right commit" 1 "$(V "$NEW")"
+# #5228 — the CDN serves the previous /build-info.json for a few seconds after a
+# Hosting release. A bounded re-read converges; a frontend that never catches up
+# still reds.
+VF() { ( cd "$REPO" && BASE="$STUB" SHELL_CONVERGE_S=0 FRONTEND_CONVERGE_S="$1" FRONTEND_POLL_S=1 OPENWOP_DEPLOY_PROJECT= OPENWOP_DEPLOY_REGION= bash "$ROOT/scripts/verify-deploy.sh" "$NEW" >/dev/null 2>&1; echo $? ); }
+printf '{"commit":"unknown","stamped":false,"dirty":false}' > "$STUB_DIR/build-info.json"
+( sleep 2; printf '{"commit":"%s","stamped":true,"dirty":false}' "$NEW" > "$STUB_DIR/build-info.json" ) &
+cdn_lag_pid=$!
+check "CONVERGES when /build-info.json catches up inside the budget (CDN lag)" 0 "$(VF 10)"
+wait "$cdn_lag_pid"  # only this writer: a bare `wait` would block on the stub server
+printf '{"commit":"%s","stamped":true,"dirty":false}' "$OLD" > "$STUB_DIR/build-info.json"
+check "  ...but a frontend that stays on another commit still FAILS after the budget" 1 "$(VF 2)"
 
 # NP-V2 P7 — a boot-time registry install that FAILED fails the deploy. It is
 # survivable by design (the vendored copy serves), which is exactly why the
@@ -593,7 +622,7 @@ printf '{"status":"ready","build":{"commit":"%s","stamped":true},"checks":{"regi
 check "  ...and PASSES when every attempted install succeeded" 0 "$(V "$NEW")"
 set_live "$NEW"
 check "  ...and a backend that predates the report is NOT a failure (said so, not read as none)" 0 "$(V "$NEW")"
-VW() { ( cd "$REPO" && BASE="$STUB" SHELL_CONVERGE_S=0 OPENWOP_DEPLOY_PROJECT= OPENWOP_DEPLOY_REGION= bash "$ROOT/scripts/verify-deploy.sh" "$@" >/dev/null 2>&1; echo $? ); }
+VW() { ( cd "$REPO" && BASE="$STUB" SHELL_CONVERGE_S=0 FRONTEND_CONVERGE_S=0 OPENWOP_DEPLOY_PROJECT= OPENWOP_DEPLOY_REGION= bash "$ROOT/scripts/verify-deploy.sh" "$@" >/dev/null 2>&1; echo $? ); }
 printf '{"status":"ready","build":{"commit":"%s","stamped":true},"checks":{"registryPacks":{"attempted":2,"installed":1,"failed":[{"name":"core.openwop.workflows.x","version":"1.0.0","lane":"pinned"}]}}}' "$NEW" > "$STUB_DIR/api/readiness"
 check "  ...a named --allow-registry-failures waives it (printed WAIVED, not OK)" 0 "$(VW "$NEW" --allow-registry-failures)"
 printf '{"status":"ready","build":{"commit":"%s","stamped":true},"checks":{"registryPacks":{"attempted":3,"installed":1,"failed":[]}}}' "$NEW" > "$STUB_DIR/api/readiness"
@@ -611,7 +640,7 @@ set_live "$NEW"
 # Single-half deploys must not fail on the half they deliberately did not touch.
 # Without this, `deploy.sh --backend-only` deploys correctly and then reports
 # DEPLOYED BUT NOT VERIFIED — which trains people to ignore a red verify.
-VH() { ( cd "$REPO" && BASE="$STUB" SHELL_CONVERGE_S=0 OPENWOP_DEPLOY_PROJECT= OPENWOP_DEPLOY_REGION= bash "$ROOT/scripts/verify-deploy.sh" "$@" >/dev/null 2>&1; echo $? ); }
+VH() { ( cd "$REPO" && BASE="$STUB" SHELL_CONVERGE_S=0 FRONTEND_CONVERGE_S=0 OPENWOP_DEPLOY_PROJECT= OPENWOP_DEPLOY_REGION= bash "$ROOT/scripts/verify-deploy.sh" "$@" >/dev/null 2>&1; echo $? ); }
 set_live "$NEW"
 printf '{"commit":"%s","stamped":true,"dirty":false}' "$OLD" > "$STUB_DIR/build-info.json"  # frontend deliberately stale
 check "--backend-only ignores an un-deployed frontend" 0 "$(VH "$NEW" --backend-only)"
@@ -716,7 +745,7 @@ rm -f "$CLAIMS_FILE"
 cp "$STUB_DIR/api/readiness" "$TMP/readiness.origin.bak" 2>/dev/null; cp "$STUB_DIR/build-info.json" "$TMP/build-info.origin.bak"
 set_live "$FIXCOMMIT"
 printf '{"commit":"%s","stamped":true,"dirty":false}' "$FIXCOMMIT" > "$STUB_DIR/build-info.json"
-VO() { ( cd "$REPO" && BASE="$STUB" SHELL_CONVERGE_S=0 OPENWOP_DEPLOY_PROJECT= OPENWOP_DEPLOY_REGION= \
+VO() { ( cd "$REPO" && BASE="$STUB" SHELL_CONVERGE_S=0 FRONTEND_CONVERGE_S=0 OPENWOP_DEPLOY_PROJECT= OPENWOP_DEPLOY_REGION= \
          OPENWOP_BUILD_META_DIR="$CLAIMS_META" OPENWOP_CERT_BUNDLE_ORIGIN="gs://b/p" \
          bash "$ROOT/scripts/verify-deploy.sh" "$1" >"$TMP/vo.out" 2>&1; echo $? ); }
 check "verify-deploy.sh in origin mode binds the bundle to the deployed commit → PASSES" 0 "$(VO "$FIXCOMMIT")"
@@ -1148,10 +1177,10 @@ printf '{"commit":"%s","stamped":true,"dirty":false}' "$NEW" > "$STUB_DIR/build-
 # `--limit 1` (the floor) and the windowed list both go through the same fake, so
 # a single GCLOUD_FAKE_OUT drives both: one line = floor OK + one build in window.
 P() { ( cd "$REPO" && PATH="$FAKEBIN:$PATH" BASE="$STUB" \
-        OPENWOP_DEPLOY_PROJECT=p OPENWOP_DEPLOY_REGION=r SHELL_CONVERGE_S=0 \
+        OPENWOP_DEPLOY_PROJECT=p OPENWOP_DEPLOY_REGION=r SHELL_CONVERGE_S=0 FRONTEND_CONVERGE_S=0 \
         GCLOUD_FAKE_OUT="$1" bash "$ROOT/scripts/verify-deploy.sh" "$NEW" >/dev/null 2>&1; echo $? ); }
 POUT() { ( cd "$REPO" && PATH="$FAKEBIN:$PATH" BASE="$STUB" \
-        OPENWOP_DEPLOY_PROJECT=p OPENWOP_DEPLOY_REGION=r SHELL_CONVERGE_S=0 \
+        OPENWOP_DEPLOY_PROJECT=p OPENWOP_DEPLOY_REGION=r SHELL_CONVERGE_S=0 FRONTEND_CONVERGE_S=0 \
         GCLOUD_FAKE_OUT="$1" bash "$ROOT/scripts/verify-deploy.sh" "$NEW" 2>&1 ); }
 
 # ── preflight Gate 5: the pg connection budget (incident 2026-09-05, twice) ──
@@ -1203,14 +1232,62 @@ E_SQL2='{"name":"OPENWOP_SQL_PG_POOL_MAX","value":"2"}'
 E_VEC='{"name":"OPENWOP_SURFACE_VECTOR","value":"pgvector"}'
 E_VEC2='{"name":"OPENWOP_VECTOR_PG_POOL_MAX","value":"2"}'
 E_GVEC='{"name":"OPENWOP_SURFACE_BACKEND","value":"pgvector"}'
+E_VDSN='{"name":"OPENWOP_VECTOR_PG_DSN","value":"postgresql://fixture"}'
+E_VDSN_REF='{"name":"OPENWOP_VECTOR_PG_DSN","valueFrom":{"secretKeyRef":{"name":"fixture-db","key":"latest"}}}'
+E_VDSN_EMPTY='{"name":"OPENWOP_VECTOR_PG_DSN","value":""}'
 check "pg budget: durable everywhere adds NO pool (4 × 3 = 12) PASSES" 0 "$(PB "$(svc_env 3 1 "$E_POOL,$E_DUR")")"
 check "pg budget: sql=postgres at its default 10 → (4+10) × 3 = 42 > 22 FAILS" 1 "$(PB "$(svc_env 3 1 "$E_POOL,$E_SQL")")"
 check "pg budget: sql=postgres pool 2 + pgvector pool 2 → (4+2+2) × 2 = 16 PASSES" 0 "$(PB "$(svc_env 2 1 "$E_POOL,$E_SQL,$E_SQL2,$E_VEC,$E_VEC2")")"
 check "pg budget: pgvector selected via the GLOBAL default still counts → (4+10) × 2 = 28 > 22 FAILS" 1 "$(PB "$(svc_env 2 1 "$E_POOL,$E_GVEC")")"
+check "pg budget: configured unselected vector pool still counts → (4+10) × 2 = 28 FAILS" 1 "$(PB "$(svc_env 2 1 "$E_POOL,$E_DUR,$E_VDSN")")"
+check "pg budget: secret-bound configured pool 2 counts → (4+2) × 3 = 18 PASSES" 0 "$(PB "$(svc_env 3 1 "$E_POOL,$E_DUR,$E_VDSN_REF,$E_VEC2")")"
+check "pg budget: empty unselected vector DSN opens no pool → 4 × 3 = 12 PASSES" 0 "$(PB "$(svc_env 3 1 "$E_POOL,$E_DUR,$E_VDSN_EMPTY")")"
+check "pg budget: selected AND configured uses one pool → (4+2) × 3 = 18 PASSES" 0 "$(PB "$(svc_env 3 1 "$E_POOL,$E_VEC,$E_VDSN,$E_VEC2")")"
 case "$(PBOUT "$(svc_env 3 1 "$E_POOL,$E_SQL,$E_SQL2")")" in
   *"per-instance pool = storage 4 + sql 2"*) ok "  ...and the OK line itemises the per-instance pool" ;;
   *) bad "  ...but the per-instance pool was not itemised" ;;
 esac
+# ── Gate 5c (ADR 0981 P3): the strict profile's two rule decisions ──
+# This release refuses to boot under posture=auth without the membership and
+# (with superadmins listed) superadmin-MFA decisions. A bare deploy carries the
+# live env forward, so preflight reads it and refuses BEFORE the build. Every
+# case can fail: the refusals go green if the gate is dropped, the passes go red
+# if it is unconditionally angry, and the evaluation case goes red if posture is
+# ignored.
+E_AUTH='{"name":"OPENWOP_DEPLOY_POSTURE","value":"auth"}'
+E_AUTHZ='{"name":"OPENWOP_AUTHORIZATION_ENFORCEMENT","value":"true"}'
+E_AUTHZ_HATCH='{"name":"OPENWOP_ALLOW_UNENFORCED_AUTHORIZATION","value":"true"}'
+E_AUTHZ_UPPER='{"name":"OPENWOP_AUTHORIZATION_ENFORCEMENT","value":"TRUE"}'
+E_SA='{"name":"OPENWOP_SUPERADMIN_TENANTS","value":"user:op1,user:op2"}'
+E_SA_REF='{"name":"OPENWOP_SUPERADMIN_TENANTS","valueFrom":{"secretKeyRef":{"name":"sa","key":"latest"}}}'
+E_MFA='{"name":"OPENWOP_SUPERADMIN_REQUIRE_MFA","value":"true"}'
+E_MFA_HATCH='{"name":"OPENWOP_ALLOW_SUPERADMIN_WITHOUT_MFA","value":"true"}'
+E_AUTHZ_REF='{"name":"OPENWOP_AUTHORIZATION_ENFORCEMENT","valueFrom":{"secretKeyRef":{"name":"f","key":"latest"}}}'
+E_LEGACY='{"name":"OPENWOP_AUTH_ENFORCE_BEARER","value":"true"}'
+check "Gate 5c: an evaluation posture needs neither decision (PASSES)" 0 "$(PB "$(svc_env 3 1 "$E_POOL,$E_SA")")"
+check "Gate 5c: auth with membership enforced and no superadmins PASSES" 0 "$(PB "$(svc_env 3 1 "$E_POOL,$E_AUTH,$E_AUTHZ")")"
+check "Gate 5c: auth WITHOUT the membership decision REFUSES before the build" 1 "$(PB "$(svc_env 3 1 "$E_POOL,$E_AUTH")")"
+case "$(PBOUT "$(svc_env 3 1 "$E_POOL,$E_AUTH")")" in
+  *"OPENWOP_AUTHORIZATION_ENFORCEMENT=true"*"OPENWOP_ALLOW_UNENFORCED_AUTHORIZATION=true"*) ok "  ...and names the variable and its hatch" ;;
+  *) bad "  ...but did not name the membership variable and hatch" ;;
+esac
+check "Gate 5c: the membership hatch satisfies the row" 0 "$(PB "$(svc_env 3 1 "$E_POOL,$E_AUTH,$E_AUTHZ_HATCH")")"
+check "Gate 5c: only the exact string \"true\" counts (TRUE REFUSES), as at boot" 1 "$(PB "$(svc_env 3 1 "$E_POOL,$E_AUTH,$E_AUTHZ_UPPER")")"
+check "Gate 5c: the legacy OPENWOP_AUTH_ENFORCE_BEARER=true posture is auth too (REFUSES undecided)" 1 "$(PB "$(svc_env 3 1 "$E_POOL,$E_LEGACY")")"
+check "Gate 5c: listed superadmins WITHOUT the MFA decision REFUSE" 1 "$(PB "$(svc_env 3 1 "$E_POOL,$E_AUTH,$E_AUTHZ,$E_SA")")"
+case "$(PBOUT "$(svc_env 3 1 "$E_POOL,$E_AUTH,$E_AUTHZ,$E_SA")")" in
+  *"OPENWOP_SUPERADMIN_REQUIRE_MFA=true"*"OPENWOP_ALLOW_SUPERADMIN_WITHOUT_MFA=true"*) ok "  ...and names the MFA variable and its hatch" ;;
+  *) bad "  ...but did not name the MFA variable and hatch" ;;
+esac
+check "Gate 5c: listed superadmins with MFA required PASS" 0 "$(PB "$(svc_env 3 1 "$E_POOL,$E_AUTH,$E_AUTHZ,$E_SA,$E_MFA")")"
+check "Gate 5c: listed superadmins with the MFA hatch PASS" 0 "$(PB "$(svc_env 3 1 "$E_POOL,$E_AUTH,$E_AUTHZ,$E_SA,$E_MFA_HATCH")")"
+check "Gate 5c: a secret-bound superadmin list counts as listed (REFUSES without MFA)" 1 "$(PB "$(svc_env 3 1 "$E_POOL,$E_AUTH,$E_AUTHZ,$E_SA_REF")")"
+check "Gate 5c: a secret-bound decision flag is UNMEASURED and REFUSES (never guessed)" 1 "$(PB "$(svc_env 3 1 "$E_POOL,$E_AUTH,$E_AUTHZ_REF")")"
+case "$(PBOUT "$(svc_env 3 1 "$E_POOL,$E_AUTH,$E_AUTHZ_REF")")" in
+  *"UNMEASURED"*) ok "  ...and says UNMEASURED rather than claiming the decision is missing" ;;
+  *) bad "  ...but did not report the secret-bound flag as unmeasured" ;;
+esac
+
 # …and the SUMMARY must say which fact it is. `refusing to guess` in the detail
 # followed by `the connection budget does not fit` in the headline is a gate
 # that is honest where nobody looks and false where everybody does — it misled
@@ -1237,14 +1314,16 @@ case "$BREACH_OUT" in *"COULD NOT BE MEASURED"*) bad "  ...and a measured breach
 # red if the arm is unconditionally angry, and the two degraded cases go red if
 # either one is ever read as a pass.
 SR_SVC='{"status":{"traffic":[{"revisionName":"live-rev","percent":100}]},"spec":{"template":{"spec":{"containers":[{"env":[]}]}}}}'
-SR() { ( cd "$REPO" && PATH="$FAKEBIN:$PATH" BASE="$STUB" OPENWOP_DEPLOY_PROJECT=p OPENWOP_DEPLOY_REGION=r SHELL_CONVERGE_S=0 \
+SR() { ( cd "$REPO" && PATH="$FAKEBIN:$PATH" BASE="$STUB" OPENWOP_DEPLOY_PROJECT=p OPENWOP_DEPLOY_REGION=r SHELL_CONVERGE_S=0 FRONTEND_CONVERGE_S=0 \
         GCLOUD_FAKE_OUT="b1	2026-08-18T16:28:06+00:00	SUCCESS" GCLOUD_FAKE_SERVICE_JSON="$SR_SVC" GCLOUD_FAKE_LOGS="$1" GCLOUD_FAKE_LOGS_RC="${3:-}" \
         bash "$ROOT/scripts/verify-deploy.sh" ${2:-} "$NEW" 2>&1; echo "EXIT=$?" ); }
 SR_OK="$(SR "$(printf 'live-rev\nlive-rev')")"
 case "$SR_OK" in *"stale revs  OK"*) ok "stale revs: every fire from the serving revision → OK" ;; *) bad "stale revs: a clean window did not read OK" ;; esac
 SR_BAD="$(SR "$(printf 'live-rev\nold-rev\nold-rev')")"
 case "$SR_BAD" in *"stale revs  FAILED"*"EXIT=1"*) ok "stale revs: a NON-serving revision firing jobs FAILS standalone" ;; *) bad "stale revs: a stale revision firing jobs did not fail standalone" ;; esac
-case "$SR_BAD" in *"old-rev fired 2 job(s):  gcloud run revisions delete old-rev"*) ok "  ...and names the revision, its fire count and the exact delete command" ;; *) bad "  ...but did not print the delete command" ;; esac
+case "$SR_BAD" in *"old-rev fired 2 job(s) in the lookback window"*) ok "  ...and names the revision and historical fire count" ;; *) bad "  ...but did not name the historical fire count" ;; esac
+case "$SR_BAD" in *"revisions delete"*) bad "  ...but tells the operator to delete the rollback target" ;; *) ok "  ...and never recommends revision deletion (ADR 0802 correction)" ;; esac
+case "$SR_BAD" in *"not proof of current activity"*"instance_count"*) ok "  ...and requires current drain evidence before claiming ongoing work" ;; *) bad "  ...but treats a historical fire as current activity" ;; esac
 SR_AD="$(SR "$(printf 'old-rev\nlive-rev')" --after-deploy)"
 case "$SR_AD" in *"stale revs  ACTION"*) ok "stale revs: right after a deploy the old revision is an ACTION, not a failure" ;; *) bad "stale revs: --after-deploy did not report an ACTION" ;; esac
 case "$SR_AD" in *"stale revs  FAILED"*) bad "  ...but it still FAILED every deploy" ;; *) ok "  ...and does not fail every deploy for an old instance that is still draining" ;; esac
@@ -1303,7 +1382,7 @@ if ( PATH="$NOGCLOUD" command -v gcloud >/dev/null 2>&1 ); then
   bad "no-gcloud PATH still resolves gcloud — the arm below would test nothing"
 fi
 skip_out=$( ( cd "$REPO" && PATH="$NOGCLOUD" BASE="$STUB" \
-              OPENWOP_DEPLOY_PROJECT=p OPENWOP_DEPLOY_REGION=r SHELL_CONVERGE_S=0 \
+              OPENWOP_DEPLOY_PROJECT=p OPENWOP_DEPLOY_REGION=r SHELL_CONVERGE_S=0 FRONTEND_CONVERGE_S=0 \
               bash "$ROOT/scripts/verify-deploy.sh" "$NEW" 2>&1 ) || true )
 case "$skip_out" in
   *"peer build  SKIPPED"*) ok "no gcloud → SKIPPED (a distinct word from OK, so it cannot read as a pass)" ;;
@@ -1316,7 +1395,7 @@ esac
 
 # Unset config must skip too — deploy.sh exports these, a bare run does not.
 unset_out=$( ( cd "$REPO" && PATH="$FAKEBIN:$PATH" BASE="$STUB" \
-               OPENWOP_DEPLOY_PROJECT= OPENWOP_DEPLOY_REGION= SHELL_CONVERGE_S=0 \
+               OPENWOP_DEPLOY_PROJECT= OPENWOP_DEPLOY_REGION= SHELL_CONVERGE_S=0 FRONTEND_CONVERGE_S=0 \
                bash "$ROOT/scripts/verify-deploy.sh" "$NEW" 2>&1 ) || true)
 case "$unset_out" in
   *"peer build  SKIPPED"*) ok "unset OPENWOP_DEPLOY_PROJECT/REGION → SKIPPED, not a silent pass" ;;
@@ -1361,12 +1440,12 @@ chmod +x "$FAKEBIN2/gcloud"
 # $1 = floor output, $2 = window output, $3.. = extra verify-deploy args
 W() { fl="$1"; wn="$2"; shift 2
   ( cd "$REPO" && PATH="$FAKEBIN2:$PATH" BASE="$STUB" \
-    OPENWOP_DEPLOY_PROJECT=p OPENWOP_DEPLOY_REGION=r SHELL_CONVERGE_S=0 \
+    OPENWOP_DEPLOY_PROJECT=p OPENWOP_DEPLOY_REGION=r SHELL_CONVERGE_S=0 FRONTEND_CONVERGE_S=0 \
     GCLOUD_FAKE_FLOOR="$fl" GCLOUD_FAKE_WINDOW="$wn" \
     bash "$ROOT/scripts/verify-deploy.sh" "$NEW" "$@" >/dev/null 2>&1; echo $? ); }
 WOUT() { fl="$1"; wn="$2"; shift 2
   ( cd "$REPO" && PATH="$FAKEBIN2:$PATH" BASE="$STUB" \
-    OPENWOP_DEPLOY_PROJECT=p OPENWOP_DEPLOY_REGION=r SHELL_CONVERGE_S=0 \
+    OPENWOP_DEPLOY_PROJECT=p OPENWOP_DEPLOY_REGION=r SHELL_CONVERGE_S=0 FRONTEND_CONVERGE_S=0 \
     GCLOUD_FAKE_FLOOR="$fl" GCLOUD_FAKE_WINDOW="$wn" \
     bash "$ROOT/scripts/verify-deploy.sh" "$NEW" "$@" 2>&1 ); }
 
@@ -1439,7 +1518,7 @@ echo "== verify-deploy: the SPA shell arm (H91) =="
 # check whose whole premise is that a green is misleading had no coverage, for a
 # failure that has happened twice (2026-08-02 live; the 2026-08-03 16-minute
 # wedge that logged nothing).
-S() { ( cd "$REPO" && BASE="$STUB" SHELL_CONVERGE_S=0 \
+S() { ( cd "$REPO" && BASE="$STUB" SHELL_CONVERGE_S=0 FRONTEND_CONVERGE_S=0 \
         OPENWOP_DEPLOY_PROJECT= OPENWOP_DEPLOY_REGION= \
         bash "$ROOT/scripts/verify-deploy.sh" "$NEW" >/dev/null 2>&1; echo $? ); }
 set_live "$NEW"
@@ -1481,7 +1560,7 @@ check "a shell with NO bundle reference FAILS (not skipped)" 1 "$(S)"
 
 # --backend-only must not assert the frontend's shell, for the same reason it
 # does not assert the frontend's commit: a half it deliberately did not deploy.
-check "--backend-only does not red on a broken shell" 0 "$( ( cd "$REPO" && BASE="$STUB" SHELL_CONVERGE_S=0 \
+check "--backend-only does not red on a broken shell" 0 "$( ( cd "$REPO" && BASE="$STUB" SHELL_CONVERGE_S=0 FRONTEND_CONVERGE_S=0 \
         OPENWOP_DEPLOY_PROJECT= OPENWOP_DEPLOY_REGION= \
         bash "$ROOT/scripts/verify-deploy.sh" "$NEW" --backend-only >/dev/null 2>&1; echo $? ) )"
 
@@ -1520,7 +1599,7 @@ set_live "$NEW"
 printf '{"commit":"%s","stamped":true,"dirty":false}' "$NEW" > "$STUB_DIR/build-info.json"
 # EV <local-origin> <live-origin> [describe-rc] — prints "<exit> <evidence line>",
 # plus " [origin-arm]" when the ORIGIN-mode evidence checks actually ran.
-EV() { ( cd "$REPO" && out=$(PATH="$GCBIN:$PATH" BASE="$STUB" SHELL_CONVERGE_S=0 \
+EV() { ( cd "$REPO" && out=$(PATH="$GCBIN:$PATH" BASE="$STUB" SHELL_CONVERGE_S=0 FRONTEND_CONVERGE_S=0 \
           OPENWOP_DEPLOY_PROJECT=p OPENWOP_DEPLOY_REGION=r OPENWOP_DEPLOY_ACCOUNT=deployer@example.com \
           OPENWOP_CERT_BUNDLE_ORIGIN="$1" GCLOUD_FAKE_ORIGIN="$2" GCLOUD_FAKE_DESCRIBE_RC="${3:-0}" \
           bash "$ROOT/scripts/verify-deploy.sh" "$NEW" --backend-only 2>&1); rc=$?

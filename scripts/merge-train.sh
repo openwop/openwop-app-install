@@ -5,6 +5,12 @@
 #   scripts/merge-train.sh --dry-run 4316 4319  # build the train and report; no gate
 #   scripts/merge-train.sh --no-merge 4316      # gate the train; leave merging to you
 #   scripts/merge-train.sh --no-bisect 4316 4319  # a red train stops instead of bisecting
+#   scripts/merge-train.sh --gate-ref <sha>     # gate origin/main + one commit; merge nothing
+#
+# --gate-ref (ADR 0976) is a PROBE: it builds origin/main plus the given commit
+# under the same lock, worktree and installs as a train, runs one gate, and exits
+# 0 (green) or 1 (red). scripts/batch.sh uses it to bisect a red batch over its
+# merges. It merges nothing, so it needs no PR and never bisects itself.
 #
 # WHY. The gate is ~45 minutes and one runs at a time on a machine, so N pull
 # requests gated one by one cost N gates PLUS the queue between them — measured
@@ -32,19 +38,33 @@
 # once (OPENWOP_TRAIN_RETRIES, default 1) instead of being abandoned. Under
 # Tracegate the re-gate only runs what the new commits can affect.
 #
+# THE RELEASE BUS (ADR 0991) — the train publishes its start, rebuilds and
+# result to the cross-machine bus (scripts/lib/release-bus.mjs) and holds an
+# `active` lease while it gates, so the other machines can see it. Before
+# gating it WARNS if another machine holds a live gate or deploy lease. All of
+# it is advisory: it never waits, never refuses and never changes this
+# script's exit status (OPENWOP_RELEASE_BUS=off turns it off).
+#
 # It never passes `--delete-branch` (CLAUDE.md: deleting a base branch closes the
 # PRs stacked on it), and it verifies every merge with `gh pr view` instead of
 # trusting `gh pr merge`'s exit code, which is non-zero from a worktree even when
 # the merge landed.
 set -euo pipefail
+# A signal can enter Bash's EXIT trap with $? == 0 even though the process
+# terminates with that signal. Make interrupted trains explicit nonzero exits
+# before the bus/claim/lock cleanup hooks publish their result (ADR 0991).
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 DRY_RUN=0
 DO_MERGE=1
 BISECT=1
 RETRIES="${OPENWOP_TRAIN_RETRIES:-1}"
 PRS=()
+GATE_REF=""
 for arg in "$@"; do
   case "$arg" in
+    --gate-ref=*) GATE_REF="${arg#--gate-ref=}"; DO_MERGE=0; BISECT=0 ;;
     --dry-run) DRY_RUN=1 ;;
     --no-merge) DO_MERGE=0 ;;
     --no-bisect) BISECT=0 ;;
@@ -53,8 +73,11 @@ for arg in "$@"; do
     *) PRS+=("$arg") ;;
   esac
 done
-if [ "${#PRS[@]}" -eq 0 ]; then
-  echo "usage: scripts/merge-train.sh [--dry-run|--no-merge|--no-bisect] <pr> [<pr>…]" >&2
+if [ -n "$GATE_REF" ]; then
+  [ "${#PRS[@]}" -eq 0 ] || { echo "merge-train: --gate-ref takes no PR numbers" >&2; exit 2; }
+  PRS=(ref)
+elif [ "${#PRS[@]}" -eq 0 ]; then
+  echo "usage: scripts/merge-train.sh [--dry-run|--no-merge|--no-bisect] <pr> [<pr>…] | --gate-ref=<sha>" >&2
   exit 2
 fi
 
@@ -80,7 +103,18 @@ say "merge train: ${PRS[*]}"
 # (scripts/lib/train-lock.sh says why). Claimed BEFORE any fetch or checkout.
 # shellcheck source=lib/train-lock.sh
 . "$ROOT/scripts/lib/train-lock.sh"
+# ADR 0974 — observe only (records what the broker would have done; waits for nothing).
+# P2: registered BEFORE the train lock, so a train waiting for another train
+# already makes the daemon yield (I11), as the daemon's `pgrep merge-train` did.
+# shellcheck source=lib/broker-observe.sh
+# (Guarded: a test fixture may copy this script without the helper.)
+if [ -f "$ROOT/scripts/lib/broker-observe.sh" ]; then . "$ROOT/scripts/lib/broker-observe.sh"; broker_observe train gate "train ${PRS[*]}"; fi
 claim_train_lock "$TRAIN_LOCK" "${PRS[*]}${OPENWOP_TRAIN_DIR:+ (train dir $TRAIN)}" || exit 3
+# Machine-wide marker (scripts/lib/ci-claims.sh, 2026-10-26): from here to exit,
+# peers in ANY repo on this machine can see this train, including its installs,
+# which no suite detector matches. Guarded: a test fixture may copy this script alone.
+if [ -f "$ROOT/scripts/lib/ci-claims.sh" ]; then . "$ROOT/scripts/lib/ci-claims.sh"; else ci_claim_publish() { :; }; fi
+ci_claim_publish claimed "#${PRS[*]}"
 git -C "$ROOT" fetch -q origin
 
 # ── CE-17: a release freeze refuses the train BEFORE a 45-minute gate ────────
@@ -99,7 +133,14 @@ fi
 
 # ── every car must be an open PR against main ────────────────────────────────
 HEADS=()
+if [ -n "$GATE_REF" ]; then
+  git -C "$ROOT" fetch -q origin
+  ref_oid="$(git -C "$ROOT" rev-parse --verify -q "${GATE_REF}^{commit}")" || { echo "merge-train: --gate-ref: no commit '$GATE_REF'" >&2; exit 2; }
+  HEADS+=("ref:probe:$ref_oid")
+  echo "  probe  ${ref_oid:0:9}"
+fi
 for pr in "${PRS[@]}"; do
+  [ -n "$GATE_REF" ] && break
   info="$(gh pr view "$pr" --json state,baseRefName,headRefName,headRefOid,isDraft --jq '[.state,.baseRefName,.headRefName,.headRefOid,(.isDraft|tostring)]|@tsv')"
   IFS=$'\t' read -r state base head oid draft <<< "$info"
   if [ "$state" != "OPEN" ]; then echo "merge-train: #$pr is $state, not OPEN" >&2; exit 1; fi
@@ -152,6 +193,26 @@ if [ "$DRY_RUN" -eq 1 ]; then
   exit 0
 fi
 
+# ── ADR 0991: the release bus (advisory; never blocks, never changes the exit) ──
+# (Guarded: a test fixture may copy this script without the helper.)
+if [ -f "$ROOT/scripts/lib/release-bus.sh" ]; then
+  # shellcheck source=lib/release-bus.sh
+  . "$ROOT/scripts/lib/release-bus.sh"
+  release_bus warn-others --kinds gate,deploy
+  BUS_PRS="$(IFS=,; echo "${PRS[*]}")"
+  train_bus_end() {
+    local rc="$1" merged="" red=""
+    merged="$(IFS=,; echo "${MERGED[*]:-}")"; red="$(IFS=,; echo "${CULPRITS[*]:-}")"
+    printf '{"kind":"gate","phase":"result","prs":"%s","exit":%s,"merged":"%s","red":"%s","base":"%s","tree":"%s","main":"%s","result":"%s"}' \
+      "$BUS_PRS" "$rc" "$merged" "$red" "${BASE_OID:-}" "${TRAIN_TREE:-}" "$(git -C "$ROOT" rev-parse -q --verify origin/main 2>/dev/null || true)" \
+      "$([ "$rc" -eq 0 ] && echo GREEN || { [ -n "$red" ] && echo "RED #${red//,/ #}" || echo "STOPPED rc=$rc"; })"
+  }
+  release_bus_hold "gate-$(hostname -s 2>/dev/null || hostname)-$$" gate train_bus_end --prs "$BUS_PRS" --base "$BASE_OID" --tree "$TRAIN_TREE"
+  release_bus publish "{\"kind\":\"gate\",\"phase\":\"start\",\"prs\":\"$BUS_PRS\",\"base\":\"$BASE_OID\",\"tree\":\"$TRAIN_TREE\"}"
+else
+  release_bus() { return 0; }
+fi
+
 # ── dependencies: install what is missing OR stale ───────────────────────────
 # `node_modules` survives between trains, but building a train rewrites every
 # lockfile it touches: the worktree is reset to main, then each PR is merged
@@ -169,6 +230,7 @@ needs_install() {
   [ "$(cat "$d/node_modules/.openwop-ci-lock-sha" 2>/dev/null)" != "$(shasum -a 256 "$d/package-lock.json" | cut -d' ' -f1)" ]
 }
 ensure_deps() {
+  ( cd "$TRAIN" 2>/dev/null || cd "$ROOT"; ci_claim_publish installing "#${PRS[*]}" )
   if needs_install backend/typescript; then
     say "installing backend dependencies in the train"
     # npm 10.9.8, never the local npm: npm >= 11.5 drops @azure/core-rest-pipeline
@@ -185,11 +247,22 @@ ensure_deps() {
 }
 
 # ── gate + merge ─────────────────────────────────────────────────────────────
-# gate_train — ONE `npm run ci` on the current train tree.
+# gate_train — ONE configured gate, with evidence where the adopter uses Hyvemind.
 gate_train() {
   ensure_deps
   say "gating the train (one npm run ci for $# PR(s): #$*)"
-  ( cd "$TRAIN" && npm run ci )
+  ( cd "$TRAIN" 2>/dev/null || cd "$ROOT"; ci_claim_publish gating "#$*" )
+  # The openwop Hyvemind preset runs npm run ci once. Record/check that actual
+  # run here; wrapping the whole train would bind evidence to ROOT, not TRAIN.
+  # A missing, partial, red or tree-invalid record must never reach merge_train.
+  if [ -f "$TRAIN/hyvemind.json" ]; then
+    ( cd "$TRAIN" && npx -y hyvemind@0.2.0 gate && npx -y hyvemind@0.2.0 evidence )
+  else
+    # The white-label bundle intentionally strips the steward's Hyvemind config
+    # (ADR 0052). Adopters without their own config retain the same full CI gate.
+    echo "  no adopter Hyvemind config; running npm run ci directly (no Hyvemind record)"
+    ( cd "$TRAIN" && npm run ci )
+  fi
 }
 
 # merge_train <pr>… — merge in order, ONLY if main is still what the train was
@@ -217,13 +290,26 @@ merge_train() {
       exit 1
     fi
   fi
-  local pr state
+  # Recheck every car before requesting any merge. A green result belongs to
+  # the recorded head, not a later push to the same PR. The API precondition
+  # below also closes the race between this read and GitHub performing a merge.
+  local pr state expected live_head
   for pr in "$@"; do
+    expected="$(head_of "$pr")"; expected="${expected##*:}"
+    IFS=$'\t' read -r state live_head <<< "$(gh pr view "$pr" --json state,headRefOid --jq '[.state,.headRefOid]|@tsv')"
+    if [ "$state" != OPEN ] || [ "$live_head" != "$expected" ]; then
+      echo "merge-train: #$pr changed after gating (state ${state:-unreadable}, head ${live_head:-unreadable}; gated $expected)." >&2
+      echo "             No merges requested. Rebuild and gate the current PR heads." >&2
+      exit 1
+    fi
+  done
+  for pr in "$@"; do
+    expected="$(head_of "$pr")"; expected="${expected##*:}"
     say "merging #$pr"
     if [ "$OWN_FREEZE" -eq 1 ]; then
-      bash "$ROOT/scripts/release-freeze.sh" merge "$pr" --holder "$OPENWOP_FREEZE_HOLDER" >/dev/null 2>&1 || true
+      bash "$ROOT/scripts/release-freeze.sh" merge "$pr" --holder "$OPENWOP_FREEZE_HOLDER" --match-head-commit "$expected" >/dev/null 2>&1 || true
     else
-      gh pr merge "$pr" --merge >/dev/null 2>&1 || true   # exit code is not the result — see header
+      gh pr merge "$pr" --merge --match-head-commit "$expected" >/dev/null 2>&1 || true   # exit code is not the result — see header
     fi
     state="$(gh pr view "$pr" --json state --jq .state)"
     if [ "$state" != "MERGED" ]; then
@@ -262,6 +348,10 @@ ride() {
       echo "merge-train: the train is RED for #$*. Nothing of it was merged." >&2
       return 0
     fi
+    if [ -n "$GATE_REF" ]; then
+      echo; echo "probe GREEN: origin/main ${BASE_OID:0:9} + ${GATE_REF} (tree ${TRAIN_TREE:0:12})"
+      MERGED+=("$@"); return 0
+    fi
     if [ "$DO_MERGE" -eq 0 ]; then
       echo
       echo "train green (tree ${TRAIN_TREE:0:12}). --no-merge: merge #$* in this order while main is still ${BASE_OID:0:9}."
@@ -274,6 +364,7 @@ ride() {
       tries=$((tries + 1))
       say "main moved — rebuilding the train on the new main and re-gating (retry $tries of $RETRIES)"
       build_train "$@" || { CULPRITS+=("$@"); return 0; }
+      release_bus publish "{\"kind\":\"gate\",\"phase\":\"rebuild\",\"prs\":\"$(IFS=,; echo "$*")\",\"base\":\"$BASE_OID\",\"tree\":\"$TRAIN_TREE\"}"
       continue
     fi
     echo "             Re-run the train; if the new commits share no files with it, that is your call to make by hand." >&2
@@ -282,6 +373,10 @@ ride() {
 }
 
 ride "${PRS[@]}"
+if [ -n "$GATE_REF" ] && [ "${#CULPRITS[@]}" -gt 0 ]; then
+  echo "probe RED: origin/main ${BASE_OID:0:9} + ${GATE_REF}" >&2
+  exit 1
+fi
 if [ "${#CULPRITS[@]}" -gt 0 ]; then
   echo >&2
   [ "${#MERGED[@]}" -gt 0 ] && echo "merge-train: green and handled: #${MERGED[*]}" >&2

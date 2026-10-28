@@ -4,6 +4,23 @@
  *
  * Route-level where the lane is HTTP (who mints the id, what gets delivered),
  * service-level for the state machine.
+ *
+ * Tracker TST-BHB-2. Red when (sabotage-witnessed, wave 62): the no-reply-channel
+ * branch stops recording `not_sent`; an internal note reaches `deliverOutbound`;
+ * `deliverOutbound` delivers a non-outbound message; the widget sub-toggle stops
+ * deciding `visible` vs `not_sent`; a final state becomes retryable or a stale
+ * `pending` stops reading `unknown`; a retry stops counting attempts; or the executor
+ * marks an undelivered reply `sent`.
+ *
+ * Recorded guards (each probed on its own, wave 62):
+ *  - "a caller-supplied id cannot name another message" is held THREE times: the
+ *    route mints `client:<userId>:<key>` (routes.ts), `appendMessageResult` refuses
+ *    to re-append an existing id, and `deliverOutbound` refuses a non-outbound
+ *    message. The route mint is observable here (the reply lands under a
+ *    `client:` id); the direction check is asserted directly.
+ *  - "delivered once" is a double guard: the executor delivers only on the append
+ *    that wrote the reply, and `deliverOutbound` itself returns an existing row
+ *    without re-sending. A single-guard sabotage stays green by design.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -14,9 +31,11 @@ import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { createTicket, appendMessage, getTicket, listTickets } from '../src/features/service-desk/tickets.js';
 import { deliverOutbound, deliveries, listDeliveries, STALE_PENDING_MS } from '../src/features/service-desk/delivery.js';
+import type { StartRunDeps } from '../src/host/runStarter.js';
 
 let BASE: string;
 let server: http.Server;
+let runDeps: StartRunDeps;
 const setToggle = async (id: string, status: 'on' | 'off'): Promise<void> => {
   await saveConfig({ ...getToggleDefault(id)!, status }, 'test');
 };
@@ -27,6 +46,7 @@ beforeAll(async () => {
   process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+  runDeps = { storage: app.locals.storage, hostSuite: app.locals.hostSuite };
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   const users = getToggleDefault('users');
   if (users) await saveConfig({ ...users, status: 'on' }, 'test');
@@ -82,6 +102,8 @@ describe('ADR 0878 D3 — reply delivery', () => {
     const after = (await getTicket(tenantId, ticket.ticketId))!;
     expect(after.messages.filter((m) => m.messageId === 'note-secret')).toHaveLength(1);
     expect(after.messages.find((m) => m.messageId === 'note-secret')!.direction).toBe('internal');
+    // The route minted its own id for the reply (the first of the three guards).
+    expect(after.messages.some((m) => m.direction === 'outbound' && m.messageId.startsWith('client:') && m.messageId.endsWith(':note-secret'))).toBe(true);
     expect((await listDeliveries(tenantId, ticket.ticketId))['note-secret']).toBeUndefined();
     // …and the service itself refuses to deliver a non-outbound message.
     await expect(deliverOutbound({ tenantId, ticketId: ticket.ticketId, messageId: 'note-secret' })).rejects.toMatchObject({ code: 'validation_error' });
@@ -142,8 +164,6 @@ describe('ADR 0878 D3 — reply delivery', () => {
     const action = await enqueueActionWithApproval(tenantId, { kind: 'servicedesk.reply', payload: { ticketId: ticket.ticketId }, draft: 'It ships tomorrow.', riskLevel: 'medium' });
     expect(action.orgId).toBe(orgId); // stamped from the TICKET
     const { executeApprovedAction } = await import('../src/features/assistant/actionExecution.js');
-    const { openStorage } = await import('../src/storage/index.js');
-    const runDeps = { storage: await openStorage('memory://'), hostSuite: {} } as unknown as Parameters<typeof executeApprovedAction>[0]; // test-only justified cast: the servicedesk branch reads only deps.storage (policy audit); it never starts a run
     await executeApprovedAction(runDeps, tenantId, action, 'approver-1');
     await executeApprovedAction(runDeps, tenantId, action, 'approver-1');
     const d = await listDeliveries(tenantId, ticket.ticketId);
@@ -163,8 +183,6 @@ describe('ADR 0878 D3 — reply delivery', () => {
       const { enqueueActionWithApproval } = await import('../src/features/assistant/actionApproval.js');
       const action = await enqueueActionWithApproval(tenantId, { kind: 'servicedesk.reply', payload: { ticketId: ticket.ticketId }, draft: 'Done.' });
       const { executeApprovedAction } = await import('../src/features/assistant/actionExecution.js');
-      const { openStorage } = await import('../src/storage/index.js');
-      const runDeps = { storage: await openStorage('memory://'), hostSuite: {} } as unknown as Parameters<typeof executeApprovedAction>[0]; // test-only justified cast: the servicedesk branch never starts a run
       await executeApprovedAction(runDeps, tenantId, action, 'approver-1');
       const { getPendingAction } = await import('../src/features/assistant/assistantService.js');
       expect((await getPendingAction(tenantId, action.actionId))!.status).toBe('sent');

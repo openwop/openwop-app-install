@@ -8,6 +8,12 @@
  *
  * `runStarter.ts` must NOT call the seam: ADR 0821 P5 (workstream E) calls the
  * limit directly there, so a seam call would count every starter run twice.
+ *
+ * EXCLUDED is checked both ways: an excluded file that no longer mints is a
+ * stale exclusion and fails, so it cannot later admit an unwrapped insert.
+ *
+ * Tracker TST-BUL-9. Sabotage-witnessed (w62): red when a wrapped insert is
+ * unwrapped, an unclassified minting site appears, or runStarter calls the seam.
  */
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
@@ -74,6 +80,10 @@ describe('ADR 0821 P5 follow-up — run-limit seam coverage of the run-minting s
       .filter(([f, s]) => s.calls > 0 && !EXCLUDED[f] && (WRAPPED[f] ?? 0) !== s.calls)
       .map(([f, s]) => `${f}: ${s.calls} insertRunWithStartContext call(s), ${s.wrapped} wrapped`);
     expect(unclassified).toEqual([]);
+    // Shrink-only hygiene: every exclusion still names a live minting site.
+    // `host/runInsert.ts` DECLARES the insert (its count nets the declaration out), so it is exempt.
+    const staleExclusions = Object.keys(EXCLUDED).filter((f) => f !== 'host/runInsert.ts' && (sites[f]?.calls ?? 0) === 0);
+    expect(staleExclusions).toEqual([]);
   });
 
   it('runStarter does NOT call the seam (it would double-count with ADR 0821 P5)', () => {

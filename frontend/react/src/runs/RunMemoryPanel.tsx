@@ -74,6 +74,25 @@ function buildAttribution(events: readonly RunEventDoc[]): Map<string, WriteAttr
   return byMemoryId;
 }
 
+/**
+ * ADR 0979 D4 — the run whose rows this panel asks for. Normally this run. A
+ * `replay` fork writes nothing (RFC 0057 §D) and instead re-reads the source
+ * run's `memory.written` VERBATIM, `run-id:<sourceRunId>` tag included, so the
+ * entry its log records is tagged with the source run. Read that tag off the
+ * recorded fact rather than guessing from fork metadata.
+ */
+function recordedRunId(runId: string, events: readonly RunEventDoc[]): string {
+  for (const ev of events) {
+    if (ev.type !== 'memory.written') continue;
+    const tags = (ev.payload && typeof ev.payload === 'object' ? (ev.payload as { tags?: unknown }).tags : undefined);
+    if (!Array.isArray(tags)) continue;
+    for (const tag of tags) {
+      if (typeof tag === 'string' && tag.startsWith('run-id:') && tag.length > 'run-id:'.length) return tag.slice('run-id:'.length);
+    }
+  }
+  return runId;
+}
+
 /** Column set for the memory ledger DataTable. Factory so the Content cell can
  *  attribute each entry via the run's `memory.written` map. Order-preserving:
  *  no sortValue (entries keep their server order). */
@@ -141,10 +160,15 @@ export function RunMemoryPanel({ runId, events, status }: Props) {
   // tag-heuristic behaviour rather than silently showing zero writes.
   const [attributionAdvertised, setAttributionAdvertised] = useState<boolean | null>(null);
   const terminal = status ? TERMINAL.has(status) : false;
+  const queryRunId = useMemo(() => recordedRunId(runId, events), [runId, events]);
 
   useEffect(() => {
     let cancelled = false;
-    listMemory({ limit: 50 })
+    // ADR 0979 D4 — ask the host for THIS run's rows. Listing the newest 50 tenant
+    // rows and filtering here showed nothing for any run older than those 50, and
+    // counted other runs' rows as this run's total. A replay fork asks for the
+    // source run's rows, which its log records as this run's write.
+    listMemory({ tag: `run-id:${queryRunId}`, limit: 50 })
       .then((res) => {
         if (!cancelled) setEntries(res.entries);
       })
@@ -155,7 +179,7 @@ export function RunMemoryPanel({ runId, events, status }: Props) {
       cancelled = true;
     };
     // Refetch when the run finishes so the on-completion run-summary appears.
-  }, [runId, terminal]);
+  }, [queryRunId, terminal]);
 
   useEffect(() => {
     let cancelled = false;
@@ -178,20 +202,11 @@ export function RunMemoryPanel({ runId, events, status }: Props) {
 
   const attribution = useMemo(() => buildAttribution(events), [events]);
 
-  const thisRunTag = `run-id:${runId}`;
   // Authoritative when the host advertises attribution AND we've actually
   // received write events for this run; otherwise the tag heuristic.
   const useEvents = attributionAdvertised === true && attribution.size > 0;
-  const mineFor = (e: MemoryEntry): boolean =>
-    useEvents ? attribution.has(e.id) : e.tags.includes(thisRunTag);
 
-  const { fromThisRun, total } = useMemo(() => {
-    const list = entries ?? [];
-    const count = list.filter((e) =>
-      useEvents ? attribution.has(e.id) : e.tags.includes(thisRunTag),
-    ).length;
-    return { fromThisRun: count, total: list.length };
-  }, [entries, useEvents, attribution, thisRunTag]);
+  const total = entries?.length ?? 0;
 
   // Nothing to show and no error → the host doesn't expose memory, or it's
   // empty. Stay quiet rather than render an empty card.
@@ -203,7 +218,6 @@ export function RunMemoryPanel({ runId, events, status }: Props) {
         <h2 className="u-flex-1">{t('memoryLedger')}</h2>
         {!error && (
           <span className="muted u-fs-12">
-            {fromThisRun > 0 ? `${t('memoryFromThisRun', { count: fromThisRun })} · ` : ''}
             {t('memoryEntryCount', { count: total })}
           </span>
         )}
@@ -219,7 +233,6 @@ export function RunMemoryPanel({ runId, events, status }: Props) {
           caption={t('memoryTableCaption')}
           rows={entries ?? []}
           rowKey={(e) => e.id}
-          rowClassName={(e) => (mineFor(e) ? 'memory-row-mine' : undefined)}
           columns={MEMORY_COLUMNS(attribution)}
         />
       )}

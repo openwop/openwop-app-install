@@ -6,6 +6,12 @@
  * workspace. It degraded correctly (every read served the seed floor), which is
  * exactly why nothing surfaced it. This pins the wiring so it cannot regress to
  * "built but unreachable" again.
+ *
+ * Sabotage witnesses (8f W4): dropping `tutorialsSeeder` from
+ * `EXAMPLE_DATA_SEEDERS` reds every case (ted-unregistered); listing it twice
+ * reds the unique-id case (ted-dup-id); reverting either corrected copy line in
+ * `host/exampleDataSeeders.ts` reds its copy case (ted-clear-copy,
+ * ted-promise-copy).
  */
 import { describe, it, expect } from 'vitest';
 import { EXAMPLE_DATA_SEEDERS } from '../src/host/exampleDataSeeders.js';
@@ -15,9 +21,8 @@ describe('ADR 0488 — the tutorials example-data seeder', () => {
 
   it('is registered (the DATA-T1 regression: defined but never invoked)', () => {
     expect(seeder, 'no seeder with id "tutorials" is registered').toBeDefined();
-    expect(typeof seeder!.seed).toBe('function');
-    expect(typeof seeder!.count).toBe('function');
-    expect(typeof seeder!.clear).toBe('function');
+    // The found row is THE tutorials seeder, not an id collision.
+    expect(seeder!.label).toBe('Editable tutorials');
   });
 
   it('its copy tells the operator that CLEAR reverts rather than removes', () => {

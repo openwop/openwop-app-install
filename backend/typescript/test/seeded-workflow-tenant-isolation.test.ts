@@ -8,6 +8,23 @@
  *
  * Route-level, two real tenant sessions: the authorization boundary is only
  * observable through the HTTP surface.
+ *
+ * PROTECTED (tenant isolation). Deliberate multi-guards, named so a single-guard
+ * sabotage reading green is understood rather than "fixed":
+ *   - a PRE-SQUAT of a free shared id is refused by `isWriteProtected`'s shared
+ *     branch (routes/workflows.ts) AND by `forkSharedWorkflow` → `claimForkOf`,
+ *     which finds no ownership row and answers the same 404
+ *     (host/sharedWorkflowFork.ts). A `wf.seed.*` id is refused a THIRD time by
+ *     the ADR 0794 server-minted-origin guard. Each alone is vacuous by design;
+ *     the piece every copy depends on is the `SHARED_WORKFLOW_ID` predicate,
+ *     probed through the `tmpl.*` leg (not server-minted).
+ *   - a non-owner's write of a REGISTERED seeded id is refused by the same
+ *     shared-branch + claimForkOf pair and by the "registered + not mine" arm.
+ * Deletion-cascade ABSENCE is observed through a spy `onWorkflowDeleted` hook:
+ * the registry invokes every deletion hook synchronously inside
+ * `deleteRegisteredWorkflow`, so the spy is the cascade's real trigger signal
+ * (no real-clock sleep). Sabotage witnesses (grade-tests 8f w2): ti-* in
+ * g4-probes.json / g4-reprobes.json.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -27,8 +44,17 @@ import { listRevisions, recordRevision, getRevision } from '../src/host/workflow
 import { registerJob, listJobs } from '../src/host/schedulingService.js';
 import { createBoard, createCard, listCards } from '../src/host/kanbanService.js';
 import { createRosterEntry, getRosterEntry } from '../src/host/rosterService.js';
-import { workflowForkHookIds, getRegisteredWorkflowAsync, registerWorkflowDurable, onWorkflowForked, deleteRegisteredWorkflow } from '../src/host/workflowsRegistry.js';
+import { workflowForkHookIds, getRegisteredWorkflowAsync, registerWorkflowDurable, onWorkflowForked, onWorkflowDeleted, deleteRegisteredWorkflow } from '../src/host/workflowsRegistry.js';
 import { listChains, expandChain } from '../src/host/workflowChainPackLoader.js';
+import type { WorkflowDefinition } from '../src/executor/types.js';
+
+/** Every id the registry's deletion cascade was TRIGGERED for. The registry calls
+ *  each hook synchronously inside `deleteRegisteredWorkflow`, so this records the
+ *  cascade before any of its async work could run. Registered once per file. */
+const deletionsTriggered: string[] = [];
+onWorkflowDeleted(async (workflowId) => { deletionsTriggered.push(workflowId); });
+/** Drain microtasks/immediates so any (sabotaged) fire-and-forget work settles. */
+const drain = async (): Promise<void> => { for (let i = 0; i < 5; i += 1) await new Promise<void>((r) => setImmediate(r)); };
 
 type Json = Record<string, unknown>;
 interface Node { nodeId: string; typeId: string; config?: Json }
@@ -47,7 +73,7 @@ describe('ADR 0789 — a tenant write never reaches a shared (seeded) definition
         headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
         ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
       });
-      for (const ck of getSetCookies(res.headers) as string[]) {
+      for (const ck of getSetCookies(res.headers)) {
         const m = /(__session=[^;]+)/.exec(ck);
         if (m) cookie = m[1];
       }
@@ -162,8 +188,10 @@ describe('ADR 0789 — a tenant write never reaches a shared (seeded) definition
     expect(del.status).toBe(200);
     expect(await getOwned(A, id)).toBeNull();
     expect((await bob('GET', `/workflows/${id}`)).status, 'Alice\'s delete removed the definition Bob runs').toBe(200);
-    // Give a fire-and-forget deletion cascade the chance to run before asserting it did not.
-    await new Promise((r) => setTimeout(r, 50));
+    // The cascade was never TRIGGERED (the real signal), and nothing it could
+    // have done has landed after a drain.
+    expect(deletionsTriggered, 'the delete triggered the shared definition\'s deletion cascade').not.toContain(id);
+    await drain();
     expect((await listRevisions(id)).length, 'the delete cascaded away every tenant\'s revision history').toBe(revsBefore);
   });
 
@@ -181,10 +209,11 @@ describe('ADR 0789 — a tenant write never reaches a shared (seeded) definition
   it('PROMOTE of an archived seeded workflow keeps THIS tenant\'s archive (it never rebuilds from the shared row)', async () => {
     const id = ids[14]!;
     const now = new Date().toISOString();
-    await tryDurableStorage()!.insertRun({
+    const run: RunRecord = {
       runId: 'run-seeded-promote', workflowId: id, tenantId: A, status: 'completed',
       inputs: {}, metadata: {}, configurable: {}, createdAt: now, updatedAt: now,
-    } as RunRecord);
+    };
+    await tryDurableStorage()!.insertRun(run);
     expect((await alice('POST', `/host/openwop-app/workflows/${id}/archive`)).status).toBe(200);
     const promote = await alice('POST', `/host/openwop-app/workflows/${id}/promote`);
     expect(promote.status).toBe(200);
@@ -213,10 +242,10 @@ describe('ADR 0789 — a tenant write never reaches a shared (seeded) definition
       const r = await registerJob({ jobId, tenantId: t, cronExpr: '0 * * * *', workflowId: id, timezone: 'UTC' });
       expect(r.ok).toBe(true);
     }
-    const board = await createBoard({ tenantId: A, name: 'Alice board', triggerWorkflowId: id } as never);
-    const card = await createCard({ boardId: board.id, columnId: board.columns[0]!.id, title: 'c', workflowId: id } as never);
-    const bobBoard = await createBoard({ tenantId: B, name: 'Bob board' } as never);
-    const bobCard = await createCard({ boardId: bobBoard.id, columnId: bobBoard.columns[0]!.id, title: 'c', workflowId: id } as never);
+    const board = await createBoard({ tenantId: A, name: 'Alice board', triggerWorkflowId: id });
+    const card = await createCard({ boardId: board.id, columnId: board.columns[0]!.id, title: 'c', workflowId: id });
+    const bobBoard = await createBoard({ tenantId: B, name: 'Bob board' });
+    const bobCard = await createCard({ boardId: bobBoard.id, columnId: bobBoard.columns[0]!.id, title: 'c', workflowId: id });
     await createRosterEntry({ tenantId: A, persona: 'Forky', agentRef: { agentId: 'a.b.c.d' }, workflows: [id, 'other'] });
 
     const save = await aliceSaves(id, 'ALICE-REPOINT');
@@ -237,7 +266,9 @@ describe('ADR 0789 — a tenant write never reaches a shared (seeded) definition
   });
 
   it('every store that holds a live per-tenant workflow reference registers a fork hook', () => {
-    expect(workflowForkHookIds().sort()).toEqual([
+    // `test:*` hooks are this file's own (the PARTIAL FAILURE case registers them
+    // permanently), so they are filtered out: the list is order-independent.
+    expect(workflowForkHookIds().filter((h) => !h.startsWith('test:')).sort()).toEqual([
       'connections:inbound', 'host-event:binding', 'kanban', 'messaging:routing-rule', 'profiles:profile',
       'projects', 'roster', 'schedchat:config', 'scheduler:job', 'trigger-bridge:subscription',
       'workflow:budget', 'workflow:debug-pin', 'workflow:eval-set',
@@ -252,16 +283,21 @@ describe('ADR 0789 — a tenant write never reaches a shared (seeded) definition
     // dropped — keeping it would make the NEXT save fork a second copy. A
     // reference the failed hook missed stays on the shared id, which is unchanged
     // and still resolves: stale, never unsafe.
-    let boomCalls = 0;
-    onWorkflowForked('test:boom', async () => { boomCalls += 1; if (boomCalls === 1) throw new Error('boom'); return 0; });
     const id = ids[7]!;
+    let boomCalls = 0;
+    let afterCalls = 0;
+    // Counted only for THIS case's id, so another case's fork cannot move them.
+    onWorkflowForked('test:boom', async (_t, from) => { if (from !== id) return 0; boomCalls += 1; if (boomCalls === 1) throw new Error('boom'); return 0; });
+    // Registered AFTER boom: per-hook isolation means it still runs once boom throws.
+    onWorkflowForked('test:after', async (_t, from) => { if (from === id) afterCalls += 1; return 0; });
     await registerJob({ jobId: 'job-alice-partial', tenantId: A, cronExpr: '0 * * * *', workflowId: id, timezone: 'UTC' });
     const save = await aliceSaves(id, 'ALICE-PARTIAL');
     expect(save.status).toBe(201);
     const forkId = save.body?.workflowId as string;
     expect(forkId).not.toBe(id);
     expect(save.body?.repointFailed).toEqual(['test:boom']);
-    expect((await listJobs(A)).find((j) => j.jobId === 'job-alice-partial')?.workflowId, 'a later hook was skipped after one threw').toBe(forkId);
+    expect(afterCalls, 'a hook registered AFTER the one that threw was skipped').toBe(1);
+    expect((await listJobs(A)).find((j) => j.jobId === 'job-alice-partial')?.workflowId).toBe(forkId);
     expect((await getOwned(A, forkId))?.forkedFrom).toBe(id);
     expect(await getOwned(A, id)).toBeNull();
     expect(markerOf((await bob('GET', `/workflows/${id}`)).body)).toBeUndefined();
@@ -272,6 +308,8 @@ describe('ADR 0789 — a tenant write never reaches a shared (seeded) definition
     expect(next.status).toBe(201);
     expect(next.body?.repointFailed).toBeUndefined();
     expect(boomCalls).toBe(2);
+    // The retry ran ONLY the owed hook, not the one that already succeeded.
+    expect(afterCalls).toBe(1);
     expect((await getOwned(A, forkId))?.repointPending).toBeUndefined();
   });
 
@@ -294,6 +332,16 @@ describe('ADR 0789 — a tenant write never reaches a shared (seeded) definition
     });
     expect(squat.status).toBe(404);
     expect(await getRegisteredWorkflowAsync('wf.seed.not-yet-shipped-chain')).toBeNull();
+    // The same refusal on a shared namespace that is NOT server-minted (`tmpl.*`),
+    // so the ADR 0794 origin guard cannot stand in for the shared-id rule.
+    const squatTmpl = await alice('POST', '/host/openwop-app/workflows', {
+      workflowId: 'tmpl.not-yet-shipped-template',
+      metadata: { name: 'squat' },
+      nodes: [{ nodeId: 'a', typeId: 'core.noop', config: { injected: 'SQUAT' } }],
+      edges: [],
+    });
+    expect(squatTmpl.status).toBe(404);
+    expect(await getRegisteredWorkflowAsync('tmpl.not-yet-shipped-template')).toBeNull();
   });
 
   it('a non-owner of a seeded id still gets the indistinguishable 404 on write', async () => {
@@ -344,7 +392,10 @@ describe('ADR 0789 — a tenant write never reaches a shared (seeded) definition
     expect(markerOf((await bob('GET', `/workflows/${id}`)).body)).toBeUndefined();
   });
 
-  it('two CONCURRENT first saves converge on ONE fork', async () => {
+  it('two first saves (concurrent or serial) converge on ONE fork', async () => {
+    // NOT a forced race: two parallel HTTP calls usually serialise. The claim is
+    // carried by `claimForkOf`'s CAS either way (sabotage witness ti-claim: a
+    // second fork is minted whether or not the requests interleave).
     const id = ids[10]!;
     const [a, b] = await Promise.all([aliceSaves(id, 'TAB-1'), aliceSaves(id, 'TAB-2')]);
     expect(a.status).toBe(201);
@@ -354,7 +405,11 @@ describe('ADR 0789 — a tenant write never reaches a shared (seeded) definition
   });
 
   it('a stale canvas of the SHARED original cannot silently overwrite the fork (If-Match judged against the fork head)', async () => {
-    const id = ids[1]!; // forked by Alice in the fork leg
+    const id = ids[1]!;
+    // Forked by Alice in the fork leg — or here, if this case runs first (shuffle).
+    if (!(await listOwned(A)).some((r) => r.forkedFrom === id)) {
+      expect((await aliceSaves(id, 'ALICE-FORK')).status).toBe(201);
+    }
     const sharedHead = revisionHashOf((await getRegisteredWorkflowAsync(id))!);
     const got = (await bob('GET', `/workflows/${id}`)).body as Json;
     const res = await fetch(`${BASE}/host/openwop-app/workflows`, {
@@ -407,13 +462,14 @@ describe('ADR 0789 — a tenant write never reaches a shared (seeded) definition
 
   it('the LAST owner\'s teardown never deletes a shared definition or its history', async () => {
     const id = 'wf.seed.lonely-last-owner';
-    const def = { workflowId: id, metadata: { name: 'lonely' }, nodes: [{ nodeId: 'a', typeId: 'core.noop', config: {} }], edges: [] };
-    await registerWorkflowDurable(def as never);
-    await recordRevision('org:lonely', def as never);
+    const def: WorkflowDefinition = { workflowId: id, metadata: { name: 'lonely' }, nodes: [{ nodeId: 'a', typeId: 'core.noop', config: {} }], edges: [] };
+    await registerWorkflowDurable(def);
+    await recordRevision('org:lonely', def);
     await recordOwnership('org:lonely', id, { name: 'lonely', nodeCount: 1 });
     const r = await purgeTenantOwnedWorkflowDefs('org:lonely', deleteRegisteredWorkflow);
     expect(r.defsDeleted).toBe(0);
-    await new Promise((res) => setTimeout(res, 50));
+    expect(deletionsTriggered, 'the teardown triggered the shared definition\'s deletion cascade').not.toContain(id);
+    await drain();
     expect(await getRegisteredWorkflowAsync(id)).not.toBeNull();
     expect((await listRevisions(id)).length).toBeGreaterThan(0);
   });

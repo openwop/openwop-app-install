@@ -1,52 +1,48 @@
 /**
- * ADR 0112 Phase 1 — conversation & message full-text search engine.
+ * Conversation & message search (ADR 0112, rebuilt by ADR 0997).
  *
- * Boundaries (architect-reviewed): this is a READ-ONLY, DERIVED index over the
- * ADR 0043 chat store — never a second chat store. The substrate is the host
- * **`db.search` SearchSurface** (RFC 0018 full-text/BM25), the lexical analog of
- * the `db.vector` surface KB builds on (`features/kb/kbService.ts`). Like KB's
- * ephemeral vector namespace, the search namespace is **lazily rebuilt from the
- * durable message rows** (`listChatSessionMessages`) — so it is structurally
- * incapable of drifting from the source of truth: a missed/edited/deleted message
- * self-heals on the next query. The freshness watermark is
- * `${messageCount}:${updatedAt}` (CSC-1) — NOT `messageCount` alone, which was
- * blind to the two content-preserving-count ops: an in-place edit and a
- * tombstone-delete both keep the count but bump the session's `updatedAt`.
+ * Search reads the durable chat store at request time. It keeps NO copy of message
+ * text anywhere. ADR 0112 Phase 1 built a derived index on the tenant's `db.search`
+ * host surface; ADR 0997 removed it because every defect found in it was a way the
+ * copy disagreed with the source:
+ * - the surface is durable in prod, while the ids to clean up lived in process
+ *   memory, so deleted and DSAR-erased text came back after a restart (CSP-1/2);
+ * - every workflow run in the tenant gets the same surface, so
+ *   `core.db.search-query` could read other members' private messages (CSP-3);
+ * - the query ranked the tenant-wide index and filtered afterwards, so other
+ *   members' matches crowded the caller's out (CSP-4).
  *
- * ADR CORRECTION (vs the ADR's "Postgres FTS first / custom tsvector table"): the
- * host already owns the two-backend FTS abstraction (`db.search`, in-memory ↔ a
- * future persisted backend), exactly as it owns `db.vector`. Building a
- * feature-local `tsvector`/GIN table would be a PARALLEL substrate
- * (no-parallel-architecture violation). v1 rides `db.search`; **persisted FTS is a
- * host-surface follow-up** (it benefits the vector surface too), NOT a
- * feature-local table. The pluggable-engine intent of the ADR is satisfied by the
- * surface port itself.
+ * Now the caller's visible conversation ids (ADR 0043 predicate) go to
+ * `Storage.searchChatMessages`, a database prefilter. Each candidate row is then
+ * read through `messageView` (ADR 0992 D1), the one projection every chat exit
+ * uses, and only the text the person saw can match or be shown (CSP-5).
  *
- * Replay/fork: N/A — read-only, nothing recorded, nothing stamped.
+ * Replay/fork: N/A, read-only, nothing recorded or stamped.
  */
 import type { Storage } from '../../storage/storage.js';
 import { listConversationMetas, type ConversationType } from '../../host/conversationStore.js';
 import { isVisibleToAsync } from '../../host/conversationVisibility.js';
-import { buildHostSurfaceBundle } from '../../host/inMemorySurfaces.js';
+import { createLogger } from '../../observability/logger.js';
+import { messageView } from '../chat-export/transcriptRenderer.js';
+import { purgeLegacySearchIndexOnce } from './legacyIndexPurge.js';
 
-/** The per-tenant `db.search` index name holding chat-message docs. */
-const INDEX = 'chat-search';
-/** Doc-id separator: `${conversationId}\u0000${messageId}`. NUL never appears in
- *  a conversationId (route id pattern `[A-Za-z0-9_-]`) or a messageId. */
-const SEP = '\u0000';
+const log = createLogger('conversation-search');
+
+/** ADR 0997 D3 — candidate rows read per query. Reaching it sets `truncated`. */
+export const CANDIDATE_LIMIT = 500;
+/** ADR 0997 D3 — query bounds. */
+const MAX_QUERY_CHARS = 200;
+const MAX_TOKENS = 8;
+const DEFAULT_LIMIT = 20;
 
 export interface SearchScope {
   tenantId: string;
-  /** The caller's owned-or-participant conversation ids — resolved via ADR 0043
-   *  visibility BEFORE the query (the route's job). The ONLY conversations a hit
-   *  may come from. */
+  /** The caller's readable conversation ids, resolved through the ADR 0043
+   *  predicate BEFORE the query. The ONLY conversations a hit may come from. */
   visibleConversationIds: readonly string[];
-  /** Live conversation titles (route-supplied, from the chat-session store) so
-   *  title hits are matched against CURRENT titles — no title-staleness in the
-   *  index. */
+  /** Live titles, matched as-is (no stale copy). */
   titleById?: ReadonlyMap<string, string>;
-  /** Live conversation types (route-supplied) for the optional `type` facet +
-   *  hit enrichment. */
+  /** Live conversation types, for the `type` facet and hit enrichment. */
   typeById?: ReadonlyMap<string, ConversationType>;
   /** Optional facet: only conversations of this type. */
   type?: ConversationType;
@@ -62,136 +58,55 @@ export interface SearchHit {
   type?: ConversationType;
   /** The best-matching message (absent ⇒ a title-only hit). */
   messageId?: string;
-  /** Highlighted excerpt around the match (or the title for a title-only hit). */
+  /** Excerpt around the match (or the title for a title-only hit). */
   snippet: string;
   score: number;
-  /** The matched message's `createdAt` — for "jump to". */
+  /** The matched message's `createdAt`. */
   matchedAt?: string;
-  /** The matched message's role — for attribution/facet. */
+  /** The matched message's role. */
   role?: string;
 }
 
-// ── ephemeral, rebuildable caches (mirror KB's ephemeral vector namespace) ──────
-// Keyed by tenantId. All three are rebuilt together during backfill, so they can
-// never disagree with each other or with the durable rows.
-interface MsgMeta { role: string; createdAt: string; text: string }
-const metaByTenant = new Map<string, Map<string, MsgMeta>>(); // `${conv}${SEP}${msg}` -> meta
-const indexedIdsByConv = new Map<string, Set<string>>();      // `${tenant}${SEP}${conv}` -> docIds
-const watermarkByConv = new Map<string, string>();            // `${tenant}${SEP}${conv}` -> `${messageCount}:${updatedAt}` (CSC-1)
-/** The ADR 0195 D2 tombstone content sentinel — a deleted message's row is kept
- *  with this exact content; it carries no searchable text (CSC-1). */
-const TOMBSTONE_CONTENT = '{"deleted":true}';
-
-function tenantMeta(tenantId: string): Map<string, MsgMeta> {
-  let m = metaByTenant.get(tenantId);
-  if (!m) { m = new Map(); metaByTenant.set(tenantId, m); }
-  return m;
+export interface SearchResult {
+  hits: SearchHit[];
+  /** True when the candidate cap was reached: only the newest
+   *  {@link CANDIDATE_LIMIT} matching messages were examined. */
+  truncated: boolean;
 }
 
-/** Test/maintenance hook — drop all cached state (forces a cold rebuild). */
-export function __resetSearchEngine(): void {
-  metaByTenant.clear();
-  indexedIdsByConv.clear();
-  watermarkByConv.clear();
+/** ADR 0997 D3 — Unicode letter/number runs, lower-cased, de-duplicated, at most
+ *  {@link MAX_TOKENS}. The old ASCII split broke `café` into `caf`. */
+export function queryTokens(q: string): string[] {
+  const runs = q.slice(0, MAX_QUERY_CHARS).toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
+  return [...new Set(runs)].slice(0, MAX_TOKENS);
 }
 
-/** Robust plain-text projection of a stored `ChatMessageRecord.content` (a
- *  serialized ChatMessage — string, `{content}`, or a parts array). Falls back to
- *  the raw string when it isn't JSON. */
-export function extractText(content: string): string {
-  if (!content) return '';
-  const t = content.trim();
-  if (!(t.startsWith('{') || t.startsWith('['))) return content;
-  try {
-    return flattenText(JSON.parse(content)).trim() || content;
-  } catch {
-    return content;
-  }
+function occurrences(haystack: string, needle: string): number {
+  let n = 0;
+  for (let i = haystack.indexOf(needle); i >= 0; i = haystack.indexOf(needle, i + needle.length)) n++;
+  return n;
 }
 
-// CONV-3: cap the recursion depth so pathological/deeply-nested stored JSON (model/import-
-// derived, untrusted shape) can't blow the stack while building the search doc.
-const MAX_FLATTEN_DEPTH = 64;
-
-function flattenText(v: unknown, depth = 0): string {
-  if (depth > MAX_FLATTEN_DEPTH) return '';
-  if (typeof v === 'string') return v;
-  if (Array.isArray(v)) return v.map((x) => flattenText(x, depth + 1)).join(' ');
-  if (v && typeof v === 'object') {
-    const o = v as Record<string, unknown>;
-    if (typeof o.text === 'string') return o.text;
-    if (o.content !== undefined) return flattenText(o.content, depth + 1);
-    return Object.values(o).map((x) => flattenText(x, depth + 1)).join(' ');
+/** ALL tokens must occur; the score sums `1 + ln(1 + occurrences)` per token.
+ *  Null when any token is missing. */
+function scoreText(text: string, tokens: readonly string[]): number | null {
+  const lower = text.toLowerCase();
+  let score = 0;
+  for (const tok of tokens) {
+    const n = occurrences(lower, tok);
+    if (n === 0) return null;
+    score += 1 + Math.log(1 + n);
   }
-  return '';
-}
-
-/** Lazily (re)build one conversation's message docs in the `db.search` namespace,
- *  from the durable rows — the self-correcting, drift-proof backfill. No-op when
- *  the conversation's `${messageCount}:${updatedAt}` signature is unchanged since
- *  the last build this process-life (CSC-1: `updatedAt` catches edit/delete, which
- *  leave the count untouched). */
-export async function ensureConversationIndexed(
-  storage: Storage,
-  tenantId: string,
-  conversationId: string,
-): Promise<void> {
-  const wmKey = `${tenantId}${SEP}${conversationId}`;
-  const session = await storage.getChatSession(tenantId, conversationId);
-  // CSC-1 — fold content mutation into the freshness key. An in-place EDIT or a
-  // tombstone-DELETE keeps `messageCount` (the row survives), so a count-only
-  // watermark went stale on exactly the two ops that replace/remove text —
-  // leaving old text matching with a stale snippet, and deleted content
-  // searchable. The edit/delete routes now bump the session's `updatedAt` (as
-  // title edits already do), so `${messageCount}:${updatedAt}` moves on append,
-  // edit, AND delete. Still one cheap `getChatSession` row read — the per-query
-  // fast path (no full-message scan) is preserved.
-  const sig = `${session?.messageCount ?? -1}:${session?.updatedAt ?? ''}`;
-  if (watermarkByConv.get(wmKey) === sig && indexedIdsByConv.has(wmKey)) return; // fresh
-
-  const messages = await storage.listChatSessionMessages(conversationId);
-  const search = buildHostSurfaceBundle({ tenantId }).db.search;
-  const meta = tenantMeta(tenantId);
-  const prevIds = indexedIdsByConv.get(wmKey) ?? new Set<string>();
-  const liveIds = new Set<string>();
-
-  const docs: Array<{ id: string; fields: Record<string, unknown> }> = [];
-  for (const m of messages) {
-    // CSC-1 — a tombstoned message (the ADR 0195 D2 delete route writes this exact
-    // content sentinel) has no searchable text. Skip it so its prior doc is dropped
-    // as stale — NOT indexed as the literal `{"deleted":true}`, which would make
-    // "deleted"/"true" a spurious tenant-wide match on every deleted message.
-    if (m.content === TOMBSTONE_CONTENT) continue;
-    const text = extractText(m.content);
-    if (!text) continue;
-    const id = `${conversationId}${SEP}${m.messageId}`;
-    liveIds.add(id);
-    // Only searchable TEXT goes in `fields` — the surface joins ALL field values
-    // into the query haystack, so role/ids/timestamps must NOT live here (they'd
-    // cause false matches). Metadata rides the sidecar cache instead.
-    docs.push({ id, fields: { text } });
-    meta.set(id, { role: m.role, createdAt: m.createdAt, text });
-  }
-  if (docs.length > 0) await search.index({ index: INDEX, docs });
-
-  // Drop docs for messages that no longer exist (deletes/resets).
-  const stale = [...prevIds].filter((id) => !liveIds.has(id));
-  if (stale.length > 0) {
-    await search.delete({ index: INDEX, ids: stale });
-    for (const id of stale) meta.delete(id);
-  }
-  indexedIdsByConv.set(wmKey, liveIds);
-  watermarkByConv.set(wmKey, sig);
+  return score;
 }
 
 const HIGHLIGHT_RADIUS = 60;
 
-/** Build a snippet around the first occurrence of any query token. */
-function snippetFor(text: string, q: string): string {
-  const qTokens = q.toLowerCase().split(/[^a-z0-9]+/i).filter((s) => s.length > 0);
+/** An excerpt around the earliest token occurrence. */
+function snippetFor(text: string, tokens: readonly string[]): string {
   const lower = text.toLowerCase();
   let at = -1;
-  for (const tok of qTokens) {
+  for (const tok of tokens) {
     const i = lower.indexOf(tok);
     if (i >= 0 && (at < 0 || i < at)) at = i;
   }
@@ -201,23 +116,19 @@ function snippetFor(text: string, q: string): string {
   return `${start > 0 ? '…' : ''}${text.slice(start, end).trim()}${end < text.length ? '…' : ''}`;
 }
 
-/** Search the caller's VISIBLE conversations for `q`. Backfills the visible set,
- *  queries message content via `db.search`, post-filters to the visible set
- *  (belt-and-suspenders over the surface's tenant scoping), matches live titles,
- *  and returns the best hit per conversation. */
-/** XCH-HOLE-5 (LLM-EXCHANGE-AUDIT Wave 4): the ONE owner of "search the
- *  caller's visible conversations" — the route and the
- *  `openwop:conversations.search` agent tool both call THIS, so the ADR 0043
- *  visibility filter can never drift between the two consumers. Resolves the
- *  caller's visible conversations BEFORE the query; only those ids enter the
- *  scope (no cross-user existence leak). */
+/** XCH-HOLE-5: the ONE owner of "search the caller's visible conversations". The
+ *  route and the `openwop:conversations.search` agent tool both call THIS, so the
+ *  ADR 0043 visibility filter cannot drift between them. Visibility is resolved
+ *  BEFORE the query; only those ids reach storage. */
 export async function searchVisibleConversations(
   storage: Storage,
   tenantId: string,
   actingUserId: string | undefined,
   q: string,
   opts?: { type?: ConversationType; role?: string; limit?: number },
-): Promise<SearchHit[]> {
+): Promise<SearchResult> {
+  if (queryTokens(q).length === 0) return { hits: [], truncated: false };
+  await purgeLegacySearchIndexOnce(); // ADR 0997 D6 — once per process, best-effort
   const [sessions, metas] = await Promise.all([
     storage.listChatSessions(tenantId),
     listConversationMetas(tenantId),
@@ -227,86 +138,75 @@ export async function searchVisibleConversations(
     sessions.map((s) => isVisibleToAsync(byId.get(s.sessionId) ?? null, tenantId, actingUserId)),
   );
   const visibleSessions = sessions.filter((_, i) => shown[i]);
-  const scope: SearchScope = {
+  return searchConversations(storage, {
     tenantId,
     visibleConversationIds: visibleSessions.map((s) => s.sessionId),
     titleById: new Map(visibleSessions.map((s) => [s.sessionId, s.title])),
     typeById: new Map(visibleSessions.map((s) => [s.sessionId, byId.get(s.sessionId)?.type ?? 'agent'])),
     ...(opts?.type ? { type: opts.type } : {}),
     ...(opts?.role ? { role: opts.role } : {}),
-    limit: opts?.limit && opts.limit > 0 ? opts.limit : 20,
-  };
-  return searchConversations(storage, scope, q);
+    limit: opts?.limit && opts.limit > 0 ? opts.limit : DEFAULT_LIMIT,
+  }, q);
 }
 
 export async function searchConversations(
   storage: Storage,
   scope: SearchScope,
   q: string,
-): Promise<SearchHit[]> {
-  const query = q.trim();
-  if (!query) return [];
-  const limit = scope.limit && scope.limit > 0 ? scope.limit : 20;
-
-  // Facet the visible set by type up front (cheap; route-supplied map).
-  const visible = scope.visibleConversationIds.filter((id) =>
-    !scope.type || scope.typeById?.get(id) === scope.type,
-  );
+): Promise<SearchResult> {
+  const started = Date.now();
+  const tokens = queryTokens(q);
+  if (tokens.length === 0) return { hits: [], truncated: false };
+  const limit = scope.limit && scope.limit > 0 ? scope.limit : DEFAULT_LIMIT;
+  const visible = scope.visibleConversationIds.filter((id) => !scope.type || scope.typeById?.get(id) === scope.type);
+  if (visible.length === 0) return { hits: [], truncated: false };
   const visibleSet = new Set(visible);
-  if (visibleSet.size === 0) return [];
 
-  // Lazy backfill only the in-scope conversations.
-  for (const id of visible) await ensureConversationIndexed(storage, scope.tenantId, id);
-
-  // Message-content hits.
-  const search = buildHostSurfaceBundle({ tenantId: scope.tenantId }).db.search;
-  const res = await search.query({ index: INDEX, q: query, k: limit * 8 });
-  const rawHits = (res.hits as Array<{ id: string; score: number; fields: Record<string, unknown> }>) ?? [];
-  const meta = tenantMeta(scope.tenantId);
+  const rows = await storage.searchChatMessages(visible, tokens, { limit: CANDIDATE_LIMIT });
+  const truncated = rows.length >= CANDIDATE_LIMIT;
 
   const bestByConv = new Map<string, SearchHit>();
-  for (const h of rawHits) {
-    const sep = h.id.indexOf(SEP);
-    if (sep < 0) continue;
-    const conversationId = h.id.slice(0, sep);
-    if (!visibleSet.has(conversationId)) continue; // belt-and-suspenders scoping
-    const messageId = h.id.slice(sep + 1);
-    const mm = meta.get(h.id);
-    if (scope.role && mm?.role !== scope.role) continue; // role facet
-    const text = mm?.text ?? String(h.fields.text ?? '');
-    const hit: SearchHit = {
-      conversationId,
-      title: scope.titleById?.get(conversationId) ?? '',
-      ...(scope.typeById?.get(conversationId) ? { type: scope.typeById.get(conversationId) } : {}),
-      messageId,
-      snippet: snippetFor(text, query),
-      score: h.score,
-      ...(mm?.createdAt ? { matchedAt: mm.createdAt } : {}),
-      ...(mm?.role ? { role: mm.role } : {}),
-    };
-    const prev = bestByConv.get(conversationId);
-    if (!prev || hit.score > prev.score) bestByConv.set(conversationId, hit);
+  for (const row of rows) {
+    if (!visibleSet.has(row.sessionId)) continue; // the storage contract, re-asserted
+    if (scope.role && row.role !== scope.role) continue;
+    // ADR 0997 D1 / ADR 0992 D1 — the database matched the RAW envelope; only the
+    // text the person saw decides a hit. A deleted row or a card has no text.
+    const view = messageView(row);
+    if (view.deleted || !view.text) continue;
+    const score = scoreText(view.text, tokens);
+    if (score === null) continue;
+    const prev = bestByConv.get(row.sessionId);
+    // Rows arrive newest first, so a tie keeps the newer message.
+    if (prev && prev.score >= score) continue;
+    const type = scope.typeById?.get(row.sessionId);
+    bestByConv.set(row.sessionId, {
+      conversationId: row.sessionId,
+      title: scope.titleById?.get(row.sessionId) ?? '',
+      ...(type ? { type } : {}),
+      messageId: row.messageId,
+      snippet: snippetFor(view.text, tokens),
+      score,
+      matchedAt: row.createdAt,
+      role: row.role,
+    });
   }
 
-  // Live title hits (matched against CURRENT titles — no index staleness). A
-  // title hit only ADDS a conversation that had no message hit, or lifts a weak
-  // message hit; the role facet excludes title-only hits (title has no author).
+  // Live title hits: add a conversation with no message hit. The role facet
+  // excludes them (a title has no author).
   if (!scope.role && scope.titleById) {
-    const qLower = query.toLowerCase();
     for (const id of visible) {
+      if (bestByConv.has(id)) continue;
       const title = scope.titleById.get(id);
-      if (!title || !title.toLowerCase().includes(qLower)) continue;
-      if (!bestByConv.has(id)) {
-        bestByConv.set(id, {
-          conversationId: id,
-          title,
-          ...(scope.typeById?.get(id) ? { type: scope.typeById.get(id) } : {}),
-          snippet: title,
-          score: 1, // title-only baseline; message hits (≥1 + tf) rank above
-        });
-      }
+      if (!title || scoreText(title, tokens) === null) continue;
+      const type = scope.typeById?.get(id);
+      bestByConv.set(id, { conversationId: id, title, ...(type ? { type } : {}), snippet: title, score: 1 });
     }
   }
 
-  return [...bestByConv.values()].sort((a, b) => b.score - a.score).slice(0, limit);
+  const hits = [...bestByConv.values()].sort((a, b) => b.score - a.score).slice(0, limit);
+  // ADR 0997 D7 — counts only, never the query or any text.
+  log.info('conversation_search', {
+    visible: visible.length, candidates: rows.length, hits: hits.length, truncated, ms: Date.now() - started,
+  });
+  return { hits, truncated };
 }

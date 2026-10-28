@@ -10,10 +10,10 @@
  * funnel step is worth 5 views; a paid order is worth 20. Tuning them is a
  * product decision recorded here, not a hidden model.
  */
-import { listCollectedEvents } from '../cdp/collectService.js';
-import { sessionsForContact } from '../analytics/identityLinkService.js';
-import { listOrders } from '../commerce/commerceService.js';
+import { readSignals } from './leadIntel/signals.js';
+import { evaluateLeadScore, V0_CONTENT } from './leadIntel/model.js';
 
+/** The v0 weights (ADR 0954 D1: `V0_CONTENT` is the one definition of them). */
 export const LEAD_SCORE_WEIGHTS = { view: 1, completion: 5, paidOrder: 20 } as const;
 
 export interface LeadScore {
@@ -26,31 +26,28 @@ export interface LeadScore {
     paidOrders: number;
   };
   weights: typeof LEAD_SCORE_WEIGHTS;
+  /** ADR 0954 P0 (L3) — true when a capped read makes the counts lower bounds.
+   *  The old read capped at 50 000 tenant events and said nothing. */
+  truncated: boolean;
 }
 
+/**
+ * ADR 0954 P0 — the v0 model on the one engine, reading funnel events through the
+ * per-visitor index (no per-contact tenant scan). Same numbers as before for every
+ * caller; per-client models are read by the lead-intelligence routes, not here.
+ */
 export async function computeLeadScore(tenantId: string, contactId: string, orgId?: string): Promise<LeadScore> {
-  const sessions = new Set(await sessionsForContact(tenantId, contactId));
-  let funnelViews = 0;
-  let funnelCompletions = 0;
-  if (sessions.size > 0) {
-    for (const evt of await listCollectedEvents(tenantId, 50_000)) {
-      if (evt.eventType !== 'funnel.step_viewed' && evt.eventType !== 'funnel.step_completed') continue;
-      const visitor = (evt.payload as { visitor?: unknown }).visitor;
-      if (typeof visitor !== 'string' || !sessions.has(visitor)) continue;
-      if (evt.eventType === 'funnel.step_viewed') funnelViews += 1;
-      else funnelCompletions += 1;
-    }
-  }
-  let paidOrders = 0;
-  if (orgId) {
-    paidOrders = (await listOrders(tenantId, orgId)).filter((o) => o.contactId === contactId && o.status !== 'canceled' && o.status !== 'pending').length;
-  }
-  const score = funnelViews * LEAD_SCORE_WEIGHTS.view
-    + funnelCompletions * LEAD_SCORE_WEIGHTS.completion
-    + paidOrders * LEAD_SCORE_WEIGHTS.paidOrder;
+  const inputs = await readSignals(tenantId, { contactId }, new Set(V0_CONTENT.signals.map((s) => s.signalId)), orgId);
+  const { score } = evaluateLeadScore(V0_CONTENT, inputs.raw);
   return {
     contactId, score,
-    parts: { linkedSessions: sessions.size, funnelViews, funnelCompletions, paidOrders },
+    parts: {
+      linkedSessions: inputs.linkedSessions,
+      funnelViews: inputs.raw['funnel.view'] ?? 0,
+      funnelCompletions: inputs.raw['funnel.completion'] ?? 0,
+      paidOrders: inputs.raw['commerce.paid-order'] ?? 0,
+    },
     weights: LEAD_SCORE_WEIGHTS,
+    truncated: inputs.truncated,
   };
 }

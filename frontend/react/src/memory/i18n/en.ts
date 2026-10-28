@@ -29,10 +29,9 @@ export const messages = {
   removeMemory: 'Remove memory',
   // MemoryInspectorPage — header
   eyebrow: 'Memory',
-  inspectorTitle: 'Memory inspector',
-  inspectorLedePrefix:
-    "Browse the tenant's memory ledger. Entries are written host-internally — the executor writes a run-summary on completion. Reads and deletes are scoped to your credential server-side; the inspector can't see another tenant's memory.",
-  inspectorLedeShowing: 'Showing',
+  inspectorTitle: 'Run summaries',
+  inspectorLede: 'Short summaries written when a workflow run completes, plus notes a workflow step saved. Agents do not read this list — an agent\'s memories live on its Memory tab.',
+  inspectorOwnRunsOnly: 'You see the runs you started; workspace admins see every run.',
   // MemoryInspectorPage — redaction
   redactedBadge: 'redacted',
   redactedTitle: 'Contains host-redacted secret material (SR-1)',
@@ -72,11 +71,11 @@ export const messages = {
   emptyNoEntriesTitle: 'No memory entries yet',
   emptyNoMatchBody: 'No entries match the current search or tag filter. Clear the filters to see the full ledger.',
   clearFilters: 'Clear filters',
-  emptyNoEntriesBody: 'Entries are written host-internally — the executor writes a run-summary on completion. Run a workflow to populate the ledger.',
+  emptyNoEntriesBody: 'A summary appears here when a workflow run completes. Runs that used demo or placeholder output write none.',
   // memoryClient — errors
   getEntryError: 'getMemoryEntry returned {{status}}',
   deleteEntryRequestError: 'deleteMemoryEntry returned {{status}}',
-  removeMemoryConfirmBody: 'Remove this memory? The agent will no longer recall it.',
+  removeMemoryConfirmBody: 'Remove this memory? It will no longer be recalled.',
   storedUnknown: "Stored memories: unknown",
   loadFailedTitle: "Could not load these memories",
   loadFailedBody: "This is a failed read, not an empty memory — anything stored is still there.",

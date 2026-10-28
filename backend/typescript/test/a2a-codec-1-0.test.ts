@@ -12,6 +12,14 @@
  *     OpenWOP envelope, which §D.7 forbids and no consumer would notice.
  *
  * Each assertion below is the negative form of one of those.
+ *
+ * Tracker TST-BG1-3. Red when (probe-witnessed, wave 58): `fromWireState10`
+ * coerces an unknown value; the stored↔wire table loses its bijection;
+ * `decodePart10` reads `kind`; `messageText10` inlines a url part; the interrupt
+ * carrier leaks onto a non-interrupt state; the status event grows `final`;
+ * `projectPeerError10` copies peer detail, lets `supportedVersions` cross on a
+ * non-version reason, ignores the ErrorInfo `@type`, drops the numeric-code
+ * fallback or restates an unknown reason; `errorData10` drops `domain`.
  */
 
 import { describe, expect, it } from 'vitest';

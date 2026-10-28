@@ -9,9 +9,13 @@
  * explicit, answerable ("why that one?"), and impossible to mistake for the
  * board's own arrangement.
  *
- * Read-only, and deliberately not a weights editor: weights live in Priority
- * Matrix's existing criteria-set editor (ADR 0534 matrix row 10). This panel
- * explains a decision; it never makes one.
+ * Read-only, and deliberately not a weights editor (the weights are a server
+ * constant with no editor — ADR 0963 D7). This panel explains a decision; it
+ * never makes one.
+ *
+ * ADR 0963 D3 — cards HELD after a stopped or failed run are listed separately:
+ * the agent will not take them again on its own, and the release is the card's
+ * own note, so the panel says where to go rather than offering a second control.
  *
  * Renders nothing at all when the feature is off for the workspace — an off
  * feature is not an empty state, and showing "nothing queued" would be a lie
@@ -23,6 +27,15 @@ import { Button } from '../ui/Button.js';
 import { SkeletonRows } from '../ui/Skeleton.js';
 import { getBoardRanking, type RankedCard, type RankingResult } from './workSelectionClient.js';
 import { Notice } from '../ui/Notice.js';
+
+/** Bring a board card into view and focus it, so "release it on the card"
+ *  is one click away. A card that is not rendered (another tab) is a no-op. */
+function showCard(cardId: string): void {
+  const el = document.querySelector<HTMLElement>(`[data-card-id="${CSS.escape(cardId)}"]`);
+  if (!el) return;
+  el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  el.focus({ preventScroll: true });
+}
 
 /** Numbering is real information here — it is the agent's actual sequence, not
  *  decoration — so the rank is rendered as the row's leading element. */
@@ -110,23 +123,42 @@ export function AgentUpNextPanel({ boardId, refreshSignal }: {
       </section>
     );
   }
-  const ranked = result.ranked;
-  if (ranked.length === 0) return null;
+  const { ranked, held } = result;
+  if (ranked.length === 0 && held.length === 0) return null;
 
   return (
     <section className="surface-card u-grid u-gap-2" aria-labelledby="upnext-heading">
       <h3 id="upnext-heading" className="u-m-0 u-fs-15">{t('upNextTitle')}</h3>
-      <p className="muted u-m-0 u-fs-13">{t('upNextCount', { count: ranked.length })} {t('upNextHelp')}</p>
-      <ol className="upnext-list u-grid u-gap-2">
-        {ranked.map((card) => (
-          <RankRow
-            key={card.cardId}
-            card={card}
-            expanded={openId === card.cardId}
-            onToggle={() => setOpenId(openId === card.cardId ? null : card.cardId)}
-          />
-        ))}
-      </ol>
+      {ranked.length > 0 ? (
+        <>
+          <p className="muted u-m-0 u-fs-13">{t('upNextCount', { count: ranked.length })} {t('upNextHelp')}</p>
+          <ol className="upnext-list u-grid u-gap-2">
+            {ranked.map((card) => (
+              <RankRow
+                key={card.cardId}
+                card={card}
+                expanded={openId === card.cardId}
+                onToggle={() => setOpenId(openId === card.cardId ? null : card.cardId)}
+              />
+            ))}
+          </ol>
+        </>
+      ) : null}
+      {held.length > 0 ? (
+        <div className="u-grid u-gap-1" role="group" aria-labelledby="upnext-held-heading">
+          <h4 id="upnext-held-heading" className="u-m-0 u-fs-13">{t('upNextHeldTitle')}</h4>
+          <p className="muted u-m-0 u-fs-13">{t('upNextHeldHelp')}</p>
+          <ul className="upnext-list u-grid u-gap-1">
+            {held.map((card) => (
+              <li key={card.cardId}>
+                {/* The release is on the card itself (ADR 0963 D3) — take the
+                    person there rather than offering a second control here. */}
+                <Button variant="quiet" size="sm" onClick={() => showCard(card.cardId)}>{card.title}</Button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
     </section>
   );
 }

@@ -49,8 +49,12 @@ import { startWebhookDeliveryWorker, type WebhookDeliveryWorker } from '../src/h
 import type { Storage } from '../src/storage/storage.js';
 import { bareRunId } from './support/bareRunId.js';
 
-/** Dead subscribers. With the healthy one this is exactly `CLAIM_BATCH` (5), so
- *  all of them share ONE claimed batch — the unit WHD-1 was about. */
+/** Dead subscribers. With the healthy one that is five subscriptions. The running
+ *  worker is the ADR 0752 lane dispatcher (`createWebhookDispatcher`): one lane per
+ *  subscription (`onePerSubscription`) and a capacity of at least nine
+ *  (`WEBHOOK_MIN_IN_FLIGHT`), so all five attempts are in flight at once. The
+ *  regression this file catches is a dispatcher that walks them one at a time
+ *  (WHD-1's sequential batch); probe `8fw5g4-whd3-serial` cuts the capacity to 1. */
 const DEAD_SUBSCRIBERS = 4;
 /**
  * The bound on "run created → healthy subscriber holds the delivery".

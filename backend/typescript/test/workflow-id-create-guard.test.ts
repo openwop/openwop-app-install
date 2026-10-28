@@ -37,6 +37,13 @@ describe('ADR 0794 — tenant routes create only client-minted origins', () => {
       return { status: res.status, body: (await res.json().catch(() => undefined)) as Record<string, unknown> | undefined };
     };
   }
+  /** The route's refusal for a write-protected id: a UNIFORM not-found (the id's
+   *  existence is not disclosed), asserted literally so a route-miss 404 or any
+   *  other refusal cannot satisfy it (`routes/workflows.ts` POST handler). */
+  const expectRefused = (r: { status: number; body: Record<string, unknown> | undefined }, id: string): void => {
+    expect(r.status, id).toBe(404);
+    expect(r.body).toEqual({ error: 'workflow_not_found', message: 'workflow not found', details: { workflowId: id } });
+  };
   const def = (workflowId: string) => ({ workflowId, metadata: { name: 'x' }, nodes: [{ nodeId: 'a', typeId: 'core.noop', config: {} }], edges: [] });
 
   let mallory: ReturnType<typeof client>;
@@ -56,6 +63,7 @@ describe('ADR 0794 — tenant routes create only client-minted origins', () => {
   it('the origins the browser mints are creatable', async () => {
     for (const id of [blankWorkflowId(), dupWorkflowId()]) {
       expect((await mallory('POST', '/host/openwop-app/workflows', def(id))).status, id).toBe(201);
+      expect((await getRegisteredWorkflowAsync(id))?.workflowId, `${id} must have been registered`).toBe(id);
     }
   });
 
@@ -64,14 +72,14 @@ describe('ADR 0794 — tenant routes create only client-minted origins', () => {
     const victimSub = subWorkflowId('org:victim', 'review.step', '1.0.0');
     const victimCadence = cadenceWorkflowId('org:victim', 'strategy.weekly-checkin');
     for (const id of [victimSub, victimCadence]) {
-      expect((await mallory('POST', '/host/openwop-app/workflows', def(id))).status, id).toBe(404);
+      expectRefused(await mallory('POST', '/host/openwop-app/workflows', def(id)), id);
       expect(await getRegisteredWorkflowAsync(id), `${id} must not have been registered`).toBeFalsy();
     }
   });
 
   it('a client cannot choose a copy or fork id either', async () => {
     for (const id of [copyWorkflowId('approvals.request-sign-off'), forkWorkflowId('wf.seed.digest')]) {
-      expect((await mallory('POST', '/host/openwop-app/workflows', def(id))).status, id).toBe(404);
+      expectRefused(await mallory('POST', '/host/openwop-app/workflows', def(id)), id);
       expect(await getRegisteredWorkflowAsync(id)).toBeFalsy();
     }
   });

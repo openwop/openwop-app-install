@@ -3,12 +3,23 @@
  * The Cloud Run image does not bundle the SPA dist, so the shell is fetched
  * from Hosting's static /index.html and TTL-cached; a refresh failure serves
  * the last-good shell (stale beats broken); a non-HTML body is never cached.
+ *
+ * TST-BQR-7. TTL expiry is driven by faking ONLY `Date` (the refresh deadline
+ * `setTimeout` stays real). Red when: every request re-fetches (TTL ignored);
+ * a failed refresh drops the last-good shell; a non-2xx or a non-HTML body is
+ * cached; the refresh stops sending If-None-Match, or treats a 304 as a
+ * failure (asserted via the absence of `spa_shell_fetch_failed`); the
+ * in-flight-refresh WEDGE bound (`SHELL_REFRESH_WEDGE_MS`, the guard that
+ * holds 'a refresh that never settles…') is removed; the in-request await
+ * loses its `SHELL_REFRESH_AWAIT_MS` deadline (the BOUNDED-wait case) or
+ * stops awaiting (the IN-REQUEST case); the default TTL is not 60 s.
+ * Honest ceiling: the bounded-wait case measures a real ~1 s deadline.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/index.js';
-import { __expireShellRefreshForTests, __resetShellCacheForTests } from '../src/features/publishing/routes.js';
+import { __expireShellRefreshForTests, __resetShellCacheForTests, __shellTtlMsForTests } from '../src/features/publishing/routes.js';
 
 let PORT = 0; let server: http.Server;
 let shellServer: http.Server; let SHELL_URL = '';
@@ -47,7 +58,14 @@ afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
   await new Promise<void>((res) => shellServer.close(() => res()));
 });
+/** Age every cached shell past a 1 s TTL without sleeping (fake Date only). */
+function lapseTtl(): void {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(Date.now() + 1_100);
+}
+
 afterEach(() => {
+  vi.useRealTimers();
   delete process.env.OPENWOP_SPA_SHELL_URL;
   delete process.env.OPENWOP_SPA_SHELL_TTL_S;
   __resetShellCacheForTests();
@@ -84,11 +102,11 @@ describe('ADR 0384 — shell-from-URL', () => {
     process.env.OPENWOP_SPA_SHELL_TTL_S = '1';
     expect((await humanGet('/')).body).toContain('SHELL v1');
     shellStatus = 500; // origin breaks
-    await new Promise((r) => setTimeout(r, 1100)); // TTL expires
-    const stale = await humanGet('/');
-    expect(stale.status).toBe(200); // refresh is fire-and-forget; stale serves
+    lapseTtl(); // TTL expires
+    const stale = await humanGet('/'); // the refresh runs (awaited) and fails
+    expect(shellHits).toBe(2);
+    expect(stale.status).toBe(200); // stale serves
     expect(stale.body).toContain('SHELL v1');
-    await new Promise((r) => setTimeout(r, 50)); // let the failed refresh settle
     expect((await humanGet('/')).body).toContain('SHELL v1'); // last-good retained
   });
 
@@ -126,10 +144,22 @@ describe('ADR 0384 — shell staleness window', () => {
     expect((await humanGet('/')).body).toContain('SHELL v1');
     expect(condHits).toBe(0); // first fetch is unconditional — nothing to validate against
 
-    await new Promise((r) => setTimeout(r, 1100)); // TTL lapses
-    await humanGet('/');                            // triggers the refresh
-    await new Promise((r) => setTimeout(r, 100));   // fire-and-forget settles
-    expect(condHits).toBeGreaterThan(0);            // it sent If-None-Match
+    const lines: string[] = [];
+    const write = process.stdout.write.bind(process.stdout);
+    const spy = vi.spyOn(process.stdout, 'write').mockImplementation((chunk: string | Uint8Array, ...rest: unknown[]) => {
+      lines.push(String(chunk));
+      return write(chunk, ...(rest as []));
+    });
+    try {
+      lapseTtl();                                   // TTL lapses
+      await humanGet('/');                          // the refresh runs in-request
+      expect(condHits).toBe(1);                     // it sent If-None-Match → 304
+      // A 304 is a SUCCESSFUL revalidation, not a failure that happens to keep
+      // the last-good body.
+      expect(lines.some((l) => l.includes('spa_shell_fetch_failed'))).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
     expect((await humanGet('/')).body).toContain('SHELL v1'); // 304 kept the body
   });
 
@@ -142,9 +172,7 @@ describe('ADR 0384 — shell staleness window', () => {
     // A frontend deploy: new shell, new validator (and the old assets are gone).
     shellBody = '<!doctype html><html><head></head><body>SHELL v2</body></html>';
     shellEtag = 'W/"v2"';
-    await new Promise((r) => setTimeout(r, 1100));
-    await humanGet('/');
-    await new Promise((r) => setTimeout(r, 100));
+    lapseTtl();
     expect((await humanGet('/')).body).toContain('SHELL v2'); // stale shell replaced
   });
 
@@ -154,7 +182,6 @@ describe('ADR 0384 — shell staleness window', () => {
     expect((await humanGet('/')).body).toContain('SHELL v1');
     // The default is the outage ceiling — assert it directly rather than trust
     // the comment: a 61s-old cache must be considered expired.
-    const { __shellTtlMsForTests } = await import('../src/features/publishing/routes.js');
     expect(__shellTtlMsForTests()).toBe(60_000);
   });
 });
@@ -183,7 +210,7 @@ describe('ADR 0384 — a starved refresh must not wedge the cache (2026-08-08)',
     // A frontend deploy lands, and the very next refresh is starved.
     shellBody = '<!doctype html><html><head></head><body>SHELL v2</body></html>';
     shellHang = true;
-    await new Promise((r) => setTimeout(r, 1100));
+    lapseTtl();
     // This request opens a refresh that will never settle. It must still answer
     // (with the last-good shell) rather than hang on the origin.
     expect((await humanGet('/')).body).toContain('SHELL v1');
@@ -193,8 +220,7 @@ describe('ADR 0384 — a starved refresh must not wedge the cache (2026-08-08)',
     // forever. It must now attempt again once the wedge bound lapses.
     shellHang = false;
     __expireShellRefreshForTests();
-    await new Promise((r) => setTimeout(r, 1100));
-    await humanGet('/');
+    vi.setSystemTime(Date.now() + 1_100);
     expect((await humanGet('/')).body).toContain('SHELL v2');
   });
 
@@ -203,10 +229,10 @@ describe('ADR 0384 — a starved refresh must not wedge the cache (2026-08-08)',
     process.env.OPENWOP_SPA_SHELL_TTL_S = '1';
     await humanGet('/');
     shellHang = true;
-    await new Promise((r) => setTimeout(r, 1100));
-    const t0 = Date.now();
+    lapseTtl();
+    const t0 = performance.now();
     const res = await humanGet('/');
-    const waited = Date.now() - t0;
+    const waited = performance.now() - t0;
     expect(res.body).toContain('SHELL v1');       // last-good, not a 5xx
     // Bounded by SHELL_REFRESH_AWAIT_MS (1s), NOT the 5s fetch abort.
     expect(waited).toBeLessThan(3000);
@@ -222,7 +248,7 @@ describe('ADR 0384 — a starved refresh must not wedge the cache (2026-08-08)',
     expect((await humanGet('/')).body).toContain('SHELL v1');
     shellBody = '<!doctype html><html><head></head><body>SHELL v2</body></html>';
     shellEtag = null;
-    await new Promise((r) => setTimeout(r, 1100));
+    lapseTtl();
     expect((await humanGet('/')).body).toContain('SHELL v2');
   });
 });

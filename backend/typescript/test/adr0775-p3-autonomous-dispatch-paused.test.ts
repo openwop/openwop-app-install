@@ -4,9 +4,14 @@
  * honoured the switch; a schedule, a scheduled chat, a follow-up and an approved
  * proposal all kept dispatching a paused agent.
  *
- * The schedule witnesses call the daemon's real `fireJob` with deps that cannot
- * start a run: a fire the gate lets through fails later at dispatch, so the skip
- * reason says which side of the gate the fire landed on.
+ * The schedule witnesses call the daemon's real `fireJob` with the app's real
+ * deps and a workflow id that does not resolve: a fire the gate lets through ends
+ * `workflow-unresolved`, so the skip reason says which side of the gate it landed on.
+ *
+ * Red when (wave 60 probes, tracker TST-BRC-1): the daemon's `agent-paused` skip is
+ * dropped; the verdict stops reading `enabled`; `jobAgentRef` reorders its sources;
+ * the verdict stops reverse-scanning a registry agent id to its roster member; or the
+ * approval claim stops refusing a paused member before its lock.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -15,7 +20,7 @@ import { createApp } from '../src/index.js';
 import { fireJob } from '../src/host/scheduleDaemon.js';
 import { getJob, registerJob } from '../src/host/schedulingService.js';
 import { createRosterEntry, updateRosterEntry } from '../src/host/rosterService.js';
-import { createApproval } from '../src/host/approvalService.js';
+import { createApproval, listApprovals } from '../src/host/approvalService.js';
 import { autonomousDispatchVerdict, jobAgentRef } from '../src/host/autonomousDispatchPolicy.js';
 import type { StartRunDeps } from '../src/host/runStarter.js';
 
@@ -28,7 +33,7 @@ beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'p3', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  deps = { storage: app.locals.storage } as unknown as StartRunDeps;
+  deps = { storage: app.locals.storage, hostSuite: app.locals.hostSuite };
   await new Promise<void>((res) => {
     server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
   });
@@ -70,7 +75,8 @@ describe('scheduled fires skip a paused roster agent', () => {
 
     await updateRosterEntry(T, rosterId, { enabled: true });
     const after = await fireJob(deps, (await getJob(jobId))!, { trigger: 'schedule', applyBudget: false });
-    expect(after).not.toEqual({ skipped: 'agent-paused' });
+    // Past the gate: the dispatch itself is what ends it (the fixture workflow does not resolve).
+    expect(after).toEqual({ skipped: 'workflow-unresolved' });
   });
 
   it('a scheduled chat or follow-up (the agent named only in the run inputs) is skipped too', async () => {
@@ -92,7 +98,7 @@ describe('scheduled fires skip a paused roster agent', () => {
 
   it('a job that runs no roster agent is not gated', async () => {
     expect(await autonomousDispatchVerdict(T, 'core.openwop.agents.not-on-any-roster')).toEqual({ allowed: true });
-    expect(await fire({ jobId: `j-p3-none-${n++}`, tenantId: T, cronExpr: '* * * * *', workflowId: 'wf.p3' })).not.toEqual({ skipped: 'agent-paused' });
+    expect(await fire({ jobId: `j-p3-none-${n++}`, tenantId: T, cronExpr: '* * * * *', workflowId: 'wf.p3' })).toEqual({ skipped: 'workflow-unresolved' });
   });
 });
 
@@ -117,6 +123,8 @@ describe('approving a paused agent\'s proposal', () => {
     const refused = await call('POST', `/host/openwop-app/approvals/${encodeURIComponent(approval.approvalId)}/claim`, {});
     expect(refused.status).toBe(409);
     expect((refused.body.details as { reason?: string } | undefined)?.reason).toBe('agent_paused');
+    // The refusal took no lock: the approval is still pending.
+    expect((await listApprovals(tenantId, 'pending')).map((a) => a.approvalId)).toContain(approval.approvalId);
 
     // Resumed, the claim passes the gate (and stops at the next check: this
     // fixture's workflow does not resolve). Still pending proves the refusal

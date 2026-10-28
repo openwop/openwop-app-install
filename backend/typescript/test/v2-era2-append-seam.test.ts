@@ -14,6 +14,12 @@ import { createApp } from '../src/index.js';
  * `agent.reasoning-delta` is the suite's witness type because the codemap
  * RENAMES it (v1 `agent.reasoning.delta`) — an identity row would pass whether
  * or not the writer rule held.
+ *
+ * DOUBLE GUARD (named, grade-tests wave 63): a foreign tenant's seeded run is
+ * fenced TWICE — `fromWireRunId` refuses the bound id's tenant segment before any
+ * lookup, and the handler then re-checks `run.tenantId !== tenant`. Removing the
+ * second check alone stays green (probe 8fw4g4-app-tenant, vacuous by design);
+ * breaking BOTH reds the foreign-tenant leg (probe 8fw4g4-app-tenant-both-r2).
  */
 let server: Server;
 let base: string;
@@ -90,12 +96,18 @@ describe('appendEra2Event — the writer rule, witnessed through the production 
     expect(r.status, 'the seam must not be able to inject into a real run').toBe(404);
     const unknown = await append({ runId: 'append-tenant/00000000-0000-4000-8000-000000000000', type: V2_NAME, payload: {} });
     expect(unknown.status).toBe(404);
-    expect(unknown.json?.error ?? (unknown.json as { code?: string } | null)?.code).toBe(r.json?.error ?? (r.json as { code?: string } | null)?.code);
+    // Indistinguishable from an unknown run, compared against a LITERAL code (the seam's `run_not_found` travels as the registered v2 `not_found`).
+    expect(r.json?.error).toBe('not_found');
+    expect(unknown.json?.error).toBe('not_found');
   });
 
   it("another tenant's seeded run is 404", async () => {
     const theirs = await seed('running', OTHER_KEY);
-    expect((await append({ runId: theirs, type: V2_NAME, payload: {} })).status).toBe(404);
+    const r = await append({ runId: theirs, type: V2_NAME, payload: {} });
+    expect(r.status).toBe(404);
+    expect(r.json?.error).toBe('not_found');
+    // Positive control: the owner CAN append to the same run.
+    expect((await append({ runId: theirs, type: V2_NAME, payload: { agentId: 'conformance', delta: 'x', sequence: 0 } }, OTHER_KEY)).status).toBe(202);
   });
 
   it('a terminal run is 409 run_terminal', async () => {
@@ -110,7 +122,11 @@ describe('appendEra2Event — the writer rule, witnessed through the production 
     for (const type of ['not.a.type', V1_NAME, 'openwop-app.a2ui-surface']) {
       const r = await append({ runId, type, payload: {} });
       expect(r.status, `${type} must be refused`).toBe(400);
+      expect(r.json?.error).toBe('validation_error');
+      expect(String(r.json?.message), `${type} is refused by the TYPE check`).toContain('type must be a v2 event type name');
     }
-    expect((await append({ runId, type: V2_NAME, payload: {}, extra: 1 })).status, 'closed-world body').toBe(400);
+    const closed = await append({ runId, type: V2_NAME, payload: {}, extra: 1 });
+    expect(closed.status, 'closed-world body').toBe(400);
+    expect(String(closed.json?.message)).toContain('unexpected field(s): extra');
   });
 });

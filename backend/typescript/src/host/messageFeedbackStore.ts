@@ -23,6 +23,7 @@
  */
 
 import { DurableCollection } from './hostExtPersistence.js';
+import type { ServedModel } from './turnAttribution.js';
 import { sanitizeFreeText } from '../byok/textRedaction.js';
 import { registerSubjectEraser } from './subjectErasure.js';
 import { subjectKeyForms } from './subjectErasureRedaction.js';
@@ -37,6 +38,15 @@ export interface MessageFeedback {
   subjectRef: string;
   rating: FeedbackRating;
   reason?: string;
+  /** ADR 0986 D2 — what answered the rated turn, stamped by the SERVER from the
+   *  exchange's attribution row at write. Absent ⇒ the rating cannot be
+   *  attributed to a model (never inferred from client-written message meta). */
+  attribution?: ServedModel;
+  /** The conversation run that produced the rated turn (with `attribution`). */
+  runId?: string;
+  /** ADR 0986 — the attribution lookup ran at write and found no row. Absent on a
+   *  row recorded before ADR 0986, which the leaderboard looks up once more. */
+  attributionChecked?: true;
   createdAt: string;
   updatedAt: string;
 }
@@ -59,6 +69,7 @@ export async function setMessageFeedback(input: {
   subjectRef: string;
   rating: FeedbackRating;
   reason?: string;
+  attribution?: { served: ServedModel; runId: string } | null;
 }): Promise<MessageFeedback> {
   const now = new Date().toISOString();
   const existing = await feedback.get(`${input.tenantId}:${input.conversationId}:${input.messageId}:${input.subjectRef}`);
@@ -72,6 +83,12 @@ export async function setMessageFeedback(input: {
     subjectRef: input.subjectRef,
     rating: input.rating,
     ...(reason ? { reason } : {}),
+    // A re-rate after the attribution row aged out keeps the stamp it already has.
+    ...(input.attribution
+      ? { attribution: input.attribution.served, runId: input.attribution.runId }
+      : existing?.attribution ? { attribution: existing.attribution, ...(existing.runId ? { runId: existing.runId } : {}) }
+      // Looked up at write and found nothing: the leaderboard never re-resolves it.
+      : input.attribution === null ? { attributionChecked: true as const } : {}),
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,
   };
@@ -115,9 +132,14 @@ export async function listMessageFeedbackForSession(tenantId: string, conversati
 /** DSAR eraser — drop every feedback row authored by the subject, tenant-wide. */
 export async function eraseSubjectFeedback(tenantId: string, subjectKey: string): Promise<void> {
   if (!tenantId || !subjectKey) return;
-  const { forms } = subjectKeyForms(subjectKey);
+  // ADR 0986 (EV2-11) — the route writes `userRef(actingUserOf(req))`, and a
+  // signed-in caller's id is already `user:`-shaped, so live rows carry
+  // `user:user:<id>`. No key form matched that, so a DSAR left every signed-in
+  // rating behind. The key forms include the doubled spelling (ADR 0464 correction,
+  // DSAR-DBL).
+  const match = subjectKeyForms(subjectKey).forms;
   for (const f of await feedback.listByPrefix(`${tenantId}:`)) {
-    if (forms.has(f.subjectRef)) await feedback.delete(`${f.tenantId}:${f.conversationId}:${f.messageId}:${f.subjectRef}`);
+    if (match.has(f.subjectRef)) await feedback.delete(`${f.tenantId}:${f.conversationId}:${f.messageId}:${f.subjectRef}`);
   }
 }
 

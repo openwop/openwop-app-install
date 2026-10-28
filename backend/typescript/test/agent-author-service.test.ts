@@ -8,9 +8,15 @@
  *   - persist creates through the SHARED createRosterEntry path and the agent
  *     lands DISABLED (the draft-never-auto-activate consensus)
  *   - tenant isolation: another tenant's user-agent is not in the catalog
+ *
+ * Tracker TST-BKW-4. Each case seeds its own roster state (the collision case
+ * persists its own persona), so the file is shuffle-safe. Red when the catalog
+ * stops filtering by tenant visibility, the agentId / workflow / persona-collision
+ * checks are dropped, or persist creates the agent ENABLED — each
+ * sabotage-witnessed (w65).
  */
 
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { getAgentRegistry } from '../src/executor/agentRegistry.js';
 import {
   buildAgentAuthorCatalog,
@@ -45,7 +51,7 @@ function registerForeignUserAgent(id: string, ownerTenant: string): void {
     packVersion: '0',
     toolAllowlist: [],
     ownerTenant,
-  } as Parameters<ReturnType<typeof getAgentRegistry>['register']>[0]);
+  });
 }
 
 beforeAll(async () => {
@@ -57,7 +63,6 @@ afterAll(() => {
   getAgentRegistry()._resetForTest();
   __resetHostExtPersistence();
 });
-afterEach(() => { /* roster rows are tenant-scoped per test persona names */ });
 
 describe('agent-author catalog — tenant closed world', () => {
   it('lists pack agents and HIDES another tenant’s user agent', async () => {
@@ -104,7 +109,9 @@ describe('agent-author persist — the shared path, landing disabled', () => {
   });
 
   it('a persona collision fails at VALIDATE with the model-facing message', async () => {
-    const v = await validateAgentDraft({ persona: 'Drafted One', agentId: 'test.agent-author.backing' }, { tenantId: TENANT });
+    // Seeds its OWN roster row (shuffle-safe), then collides case-insensitively.
+    await persistAgentDraft({ persona: 'Collide One', agentId: 'test.agent-author.backing' }, { tenantId: TENANT });
+    const v = await validateAgentDraft({ persona: 'collide one', agentId: 'test.agent-author.backing' }, { tenantId: TENANT });
     expect(v.ok).toBe(false);
     expect(v.errors.join(' ')).toMatch(/already exists on the roster/);
   });

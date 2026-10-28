@@ -33,6 +33,15 @@ export const ERASED_USER_REF = `user:${ERASED}`;
  * key (e.g. `crm:contact:<id>`) contributes itself verbatim, so a stripped
  * segment of an unrelated key shape can never enter the match set.
  *
+ * The set also holds the subject's `userRef()` spelling (`user:` + the key, and
+ * `user:` + the scope). `User.userId` is ITSELF `user:<hash>`
+ * (`usersService.userIdFor`), and several writers apply `userRef()` to it
+ * (`userRef(req.userId)` in the chat routes, `user:${req.userId}` in a few
+ * features), so live rows hold `user:user:<hash>`, which no other form matches.
+ * Only the key and the scope are re-prefixed, never the stripped `raw`: for an
+ * `agent:X` key, `user:X` would bridge into an unrelated person's ref (the
+ * projects-eraser F2 rule). ADR 0464 correction 2026-10-26 (DSAR-DBL).
+ *
  * - `forms`: the set to test a stored id/ref field against (`forms.has(field)`).
  * - `scope`: the `user:<id>` scope form (for stores whose KEYS embed a scope —
  *   subject memory, subject knowledge).
@@ -48,5 +57,5 @@ export function subjectKeyForms(subjectKey: string): {
   // An already-scoped key (any `prefix:` shape) is its own scope form; only a
   // bare id gets `user:`-tagged.
   const scope = m || subjectKey.includes(':') ? subjectKey : `user:${subjectKey}`;
-  return { forms: new Set([subjectKey, raw, scope]), scope, raw };
+  return { forms: new Set([subjectKey, raw, scope, `user:${subjectKey}`, `user:${scope}`]), scope, raw };
 }

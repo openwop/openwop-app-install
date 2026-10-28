@@ -411,6 +411,7 @@ export function mapCategory(raw: string): NodeCategory {
     case 'flow':
     case 'control':
     case 'integration':
+    case 'journey': // ADR 0955 P5 — declared by the journey nodes' `x-paletteCategory`
       return raw;
     case 'canvas':
       return 'data';
@@ -429,6 +430,8 @@ function accentFor(category: NodeCategory): string {
     case 'ai': return 'var(--cat-ai)';
     case 'control': return 'var(--cat-control)';
     case 'integration': return 'var(--cat-integration)';
+    // ADR 0955 P5 — journeys reuse the flow accent (no new token: a journey is a flow of sends).
+    case 'journey': return 'var(--cat-flow)';
   }
 }
 

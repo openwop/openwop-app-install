@@ -5,6 +5,10 @@
  * including the two branches no route can reach: a store that THROWS (must
  * propagate, never answer "foreign" — a resume would read that as a permanent
  * "workflow gone") and a process with no host-ext store bound at all.
+ *
+ * Tracker TST-BLO-3. Sabotage-witnessed (w62): red when an owned id is not
+ * short-circuited, another tenant's authorship is ignored, the shared-id exit is
+ * removed, a store error is swallowed, or the no-store test exit is removed.
  */
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { initHostExtPersistence, __resetHostExtPersistence } from '../src/host/hostExtPersistence.js';

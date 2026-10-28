@@ -4,13 +4,18 @@
  * walkthroughProgress (tenant-level). Verifies the projection, the transient/non-tour
  * exclusions, tenant isolation, AND the toggle gate through the real bundle
  * (a guided-tours-OFF tenant gets host_capability_disabled; ON resolves).
+ *
+ * Order-independent (8f W4): the gate case's toggle flip is host-wide, so it is
+ * restored in afterEach. Witnessed: wsu-owned-leak, wsu-untagged,
+ * wsu-system-dropped, wsu-transient, wsu-projection-leak, wsu-acting-user.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { buildHostSurfaceBundle } from '../src/host/inMemorySurfaces.js';
 import { buildWalkthroughsSurface } from '../src/features/walkthroughs/surface.js';
+import type { FeatureSurface } from '../src/host/featureSurfaces.js';
 import { putWalkthroughProgress } from '../src/features/walkthroughs/progressStore.js';
 import { registerWorkflow } from '../src/host/workflowsRegistry.js';
 import { recordOwnership } from '../src/host/workflowOwnership.js';
@@ -31,6 +36,13 @@ beforeAll(async () => {
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { void (server.address() as AddressInfo); res(); }); });
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
+// `saveConfig(config, savedBy)` is NOT tenant-scoped: the gate case flips the
+// `walkthroughs` toggle for the whole host. Put the shipped default back after
+// every case, so no other case (in any order) inherits a flipped toggle.
+afterEach(async () => {
+  const d = getToggleDefault('walkthroughs');
+  if (d) await saveConfig(d, 'test');
+});
 
 interface WalkthroughsOut { walkthroughs: Array<{ walkthroughId: string; name: string }> }
 interface ProgressOut { progress: Array<{ walkthroughId: string; status: string; runId: string; updatedAt: string }> }
@@ -82,8 +94,12 @@ describe('guided-tours surface (ctx.features.guidedTours) — ADR 0368 P6d', () 
     expect(noUser.progress).toEqual([]);
   });
 
-  it('the surface is toggle-gated through the real bundle: OFF ⇒ host_capability_disabled, ON ⇒ resolves', async () => {
-    const bundleFor = () => buildHostSurfaceBundle({ tenantId: 't-p6d-gate' }).features['walkthroughs'] as Record<string, (a: Record<string, unknown>) => Promise<unknown>>;
+  it('the surface is toggle-gated through the real bundle: OFF ⇒ host_capability_disabled, ON ⇒ resolves (host-wide toggle, restored)', async () => {
+    const bundleFor = (): FeatureSurface => {
+      const surface = buildHostSurfaceBundle({ tenantId: 't-p6d-gate' }).features['walkthroughs'];
+      expect(surface, 'the walkthroughs surface is bundled').toBeDefined();
+      return surface!;
+    };
     const codeOf = async (fn: () => Promise<unknown>): Promise<string | undefined> => {
       try { await fn(); return undefined; } catch (err) { return (err as { code?: string }).code; }
     };
@@ -92,11 +108,15 @@ describe('guided-tours surface (ctx.features.guidedTours) — ADR 0368 P6d', () 
     expect(await codeOf(() => off.listWalkthroughs!({}))).toBe('host_capability_disabled');
     expect(await codeOf(() => off.walkthroughProgress!({}))).toBe('host_capability_disabled');
 
-    // Enable for the tenant — the surface resolves (no gate denial).
+    // Enable the toggle (host-wide; afterEach restores it) — the surface resolves.
     const d = getToggleDefault('walkthroughs');
-    if (d) await saveConfig({ ...d, status: 'on' }, 'test');
+    expect(d, 'the walkthroughs toggle is declared').not.toBeNull();
+    await saveConfig({ ...d!, status: 'on' }, 'test');
     const on = bundleFor();
     expect(await codeOf(() => on.listWalkthroughs!({}))).toBeUndefined();
     expect(await codeOf(() => on.walkthroughProgress!({}))).toBeUndefined();
+    // …and returns the surface's real shape, not merely "did not throw".
+    const listed = as<WalkthroughsOut>(await on.listWalkthroughs!({}));
+    expect(Array.isArray(listed.walkthroughs)).toBe(true);
   });
 });

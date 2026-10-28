@@ -28,6 +28,7 @@
  */
 
 import type { Storage } from '../storage/storage.js';
+import { APPROVAL_WAIT_KEY_PREFIX, recordApprovalWaiter } from '../host/autonomyPolicy/waiters.js';
 import type { InterruptRecord, RunRecord } from '../types.js';
 import type { getSuspendManager } from './suspendManager.js';
 import type { ExecuteRunOptions, SerializedSnapshot } from './executor.js';
@@ -145,6 +146,15 @@ export async function ensureForkInterrupts(input: {
     });
     outcome.recreated.push(nodeId);
     outcome.kinds.push([nodeId, source.kind]);
+    // ADR 0942 D5 — a node waiting on an owning-kind approval (`approval:<id>`)
+    // is resumed by that approval's decision through the waiter store, which names
+    // RUNS. The fork is a new run, so it registers itself; otherwise the decision
+    // resumes only its source and the fork strands at the gate. On resume the node
+    // re-runs its chokepoint, so an attended fork still asks for its own approval.
+    const waitKey = (data && typeof data === 'object' && !Array.isArray(data)) ? (data as Record<string, unknown>).key : undefined;
+    if (source.kind === 'external-event' && typeof waitKey === 'string' && waitKey.startsWith(APPROVAL_WAIT_KEY_PREFIX)) {
+      await recordApprovalWaiter(run.tenantId, waitKey.slice(APPROVAL_WAIT_KEY_PREFIX.length), run.runId);
+    }
   }
   return outcome;
 }

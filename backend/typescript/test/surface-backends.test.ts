@@ -1,4 +1,17 @@
-import { afterEach, describe, expect, it } from 'vitest';
+/**
+ * Host-surface backend seam (ADR 0195 / ADR 0636): `OPENWOP_SURFACE_*` picks a
+ * backend per surface, an unwired selection fails the BOOT (never a silent
+ * fall back to memory), and the enterprise posture refuses an ephemeral tier
+ * unless an acknowledgement names it. What breaks each claim: a resolver that
+ * ignores the per-surface override, a `resolveSurface` that falls back to the
+ * memory factory, or a guard list that drifts from the boot's
+ * `DURABILITY_REQUIRED_SURFACES` (pinned by the SSoT parity case below,
+ * added in grade-tests wave 61 because the "every key" test the comment on
+ * ALL_KEYS promised did not exist).
+ */
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import {
   resolveBackendId,
   resolveSurface,
@@ -19,12 +32,14 @@ import { registerS3BlobAdapter } from '../src/host/blob/s3Blob.js';
 import { registerOpenSearchAdapter } from '../src/host/search/openSearchSearch.js';
 import { registerPgVectorAdapter } from '../src/host/vector/pgVectorVector.js';
 import { registerPgSqlAdapter } from '../src/host/sql/pgSql.js';
-import type { Storage } from '../src/storage/index.js';
+import { openStorage, type Storage } from '../src/storage/index.js';
 
 const SCOPE = { tenantId: 't1' } as const;
 
 /** Mirrors DURABILITY_REQUIRED_SURFACES in inMemorySurfaces.ts — the list the
- *  boot passes to both guards. Kept in sync by the "every key" test below. */
+ *  boot passes to both guards. That constant is function-local (not
+ *  importable), so the "ALL_KEYS equals the boot's list" case below PARSES it
+ *  out of the source and compares. */
 const ALL_KEYS: readonly SurfaceKey[] = [
   'kv', 'table', 'cache', 'blob', 'queue',
   'sql', 'vector', 'search', 'nosql',
@@ -33,8 +48,11 @@ const ALL_KEYS: readonly SurfaceKey[] = [
 
 /** Register exactly what `index.ts` registers at boot, in its order, with no
  *  backend selected (so the registrars' own env checks stay quiet). */
+let bootStorage: Storage;
+beforeAll(async () => { bootStorage = await openStorage('memory://'); });
+
 function wireLikeBoot(): void {
-  initDurableSurfaces({} as unknown as Storage);
+  initDurableSurfaces(bootStorage);
   registerS3BlobAdapter();
   registerOpenSearchAdapter();
   registerPgVectorAdapter();
@@ -114,6 +132,15 @@ describe('ADR 0636 — durability guard vs the adapters that actually exist', ()
   afterEach(() => {
     _resetSurfaceAdaptersForTesting();
     clearSurfaceEnv();
+  });
+
+  it('ALL_KEYS equals the boot\'s DURABILITY_REQUIRED_SURFACES (read from source, not copied)', () => {
+    const src = readFileSync(join(__dirname, '..', 'src', 'host', 'inMemorySurfaces.ts'), 'utf8');
+    const m = /const DURABILITY_REQUIRED_SURFACES: readonly SurfaceKey\[\] = \[([\s\S]*?)\];/.exec(src);
+    expect(m, 'the boot list must still be declared in inMemorySurfaces.ts').not.toBeNull();
+    const bootKeys = [...m![1]!.matchAll(/'([^']+)'/g)].map((k) => k[1]);
+    expect(bootKeys.length).toBeGreaterThan(0);
+    expect(bootKeys).toEqual([...ALL_KEYS]);
   });
 
   it('PREMISE: with the boot registrars loaded, observability is unbackable and blob has only s3', () => {

@@ -90,6 +90,16 @@ export type ScheduleSkipReason =
    *  an RFC 0058 bound (a fire gate refused it; the goal is closed by that path).
    *  Disarmed with it, so this is normally the last skip the job records. */
   | 'goal-closed'
+  /** ADR 0957 D2 — a client report's client is paused, archived or gone, or
+   *  its definition no longer exists. The slot is skipped; the job stays. */
+  | 'client-inactive'
+  /** ADR 0985 D1 — a scheduled chat's person may no longer act in the workspace, or
+   *  its reply could not land in its conversation. Asked BEFORE the run, so no model
+   *  is paid for a reply that would be refused. Restoring access resumes it. */
+  | 'target-refused'
+  /** ADR 0985 D2 — a scheduled chat's cadence fires more often than hourly (the
+   *  floor every door shares). Re-cadencing it coarser resumes it. */
+  | 'cadence-too-frequent'
   | 'no-next-fire';
 
 export interface ScheduledJob {
@@ -751,7 +761,11 @@ export async function deleteJob(jobId: string): Promise<boolean> {
 export function isErasedJob(job: ScheduledJob): boolean {
   return job.ownerUserId === ERASED
     || (job.ownerSubject?.kind === 'user' && job.ownerSubject.id === ERASED)
-    || job.metadata?.actingUserId === ERASED;
+    || job.metadata?.actingUserId === ERASED
+    // ADR 0985 D1 (architect H3) — the person who CAUSED an actorless job (a
+    // scheduled chat's creator) is erased too: the host eraser disables such a
+    // job, and this makes that terminal at every door, the claim fence included.
+    || job.metadata?.orgScopeSubject === ERASED;
 }
 
 /** Enable/disable a job. Returns the updated job, or null when not found.

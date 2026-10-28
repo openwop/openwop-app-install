@@ -8,8 +8,16 @@ import type { RunRecord } from '../src/types.js';
  * (`created_at DESC, run_id DESC`), so a page boundary given as the last
  * item's (createdAt, runId) yields pages that are disjoint and complete even
  * when several runs share a createdAt. Exercised on the sqlite adapter
- * (memory://); the Postgres query carries the same predicate with a
- * timestamptz cast and is covered by the live-adapter lane.
+ * (memory://). The Postgres query carries the same predicate with a
+ * timestamptz cast. CORRECTED (grade-tests wave 61): this used to say the
+ * Postgres side "is covered by the live-adapter lane"; it is not —
+ * `storage-adapter-parity-testcontainers` has no `listRuns` `before` case, so
+ * the Postgres keyset predicate is exercised by no test (recorded gap).
+ *
+ * The first case pages at limit 2 AND limit 3. At limit 2 the tie pair
+ * (r-c, r-b) lands together on one page, so the `run_id < beforeRunId` arm of
+ * the cursor never decides anything (8fw3g2-ks-tie-drop was vacuous in round
+ * 1). At limit 3 page 1 ends AT r-c, so r-b is reachable only through that arm.
  */
 let storage: Storage;
 const TENANT = 'keyset-tenant';
@@ -18,7 +26,8 @@ const OTHER = 'other-tenant';
 function run(id: string, createdAt: string, tenantId = TENANT): RunRecord {
   return {
     runId: id, workflowId: 'wf', status: 'completed', tenantId, createdAt, updatedAt: createdAt,
-  } as RunRecord;
+    inputs: {}, metadata: {}, configurable: {},
+  };
 }
 
 beforeAll(async () => {
@@ -36,17 +45,20 @@ beforeAll(async () => {
 
 describe('storage.listRuns — keyset `before` cursor', () => {
   it('pages newest-first with a total order, disjoint and complete, tenant-scoped', async () => {
-    const seen: string[] = [];
-    let before: { createdAt: string; runId: string } | undefined;
-    for (let page = 0; page < 10; page++) {
-      const rows = await storage.listRuns({ tenantId: TENANT, limit: 2, ...(before ? { before } : {}) });
-      if (rows.length === 0) break;
-      seen.push(...rows.map((r) => r.runId));
-      const last = rows[rows.length - 1]!;
-      before = { createdAt: last.createdAt, runId: last.runId };
+    for (const limit of [2, 3]) {
+      const seen: string[] = [];
+      let before: { createdAt: string; runId: string } | undefined;
+      for (let page = 0; page < 10; page++) {
+        const rows = await storage.listRuns({ tenantId: TENANT, limit, ...(before ? { before } : {}) });
+        if (rows.length === 0) break;
+        seen.push(...rows.map((r) => r.runId));
+        const last = rows[rows.length - 1]!;
+        before = { createdAt: last.createdAt, runId: last.runId };
+      }
+      // total order; the tie broke on run_id DESC
+      expect(seen, `limit ${limit}`).toEqual(['r-e', 'r-d', 'r-c', 'r-b', 'r-a']);
+      expect(seen, `limit ${limit}`).not.toContain('x-1'); // never another tenant's run
     }
-    expect(seen).toEqual(['r-e', 'r-d', 'r-c', 'r-b', 'r-a']); // total order; the tie broke on run_id DESC
-    expect(seen).not.toContain('x-1'); // never another tenant's run
   });
 
   it('a cursor at the oldest run yields an empty page (the end is honest, not a repeat)', async () => {

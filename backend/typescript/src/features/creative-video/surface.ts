@@ -12,7 +12,7 @@ import { hostExtStorage } from '../../host/hostExtPersistence.js';
 import { resolveOne } from '../../host/featureToggles/service.js';
 import { OpenwopError } from '../../types.js';
 import type { BrokeredEgressDeps } from '../../host/brokeredEgress.js';
-import { generateVideo, textToVideo, resolveVideoJob } from './videoService.js';
+import { generateVideo, textToVideo, imageToVideo, resolveVideoJob } from './videoService.js';
 
 /** The frontier T2V node must AND-gate the sub-toggle with its parent — the parent
  *  gates the surface's presence, this gates the nested capability (ADR 0404 §P4). */
@@ -51,6 +51,23 @@ export function buildCreativeVideoSurface(scope: BundleScope): FeatureSurface {
       const out = await textToVideo(brokerDeps(orgId), {
         tenantId, orgId,
         prompt: requireStr(args.prompt, 'prompt'),
+        ...(optStr(args.model) ? { model: optStr(args.model) } : {}),
+        ...(typeof args.durationSec === 'number' ? { durationSec: args.durationSec } : {}),
+        createdBy: scope.actingUserId ?? actor,
+      });
+      return { success: out.status !== 'failed', ...out };
+    },
+
+    // ADR 0945 D7 — animate a checked product shot or a product photo. Rides the
+    // `creative-video.t2v` sub-toggle (same provider, same spend meter).
+    imageToVideo: async (args) => {
+      const orgId = requireStr(args.orgId, 'orgId');
+      await assertT2VEnabled(tenantId);
+      const out = await imageToVideo(brokerDeps(orgId), {
+        tenantId, orgId,
+        sourceAssetId: requireStr(args.sourceAssetId, 'sourceAssetId'),
+        prompt: requireStr(args.prompt, 'prompt'),
+        ...(optStr(args.productId) ? { productId: optStr(args.productId) } : {}),
         ...(optStr(args.model) ? { model: optStr(args.model) } : {}),
         ...(typeof args.durationSec === 'number' ? { durationSec: args.durationSec } : {}),
         createdBy: scope.actingUserId ?? actor,

@@ -6,9 +6,15 @@
  * @see docs/adr/0183-manual-test-runner-feature-parity.md
  */
 import type { BackendFeature } from '../types.js';
+import { registerSubjectEraser } from '../../host/subjectErasure.js';
 import { registerManualTestsRoutes } from './routes.js';
+import { eraseManualTestRunsSubject } from './manualTestsService.js';
 
 export const manualTestsFeature: BackendFeature = {
   id: 'manual-tests',
-  registerRoutes: (deps) => registerManualTestsRoutes(deps),
+  registerRoutes: (deps) => {
+    registerManualTestsRoutes(deps);
+    // ADR 0464 correction (DSAR-DBL) — a run's verdicts and notes are the tester's own data.
+    registerSubjectEraser(eraseManualTestRunsSubject);
+  },
 };

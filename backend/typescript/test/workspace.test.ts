@@ -2,6 +2,10 @@
  * RFC 0059 — agent workspace store: CRUD, optimistic concurrency, size
  * ceiling, WCT-1 cross-owner isolation, WSR-1 redaction.
  *
+ * Sabotage-witnessed (grade-tests wave 64): dropping the tenant term from the
+ * SQLite get or list, skipping the WSR-1 scrub, loosening the size cap, and
+ * dropping If-Match each red their case (8fw5g5-ws-*).
+ *
  * @see RFCS/0059-agent-workspace.md §C/§E
  */
 
@@ -65,8 +69,11 @@ describe('RFC 0059 §C — CRUD + concurrency', () => {
   it('oversize content → 413 workspace_too_large', async () => {
     const tooBig = 'x'.repeat(WORKSPACE_MAX_FILE_BYTES + 1);
     const r = await putWorkspaceFile(storage, T, W, 'BIG.md', { content: tooBig });
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.error).toBe('workspace_too_large');
+    if (r.ok || r.error !== 'workspace_too_large') throw new Error(`expected workspace_too_large, got ${JSON.stringify(r).slice(0, 200)}`);
+    expect(r.status).toBe(413);
+    expect(r.details).toEqual({ maxBytes: 65536, providedBytes: 65537 });
+    // Refused BEFORE storage is touched: nothing was written.
+    expect(await getWorkspaceFile(storage, T, W, 'BIG.md')).toBeNull();
   });
 });
 
@@ -94,5 +101,9 @@ describe('RFC 0059 §E — WSR-1 secret redaction on write', () => {
     if (!put.ok) return;
     expect(put.file.content).not.toContain('sk-ant-api03-abcdefghijklmnop1234');
     expect(put.file.content).toContain('sk-***');
+    // "before it PERSISTS": the stored row, read back fresh, holds no secret.
+    const stored = await getWorkspaceFile(storage, T, W, 'leak.md');
+    expect(stored?.content).not.toContain('sk-ant-api03-abcdefghijklmnop1234');
+    expect(stored?.content).toContain('sk-***');
   });
 });

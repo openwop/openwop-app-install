@@ -15,9 +15,15 @@
  *     and assert BOTH of A's child rows are reached AND tenant B's survive
  *     (`listTenantConnectionIds` filters by exact `tenantId`, so B is untouched).
  *     Born-red: drop the hook registration → A's children survive the purge.
- *  2. REVOKE — the `connections-children` consumer deletes a revoked connection's
- *     children (so none orphan between revoke and teardown, keeping the teardown
- *     hook COMPLETE). Fire the revoke event → the children are gone.
+ *  2. REVOKE — the PRODUCT's `connections-children` consumer (registered by
+ *     `connectionsFeature.registerRoutes`, feature.ts) deletes a revoked
+ *     connection's children (so none orphan between revoke and teardown, keeping
+ *     the teardown hook COMPLETE). The consumer is not exported, so the case boots
+ *     the real app (createApp registers every feature) and registers no copy of
+ *     it (it only no-ops the WhatsApp sibling, which also unpairs; see the case):
+ *     an earlier version registered its own copy of the consumer, and
+ *     deleting the product's body stayed green (probe 8fw3g3-tdc-consumer was
+ *     vacuous). Fire the revoke event → the children are gone.
  *  3. WIRING — assert `feature.ts` actually registers BOTH the purge hook and the
  *     revoke consumer, so deleting either wiring fails the build.
  */
@@ -38,13 +44,13 @@ import {
   createSecretConnection,
   __resetConnectionsStore,
 } from '../src/features/connections/connectionsService.js';
-import { pairConnection, getPairing, unpair, __resetMessagingOutbound } from '../src/features/connections/messagingOutbound.js';
+import { pairConnection, getPairing, __resetMessagingOutbound } from '../src/features/connections/messagingOutbound.js';
 import {
   __setInboundSessionForTest,
-  purgeInboundSession,
   __resetInboundStore,
 } from '../src/features/connections/inboundWebhooks.js';
 import { purgeTenantConnectionChildren } from '../src/features/connections/tenantTeardown.js';
+import { createApp } from '../src/index.js';
 import {
   onConnectionRevoked,
   fireConnectionRevoked,
@@ -114,12 +120,21 @@ describe('teardown-debt connections hook — pairing + inbound-session are teard
   });
 
   it('the connections-children revoke consumer deletes a revoked connection\'s children', async () => {
-    // Register the consumer exactly as feature.ts does.
-    onConnectionRevoked('connections-children', async ({ connectionId }) => {
-      await unpair(connectionId);
-      await purgeInboundSession(connectionId);
-    });
+    // Boot the real app: createApp runs connectionsFeature.registerRoutes, which
+    // registers the product's consumer (and re-binds host-ext persistence to the
+    // app's own store, which the seed below then writes through).
+    process.env.OPENWOP_STORAGE_DSN = 'memory://';
+    await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+    // DOUBLE GUARD in the booted app: the WhatsApp feature's own revoke consumer
+    // (`cleanupWhatsAppConnection`, whatsappService.ts:134) also calls `unpair`
+    // for EVERY revoked connection, whatever its provider. With it live, deleting
+    // the connections consumer's `unpair` stayed green (round-2 probe
+    // 8fw3g3-tdc-consumer-r2 was vacuous). Its keyed slot is replaced with a no-op
+    // so the consumer under test is the only one that can delete the pairing.
+    // Nothing else is replaced, and no copy of the product consumer is registered.
+    onConnectionRevoked('whatsapp', async () => {});
     const id = await seed(A);
+    const other = await seed(B); // a sibling connection the revoke must not touch
     expect(await getPairing(id)).not.toBeNull();
     expect(await sessionRowExists(id)).toBe(true);
 
@@ -129,7 +144,9 @@ describe('teardown-debt connections hook — pairing + inbound-session are teard
 
     expect(await getPairing(id)).toBeNull();
     expect(await sessionRowExists(id)).toBe(false);
-  });
+    expect(await getPairing(other)).not.toBeNull();
+    expect(await sessionRowExists(other)).toBe(true);
+  }, 60_000);
 
   it('feature.ts wires BOTH the purge hook and the revoke consumer', () => {
     // Strip line-comments before matching: a commented-out registration still

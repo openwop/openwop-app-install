@@ -29,8 +29,12 @@ import type { Request } from 'express';
 import { isSuperadmin, isSuperadminTenant } from '../src/host/superadmin.js';
 
 /** A session: an active workspace plus the caller's own personal tenant. */
-const req = (tenantId: string, personalTenant?: string): Request =>
-  ({ tenantId, personalTenant } as unknown as Request);
+// `isSuperadmin` reads only these members. A typed partial plus ONE widening
+// cast (no `unknown` hop), so a member renamed on `Request` reds tsc here.
+function asReq(r: Partial<Request>): Request {
+  return r as Request;
+}
+const req = (tenantId: string, personalTenant?: string): Request => asReq({ tenantId, personalTenant });
 
 const OPERATOR = 'user:abc123';
 const SAML_TENANT = 'saml:acme'; // what OPENWOP_SAML_TENANT mints — many humans, one id
@@ -90,7 +94,7 @@ describe('the two branches the personal-tenant change did NOT touch', () => {
     // The conformance/admin key. It must not depend on the allowlist at all —
     // if a future refactor folds it into the tenant match, this reds.
     delete process.env.OPENWOP_SUPERADMIN_TENANTS;
-    const wildcard = { principal: { tenants: ['*'] } } as unknown as Request;
+    const wildcard = asReq({ principal: { principalId: 'admin-key', tenants: ['*'], token: 'tok' } });
     expect(isSuperadmin(wildcard)).toBe(true);
   });
 
@@ -99,7 +103,7 @@ describe('the two branches the personal-tenant change did NOT touch', () => {
     // key (ADR 0561 made scoped the default). If the check ever loosens from
     // `includes('*')` to a truthy-tenants test, this reds and that one does not.
     delete process.env.OPENWOP_SUPERADMIN_TENANTS;
-    const scoped = { principal: { tenants: ['acme'] }, tenantId: 'acme' } as unknown as Request;
+    const scoped = asReq({ principal: { principalId: 'scoped-key', tenants: ['acme'], token: 'tok' }, tenantId: 'acme' });
     expect(isSuperadmin(scoped)).toBe(false);
   });
 

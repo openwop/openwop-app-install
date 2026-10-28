@@ -16,6 +16,17 @@
  * dotted event types in camelCase (`node.started` → `nodeStarted`). An event with
  * no `$defs` match is TOLERATED, per the schema description ("Unknown event types
  * MUST be tolerated").
+ *
+ * Breaks it (round-1 probes, witnessed): `node.started` without `typeId`
+ * (8fw2g2-rep-typeid), `replay.diverged` without `sourceRunId` (rep-diverged).
+ *
+ * CEILING — the file is exactly as strict as the corpus `$defs`, no stricter.
+ * `$defs/runCompleted` has no `required` and `additionalProperties: true`, so
+ * renaming the payload key `outputs` → `output` is schema-LEGAL and stays green
+ * (round-1 8fw2g2-rep-completed VACUOUS — not a test defect; tightening it is a
+ * corpus question). What the def DOES pin is `outputs` being an object
+ * (`_outputsObject`), so the run.completed probe is re-aimed at the scalar wrap
+ * (8fw2g2-rep-outputs-wrap-r2).
  */
 import { describe, expect, it, beforeEach } from 'vitest';
 import { join } from 'node:path';
@@ -221,7 +232,7 @@ describe('run-event payloads conform to run-event-payloads.schema.json', () => {
 
     const result = await detectAndRecordReplayDivergence(
       { listEvents: async (runId) => (runId === 'src-1' ? src : rep) },
-      { append: async (e) => { appended.push(e as { type: string; payload: unknown }); } },
+      { append: async (e) => { appended.push(e); } },
       'src-1',
       'rep-1',
       0,

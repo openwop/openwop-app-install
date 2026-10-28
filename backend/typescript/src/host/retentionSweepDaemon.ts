@@ -22,7 +22,7 @@ import { defaultRetentionDays } from '../storage/runRetentionStamp.js';
 import { createLogger } from '../observability/logger.js';
 import { getInstanceId } from './instanceId.js';
 import { getGovernancePolicy, listGovernedTenants, type GovernancePolicy } from './governanceService.js';
-import { countRetained, purgeRetained, type DryRunCount } from './retentionPurger.js';
+import { countRetained, purgeRetained, runDefaultWindowSweeps, type DryRunCount } from './retentionPurger.js';
 import type { DataClassification } from './dataClassification.js';
 import { purgeTenantHostExt } from './hostExtPersistence.js';
 import { purgeTenantOverrides } from './featureToggles/service.js';
@@ -574,6 +574,13 @@ export function startRetentionSweepDaemon(deps: RetentionSweepDeps): RetentionSw
       await blankTerminalDeliverySecretBacklog(deps.storage)
         .then((n) => { if (n > 0) log.info('webhook_delivery_secret_copies_blanked', { cleared: n }); })
         .catch((err) => log.warn('webhook delivery secret blank tick error', { error: err instanceof Error ? err.message : String(err) }));
+      // ADR 0951 D3 — stores whose window is a property of the data (session
+      // recordings: 30 days). Default ON like the TTLs: an unconfigured host must
+      // not keep a recording forever. Skipped under a dry run (it deletes blobs).
+      if (!dryRun) {
+        await runDefaultWindowSweeps().catch((err) =>
+          log.warn('default window sweep tick error', { error: err instanceof Error ? err.message : String(err) }));
+      }
       // ADR 0380 §3 — registered append-only kv stores (fail-open per store inside).
       await __runKvAgeOutOnce(deps.storage).catch((err) =>
         log.warn('kv age-out tick error', { error: err instanceof Error ? err.message : String(err) }));

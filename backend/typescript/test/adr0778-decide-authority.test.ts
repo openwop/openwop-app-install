@@ -12,8 +12,35 @@
  *  - D6 (`APWF-6`): one person was two ledger keys across the two lanes (and an
  *    unbound OIDC caller was refused outright on the node route).
  *  - D8: each review says whether THIS caller can decide it.
- *  - D3: a cancelled run's gate leaves the inbox, and the v1 node route keeps
- *    its `410`, the token route its `409`.
+ *  - D3: a cancelled run's gate leaves the inbox, and the node route and the
+ *    token route both answer `409`.
+ *
+ * Tracker: TST-BDC-1 (docs/steward/TEST-ASSESSMENT.md).
+ *
+ * Red when (sabotage-witnessed, wave 60): `requireInterruptDecider` admits a
+ * caller without the floor, or applies it to a clarification; `/reviews` drops
+ * its `requireProtocolScope('approvals:respond')` (the read-only key's refusal
+ * is then the floor's `forbidden_scope`, not the scope gate's `forbidden`) or
+ * both of its guards; the interrupt listing hands an approval token to a
+ * caller below the floor; `canDecide` stops reading the floor; `/reviews`
+ * votes as a different identity than the node route; the answer form leaks a
+ * field outside its allowlist, keeps a resolved review's form, or gives an
+ * unanswerable kind a form; the token route answers a cancelled run's gate
+ * with the generic resolved 409.
+ *
+ * Double guards (recorded, wave 60):
+ *  - the read-only key on `/reviews` is refused by `requireProtocolScope`
+ *    (code `forbidden`) and, behind it, by `requireInterruptDecider` (code
+ *    `forbidden_scope`); the case asserts the OUTER code, and a probe that
+ *    removes both is witnessed too.
+ *  - the floor's refusal code is spelled per surface: `forbidden_scope` on the
+ *    host-extension `/reviews` route, `openwop-app.forbidden_scope` on the
+ *    protocol node route (non-wire codes are host-prefixed there).
+ *  - a cancelled run's gate leaves the inbox because `runCancel.ts` CLOSES it
+ *    (outer; witnessed in `adr0778-decide-integrity`, "cancel resolves the run")
+ *    and `reviewProjection` also drops gates on terminal runs. Over HTTP a
+ *    cancel always closes the gate, so the projection filter alone cannot be
+ *    reached here.
  *
  * @see docs/adr/0778-interrupts-inbox-decide-integrity.md
  */
@@ -87,12 +114,24 @@ afterAll(async () => {
   for (const k of ['OPENWOP_OIDC_ISSUER', 'OPENWOP_OIDC_AUDIENCE', 'OPENWOP_OIDC_JWKS_URL']) delete process.env[k];
 });
 
-interface Res<T = any> { status: number; body: T }
-/** A bearer-carrying client with a cookie jar (the SPA shape: bearer + __session). */
-type Client = { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; patch: (p: string, b?: unknown) => Promise<Res>; put: (p: string, b?: unknown) => Promise<Res>; del: (p: string) => Promise<Res> };
+interface Res<T = unknown> { status: number; body: T }
+/** The error envelope (`{ error: <code>, message, details? }`). */
+interface ErrBody { error?: string; message?: string; details?: Record<string, unknown> }
+interface RunBody { status?: string }
+interface InterruptRow { interruptId: string; nodeId: string; token?: string }
+interface InterruptList { interrupts?: InterruptRow[] }
+/** A bearer-carrying client with a cookie jar (the SPA shape: bearer + __session).
+ *  Each call site names the body shape it reads. */
+type Client = {
+  get: <T = ErrBody>(p: string) => Promise<Res<T>>;
+  post: <T = ErrBody>(p: string, b?: unknown) => Promise<Res<T>>;
+  patch: <T = ErrBody>(p: string, b?: unknown) => Promise<Res<T>>;
+  put: <T = ErrBody>(p: string, b?: unknown) => Promise<Res<T>>;
+  del: <T = ErrBody>(p: string) => Promise<Res<T>>;
+};
 function client(token: string): Client {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: {
@@ -112,10 +151,16 @@ function client(token: string): Client {
       const m = /(__session=[^;]+)/.exec(sc);
       if (m) cookie = m[1];
     }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
+    const out: unknown = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    return { status: res.status, body: out as T };
   };
-  return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b), put: (p, b) => call('PUT', p, b), del: (p) => call('DELETE', p) };
+  return {
+    get: <T = ErrBody>(p: string) => call<T>('GET', p),
+    post: <T = ErrBody>(p: string, b?: unknown) => call<T>('POST', p, b),
+    patch: <T = ErrBody>(p: string, b?: unknown) => call<T>('PATCH', p, b),
+    put: <T = ErrBody>(p: string, b?: unknown) => call<T>('PUT', p, b),
+    del: <T = ErrBody>(p: string) => call<T>('DELETE', p),
+  };
 }
 
 
@@ -137,7 +182,7 @@ async function sharedWorkspace(tag: string): Promise<{ ws: string; owner: Client
   const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   const owner = await oidcCaller(`ad-${tag}-owner-${stamp}`);
   const viewer = await oidcCaller(`ad-${tag}-viewer-${stamp}`);
-  const ws = (await owner.c.post(WS, { name: `AD ${tag} ${stamp}` })).body.workspaceId as string;
+  const ws = (await owner.c.post<{ workspaceId: string }>(WS, { name: `AD ${tag} ${stamp}` })).body.workspaceId;
   expect((await owner.c.post(`${WS}/${encodeURIComponent(ws)}/switch`)).status).toBe(200);
   // MEASURED (ADR 0774): the owner of a workspace an unbound caller created is
   // keyed by the LEGACY spelling — the union is what admits them.
@@ -154,7 +199,7 @@ interface Review { reviewId: string; interruptId?: string; canDecide?: boolean; 
 async function pollWaiting(c: Client, runId: string): Promise<string> {
   for (let i = 0; i < 100; i++) {
     await new Promise((r) => setTimeout(r, 20));
-    const s = (await c.get(`/runs/${runId}`)).body?.status as string;
+    const s = (await c.get<RunBody | undefined>(`/runs/${runId}`)).body?.status ?? '';
     if (s?.startsWith('waiting') || ['completed', 'failed', 'cancelled'].includes(s)) return s;
   }
   return 'unknown';
@@ -166,11 +211,11 @@ async function gateRun(owner: Client, gate: { typeId: string; config: Record<str
   const workflowId = `wf.adr0778.http.${Date.now()}.${++wfSeq}`;
   const made = await owner.post(`${H}/workflows`, { workflowId, nodes: [{ nodeId: 'gate', ...gate }], edges: [] });
   expect(made.status, JSON.stringify(made.body)).toBeLessThan(300);
-  const started = await owner.post('/runs', { workflowId, inputs: {} });
+  const started = await owner.post<{ runId: string }>('/runs', { workflowId, inputs: {} });
   expect(started.status, JSON.stringify(started.body)).toBe(201);
-  const runId = started.body.runId as string;
+  const runId = started.body.runId;
   expect((await pollWaiting(owner, runId)).startsWith('waiting')).toBe(true);
-  const ints = (await owner.get(`${H}/runs/${bareRunId(runId)}/interrupts`)).body.interrupts as Array<{ interruptId: string; nodeId: string; token?: string }>;
+  const ints = (await owner.get<InterruptList>(`${H}/runs/${bareRunId(runId)}/interrupts`)).body.interrupts ?? [];
   const it_ = ints.find((i) => i.nodeId === 'gate')!;
   return { runId, interruptId: it_.interruptId, ...(it_.token ? { token: it_.token } : {}) };
 }
@@ -184,23 +229,25 @@ describe('ADR 0778 D2 — deciding an open approval gate needs approvals:respond
 
     const node = await viewer.post(`/runs/${runId}/interrupts/gate`, { resumeValue: { action: 'approve' } });
     expect(node.status, JSON.stringify(node.body)).toBe(403);
+    expect(node.body).toMatchObject({ error: 'openwop-app.forbidden_scope', message: 'Missing required scope: approvals:respond' });
     const inbox = await viewer.post(`${H}/reviews/interrupt:${interruptId}/actions/approve`, {});
     expect(inbox.status, JSON.stringify(inbox.body)).toBe(403);
+    expect(inbox.body).toMatchObject({ error: 'forbidden_scope', message: 'Missing required scope: approvals:respond' });
 
     // grade-code APCD-1 — nor can the Viewer be HANDED the token: the token
     // route checks nothing else, so the listing's token was a third lane round
     // the floor. The owner still gets it.
-    const viewerRows = (await viewer.get(`${H}/runs/${bareRunId(runId)}/interrupts`)).body.interrupts as Array<{ interruptId: string; token?: string }>;
+    const viewerRows = (await viewer.get<InterruptList>(`${H}/runs/${bareRunId(runId)}/interrupts`)).body.interrupts ?? [];
     expect(viewerRows.find((r) => r.interruptId === interruptId)?.token, 'a Viewer was handed the decide token').toBeUndefined();
-    const ownerRows = (await owner.get(`${H}/runs/${bareRunId(runId)}/interrupts`)).body.interrupts as Array<{ interruptId: string; token?: string }>;
+    const ownerRows = (await owner.get<InterruptList>(`${H}/runs/${bareRunId(runId)}/interrupts`)).body.interrupts ?? [];
     expect(ownerRows.find((r) => r.interruptId === interruptId)?.token).toBeTruthy();
 
-    const listed = ((await viewer.get(`${H}/reviews?status=pending`)).body.items as Review[]).find((r) => r.interruptId === interruptId);
+    const listed = (await viewer.get<{ items: Review[] }>(`${H}/reviews?status=pending`)).body.items.find((r) => r.interruptId === interruptId);
     expect(listed?.canDecide, 'the viewer was offered a decision the server refuses').toBe(false);
-    expect((await owner.get(`/runs/${runId}`)).body.status).toBe('waiting-approval');
+    expect((await owner.get<RunBody>(`/runs/${runId}`)).body.status).toBe('waiting-approval');
 
     // The owner (Editor and above) sees it as decidable and decides it.
-    const mine = ((await owner.get(`${H}/reviews?status=pending`)).body.items as Review[]).find((r) => r.interruptId === interruptId);
+    const mine = (await owner.get<{ items: Review[] }>(`${H}/reviews?status=pending`)).body.items.find((r) => r.interruptId === interruptId);
     expect(mine?.canDecide).toBe(true);
     const ok = await owner.post(`${H}/reviews/interrupt:${interruptId}/actions/approve`, {});
     expect(ok.status, JSON.stringify(ok.body)).toBe(200);
@@ -211,6 +258,13 @@ describe('ADR 0778 D2 — deciding an open approval gate needs approvals:respond
     const { runId } = await gateRun(owner, { typeId: 'core.interrupt', config: { kind: 'clarification', data: { prompt: 'Which one?' } } });
     const r = await viewer.post(`/runs/${runId}/interrupts/gate`, { resumeValue: { answer: 'the blue one' } });
     expect(r.status, JSON.stringify(r.body)).toBe(200);
+    // The answer LANDED: the run leaves its wait and completes.
+    let status = '';
+    for (let i = 0; i < 100 && !['completed', 'failed'].includes(status); i++) {
+      await new Promise((res) => setTimeout(res, 20)); // run-settle poll: no hook to await over HTTP
+      status = (await owner.get<RunBody | undefined>(`/runs/${runId}`)).body?.status ?? '';
+    }
+    expect(status).toBe('completed');
   });
 
   it('a key narrowed to runs:read cannot decide through /reviews (it could: the route checked runs:read)', async () => {
@@ -224,7 +278,10 @@ describe('ADR 0778 D2 — deciding an open approval gate needs approvals:respond
     const readOnly = client(token);
     const r = await readOnly.post(`${H}/reviews/interrupt:${interruptId}/actions/approve`, {});
     expect(r.status, JSON.stringify(r.body)).toBe(403);
-    const pending = ((await owner.get(`${H}/reviews?status=pending`)).body.items as Review[]).some((x) => x.interruptId === interruptId);
+    // The OUTER guard: the route's own scope gate (`forbidden`), not the decide
+    // floor behind it (`forbidden_scope`).
+    expect(r.body).toMatchObject({ error: 'forbidden', message: 'Missing required scope: approvals:respond' });
+    const pending = (await owner.get<{ items: Review[] }>(`${H}/reviews?status=pending`)).body.items.some((x) => x.interruptId === interruptId);
     expect(pending, 'the read-only key decided the gate').toBe(true);
   });
 });
@@ -239,10 +296,10 @@ describe('ADR 0778 D10 correction — a typed review is answerable on the card',
   async function typedRun(owner: Client, kind: string, data: Record<string, unknown>): Promise<string> {
     const workflowId = `wf.adr0778.form.${Date.now()}.${++wfSeq}`;
     expect((await owner.post(`${H}/workflows`, { workflowId, nodes: [{ nodeId: 'gate', typeId: 'core.interrupt', config: { kind, data } }], edges: [] })).status).toBeLessThan(300);
-    const runId = (await owner.post('/runs', { workflowId, inputs: {} })).body.runId as string;
+    const runId = (await owner.post<{ runId: string }>('/runs', { workflowId, inputs: {} })).body.runId;
     for (let i = 0; i < 100; i++) {
       await new Promise((r) => setTimeout(r, 20));
-      const ints = (await owner.get(`${H}/runs/${bareRunId(runId)}/interrupts`)).body?.interrupts as Array<{ interruptId: string; nodeId: string }> | undefined;
+      const ints = (await owner.get<InterruptList | undefined>(`${H}/runs/${bareRunId(runId)}/interrupts`)).body?.interrupts;
       const hit = ints?.find((x) => x.nodeId === 'gate');
       if (hit) return hit.interruptId;
     }
@@ -253,7 +310,7 @@ describe('ADR 0778 D10 correction — a typed review is answerable on the card',
     const { owner, viewer } = await sharedWorkspace('answer');
     const { runId, interruptId } = await gateRun(owner, { typeId: 'core.interrupt', config: { kind: 'clarification', data: { question: 'Which colour?' } } });
 
-    const listed = ((await viewer.get(`${H}/reviews?status=pending`)).body.items as FormReview[]).find((r) => r.interruptId === interruptId);
+    const listed = (await viewer.get<{ items: FormReview[] }>(`${H}/reviews?status=pending`)).body.items.find((r) => r.interruptId === interruptId);
     expect(listed?.answerForm).toEqual({ question: 'Which colour?' });
     expect(listed?.actions).toEqual([expect.objectContaining({ action: 'resolve', requiresValue: true })]);
     expect(listed?.canDecide).toBe(true);
@@ -263,10 +320,10 @@ describe('ADR 0778 D10 correction — a typed review is answerable on the card',
     let status = '';
     for (let i = 0; i < 100 && !['completed', 'failed'].includes(status); i++) {
       await new Promise((res) => setTimeout(res, 20));
-      status = (await owner.get(`/runs/${runId}`)).body?.status as string;
+      status = (await owner.get<RunBody | undefined>(`/runs/${runId}`)).body?.status ?? '';
     }
     expect(status).toBe('completed');
-    expect(((await owner.get(`${H}/reviews/interrupt:${interruptId}`)).body as FormReview).answerForm, 'a resolved review still offered a form').toBeUndefined();
+    expect((await owner.get<FormReview>(`${H}/reviews/interrupt:${interruptId}`)).body.answerForm, 'a resolved review still offered a form').toBeUndefined();
   });
 
   it('the answer form is a closed allowlist: nothing else in data reaches the projection', async () => {
@@ -278,7 +335,7 @@ describe('ADR 0778 D10 correction — a typed review is answerable on the card',
         connection: { ref: 'conn:crm', providerId: 'hubspot', label: 'HubSpot', token: 'leak-me-2' },
       } },
     });
-    const review = (await owner.get(`${H}/reviews/interrupt:${interruptId}`)).body as FormReview;
+    const review = (await owner.get<FormReview>(`${H}/reviews/interrupt:${interruptId}`)).body;
     expect(review.answerForm).toEqual({
       question: 'Q?', profile: 'openwop-connection',
       connection: { ref: 'conn:crm', providerId: 'hubspot', label: 'HubSpot' },
@@ -289,11 +346,11 @@ describe('ADR 0778 D10 correction — a typed review is answerable on the card',
   it('refinement carries its draft, cancellation its reason, and a kind the card cannot answer carries no form', async () => {
     const { owner } = await sharedWorkspace('kinds');
     const refine = await typedRun(owner, 'refinement', { current: { title: 'Draft 1' }, extra: 'x' });
-    expect(((await owner.get(`${H}/reviews/interrupt:${refine}`)).body as FormReview).answerForm).toEqual({ current: { title: 'Draft 1' } });
+    expect((await owner.get<FormReview>(`${H}/reviews/interrupt:${refine}`)).body.answerForm).toEqual({ current: { title: 'Draft 1' } });
     const cancel = await typedRun(owner, 'cancellation', { reason: 'Budget cut', extra: 'x' });
-    expect(((await owner.get(`${H}/reviews/interrupt:${cancel}`)).body as FormReview).answerForm).toEqual({ reason: 'Budget cut' });
+    expect((await owner.get<FormReview>(`${H}/reviews/interrupt:${cancel}`)).body.answerForm).toEqual({ reason: 'Budget cut' });
     const ext = await typedRun(owner, 'external-event', { question: 'not a human ask' });
-    expect(((await owner.get(`${H}/reviews/interrupt:${ext}`)).body as FormReview).answerForm).toBeUndefined();
+    expect((await owner.get<FormReview>(`${H}/reviews/interrupt:${ext}`)).body.answerForm).toBeUndefined();
   });
 });
 
@@ -304,9 +361,11 @@ describe('ADR 0778 D2 × ADR 0755 D3 — a declared responder key', () => {
     const viewerSubject = (await listMembers(ws, ws)).find((m) => m.roles.includes('viewer'))!.subject!;
     const { token } = await issueApiKey({ tenantId: ws, name: 'adr0778-viewer-key', createdBy: viewerSubject, scopes: ['runs:read', 'approvals:respond'] });
     const key = client(token);
-    const rows = (await key.get(`${H}/runs/${bareRunId(runId)}/interrupts`)).body.interrupts as Array<{ interruptId: string; token?: string }>;
+    const rows = (await key.get<InterruptList>(`${H}/runs/${bareRunId(runId)}/interrupts`)).body.interrupts ?? [];
     expect(rows.find((r) => r.interruptId === interruptId)?.token, 'a Viewer\'s key was handed the decide token').toBeUndefined();
-    expect((await key.post(`/runs/${runId}/interrupts/gate`, { resumeValue: { action: 'approve' } })).status).toBe(403);
+    const decided = await key.post(`/runs/${runId}/interrupts/gate`, { resumeValue: { action: 'approve' } });
+    expect(decided.status, JSON.stringify(decided.body)).toBe(403);
+    expect(decided.body).toMatchObject({ error: 'openwop-app.forbidden_scope', message: 'Missing required scope: approvals:respond' });
   });
 });
 
@@ -318,9 +377,9 @@ describe('ADR 0778 D6 — one person is one voter on both lanes', () => {
     expect(first.status, `the node route refused a signed-in owner: ${JSON.stringify(first.body)}`).toBe(200);
     const second = await owner.post(`${H}/reviews/interrupt:${interruptId}/actions/accept`, {});
     expect(second.status, JSON.stringify(second.body)).toBe(200);
-    const review = (await owner.get(`${H}/reviews/interrupt:${interruptId}`)).body as Review;
+    const review = (await owner.get<Review>(`${H}/reviews/interrupt:${interruptId}`)).body;
     expect(review.policy?.approvals, 'one person counted as two approvers').toBe(1);
-    expect((await owner.get(`/runs/${runId}`)).body.status).toBe('waiting-approval');
+    expect((await owner.get<RunBody>(`/runs/${runId}`)).body.status).toBe('waiting-approval');
   });
 });
 
@@ -331,7 +390,7 @@ describe('ADR 0778 D3 — a cancelled run\'s gate is gone from every surface', (
     expect(token, 'the owner holds approvals:respond, so the listing carries the token').toBeTruthy();
     expect((await owner.post(`/runs/${runId}/cancel`, {})).status).toBeLessThan(300);
 
-    const listed = ((await owner.get(`${H}/reviews?status=pending`)).body.items as Review[]).some((r) => r.interruptId === interruptId);
+    const listed = (await owner.get<{ items: Review[] }>(`${H}/reviews?status=pending`)).body.items.some((r) => r.interruptId === interruptId);
     expect(listed, 'a cancelled run\'s gate is still in the inbox').toBe(false);
     // Still readable by id (a decided gate is not "not found", APCD-10), and not decidable.
     expect((await owner.post(`${H}/reviews/interrupt:${interruptId}/actions/approve`, {})).status).toBe(409);

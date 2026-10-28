@@ -8,6 +8,10 @@
  *   - `GET …/usage/orgs/:orgId/rollup` — usage-analytics now returns the
  *     tenant's managed (platform-paid) spend beside the BYOK rollup, and only
  *     that tenant's.
+ *
+ * Tracker TST-BUL-3. Sabotage-witnessed (w62): red when the superadmin check is
+ * dropped, the per-feature tenant count stops counting tenants, the `day` format
+ * check is skipped, or the rollup stops returning `managedByFeature`.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -69,7 +73,12 @@ describe('GET billing/admin/usage-by-feature — the operator read', () => {
   const path = (day?: string) => `/host/openwop-app/billing/admin/usage-by-feature${day ? `?day=${day}` : ''}`;
 
   it('refuses a customer (403) and serves the operator, with billing OFF', async () => {
-    expect((await get(customer, path(DAY))).status).toBe(403);
+    const refused = await get(customer, path(DAY));
+    expect(refused.status).toBe(403);
+    // The superadmin refusal, not the MFA one (same status): host/superadmin.ts.
+    const refusal = await refused.json() as { error?: string; message?: string };
+    expect(refusal.error).toBe('forbidden');
+    expect(refusal.message).toContain('requires a superadmin principal');
     const res = await get(operator, path(DAY));
     expect(res.status).toBe(200);
     const body = await res.json() as { day: string; features: Array<{ featureId: string; tenants: number; inputTokens: number }>; rows: unknown[] };
@@ -82,7 +91,11 @@ describe('GET billing/admin/usage-by-feature — the operator read', () => {
 
   it('defaults to today, and rejects a malformed day', async () => {
     expect(((await (await get(operator, path())).json()) as { day: string }).day).toBe(DAY);
-    expect((await get(operator, path('yesterday'))).status).toBe(400);
+    const bad = await get(operator, path('yesterday'));
+    expect(bad.status).toBe(400);
+    const badBody = await bad.json() as { error?: string; details?: { field?: string } };
+    expect(badBody.error).toBe('validation_error');
+    expect(badBody.details?.field).toBe('day');
   });
 });
 

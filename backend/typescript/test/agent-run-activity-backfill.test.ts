@@ -6,6 +6,10 @@
  * applyMigrations (runs 21 + 22) and assert the index was backfilled with the
  * correct roster/source (first-present-block priority), skipping un-attributed
  * runs.
+ *
+ * TST-BLR-1. Red when: the CASE picks a later block over an earlier present one,
+ * the `json_valid` guard is dropped (a non-JSON metadata row aborts the
+ * migration), or `agent_id` stops being backfilled.
  */
 
 import { describe, expect, it } from 'vitest';

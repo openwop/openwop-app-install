@@ -47,27 +47,57 @@ export function BrandPage(): JSX.Element {
   const [editing, setEditing] = useState<Brand | 'new' | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<Brand | null>(null);
 
+  // UX-01 (gap-closure plan S07 / audit) — only the NEWEST read may settle the
+  // list. A slow first read answering after a Retry's success would otherwise
+  // put the old failure (or the old list) back on screen.
+  const brandsSeq = useRef(0);
   const refresh = useCallback(async () => {
+    const seq = ++brandsSeq.current;
     setBrandsFailed(false);
     // R2 BR-SP-3 — a recovered list must not render under a STALE error
     // banner, and a load failure must not dual-message (the announce
     // StateCard below is the load-failure surface; the Notice is for
     // mutations).
     setError(null);
-    try { setBrands(await listBrands()); setDisabled(false); }
-    catch (e) {
+    try {
+      const next = await listBrands();
+      if (seq !== brandsSeq.current) return;
+      setBrands(next);
+      setDisabled(false);
+    } catch (e) {
+      if (seq !== brandsSeq.current) return;
       if (e instanceof FeatureDisabledError) { setDisabled(true); setBrands([]); return; }
+      // The list already shown (if any) is kept: a failed REFRESH is reported
+      // over the last good list, never by blanking it.
       setBrandsFailed(true);
     }
   }, []);
 
-  useEffect(() => {
-    void refresh();
+  const orgsSeq = useRef(0);
+  const loadOrgs = useCallback(async () => {
+    const seq = ++orgsSeq.current;
+    setOrgsFailed(false);
     // BRAND-R2-1 — a failed orgs read must not impersonate "no organization
     // yet": the empty-state branch below tells the user to CREATE an org, and
     // a transient 500 said that to users who already own one.
-    void listOrgs().then((o) => { setOrgs(o); setOrgsFailed(false); }).catch(() => setOrgsFailed(true));
-  }, [refresh]);
+    try { const o = await listOrgs(); if (seq === orgsSeq.current) setOrgs(o); }
+    catch { if (seq === orgsSeq.current) setOrgsFailed(true); }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+    void loadOrgs();
+    // An unmount retires every read still in flight, the same way a newer read
+    // does. The counters are bumped, not read, so the live ref is the intent.
+    const seqs = [brandsSeq, orgsSeq];
+    return () => { for (const r of seqs) r.current++; };
+  }, [refresh, loadOrgs]);
+
+  const retryLoad = useCallback(() => {
+    void refresh();
+    if (orgsFailed) void loadOrgs();
+  }, [refresh, loadOrgs, orgsFailed]);
+  const retryButton = <Button variant="secondary" size="sm" onClick={retryLoad}>{tc('retry')}</Button>;
 
   // R2 BR-SP-2 — the delete failure surfaced ONLY behind the dialog's scrim
   // (the exact BR-G1 class, delete lane): the dialog stayed open with zero
@@ -134,14 +164,24 @@ export function BrandPage(): JSX.Element {
           </select>
         </div>
       ) : null}
-      {brands === null ? (
+      {brands !== null && brandsFailed ? (
+        <div className="u-mb-3">
+          <Notice variant="warning" announce={t('refreshFailedStale')}>
+            <span className="u-flex u-gap-2 u-items-center">{t('refreshFailedStale')} {retryButton}</span>
+          </Notice>
+        </div>
+      ) : null}
+      {/* UX-01 — a failed FIRST read is checked before the loading branch: it
+          leaves `brands` null, and testing null first kept the spinner up for
+          good with the failure hidden behind it. */}
+      {brands === null && brandsFailed ? (
+        <StateCard announce icon={<MegaphoneIcon size={22} />} title={tc('loadFailedTitle')} body={tc('loadFailedBody')} action={retryButton} />
+      ) : brands === null ? (
         <StateCard icon={<MegaphoneIcon size={20} />} title={t('loading')} loading />
-      ) : brandsFailed ? (
-        <StateCard announce icon={<MegaphoneIcon size={22} />} title={tc('loadFailedTitle')} body={tc('loadFailedBody')} />
       ) : brands.length === 0 ? (
         orgs.length === 0 ? (
           orgsFailed ? (
-            <StateCard announce icon={<MegaphoneIcon size={22} />} title={tc('loadFailedTitle')} body={tc('loadFailedBody')} />
+            <StateCard announce icon={<MegaphoneIcon size={22} />} title={tc('loadFailedTitle')} body={tc('loadFailedBody')} action={retryButton} />
           ) : (
             <StateCard icon={<MegaphoneIcon size={22} />} title={t('noOrgTitle')} body={t('noOrgBody')} />
           )

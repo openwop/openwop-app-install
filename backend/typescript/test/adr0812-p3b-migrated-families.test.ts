@@ -11,6 +11,12 @@
  *   (the shell's vendor exclusion, live for the first time here);
  * - no migrated family keeps a `/v1`-keyed registration, which would 404 now that
  *   nothing rewrites onto it.
+ * Tracker: TST-BVC-3.
+ *
+ * Red when (wave 60 probes w60g4-p3b-*): the SPA shell's vendor exclusion is
+ * skipped (the shell then answers a browser on a vendor path; the same guard
+ * is witnessed by `adr0812-p3b-shell-vs-protocol`'s vendor case); a route is
+ * registered under `/v1` at runtime or in source.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';
@@ -89,7 +95,7 @@ const HEARTBEAT = `${VENDOR_ROOT}/heartbeat/settings`;
 describe('ADR 0812 P3b — a migrated family', () => {
   it('answers on the unversioned path, and its /v1 spelling is 410', async () => {
     const bare = await get(HEARTBEAT);
-    expect(bare.status, bare.body.slice(0, 200)).not.toBe(404);
+    expect(bare.status, bare.body.slice(0, 200)).toBe(200);
     expect(bare.type).toContain('application/json');
     const r = await get(`${V1}${HEARTBEAT}`);
     expect(r.status).toBe(410);
@@ -99,16 +105,12 @@ describe('ADR 0812 P3b — a migrated family', () => {
     const browser = { Accept: 'text/html,application/xhtml+xml,*/*;q=0.8', 'User-Agent': 'Mozilla/5.0' };
     // #4445's prod regression only appeared with 1.x RETIRED, which the suite's
     // pinned-served default never exercised; since ADR 0812 P3c it is the only posture.
-    for (const retired of ['true']) {
-      {
-        const miss = await get(`${VENDOR_ROOT}/heartbeat/zz-missing`, browser);
-        expect(miss.shell, `retired=${retired}: an unrewritten vendor path fell through to the /host/* shell`).toBe(false);
-        expect(miss.status, `retired=${retired}`).toBe(404);
-        const real = await get(HEARTBEAT, browser);
-        expect(real.shell, `retired=${retired}: the real route must answer a browser, not the shell`).toBe(false);
-        expect(real.status, `retired=${retired}: ${real.body.slice(0, 160)}`).not.toBe(404);
-      }
-    }
+    const miss = await get(`${VENDOR_ROOT}/heartbeat/zz-missing`, browser);
+    expect(miss.shell, 'an unrewritten vendor path fell through to the /host/* shell').toBe(false);
+    expect(miss.status).toBe(404);
+    const real = await get(HEARTBEAT, browser);
+    expect(real.shell, 'the real route must answer a browser, not the shell').toBe(false);
+    expect(real.status, real.body.slice(0, 160)).toBe(200);
   });
 });
 

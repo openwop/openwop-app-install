@@ -92,6 +92,33 @@ export function loadTabDeck(subject: string): TabDeckState | null {
   }
 }
 
+/**
+ * ADR 0978 D4 — the working set is kept per WORKSPACE: subject `${uid}@${workspace}`.
+ * Before D4 it was per user (`tabdeck:<uid>`), so a workspace switch restored workspace
+ * A's ids into workspace B, the dead-tab prune closed them all, and the next save
+ * overwrote A's set. `null` workspace (unresolvable — offline / signed out) keeps the
+ * legacy uid-only subject rather than refusing to persist.
+ */
+export function workspaceDeckSubject(uid: string, workspace: string | null): string {
+  return workspace ? `${uid}@${workspace}` : uid;
+}
+
+/** Load `subject`'s working set, adopting the legacy uid-only descriptor when the
+ *  workspace has none yet. `adoptedLegacy` tells the deck to forget the legacy key
+ *  only once a clean prune shows the adopted tabs belong here (`forgetLegacyTabDeck`) —
+ *  so a first visit to the WRONG workspace does not lose them. */
+export function loadWorkspaceTabDeck(subject: string, legacySubject: string | null): { state: TabDeckState | null; adoptedLegacy: boolean } {
+  const own = loadTabDeck(subject);
+  if (own || !legacySubject || legacySubject === subject) return { state: own, adoptedLegacy: false };
+  const legacy = loadTabDeck(legacySubject);
+  return legacy && legacy.tabs.length > 0 ? { state: legacy, adoptedLegacy: true } : { state: null, adoptedLegacy: false };
+}
+
+export function forgetLegacyTabDeck(legacySubject: string): void {
+  if (!legacySubject || typeof localStorage === 'undefined') return;
+  try { localStorage.removeItem(tabDeckKey(legacySubject)); } catch { /* disabled storage — harmless */ }
+}
+
 /** Persist the working set for `subject`. No-op when logged out (subject falsy). */
 export function saveTabDeck(state: TabDeckState, subject: string | null): void {
   if (!subject || typeof localStorage === 'undefined') return;

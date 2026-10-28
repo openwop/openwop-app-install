@@ -8,6 +8,10 @@
  *   hostext:agent:tool-boundary:<tenant>:<runId>:<wrapId>:<seq>   (calls)
  *   hostext:agent:tool-boundary:<tenant>:<runId>:#cap             (per-run counter)
  *   hostext:agent:tool-boundary-run:<tenant>:<agentId>:<runId>    (capture index)
+ *   hostext:agent:tool-boundary:<tenant>:#x:<runId>:…             (ADR 0984 D7: a source
+ *     run's exact calls, their counter, and every copy an eval run froze from them)
+ *   hostext:agent:tool-boundary:<tenant>:#x:<source>:#frozen:<runId>:<task>
+ *     (an EVAL run's own frozen copies, deleted with the eval run)
  *
  * LIKE patterns with `\` as the escape (Postgres's default; sqlite passes
  * `ESCAPE '\'`). Ids are escaped so a `%`/`_` in a tenant or run id can never
@@ -20,6 +24,8 @@ export function toolBoundaryKeyPatterns(tenantId: string, runId: string): string
   const r = esc(runId);
   return [
     `hostext:agent:tool-boundary:${t}:${r}:%`,
+    `hostext:agent:tool-boundary:${t}:#x:${r}:%`,
+    `hostext:agent:tool-boundary:${t}:#x:%:#frozen:${r}:%`,
     `hostext:agent:tool-boundary-run:${t}:%:${r}`,
   ];
 }

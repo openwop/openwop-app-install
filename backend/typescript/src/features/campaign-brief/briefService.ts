@@ -11,7 +11,7 @@
 import { randomUUID } from 'node:crypto';
 import { DurableCollection, hostExtStorage } from '../../host/hostExtPersistence.js';
 import { OpenwopError } from '../../types.js';
-import { cleanString, optionalCleanString } from '../../host/boundedStrings.js';
+import { cleanContent, cleanString, optionalCleanString } from '../../host/boundedStrings.js';
 import { createLogger } from '../../observability/logger.js';
 import { emitHostEvent } from '../../host/hostEventDispatcher.js';
 import { deleteVocForBrief } from './vocService.js';
@@ -202,10 +202,10 @@ function sanitizeMessaging(raw: unknown): BriefMessaging {
   if (!raw || typeof raw !== 'object') return { ...EMPTY_MESSAGING };
   const m = raw as Record<string, unknown>;
   return {
-    primaryValueProp: cleanString(m.primaryValueProp, TEXT_MAX),
+    primaryValueProp: cleanContent(m.primaryValueProp, TEXT_MAX, 'primaryValueProp'),
     toneOverride: cleanString(m.toneOverride, NAME_MAX),
     proofPoints: strList(m.proofPoints),
-    ctaStrategy: cleanString(m.ctaStrategy, NAME_MAX),
+    ctaStrategy: cleanContent(m.ctaStrategy, NAME_MAX, 'ctaStrategy'),
   };
 }
 

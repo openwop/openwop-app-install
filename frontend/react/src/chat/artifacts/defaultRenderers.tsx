@@ -30,6 +30,7 @@ const BomPreview = lazy(() => import('./BomPreview.js').then((m) => ({ default: 
 const SandboxedArtifactFrame = lazy(() => import('./SandboxedArtifactFrame.js').then((m) => ({ default: m.SandboxedArtifactFrame })));
 const MermaidDiagram = lazy(() => import('../MermaidDiagram.js').then((m) => ({ default: m.MermaidDiagram })));
 const ChartRenderer = lazy(() => import('./ChartRenderer.js').then((m) => ({ default: m.ChartRenderer })));
+const CodeResultRenderer = lazy(() => import('./CodeResultRenderer.js').then((m) => ({ default: m.CodeResultRenderer })));
 
 function MermaidRenderer({ content }: ArtifactRendererProps): JSX.Element {
   return <MermaidDiagram source={content} />;
@@ -62,6 +63,8 @@ export function registerDefaultArtifactRenderers(): void {
   registerArtifactRenderer({ artifactTypeId: 'interactive.mermaid', editable: true, Component: MermaidRenderer });
   registerArtifactRenderer({ artifactTypeId: 'interactive.chart', editable: true, Component: ChartArtifactRenderer });
   registerArtifactRenderer({ artifactTypeId: 'interactive.react', editable: true, Component: ReactInertRenderer });
+  // ADR 0995 D10 — a code-exec result (untrusted program output, text-only), read-only.
+  registerArtifactRenderer({ artifactTypeId: 'code.execution-result', editable: false, Component: CodeResultRenderer });
   // interactive.html and any other interactive.* → origin-isolated sandbox (lowest priority).
   registerArtifactRenderer({ match: (id) => id.startsWith('interactive.'), editable: true, Component: HtmlSandboxRenderer });
   // ADR 0153 Phase 1 — the slides canvas: structured typed JSON, rendered read-only

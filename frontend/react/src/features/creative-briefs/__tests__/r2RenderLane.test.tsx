@@ -33,6 +33,8 @@ vi.mock('../creativeBriefsClient.js', async (orig) => {
   const actual = await orig<Record<string, unknown>>();
   return {
     ...actual,
+    // ADR 0945 Q1 — the briefs page reads the client's edit-mode opt-in when product-grounded creative is on.
+    getGroundingSettings: vi.fn(async () => ({ editModeEnabled: false })),
     listOrgs: vi.fn(async () => [{ orgId: 'org-1', name: 'Acme' }]),
     listBriefs: (..._a: unknown[]) => listBriefs(),
     getBrief: (...a: unknown[]) => getBrief(...a),

@@ -16,6 +16,22 @@
  *  - `RRWF-3` (D2): the served outcome is keyed on the execution ordinal, not the
  *    per-body attempt — a fork cut after the first failed execution is served
  *    the SECOND execution's outcome for its first live execution.
+ *
+ * Red when (wave 60 probes, tracker TST-BRB-6): a resumed replay fork loses its
+ * run-level replay source (RRWF-19 positive and fail-closed halves); the fail-closed
+ * `replay_source_missing` arm is dropped; a terminal stops closing an execution; the
+ * served outcome is keyed on the per-body attempt instead of the execution ordinal
+ * (the `second-completed` fork); `snapshotFromEventPrefix` stops reopening a node
+ * started in the prefix (the IN FLIGHT fold, and the `second-completed` fork); the
+ * H1 replay re-open (`sourceOrdinals.highest(id) > consumed`) is dropped (the
+ * `second-start` fork, whose prefix ends at `failed(1)`).
+ *
+ * Not a witness, recorded: `ExecutionOrdinals.start`'s early `return open` is
+ * behaviourally redundant (an open ordinal always equals closed + 1, which the
+ * fallthrough recomputes), so w60g2-rpo-open-continues was an equivalent mutant.
+ *
+ * Ceiling, recorded: the `slow` node's real 800 ms and the 20 ms status polls are the
+ * real executor's timing; the pause must land while `slow` runs.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -46,7 +62,8 @@ beforeAll(async () => {
     version: '1.0.0',
     sideEffecting: true,
     async execute(ctx) {
-      effectRuns.set(ctx.runId, (effectRuns.get(bareRunId(ctx.runId)) ?? 0) + 1);
+      const id = bareRunId(ctx.runId);
+      effectRuns.set(id, (effectRuns.get(id) ?? 0) + 1);
       return { status: 'success', outputs: { sent: true } };
     },
   });
@@ -56,8 +73,9 @@ beforeAll(async () => {
     version: '1.0.0',
     sideEffecting: true,
     async execute(ctx) {
-      const n = (flakyRuns.get(bareRunId(ctx.runId)) ?? 0) + 1;
-      flakyRuns.set(ctx.runId, n);
+      const id = bareRunId(ctx.runId);
+      const n = (flakyRuns.get(id) ?? 0) + 1;
+      flakyRuns.set(id, n);
       return n === 1
         ? { status: 'failure', error: { code: 'upstream_unavailable', message: 'first try fails' } }
         : { status: 'success', outputs: { delivered: n } };
@@ -224,9 +242,11 @@ describe('ADR 0772 D2 / RRWF-4 — a fork cut inside a retried node', () => {
       expect(await waitStatus(src, (s) => TERMINAL.includes(s))).toBe('completed');
       const flaky = (await events(src)).filter((e) => e.nodeId === 'flaky');
       // second-start: the prefix ends `failed(1)` — the natural "fork from here"
-      // on attempt 2 (grade-code H1: the fold restored the node `failed`).
+      // on attempt 2 (grade-code H1: the fold restored the node `failed`). Held by
+      // the H1 replay re-open in executeRunBody, not by the ordinal key: the fork's
+      // first live attempt and its execution ordinal are both 2 here.
       // second-completed: the prefix also holds started(2) — the node was IN
-      // FLIGHT in its second execution.
+      // FLIGHT in its second execution (the in-flight fold + the ordinal key).
       const fromSeq = cut === 'second-start' ? flaky[2]!.sequence : flaky[3]!.sequence;
       const forkId = await forkReplay(src, fromSeq);
       expect(await waitStatus(forkId, (s) => TERMINAL.includes(s))).toBe('completed');

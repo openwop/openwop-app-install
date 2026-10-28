@@ -24,16 +24,22 @@ import { describe, expect, it } from 'vitest';
 import { readdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { readPackManifest } from './helpers/readPackManifest.js';
+import { engineIsDurable } from '../src/host/webSearchCapability.js';
 
 const PACKS_DIR = join(import.meta.dirname, '../../../examples/workflow-chain-packs');
 
 /** Chains whose results reach a code-level fail-closed gate rather than a prompt.
  *  Each entry names the guard so a reader can verify the claim, not just trust it. */
-const CODE_GUARDED: Record<string, string> = {
-  'kicktodo.research':
-    'feeds creatorService.recordResearch → engineIsDurable (throws StubSourceError)',
-  'openwop-app.kicktodo.challenge-factory':
-    'feeds creatorService.recordResearch → engineIsDurable (throws StubSourceError)',
+const CODE_GUARDED: Record<string, { reason: string; feederTypeId: string }> = {
+  'kicktodo.research': {
+    reason: 'feeds creatorService.recordResearch → engineIsDurable (throws StubSourceError)',
+    // `evidenceGraph` in packs/feature.kicktodo.nodes/index.mjs calls k.recordResearch.
+    feederTypeId: 'feature.kicktodo.nodes.evidence-graph',
+  },
+  'openwop-app.kicktodo.challenge-factory': {
+    reason: 'feeds creatorService.recordResearch → engineIsDurable (throws StubSourceError)',
+    feederTypeId: 'feature.kicktodo.nodes.evidence-graph',
+  },
 };
 
 interface ChainNode { id: string; typeId: string; config?: Record<string, unknown> }
@@ -58,14 +64,24 @@ describe('chains consuming core.web.search handle the not-configured case', () =
   it('the sweep finds chains at all (guards against a silently-empty ratchet)', () => {
     // Without this, a broken path or a renamed node type would make every
     // assertion below vacuously pass.
-    expect(searchChains.length).toBeGreaterThanOrEqual(5);
+    // MEASURED 6 at 6a852d799: kicktodo.research, openwop-app.kicktodo.challenge-factory
+    // (code-guarded); research.web-brief, outreach.researched-firsttouch,
+    // seo.keyword-brief, digest.topic-watch (prompt-guarded). The floor is the truth.
+    expect(searchChains.length).toBeGreaterThanOrEqual(6);
   });
 
   it.each(searchChains.map(({ pack, chain }) => [chain.chainId, pack, chain] as const))(
     '%s (%s) is prompt-guarded or code-guarded',
     (chainId, _pack, chain) => {
-      if (CODE_GUARDED[chainId]) {
-        expect(CODE_GUARDED[chainId]).toBeTruthy();
+      const code = CODE_GUARDED[chainId];
+      if (code) {
+        // The claim is checked, not trusted (8f W4 probe wc-code-guard-unverified
+        // was vacuous against `expect(entry).toBeTruthy()`): the chain really
+        // routes into the persistence feeder, and the gate really refuses both
+        // placeholder engines.
+        expect((chain.dag?.nodes ?? []).map((n) => n.typeId), code.reason).toContain(code.feederTypeId);
+        expect(engineIsDurable('demo'), 'demo results must never be durable evidence').toBe(false);
+        expect(engineIsDurable('stub'), 'stub results must never be durable evidence').toBe(false);
         return;
       }
       // Prompt-guarded: some downstream node must name BOTH placeholder engines,

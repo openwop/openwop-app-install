@@ -8,24 +8,39 @@
  * surface that answers under `/v1` and 404s under major 2 is a mount gap, and
  * that is exactly what this host shipped — five of five pairable surfaces, live.
  */
-import { describe, it, expect } from 'vitest';
+import { afterAll, beforeAll, describe, it, expect, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
+import type { Server } from 'node:http';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createApp, loadConfigFromEnv } from '../src/index.js';
+
+// The host boots ONCE, in the hook (the case used to boot it inline, and it
+// measured 6.6 s of which the probes were a fraction).
+let srv: Server; let base = '';
+// Set before the app module graph loads (the case used to import it after setting this).
+const savedKeys = vi.hoisted(() => { const k = process.env.OPENWOP_API_KEYS; process.env.OPENWOP_API_KEYS = 'pathspace-key'; return k; });
+// ADR 0972 P2 — booted as production runs (`OPENWOP_PROPOSALS_ENABLED=true`), so the
+// manifest's `/proposals` is probed as served, not exempted as an unadvertised facet.
+const savedProposals = vi.hoisted(() => { const v = process.env.OPENWOP_PROPOSALS_ENABLED; process.env.OPENWOP_PROPOSALS_ENABLED = 'true'; return v; });
+const H = { authorization: 'Bearer pathspace-key' };
+beforeAll(async () => {
+  const app = await createApp({ ...loadConfigFromEnv(), storageDsn: 'memory://' });
+  // H41: bind loopback v4 explicitly — a `[::]` wildcard can be answered by a
+  // resident 127.0.0.1 listener on the same port (scripts/check-test-ports.mjs).
+  srv = app.listen(0, '127.0.0.1');
+  await new Promise<void>((r) => srv.once('listening', () => r()));
+  base = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
+}, 120_000);
+afterAll(async () => {
+  await new Promise<void>((r) => srv.close(() => r()));
+  if (savedKeys === undefined) delete process.env.OPENWOP_API_KEYS; else process.env.OPENWOP_API_KEYS = savedKeys;
+  if (savedProposals === undefined) delete process.env.OPENWOP_PROPOSALS_ENABLED; else process.env.OPENWOP_PROPOSALS_ENABLED = savedProposals;
+});
 
 describe('v2 path space is served, not merely advertised', () => {
   it('every parameterless GET the manifest declares is reachable under major 2 (bar a pinned not-mounted ledger)', async () => {
-    const { createApp, loadConfigFromEnv } = await import('../src/index.js');
-    process.env.OPENWOP_API_KEYS = 'pathspace-key';
-    const app = await createApp({ ...loadConfigFromEnv(), storageDsn: 'memory://' } as never);
-    // H41: bind loopback v4 explicitly — a `[::]` wildcard can be answered by a
-    // resident 127.0.0.1 listener on the same port (scripts/check-test-ports.mjs).
-    const srv = app.listen(0, '127.0.0.1');
-    await new Promise<void>((r) => srv.once('listening', () => r()));
-    const base = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
-    const H = { authorization: 'Bearer pathspace-key' };
-
     const manifest = JSON.parse(readFileSync(join(
       dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'schemas', 'v2', 'path-manifest.json',
     ), 'utf8')) as unknown;
@@ -45,7 +60,8 @@ describe('v2 path space is served, not merely advertised', () => {
     const probes = [...new Set(paths.filter(
       (p) => p.startsWith('/') && !p.includes('{') && !p.includes(':') && !p.startsWith('/.well-known'),
     ))].sort();
-    expect(probes.length, 'the manifest must yield probes, or this test is vacuous').toBeGreaterThan(3);
+    // MEASURED 2026-10-23 on the vendored manifest: 13 parameterless, non-discovery GETs.
+    expect(probes.length, 'the manifest yielded fewer probes than measured — the filter or the manifest changed').toBeGreaterThanOrEqual(13);
 
     // ADR 0781 — a family v2 discovery does NOT advertise answers 404 not_found
     // under major 2 by rule (errors.md § "Unadvertised operations"). That 404 is
@@ -78,7 +94,6 @@ describe('v2 path space is served, not merely advertised', () => {
     // Keep the exemption honest: with host i18n off in this boot, `content` is
     // the family it must cover, so the list cannot silently absorb real gaps.
     expect(unadvertised.every((p) => p.startsWith('/content')), `unexpected unadvertised 404s: ${unadvertised.join(', ')}`).toBe(true);
-    srv.close();
     expect(gaps, `unreachable under major 2:\n  ${gaps.join('\n  ')}`).toEqual([]);
-  }, 120_000); // boots a host and probes every manifest pair sequentially
+  });
 });

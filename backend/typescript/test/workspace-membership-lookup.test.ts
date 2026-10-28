@@ -11,11 +11,20 @@
  * marker ("delayed, not lost"), which is harmless for retention but would be a
  * FALSE NEGATIVE here — locking a real member out of their own workspace. So a
  * negative from the index is always confirmed against the primary rows.
+ *
+ * THREE lookup paths (`accessControlService.ts` `isWorkspaceMember`): the
+ * `access-member-index` point read, the tenant-indexed slice
+ * (`listForTenantIndexed`), then the authoritative `members.list()`. A normal
+ * member is found by the first, so the fail-safe case below deletes BOTH index
+ * entries from raw storage before asserting — otherwise the fallback is never
+ * reached (round-1 probe `8fw5g4-wml-fallback` was vacuous for exactly that).
+ * Members are created in `beforeAll`, so no case depends on another's order.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openStorage } from '../src/storage/index.js';
+import type { Storage } from '../src/storage/storage.js';
 import {
   createMember,
   createWorkspace,
@@ -25,23 +34,31 @@ import {
 
 let wsA = '';
 let wsB = '';
+let storage: Storage;
+let carolMemberId = '';
 
 beforeAll(async () => {
-  initHostExtPersistence(await openStorage('memory://'));
+  storage = await openStorage('memory://');
+  initHostExtPersistence(storage);
   const a = await createWorkspace({ name: 'Acme', ownerSubject: 'oidc:owner-a' });
   const b = await createWorkspace({ name: 'Beta', ownerSubject: 'oidc:owner-b' });
   wsA = a.tenantId;
   wsB = b.tenantId;
+  // Every case's fixtures, created up front so shuffle cannot reorder a case
+  // ahead of the member it reads.
+  await createMember({ orgId: wsA, tenantId: wsA, subject: 'oidc:alice', displayName: 'Alice' });
+  carolMemberId = (await createMember({ orgId: wsA, tenantId: wsA, subject: 'oidc:carol', displayName: 'Carol' })).memberId;
 });
 
 describe('isWorkspaceMember', () => {
   it('finds a member of the workspace', async () => {
-    await createMember({ orgId: wsA, tenantId: wsA, subject: 'oidc:alice', displayName: 'Alice' });
     await expect(isWorkspaceMember('oidc:alice', wsA)).resolves.toBe(true);
   });
 
   it('does NOT leak membership across workspaces', async () => {
     // Alice is in wsA only — the bounded scan must not match her against wsB.
+    // Positive control first, so the negative is not "alice does not exist".
+    await expect(isWorkspaceMember('oidc:alice', wsA)).resolves.toBe(true);
     await expect(isWorkspaceMember('oidc:alice', wsB)).resolves.toBe(false);
   });
 
@@ -63,11 +80,15 @@ describe('isWorkspaceMember', () => {
   });
 
   it('a member whose index marker is missing is STILL found (fail-safe)', async () => {
-    // Simulates the "delayed, not lost" marker gap. Written through the same
-    // service, then the marker keyspace is bypassed by asserting the primary
-    // rows remain authoritative: a negative must be confirmed against list().
-    const m = await createMember({ orgId: wsA, tenantId: wsA, subject: 'oidc:carol', displayName: 'Carol' });
-    expect(m.memberId).toBeTruthy();
+    // A negative lookup runs `listForTenantIndexed`, whose one-time backfill would
+    // otherwise re-create the markers deleted below.
+    await expect(isWorkspaceMember('oidc:nobody', wsA)).resolves.toBe(false);
+    // The "delayed, not lost" gap, made real: drop BOTH index entries for carol from
+    // raw storage — the point-read row and the tenant-slice marker. Keys are the
+    // `DurableCollection` layout (`hostext:<name>:<id>`, `hostextidx:<name>:<tenant>:<id>`).
+    expect(await storage.kvDelete(`hostext:access-member-index:${wsA}::oidc:carol`)).toBe(true);
+    expect(await storage.kvDelete(`hostextidx:access-members:${wsA}:${carolMemberId}`)).toBe(true);
+    // Only the authoritative primary rows can find her now.
     await expect(isWorkspaceMember('oidc:carol', wsA)).resolves.toBe(true);
   });
 });

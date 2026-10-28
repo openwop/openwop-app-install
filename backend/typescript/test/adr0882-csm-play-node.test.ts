@@ -10,6 +10,11 @@
  *            a `not_found`/`validation_error` now SKIPS that account, and a missing
  *            authority is collected and fails the node AFTER the others are ensured;
  *  CSM2CD-3  a link to a merged/deleted company is skipped, not written to.
+ *
+ * Tracker TST-BHD-1. Red when (sabotage-witnessed, wave 62): the slice size exceeds
+ * the surface limit, the per-run ceiling is skipped, a not_found/validation_error
+ * aborts instead of skipping, a forbidden_scope is not collected, a gone link is
+ * written to, or nothing-ensured returns success.
  */
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';

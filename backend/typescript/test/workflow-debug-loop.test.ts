@@ -6,13 +6,25 @@
  * ordinary-run discipline — ADR 0474 revision pin + draft launch), production
  * runs never reading pins, and bulk redrive (as-run revision, terminal-only,
  * fresh identity).
+ *
+ * Every case seeds the pins it relies on (a `beforeEach` clears them), so the file
+ * passes shuffled: "ordinary run", "'only'" and "production NEVER reads pins" used
+ * to lean on a pin an earlier case left behind. The 404 posture is proven against
+ * a workflow that EXISTS in the registry but is not owned by the caller's tenant
+ * (a nonexistent id never reaches the ownership half, 8fw5g6-dl-owner-404); the
+ * as-run claim changes the head between the source run and the redrive.
+ * Sabotages witnessed (/grade-tests 8f W5, 8fw5g6-dl-*): the size cap, the secret
+ * redaction, node validation, the ownership check, the missing-pin list, 'only',
+ * the pinned tag, the redrive's provenance shedding and terminal-only rule, and
+ * the as-run revision.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
 import { bareRunId } from './support/bareRunId.js';
 import { toWireRunId } from '../src/host/v2Ids.js';
+import { registerWorkflow } from '../src/host/workflowsRegistry.js';
 
 interface RunEvent { type: string; nodeId?: string; payload?: unknown }
 
@@ -47,6 +59,13 @@ describe('workflow debug loop routes (sqlite memory app)', () => {
     expect((await mk(WF_FAIL, [{ nodeId: 'boom', typeId: 'core.fail' }], [])).status).toBe(201);
   });
   afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
+  beforeEach(async () => {
+    // No case inherits another's pins (shuffle-safe): each seeds what it needs.
+    expect((await call('DELETE', `${API}/${WF}/pins`)).status).toBe(200);
+  });
+  const pinA = async (marker = 'PINNED-A'): Promise<void> => {
+    expect((await call('PUT', `${API}/${WF}/pins/a`, { output: { marker } })).status).toBe(200);
+  };
 
   async function call<T = unknown>(method: string, path: string, body?: unknown, extra: Record<string, string> = {}): Promise<{ status: number; body: T }> {
     const res = await fetch(`${BASE}${path}`, {
@@ -63,13 +82,17 @@ describe('workflow debug loop routes (sqlite memory app)', () => {
   const runPath = (runId: string): string => `/runs/${encodeURIComponent(toWireRunId(runId, 'default'))}`;
   const V2 = { 'OpenWOP-Version': '2' };
 
+  /** The settled status; THROWS (naming the run and the poll count) if it never settles. */
   async function settle(runId: string): Promise<string> {
-    for (let i = 0; i < 200; i += 1) {
+    const POLLS = 200;
+    let last = '';
+    for (let i = 0; i < POLLS; i += 1) {
       const r = await call<{ status: string }>('GET', runPath(runId), undefined, V2);
+      last = r.body.status;
       if (r.body.status && !['pending', 'running'].includes(r.body.status)) return r.body.status;
       await new Promise((res) => setTimeout(res, 25));
     }
-    return 'timeout';
+    throw new Error(`run ${runId} did not settle after ${POLLS} polls (last status: ${last})`);
   }
 
   async function runEvents(runId: string): Promise<RunEvent[]> {
@@ -89,8 +112,12 @@ describe('workflow debug loop routes (sqlite memory app)', () => {
       expect(list.body.items[0]!.nodeId).toBe('a');
       expect(list.body.items[0]!.output).toEqual({ marker: 'PINNED-A' });
 
-      expect((await call('PUT', `${API}/${WF}/pins/not-a-node`, { output: { x: 1 } })).status).toBe(400);
-      expect((await call('PUT', `${API}/${WF}/pins/a`, { output: 'not-an-object' })).status).toBe(400);
+      const unknownNode = await call<{ message?: string }>('PUT', `${API}/${WF}/pins/not-a-node`, { output: { x: 1 } });
+      expect(unknownNode.status).toBe(400);
+      expect(unknownNode.body.message).toBe("'not-a-node' is not a node of this workflow.");
+      const notObject = await call<{ message?: string }>('PUT', `${API}/${WF}/pins/a`, { output: 'not-an-object' });
+      expect(notObject.status).toBe(400);
+      expect(notObject.body.message).toBe('output must be an object (the node.completed outputs shape).');
 
       const del = await call<{ removed: boolean }>('DELETE', `${API}/${WF}/pins/a`);
       expect(del.body.removed).toBe(true);
@@ -98,8 +125,12 @@ describe('workflow debug loop routes (sqlite memory app)', () => {
     });
 
     it('an oversized pin is refused (size cap)', async () => {
-      const big = 'x'.repeat(70 * 1024);
-      expect((await call('PUT', `${API}/${WF}/pins/a`, { output: { big } })).status).toBe(400);
+      // Spaced text (an unbroken run could be refused as secret-shaped first), past the 64 KiB cap.
+      const big = 'lorem ipsum '.repeat(6000);
+      const r = await call<{ message?: string }>('PUT', `${API}/${WF}/pins/a`, { output: { big } });
+      expect(r.status).toBe(400);
+      expect(r.body.message).toMatch(/^Pinned output too large \(\d+ bytes; max \d+\)\.$/);
+      expect((await call<{ items: unknown[] }>('GET', `${API}/${WF}/pins`)).body.items).toEqual([]);
     });
 
     it('a pinned value passes the event-log redaction discipline (pasted keys never persist)', async () => {
@@ -117,16 +148,27 @@ describe('workflow debug loop routes (sqlite memory app)', () => {
     });
 
     it('unknown workflow is a 404 (no existence leak) on every pin verb', async () => {
-      expect((await call('GET', `${API}/does-not-exist/pins`)).status).toBe(404);
-      expect((await call('PUT', `${API}/does-not-exist/pins/a`, { output: { x: 1 } })).status).toBe(404);
-      expect((await call('DELETE', `${API}/does-not-exist/pins`)).status).toBe(404);
-      expect((await call('POST', `${API}/does-not-exist/debug-run`, { fromNodeId: 'a' })).status).toBe(404);
+      // A workflow that EXISTS in the registry but that this tenant does not own
+      // answers exactly like one that does not exist (the ownership half of
+      // `loadOwnedHead`; a nonexistent id alone also misses the registry).
+      const FOREIGN = 'debug-loop-wf-foreign';
+      registerWorkflow({ workflowId: FOREIGN, nodes: [{ nodeId: 'a', typeId: 'core.noop' }], edges: [], metadata: { name: FOREIGN } });
+      for (const id of ['does-not-exist', FOREIGN]) {
+        for (const r of [
+          await call<{ message?: string }>('GET', `${API}/${id}/pins`),
+          await call<{ message?: string }>('PUT', `${API}/${id}/pins/a`, { output: { x: 1 } }),
+          await call<{ message?: string }>('DELETE', `${API}/${id}/pins`),
+          await call<{ message?: string }>('POST', `${API}/${id}/debug-run`, { fromNodeId: 'a' }),
+        ]) {
+          expect(r.status, id).toBe(404);
+          expect(r.body.message, id).toBe('Workflow not found in this catalog.');
+        }
+      }
     });
   });
 
   describe('execute-from-step', () => {
     it('missing pins are a 422 that NAMES the nodes', async () => {
-      await call('DELETE', `${API}/${WF}/pins`);
       const r = await call<{ details?: { missingPins?: string[] }; message?: string }>(
         'POST', `${API}/${WF}/debug-run`, { fromNodeId: 'b', mode: 'from-here' },
       );
@@ -136,7 +178,7 @@ describe('workflow debug loop routes (sqlite memory app)', () => {
     });
 
     it("'from-here' runs only the target subgraph, with the pinned output flowing downstream", async () => {
-      expect((await call('PUT', `${API}/${WF}/pins/a`, { output: { marker: 'PINNED-A' } })).status).toBe(200);
+      await pinA();
       const r = await call<{ runId: string; pinnedNodes: string[]; executing: string[]; skipped: string[] }>(
         'POST', `${API}/${WF}/debug-run`, { fromNodeId: 'b', mode: 'from-here' },
       );
@@ -164,6 +206,7 @@ describe('workflow debug loop routes (sqlite memory app)', () => {
     });
 
     it("'only' runs the single node and skips its descendants", async () => {
+      await pinA(); // b's direct upstream must be pinned
       const r = await call<{ runId: string; executing: string[]; skipped: string[] }>(
         'POST', `${API}/${WF}/debug-run`, { fromNodeId: 'b', mode: 'only' },
       );
@@ -180,9 +223,10 @@ describe('workflow debug loop routes (sqlite memory app)', () => {
     });
 
     it('a debug run is an ORDINARY run: draft launch, debug metadata, ADR 0474 revision pin', async () => {
+      await pinA();
       const r = await call<{ runId: string }>('POST', `${API}/${WF}/debug-run`, { fromNodeId: 'b' });
       expect(r.status).toBe(201);
-      await settle(r.body.runId);
+      expect(await settle(r.body.runId)).toBe('completed');
       // The host-ext provenance surface (the RunSnapshot wire type omits
       // run.metadata by design — the launch/debug stamps read from here).
       const rev = await call<{ definitionRevision?: string; launch?: string; launchResolved?: string; debug?: { fromNodeId?: string; mode?: string; pinnedNodes?: string[] } }>(
@@ -196,12 +240,18 @@ describe('workflow debug loop routes (sqlite memory app)', () => {
     });
 
     it('unknown fromNodeId is a 400; a bad mode is a 400', async () => {
-      expect((await call('POST', `${API}/${WF}/debug-run`, { fromNodeId: 'nope' })).status).toBe(400);
-      expect((await call('POST', `${API}/${WF}/debug-run`, { fromNodeId: 'b', mode: 'sideways' })).status).toBe(400);
+      const unknown = await call<{ message?: string }>('POST', `${API}/${WF}/debug-run`, { fromNodeId: 'nope' });
+      expect(unknown.status).toBe(400);
+      expect(unknown.body.message).toBe("fromNodeId 'nope' is not a node of this workflow.");
+      const badMode = await call<{ message?: string }>('POST', `${API}/${WF}/debug-run`, { fromNodeId: 'b', mode: 'sideways' });
+      expect(badMode.status).toBe(400);
+      expect(badMode.body.message).toBe("mode must be 'from-here' or 'only'.");
     });
 
     it('a production run NEVER reads pins — every node executes live', async () => {
-      // Pins for a exist from the tests above; an ordinary POST /v1/runs must ignore them.
+      // A pin for a EXISTS (seeded here); an ordinary POST /v1/runs must ignore it.
+      await pinA();
+      expect((await call<{ items: unknown[] }>('GET', `${API}/${WF}/pins`)).body.items).toHaveLength(1);
       const run = await call<{ runId: string }>('POST', '/runs', { workflowId: WF, inputs: { marker: 'LIVE' } });
       expect(run.status).toBe(201);
       expect(await settle(run.body.runId)).toBe('completed');
@@ -215,7 +265,6 @@ describe('workflow debug loop routes (sqlite memory app)', () => {
 
   describe('pins/from-run prefill', () => {
     it('prefills pins from a settled run\'s real outputs, tagged with the source run', async () => {
-      await call('DELETE', `${API}/${WF}/pins`);
       const run = await call<{ runId: string }>('POST', '/runs', { workflowId: WF, inputs: { marker: 'REAL' } });
       expect(await settle(run.body.runId)).toBe('completed');
 
@@ -233,7 +282,6 @@ describe('workflow debug loop routes (sqlite memory app)', () => {
     });
 
     it('one oversized output is skipped-with-reason; the rest still pin (review M3)', async () => {
-      await call('DELETE', `${API}/${WF}/pins`);
       // core.noop echoes inputs → node a's output carries the >64KB payload;
       // downstream nodes carry it too, so expect a to pin nothing... instead
       // drive a SMALL marker plus one huge field: every node's echo exceeds
@@ -262,10 +310,23 @@ describe('workflow debug loop routes (sqlite memory app)', () => {
 
   describe('bulk redrive', () => {
     it('redrives a failed run as a FRESH run pinned to the as-run revision', async () => {
-      const src = await call<{ runId: string }>('POST', '/runs', { workflowId: WF_FAIL, inputs: { seed: 42 } });
+      // Its own failing workflow, so changing the head below touches no other case.
+      const WF_ASRUN = 'debug-loop-wf-asrun';
+      const save = (marker: string) => call('POST', API, {
+        workflowId: WF_ASRUN, nodes: [{ nodeId: 'boom', typeId: 'core.fail', config: { note: marker } }], edges: [],
+        metadata: { name: WF_ASRUN, lifecycle: { transient: true, generatedBy: 'test' } },
+      });
+      expect((await save('v1')).status).toBe(201);
+      const src = await call<{ runId: string }>('POST', '/runs', { workflowId: WF_ASRUN, inputs: { seed: 42 } });
       expect(await settle(src.body.runId)).toBe('failed');
       const srcRev = await call<{ definitionRevision?: string }>('GET', `/host/openwop-app/runs/${bareRunId(src.body.runId)}/revision`);
       expect(srcRev.body.definitionRevision).toBeTruthy();
+      // The head MOVES after the source run: an as-run redrive must not follow it.
+      expect([200, 201]).toContain((await save('v2')).status);
+      const headRun = await call<{ runId: string }>('POST', '/runs', { workflowId: WF_ASRUN, inputs: {} });
+      await settle(headRun.body.runId);
+      const headRev = await call<{ definitionRevision?: string }>('GET', `/host/openwop-app/runs/${bareRunId(headRun.body.runId)}/revision`);
+      expect(headRev.body.definitionRevision, 'the head did not move — the as-run claim would be untestable').not.toBe(srcRev.body.definitionRevision);
 
       const rd = await call<{ results: Array<{ runId: string; redriveRunId?: string; error?: string }> }>(
         'POST', '/host/openwop-app/runs/redrive', { runIds: [bareRunId(src.body.runId)] },
@@ -280,7 +341,7 @@ describe('workflow debug loop routes (sqlite memory app)', () => {
       expect((run.body.inputs as { seed?: number })?.seed).toBe(42);
       const rev = await call<{ definitionRevision?: string; definitionResolvedFrom?: string; redriveOf?: string }>('GET', `/host/openwop-app/runs/${bareRunId(redriveRunId)}/revision`);
       expect(rev.body.redriveOf).toBe(bareRunId(src.body.runId));
-      expect(rev.body.definitionRevision).toBe(srcRev.body.definitionRevision); // the AS-RUN content
+      expect(rev.body.definitionRevision).toBe(srcRev.body.definitionRevision); // the AS-RUN content, not the moved head
       expect(rev.body.definitionResolvedFrom).toBe('revision');
     });
 
@@ -311,9 +372,10 @@ describe('workflow debug loop routes (sqlite memory app)', () => {
       const rd = await call<{ results: Array<{ redriveRunId?: string }> }>(
         'POST', '/host/openwop-app/runs/redrive', { runIds: [dbg.body.runId] },
       );
+      expect(rd.status).toBe(200);
       const redriveRunId = rd.body.results[0]!.redriveRunId!;
       expect(redriveRunId).toBeTruthy();
-      await settle(redriveRunId);
+      expect(await settle(redriveRunId)).toBe('failed');
       const prov = await call<{ debug?: unknown; launch?: string; redriveOf?: string }>(
         'GET', `/host/openwop-app/runs/${bareRunId(redriveRunId)}/revision`,
       );

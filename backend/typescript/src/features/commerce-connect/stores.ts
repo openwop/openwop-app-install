@@ -11,6 +11,7 @@
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { resolveSecret } from '../../byok/secretResolver.js';
 import { OpenwopError } from '../../types.js';
+import { isNonRootWorkspaceOrg } from '../../host/accessControlService.js';
 import { createHash } from 'node:crypto';
 import { STRIPE_KEY_REF } from '../billing/billingService.js';
 
@@ -38,12 +39,16 @@ export interface SellerAccount {
   mode: 'live' | 'demo';
   createdAt: string;
   updatedAt: string;
+  /** ADR 0948 P0b — set ONLY on a client-org seller (`clientSellers`): the client
+   *  org of an agency workspace this account settles for. Absent = the tenant's own. */
+  orgId?: string;
 }
 
 
 /** Reverse index row — `event.account` → seller tenant, a point lookup so the
- *  webhook path never scans the seller collection. */
-export interface SellerAccountIndex { stripeAccountId: string; tenantId: string }
+ *  webhook path never scans the seller collection. `orgId` names a client-org
+ *  seller (ADR 0948 P0b); absent = the tenant's own seller. */
+export interface SellerAccountIndex { stripeAccountId: string; tenantId: string; orgId?: string }
 
 
 export interface SeenConnectEvent { key: string; processedAt: string }
@@ -56,6 +61,53 @@ const isSeller = (p: unknown): SellerAccount | null => {
 
 
 export const sellers = new DurableCollection<SellerAccount>('commerce-connect:seller', (s) => s.tenantId, isSeller, (s) => s.tenantId);
+
+/**
+ * ADR 0948 P0b (David, 2026-10-19, #5038) — each CLIENT org of an agency workspace
+ * settles through its OWN Connect seller. Kept in its own collection so the
+ * tenant's seller (`sellers`, read by marketplace listings, KickTodo payouts and
+ * the operator import) is untouched: a client's row can never be read as the
+ * agency's, or the reverse. Tenant-indexed, so tenant teardown reclaims it.
+ */
+export const clientSellers = new DurableCollection<SellerAccount>(
+  'commerce-connect:client-seller', (s) => `${s.tenantId}::${s.orgId ?? ''}`, isSeller, (s) => s.tenantId,
+);
+
+/** Which seller: the tenant's own (`orgId` absent) or a client org's. */
+export interface SellerRef { tenantId: string; orgId?: string }
+
+/** The ONE adapter onboarding, sync and the webhook use, so the client lane is
+ *  the same code as the tenant lane — only the row's home differs. */
+export function sellerRows(ref: SellerRef): {
+  get: () => Promise<SellerAccount | null>;
+  compareAndSwap: (expected: SellerAccount | null, next: SellerAccount) => Promise<boolean>;
+  put: (next: SellerAccount) => Promise<void>;
+  remove: () => Promise<boolean>;
+} {
+  if (ref.orgId) {
+    // Only a CLIENT org has its own seller. A root org or a non-workspace org
+    // passed here would mint a row the resolver never reads; refuse it instead.
+    if (!isNonRootWorkspaceOrg(ref.tenantId, ref.orgId)) {
+      throw new OpenwopError('validation_error', 'Only a client organization of a workspace has its own seller.', 400, { feature: 'commerce-connect', code: 'not_a_client_org' });
+    }
+    const key = `${ref.tenantId}::${ref.orgId}`;
+    return {
+      get: async () => {
+        const s = await clientSellers.get(key);
+        return s && s.tenantId === ref.tenantId && s.orgId === ref.orgId ? s : null;
+      },
+      compareAndSwap: (expected, next) => clientSellers.compareAndSwap(expected, { ...next, orgId: ref.orgId }),
+      put: (next) => clientSellers.put({ ...next, orgId: ref.orgId }),
+      remove: () => clientSellers.delete(key),
+    };
+  }
+  return {
+    get: () => sellers.get(ref.tenantId),
+    compareAndSwap: (expected, next) => sellers.compareAndSwap(expected, next),
+    put: (next) => sellers.put(next),
+    remove: () => sellers.delete(ref.tenantId),
+  };
+}
 
 export const accountIndex = new DurableCollection<SellerAccountIndex>(
   'commerce-connect:seller-by-account', (r) => r.stripeAccountId, undefined, (r) => r.tenantId,
@@ -133,6 +185,8 @@ export const PAYOUT_EVENT_TYPES = new Set(['payout.paid', 'payout.failed']);
 export interface SellerPayout {
   payoutId: string;
   tenantId: string;
+  /** ADR 0948 P0b — the client org whose Connect account was paid out, if any. */
+  orgId?: string;
   amountMajorUnits: number;
   currency: string;
   status: 'paid' | 'failed';
@@ -280,12 +334,18 @@ export const listingState = (l: PaidListing): ListingState => l.state ?? 'active
  *  an existing binding throws `binding_conflict` instead of silently
  *  re-routing that account's webhook attribution. Same-tenant re-put is the
  *  idempotent no-op onboarding needs. */
-export async function bindSellerAccount(tenantId: string, stripeAccountId: string): Promise<void> {
+export async function bindSellerAccount(tenantId: string, stripeAccountId: string, orgId?: string): Promise<void> {
+  // The immutable reverse binding is the first-writer arbiter across instances.
+  // A get-then-put allows two simultaneous onboards/imports to claim the same
+  // account and report success while its webhook destination is overwritten.
+  if (await accountIndex.putIfAbsent({ stripeAccountId, tenantId, ...(orgId ? { orgId } : {}) })) return;
   const existing = await accountIndex.get(stripeAccountId);
-  if (existing && existing.tenantId !== tenantId) {
+  // ADR 0948 P0b — the binding is (tenant, org): an account bound to the agency
+  // can never become a client's, and a client's never the agency's (its webhooks
+  // would then update the wrong seller row, and the wrong account would settle).
+  if (!existing || existing.stripeAccountId !== stripeAccountId || existing.tenantId !== tenantId || (existing.orgId ?? '') !== (orgId ?? '')) {
     throw new OpenwopError('conflict', 'This Stripe account is already bound to another workspace. Dissolve the existing binding first.', 409, { stripeAccountId, reason: 'binding_conflict' });
   }
-  if (!existing) await accountIndex.put({ stripeAccountId, tenantId });
 }
 
 export const orders = new DurableCollection<ConnectOrder>('commerce-connect:order', (o) => o.orderId, undefined, (o) => o.buyerTenantId);
@@ -375,6 +435,7 @@ export const orderIntentIndex = new DurableCollection<{ paymentIntentId: string;
 /** Test-only: reset the commerce-connect stores. */
 export async function __resetCommerceConnect(): Promise<void> {
   for (const s of await sellers.list()) await sellers.delete(s.tenantId);
+  for (const s of await clientSellers.list()) await clientSellers.delete(`${s.tenantId}::${s.orgId ?? ''}`);
   for (const r of await accountIndex.list()) await accountIndex.delete(r.stripeAccountId);
   for (const e of await seenEvents.list()) await seenEvents.delete(e.key);
   for (const l of await paidListings.list()) await paidListings.delete(l.packName);

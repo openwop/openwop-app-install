@@ -1,6 +1,15 @@
 /**
  * Integration test for the Workforce host-ext service + demo seeding
- * (`src/host/workforceService.ts`) against an in-memory sqlite storage.
+ * (`src/host/workforceService.ts`, Workforce EP0 §3 telemetry + EP1 MG-5 shadow
+ * eval, RFC 0081 `live-shadow` shape) against an in-memory sqlite storage.
+ *
+ * What breaks it: a seed that is not idempotent (entities, per-tenant history, the
+ * self-healing showcase), a seed that aborts when the backend has no annotations
+ * store, an aggregator that counts another workforce's runs, a trace search whose
+ * empty query matches or whose cap drops rows without `capped`, or a shadow eval
+ * that leaks a raw outcome value. The seed is deterministic (seed string per
+ * tenant+workforce, fixed `NOW`), so the aggregates are pinned as exact numbers
+ * measured from that seed — never recomputed with the aggregator under test.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
@@ -63,7 +72,7 @@ describe('workforceService', () => {
 
   it('seeds the hero workforce entity idempotently', async () => {
     const first = await seedWorkforceEntities();
-    expect(first).toBeGreaterThan(0);
+    expect(first).toBe(5);
     const second = await seedWorkforceEntities();
     expect(second).toBe(0); // already present
 
@@ -109,23 +118,39 @@ describe('workforceService', () => {
 
   it('does not write history when only entities are seeded (anon-safe path)', async () => {
     await seedWorkforceEntities();
-    const runs = await storage.listRuns({ tenantId: 'anon:xyz', limit: 100 });
-    expect(runs.length).toBe(0);
+    // The tenants a history seed WOULD write to — the demo tenant and the showcase —
+    // must hold no runs at all after an entity-only seed.
+    for (const tenantId of ['demo', SHOWCASE_TENANT, 'anon:xyz']) {
+      expect(await storage.listRuns({ tenantId, limit: 100 }), tenantId).toHaveLength(0);
+    }
+    // Positive control: the same read sees a history seed, so the empty reads above
+    // are not an unreadable tenant.
+    await seedWorkforceHistory(storage, 'demo', { nowMs: NOW, runCount: 2 });
+    expect(await storage.listRuns({ tenantId: 'demo', limit: 100 })).toHaveLength(10);
   });
 
   it('seeds all runs even when the backend has no annotations store (best-effort; live-Postgres shape)', async () => {
     await seedWorkforceEntities();
     // Simulate a deploy whose schema omits the annotations table — insertAnnotation
     // throws, exactly as the live Postgres backend did (relation "annotations" does not exist).
+    // Only `false-positive` runs carry an annotation, and 40 runs per workforce held
+    // none, so the failing store was never called and this case could not fail
+    // (probe `8fw5g4-wfs-annot`, vacuous in round 1). 300 runs does reach it, and the
+    // call counter below proves the failure path actually ran.
+    let annotationCalls = 0;
     storage.insertAnnotation = async () => {
+      annotationCalls += 1;
       throw new Error('relation "annotations" does not exist');
     };
-    const res = await seedWorkforceHistory(storage, 'demo', { nowMs: NOW, runCount: 40 });
-    expect(res.runs).toBe(40 * 5); // 5 instrumented workforces; runs + events persisted despite annotation failures
-    const mine = (await storage.listRuns({ tenantId: 'demo', limit: 1000 })).filter(
+    const res = await seedWorkforceHistory(storage, 'demo', { nowMs: NOW, runCount: 300 });
+    expect(annotationCalls, 'the missing-annotations path must actually be exercised').toBeGreaterThan(0);
+    // Skip on first failure, don't retry: at most one failed call per workforce.
+    expect(annotationCalls).toBeLessThanOrEqual(5);
+    expect(res.runs).toBe(300 * 5); // 5 instrumented workforces; runs + events persisted despite annotation failures
+    const mine = (await storage.listRuns({ tenantId: 'demo', limit: 5000 })).filter(
       (r) => (r.metadata as { workforceId?: string }).workforceId === HERO,
     );
-    expect(mine).toHaveLength(40);
+    expect(mine).toHaveLength(300);
   });
 
   it('aggregates the 8 telemetry metrics from seeded runs (no event fan-out)', async () => {
@@ -134,17 +159,18 @@ describe('workforceService', () => {
     const runs = await storage.listRuns({ tenantId: 'demo', limit: 5000 });
 
     const m = aggregateWorkforceMetrics(runs, HERO);
+    // Exact values from the deterministic seed (seed `demo:<workforce>`, fixed NOW),
+    // measured once (grade-tests wave 64) — never recomputed with the aggregator.
     expect(m.totalRuns).toBe(300);
-    expect(m.openApprovals).toBeGreaterThan(0);
-    expect(m.terminalRuns).toBe(300 - m.openApprovals);
-    expect(m.cycleTimeP50Ms).not.toBeNull();
-    expect(m.costPerClearedUsd).toBeGreaterThan(0);
-    expect(m.overrideRate).toBeGreaterThan(0);
-    expect(m.escalationRate).toBeGreaterThan(0);
+    expect(m.openApprovals).toBe(8);
+    expect(m.terminalRuns).toBe(292);
+    expect(m.cycleTimeP50Ms).toBe(30990);
+    expect(m.costPerClearedUsd).toBeCloseTo(0.006478, 6);
+    expect(m.overrideRate).toBeCloseTo(0.2414, 4);
+    expect(m.escalationRate).toBeCloseTo(0.1933, 4);
 
     // weekly override rate trends DOWN across the window (the graduation curve)
-    const withApprovals = m.weekly.filter((w) => w.overrideRate > 0);
-    expect(withApprovals.length).toBeGreaterThan(1);
+    expect(m.weekly.map((w) => Number(w.overrideRate.toFixed(4)))).toEqual([0.2667, 0.3636, 0.375, 0.125, 0, 0.1538]);
     expect(m.weekly[0]!.overrideRate).toBeGreaterThan(m.weekly[m.weekly.length - 1]!.overrideRate);
   });
 
@@ -184,10 +210,9 @@ describe('workforceService', () => {
 
     const p = aggregateGovernancePosture(runs, HERO);
     expect(p.totalRuns).toBe(300);
-    expect(p.overrides).toBeGreaterThan(0);
-    expect(p.escalations).toBeGreaterThanOrEqual(p.overrides);
-    expect(p.recentEvents.length).toBeGreaterThan(0);
-    expect(p.recentEvents.length).toBeLessThanOrEqual(8);
+    expect(p.overrides).toBe(14);
+    expect(p.escalations).toBe(58);
+    expect(p.recentEvents).toHaveLength(8); // the cap: more than 8 qualifying events exist
     // events carry a runId + a known kind
     for (const e of p.recentEvents) {
       expect(e.runId).toBeTruthy();
@@ -224,13 +249,17 @@ describe('workforceService', () => {
 
     expect(searchWorkforceTrace(runs, HERO, '   ').matches).toHaveLength(0);
 
+    // Uncapped first: how many overridden runs this workforce really has.
+    const all = searchWorkforceTrace(runs, HERO, 'overridden', 5000);
+    expect(all.capped).toBe(false);
+    expect(all.matches).toHaveLength(14);
+    expect(all.matches.every((m) => m.outcome === 'overridden')).toBe(true);
+    // Capped at 5: exactly 5 returned, and the truncation is FLAGGED, not silent.
     const overrides = searchWorkforceTrace(runs, HERO, 'overridden', 5);
-    expect(overrides.matches.length).toBeLessThanOrEqual(5);
+    expect(overrides.matches).toHaveLength(5);
     expect(overrides.matches.every((m) => m.outcome === 'overridden')).toBe(true);
-    if (overrides.scanned > 5 && overrides.matches.length === 5) {
-      // more than the cap existed → flagged, not silently dropped
-      expect(typeof overrides.capped).toBe('boolean');
-    }
+    expect(overrides.capped).toBe(true);
+    expect(overrides.scanned).toBe(300);
   });
 
   it('seeds five starter workforces; all are instrumented with history', async () => {
@@ -267,11 +296,11 @@ describe('workforceService', () => {
 
     const c = aggregateShadowEval(runs, HERO);
     expect(c.mode).toBe('live-shadow'); // RFC 0081 vocabulary
-    expect(c.status).not.toBe('pending');
-    expect(c.aggregateScore).toBeGreaterThan(0);
-    expect(c.aggregateScore).toBeLessThanOrEqual(1);
-    expect(c.passed).toBe(c.aggregateScore >= 0.9); // EvalSummary.passed
-    expect(c.divergenceCount).toBeGreaterThanOrEqual(c.findings.length);
+    expect(c.status).toBe('pass');
+    expect(c.aggregateScore).toBeCloseTo(0.9408, 4);
+    expect(c.passed).toBe(true); // EvalSummary.passed — 0.9408 clears the 0.9 bar
+    expect(c.divergenceCount).toBe(17);
+    expect(c.findings).toHaveLength(17); // under the 20-finding limit, so all are listed
 
     for (const d of c.findings) {
       // digests differ (that IS the divergence) and are sha256-prefixed

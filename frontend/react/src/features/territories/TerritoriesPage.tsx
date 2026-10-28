@@ -30,7 +30,7 @@ import {
   listOrgs, type Org,
   listModels, createModel, activateModel, archiveModel, deleteModel, type TerritoryModel,
   listTerritories, createTerritory, updateTerritory, type Territory,
-  listRules, createRule, type AssignmentRule,
+  listRules, createRule, type AssignmentRule, type RuleTarget,
   previewModel, type PreviewSummary,
   getAttainment, setQuota, type TerritoryAttainment,
 } from './territoriesClient.js';
@@ -40,10 +40,12 @@ import { REGION_CATALOG } from '../sales-maps/regionCatalog.js';
 
 const DEAL_FIELDS = ['amount', 'title', 'currency', 'stageId', 'pipelineId', 'companyId', 'contactId', 'owner', 'status', 'closeDate'];
 const COMPANY_FIELDS = ['name', 'domain', 'industry', 'tags'];
+/** ADR 0954 D5 — the lead fields a lead-routing rule may match. */
+const LEAD_FIELDS = ['band', 'source', 'stage', 'company', 'owner', 'score'];
 const OPS = ['eq', 'ne', 'contains', 'gt', 'gte', 'lt', 'lte', 'in', 'exists'] as const;
 const fieldLabel = (f: string, t: TFunction): string => t(`field_${f}`, { defaultValue: f });
 const opLabel = (op: string, t: TFunction): string => t(`op_${op}`, { defaultValue: op });
-const NUMERIC_FIELDS = new Set(['amount']);
+const NUMERIC_FIELDS = new Set(['amount', 'score']);
 const CURRENCIES = ['USD', 'EUR', 'GBP', 'JPY', 'CAD', 'AUD', 'CHF', 'CNY', 'INR', 'BRL'];
 
 interface Cond { id: string; field: string; op: (typeof OPS)[number]; value: string }
@@ -471,7 +473,7 @@ function RulesPanel({ orgId, modelId, editable, territories, onChanged }: {
 }): JSX.Element {
   const { t } = useTranslation('territories');
   const [rules, setRules] = useState<Load<AssignmentRule[]>>(LOADING);
-  const [target, setTarget] = useState<'deal' | 'company'>('deal');
+  const [target, setTarget] = useState<RuleTarget>('deal');
   const [territoryId, setTerritoryId] = useState('');
   const [combinator, setCombinator] = useState<'all' | 'any'>('all');
   const [conds, setConds] = useState<Cond[]>(() => [newCond('amount')]);
@@ -489,7 +491,7 @@ function RulesPanel({ orgId, modelId, editable, territories, onChanged }: {
   }, [orgId, modelId]);
   useEffect(() => { load(); }, [load]);
 
-  const fields = target === 'deal' ? DEAL_FIELDS : COMPANY_FIELDS;
+  const fields = target === 'deal' ? DEAL_FIELDS : target === 'contact' ? LEAD_FIELDS : COMPANY_FIELDS;
   useEffect(() => { setConds([newCond(fields[0] ?? 'amount')]); }, [target]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const setCond = (id: string, patch: Partial<Cond>): void => setConds((cs) => cs.map((c) => (c.id === id ? { ...c, ...patch } : c)));
@@ -548,9 +550,10 @@ function RulesPanel({ orgId, modelId, editable, territories, onChanged }: {
       {editable ? (
         <form className="u-flex-col u-gap-2" onSubmit={(e) => { e.preventDefault(); void add(); }}>
           <div className="u-flex u-gap-1 u-items-end u-flex-wrap">
-            <SelectField label={t('appliesTo')} value={target} onChange={(e) => setTarget(e.target.value as 'deal' | 'company')}>
+            <SelectField label={t('appliesTo')} value={target} onChange={(e) => setTarget(e.target.value as RuleTarget)}>
               <option value="deal">{t('targetDeals')}</option>
               <option value="company">{t('targetCompanies')}</option>
+              <option value="contact">{t('targetLeads')}</option>
             </SelectField>
             <SelectField label={t('assignTo')} value={territoryId} onChange={(e) => setTerritoryId(e.target.value)}>
               <option value="">{t('pickTerritory')}</option>

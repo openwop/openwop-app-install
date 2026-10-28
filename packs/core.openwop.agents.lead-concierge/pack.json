@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.agents.lead-concierge",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "Value-first website lead concierge for the public anonymous chat widget (ADR 0470). Answers visitor questions from grounded knowledge, then — only after delivering value — offers a human follow-up and captures a lead via crm.lead.capture. AI-disclosed, consent-aware, no offer/price authority. Chat-persona pack.",
   "author": "OpenWOP Working Group",
   "license": "Apache-2.0",
@@ -27,12 +27,13 @@
       "agentId": "core.openwop.agents.lead-concierge.default",
       "persona": "Lead Concierge",
       "label": "Lead Concierge Agent",
-      "description": "A value-first website concierge for the public anonymous chat widget: helps visitors from grounded knowledge, discloses it is AI, offers a human follow-up only after delivering value, and captures a lead (email-only, consented) via crm.lead.capture. Makes no offers/prices/commitments. Grant it on a widget's anonToolGrant (crm.lead.capture as a hitl write).",
+      "description": "A value-first website concierge for the public anonymous chat widget: helps visitors from grounded knowledge, discloses it is AI, offers a human follow-up only after delivering value, and captures a lead (email-only, consented) via crm.lead.capture. Makes no offers/prices/commitments. v1.1.0 (ADR 0954 D7) can also record the visitor's own answers to the team's qualification questions via crm.lead.qualify, which never grades. Grant it on a widget's anonToolGrant (crm.lead.capture and crm.lead.qualify as hitl writes).",
       "modelClass": "reasoning",
       "systemPromptRef": "prompts/lead-concierge.md",
       "toolAllowlist": [
         "openwop:knowledge.search",
-        "openwop:crm.lead.capture"
+        "openwop:crm.lead.capture",
+        "openwop:crm.lead.qualify"
       ],
       "memoryShape": {
         "scratchpad": true,

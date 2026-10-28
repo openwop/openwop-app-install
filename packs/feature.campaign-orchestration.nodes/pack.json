@@ -1,8 +1,8 @@
 {
   "name": "feature.campaign-orchestration.nodes",
-  "version": "1.2.0",
+  "version": "1.7.0",
   "kind": "node",
-  "description": "Campaign Studio orchestration node pack \u2014 the post-generation pipeline: `consistency-check` (scores generated channel drafts against the messaging kernel, \u226580 advisory) and `finalize` (creates the MarketingCampaign from a confirmed brief over ctx.features['campaign-orchestration']). Used by the parent orchestration workflow + the Campaign Strategist.",
+  "description": "Campaign Studio orchestration node pack \u2014 the post-generation pipeline: `consistency-check` (scores generated channel drafts against the messaging kernel, \u226580 advisory) and `finalize` (creates the MarketingCampaign from a confirmed brief over ctx.features['campaign-orchestration']). `campaign-context` reads the run's own campaign for downstream nodes (ADR 0941 P5). Used by the parent orchestration workflow + the Campaign Strategist.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": [
@@ -28,11 +28,11 @@
     },
     {
       "typeId": "feature.campaign-orchestration.nodes.finalize",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "label": "Campaign: Finalize",
-      "description": "Creates (or updates) the MarketingCampaign from a confirmed brief \u2014 one campaign per brief \u2014 over ctx.features['campaign-orchestration']. Inputs: { briefId }. Output: { campaign }.",
+      "description": "Creates (or updates) the MarketingCampaign from a confirmed brief \u2014 one campaign per brief \u2014 over ctx.features['campaign-orchestration']. Inputs: { briefId }. Output: { campaign }. role:\"side-effect\" (ADR 0941 P5): it writes the campaign and emits its lifecycle webhook, so a replay fork serves the recorded outcome instead of finalizing again.",
       "category": "integration",
-      "role": "action",
+      "role": "side-effect",
       "capabilities": []
     },
     {
@@ -42,6 +42,35 @@
       "description": "Reports which campaign assets the brief lacks (brand/persona/kb); auto-resolves when all are bound (ADR 0356 P4). Inputs: { briefId }. Output: { missing, ready, prompt }.",
       "category": "integration",
       "role": "read",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.campaign-orchestration.nodes.campaign-context",
+      "version": "1.0.0",
+      "label": "Campaign: Context",
+      "description": "Reads the campaign this run belongs to, from the run's host-written run tag only (ADR 0941 D2b): the campaign summary, its product refs and the linked products' names (products: ok / unavailable / failed) and autonomy binding, and the goal FROZEN on the run at start (never the live goal). Fails typed (not_a_campaign_run, campaign_not_found, wrong_client) instead of returning an empty campaign. Inputs: none. Output: { campaign, goal, goalVersion, role }.",
+      "category": "integration",
+      "role": "read",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.campaign-orchestration.nodes.autonomy-gate",
+      "version": "1.1.0",
+      "label": "Campaign: Autonomy Gate",
+      "description": "Lets the campaign's autonomy policy decide this step (ADR 0942): auto, notify-after, approve (role-based approvers from the policy, never from config) or blocked. Config: { actionClass, stage?, factsFrom?, prompt? }. Inputs: { facts? }. Output: { decision, ruleId }. Records the gate outcome for replay, including any veto window; replay never opens another window or emits another notice.",
+      "category": "integration",
+      "role": "gate",
+      "capabilities": [
+        "side-effectful"
+      ]
+    },
+    {
+      "typeId": "feature.campaign-orchestration.nodes.autonomy-digest",
+      "version": "1.0.0",
+      "label": "Campaign: Autonomy Digest",
+      "description": "Sends each person one notice listing yesterday's campaign steps that ran under a notify-after rule with a daily digest (ADR 0942 D7). No inputs. Output: { recipients, items }.",
+      "category": "integration",
+      "role": "side-effect",
       "capabilities": []
     }
   ],

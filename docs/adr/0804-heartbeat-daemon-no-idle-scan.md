@@ -22,6 +22,11 @@ anyway.
 
 ## Decision
 
+> **CORRECTED 2026-10-19 (ADR 0963 D5).** The token this decision keys on moved on every
+> heartbeat stamp (`recordHeartbeat` bumped it), so any tick that heartbeat a member forced the
+> next tick to re-list every tenant: the cache only held while the loop did nothing. The stamp
+> no longer moves the token; the pass corrects the cached listing itself (`note`).
+
 1. **A one-row change token.** `rosterService` keeps a `roster-version`
    collection with a single row. Every successful roster write — create (CAS),
    update, `recordHeartbeat`, delete, and the ADR 0789 fork repoint — writes the

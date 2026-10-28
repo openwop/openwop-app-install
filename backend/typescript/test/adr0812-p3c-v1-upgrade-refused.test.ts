@@ -5,6 +5,11 @@
  * ADR 0806 308) never sees it. Before P3c `upgradePathname` STRIPPED a `/v1`, so a
  * retired host still opened sockets on the withdrawn path space. The registry now
  * answers the twin itself, and a bare path still reaches its handler.
+ * Tracker: TST-BVC-5.
+ *
+ * Red when (wave 60 probes w60g4-up-*): `upgradePathname` strips `/v1` again or
+ * stops stripping `/api`; the registry stops refusing a retired path, or stops
+ * treating a bare `/v1` as retired.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';

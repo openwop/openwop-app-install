@@ -226,6 +226,6 @@ describe('ADR 0921 D3 — the workflow surface is client-bound', () => {
 
   it('serves the client’s own assets to a member of that client', async () => {
     const out = await buildCampaignOpsSurface(scopeFor(operatorUserId)).listAssets({ orgId: orgA }) as { assets: CampaignAsset[] };
-    expect(out.assets.map((a) => a.locator.pageId)).toEqual([pageA]);
+    expect(out.assets.map((a) => (a.locator as { pageId: string }).pageId)).toEqual([pageA]);
   });
 });

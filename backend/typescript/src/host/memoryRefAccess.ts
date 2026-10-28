@@ -83,7 +83,8 @@ import { resolveCallerUser } from '../features/users/usersGuards.js';
 import { getRosterEntry } from './rosterService.js';
 import type { Scope } from './accessControlService.js';
 import { requireTenantScope } from '../features/featureRoute.js';
-import { MEMORY_DEMO_REF } from './inMemorySurfaces.js';
+import { MEMORY_DEMO_REF, type MemoryRow } from './inMemorySurfaces.js';
+import { runPayloadAccess } from './runPayloadAccess.js';
 
 /** Read vs write — an agent's memory needs `workspace:write` to be DELETED. */
 export type MemoryRefAccessMode = 'read' | 'write';
@@ -141,7 +142,59 @@ export async function assertMemoryRefAccess(req: Request, memoryRef: string, mod
 
   // Everything else — including `project:<id>`, which has its OWN gated door at
   // `features/projects/routes.ts` and must not gain an ungated second one here.
+  // `MEMORY_DEMO_REF` passes this ref-level check and is then decided PER ROW by
+  // `tenantMemoryAccess` (ADR 0979 D1): the route must call it.
   if (memoryRef !== MEMORY_DEMO_REF) {
     throw new OpenwopError('not_found', 'Memory not found.', 404, { memoryRef });
   }
+}
+
+/**
+ * ADR 0979 D1 — who sees which rows of the tenant memory ledger, and who may
+ * delete them.
+ *
+ * THE DEFECT this closes. The ledger holds a 280-character preview of every
+ * completed run's OUTPUT, and the arm above let `MEMORY_DEMO_REF` through with no
+ * check at all. So a Viewer read every member's run output here while issue
+ * #4543 withheld the same output from them on the run list, snapshot, poll and
+ * SSE; and any member, Viewer included, could DELETE any row.
+ *
+ * ONE RULE. Visibility is `runPayloadAccess`, the function the run reads call,
+ * applied to the owner principal the writer stamped on the row. No run lookup:
+ * the run may since have been deleted by retention, and a page may hold 2,000
+ * rows. A row with no owner (legacy, or a run with no owner of record) is admins
+ * only, exactly like an unowned run's payload.
+ *
+ * DELETE. Where the read grant is tenant-level (`wildcard`, `personal`,
+ * `no-presence`) delete follows it, so a scoped API key in a deployment-named
+ * tenant keeps `openwop memory delete`. Otherwise it needs `workspace:write`
+ * (a 403 that does not depend on the id), then the row must be visible (a 404,
+ * the same answer an absent id gets).
+ */
+export interface TenantMemoryAccess {
+  visibility: 'all' | 'own-runs';
+  canDelete: boolean;
+  /** Does the caller see this row? */
+  admits: (row: Pick<MemoryRow, 'owner'>) => boolean;
+  /** Throw unless the caller may delete at all (`403`, independent of the id). */
+  assertMayDelete: () => Promise<void>;
+}
+
+export async function tenantMemoryAccess(req: Request): Promise<TenantMemoryAccess> {
+  const access = await runPayloadAccess(req, tenantOf(req));
+  const tenantGrant = access.all && access.grant !== 'admin';
+  let canWrite = tenantGrant;
+  if (!tenantGrant) {
+    try { await requireTenantScope(req, 'workspace:write'); canWrite = true; } catch { canWrite = false; }
+  }
+  return {
+    visibility: access.all ? 'all' : 'own-runs',
+    canDelete: canWrite,
+    admits: access.all
+      ? () => true
+      : (row) => row.owner !== undefined && access.principals.has(row.owner),
+    assertMayDelete: async () => {
+      if (!tenantGrant) await requireTenantScope(req, 'workspace:write');
+    },
+  };
 }

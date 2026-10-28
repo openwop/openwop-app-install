@@ -3,20 +3,21 @@
  * input) inside a vertical flex container.
  */
 
+import { selectPurgeableEmptyChats } from './lib/abandonedChat.js';
 import { attachmentCaps } from './lib/attachmentCaps.js';
 import { Button } from '../ui/Button.js';
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { ChatHeader } from './ChatHeader.js';
-import { listOrgs } from '../client/promptLibraryClient.js';
-import { registerPromptCommands } from './promptCommands.js';
 import { ConversationView } from './ConversationView.js';
 import { LeftRail, type LeftRailTab } from './leftRail/LeftRail.js';
 import { Workbench } from './workbench/Workbench.js';
 import { useMobilePaneArbitration, useWorkbench } from './workbench/useWorkbench.js';
 // ADR 0117 Phase 3 — the read-only side-by-side compare view; lazy (zero entry-budget).
 const CompareView = lazy(() => import('./CompareView.js').then((m) => ({ default: m.CompareView })));
+// ADR 0992 D9 — the ChatGPT-archive picker, lazy (only an archive import opens it).
+const ImportArchivePicker = lazy(() => import('./ImportArchivePicker.js').then((m) => ({ default: m.ImportArchivePicker })));
 // ADR 0154 — channel-only chrome; lazy so it (and channelsClient's SSE code)
 // stays out of the eager chat entry chunk (only loads when a channel is open).
 const ChannelPresenceBar = lazy(() => import('./conversations/ChannelPresenceBar.js').then((m) => ({ default: m.ChannelPresenceBar })));
@@ -50,6 +51,8 @@ import { runCoreSubmit } from './lib/chatSubmit.js';
 // Entry-weight: the reviews strip pulls the whole review-card tree (~16 kB min
 // after the ADR 0478 HITL additions) — lazy so the chat entry stays light; the
 // cheap count store above stays eager for the badge.
+// ADR 0944 D2 — lazy: only client-bound conversations render it (entry-chunk budget).
+const ClientMemoryChip = lazy(() => import('./ClientMemoryChip.js').then((m) => ({ default: m.ClientMemoryChip })));
 const ConversationReviewsStrip = lazy(() =>
   import('./reviews/ConversationReviewsStrip.js').then((m) => ({ default: m.ConversationReviewsStrip })));
 import { useAgentMentions } from './lib/agentMentions.js';
@@ -156,21 +159,7 @@ interface Props {
 export function ChatSidebar({ config, byokStored, onOpenSettings, onRemoveKey, tenantId = 'anon' }: Props): JSX.Element {
   const { t } = useTranslation('chat');
   const { session, isSending, thinkingAgentId, error, send, cancel, emitSystem, upsertTranscriptTurn, refreshNewestMessages, reset, resolveInterrupt, runWorkflowMention, cancelWorkflowRun, regenerate, setFeedback, loadSessionFromBackend, hasOlderMessages, isLoadingEarlier, loadEarlierMessages, activeAgents } = useChatSession();
-  // ADR 0116 Phase 3c — when the prompt library is enabled, register the org's
-  // prompts as `/p-<slug>` slash commands (best-effort; scoped to the primary org).
-  // They surface in the existing SlashAutocomplete — no bespoke composer affordance.
-  const promptsAccess = { enabled: true }; // always-on
-  const exportAccess = { enabled: true }; // always-on
   const commentsContext = useCommentsContext(); // ADR 0021 ext — inline per-message comments (null when off/no org)
-  useEffect(() => {
-    if (!promptsAccess.enabled) return;
-    void (async () => {
-      try {
-        const orgId = (await listOrgs())[0]?.orgId;
-        if (orgId) await registerPromptCommands(orgId);
-      } catch { /* prompts are an optional surface — ignore a fetch failure */ }
-    })();
-  }, [promptsAccess.enabled]);
   // Stable regenerate handler (GAP-ANALYSIS E14): an inline arrow here made a
   // new function each render, defeating MessageBubble's memo. useCallback keeps
   // it referentially stable across streaming tokens (config is unchanged
@@ -276,9 +265,10 @@ export function ChatSidebar({ config, byokStored, onOpenSettings, onRemoveKey, t
     const flagKey = `openwop-app.chat.purgedEmpty:${tenantId}`;
     try { if (localStorage.getItem(flagKey)) { purgedEmptyRef.current = true; return; } } catch { /* disabled — skip */ }
     purgedEmptyRef.current = true;
-    const empties = sessionsCollection.sessions.filter(
-      (s) => s.messageCount === 0 && s.sessionId !== session.id,
-    );
+    // ADR 0978 D3 — only chats the caller owns and never used. Without the
+    // predicate this deleted every empty row it could manage: project, notebook
+    // and board group chats, DMs, and meta-less rows other members also see.
+    const empties = selectPurgeableEmptyChats(sessionsCollection.sessions, session.id);
     void (async () => {
       for (const e of empties) {
         try { await sessionsCollection.remove(e.sessionId); } catch { /* best-effort; the rail filter still hides it */ }
@@ -434,7 +424,7 @@ export function ChatSidebar({ config, byokStored, onOpenSettings, onRemoveKey, t
   // import · export · share + compare state), factored into a hook so the standalone
   // sidebar and each multi-tab TabSession run identical handlers. The standalone opens
   // a result in-place (selectConversation) and refreshes its own list.
-  const { onBranch, onBranchFrom, onImport, onExport, onShare, compareOpen, openCompare, closeCompare } = useConversationActions({
+  const { onBranch, onBranchFrom, onImport, onExport, onShare, compareOpen, openCompare, closeCompare, archiveEntries, onPickArchiveConversation, closeArchive } = useConversationActions({
     sessionId: session.id,
     refreshList: sessionsCollection.refresh,
     onOpenConversation: selectConversation,
@@ -752,6 +742,11 @@ export function ChatSidebar({ config, byokStored, onOpenSettings, onRemoveKey, t
           <CompareView currentSessionId={session.id} onClose={closeCompare} />
         </Suspense>
       ) : null}
+      {archiveEntries ? (
+        <Suspense fallback={null}>
+          <ImportArchivePicker entries={archiveEntries} onPick={(i) => { void onPickArchiveConversation(i); }} onClose={closeArchive} />
+        </Suspense>
+      ) : null}
       {showCreateChannel ? (
         <Suspense fallback={null}>
           <ChannelCreateDialog onClose={() => setShowCreateChannel(false)} onCreated={onChannelCreated} />
@@ -786,7 +781,8 @@ export function ChatSidebar({ config, byokStored, onOpenSettings, onRemoveKey, t
           onNewChat={() => { cadence.cancel(); reset(); }}
           onBranch={() => { void onBranch(); }}
           onCompare={openCompare}
-          {...(exportAccess.enabled ? { onExport: (format: 'md' | 'json') => { void onExport(format); }, onImport: (f: File) => { void onImport(f); } } : {})}
+          onExport={(format: 'md' | 'json') => { void onExport(format); }}
+          onImport={(f: File) => { void onImport(f); }}
           onShare={() => { void onShare(); }}
           session={session}
           modelSwitcher={modelSwitcher}
@@ -897,6 +893,7 @@ export function ChatSidebar({ config, byokStored, onOpenSettings, onRemoveKey, t
               <Suspense fallback={null}>
                 <ConversationReviewsStrip conversationId={session.id} isSending={isSending} />
               </Suspense>
+              {activeConversation?.client ? <Suspense fallback={null}><ClientMemoryChip client={activeConversation.client} /></Suspense> : null}
               {conveneProjectId && conveneAgentCount > 0 ? (
                 <div className="u-flex u-items-center u-wrap u-gap-2 u-pad-2-4 u-fs-12 muted">
                   <Button variant="secondary" size="sm" disabled={isSending} onClick={() => void conveneProject('')}>

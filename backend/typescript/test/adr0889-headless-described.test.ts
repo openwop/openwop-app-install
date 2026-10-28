@@ -7,6 +7,10 @@
  *
  * Same fixture as `adr0821-p4-headless-byok-preference.test.ts`: `fetch` is spied,
  * so "who was called" is observed, not inferred.
+ *
+ * Tracker TST-BHG-6. Red when (sabotage-witnessed, wave 62): the BYOK preference is
+ * used without the opt-in, a dead key is not skipped, the preferred dispatch is
+ * ignored, or the judge stops stamping the identity it dispatched to.
  */
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';

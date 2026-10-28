@@ -40,6 +40,15 @@ fails=0
 # scratch dir, and an arm that needs a claim names its own.
 SAFE_CLAIM="$TMP/claim-default"
 export OPENWOP_PREFLIGHT_CLAIM_DIR="$SAFE_CLAIM"
+# The machine-wide markers are a separate store. In particular, arms 4/5 stub
+# ps to return nothing: reading the real markers there once erased a live
+# KickTodo gate's marker and allowed the daemon to overlap it (2026-10-27).
+export OPENWOP_CI_CLAIMS_DIR="$TMP/ci-claims"
+# HERMETIC against REAL suites (2026-10-26, user decision): every scan in every
+# arm sees only processes descended from this harness (the preflight
+# OPENWOP_PREFLIGHT_TEST_ANCESTOR seam). kicktodo #124's gate hung here beside a
+# real backend lane: the mini gates waited on a suite no arm had started.
+export OPENWOP_PREFLIGHT_TEST_ANCESTOR=$$
 
 # Kill a process AND all its descendants (a waiter subshell → preflight --ci →
 # its own --wait child). `pkill -P` reaches one level only, and an orphaned
@@ -54,6 +63,7 @@ cleanup() {
   git -C "$ROOT" worktree remove --force "$TMP/wt3" 2>/dev/null
   git -C "$ROOT" worktree remove --force "$TMP/wt4" 2>/dev/null
   git -C "$ROOT" worktree remove --force "$TMP/wt5" 2>/dev/null
+  git -C "$ROOT" worktree remove --force "$TMP/wt-outside" 2>/dev/null
   [ -n "${TMPWT:-}" ] && git -C "$ROOT" worktree remove --force "$TMPWT" 2>/dev/null
   rm -rf "$TMP"
 }
@@ -80,6 +90,10 @@ trap 'printf "\n  \033[31m✗ HUNG: test-preflight-suite exceeded %ss — failin
 
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$*"; }
 bad()  { printf '  \033[31m✗\033[0m %s\n' "$*"; fails=$((fails + 1)); }
+# A scan may take time without taking a contention-poll wait. Assert the
+# emitted policy outcome, keeping elapsed wall time only as a diagnostic.
+no_poll_wait() { ! grep -qE '→ waiting |running CONTENDED \(DEBT-3\)' <<<"$1"; }
+claimed_without_poll() { grep -q 'clear after 0s; claimed for pid' <<<"$1" && no_poll_wait "$1"; }
 
 # A stand-in for a vitest parent process: argv must match the detector's pattern
 # and it must stay alive with a known cwd. Sleeping node does both.
@@ -171,6 +185,32 @@ fi
                 || bad "--check should exit 1 when contended (got $rc)"
 
 # (the fake worktree stays until the H36 arms below are done with it)
+
+# --- arm 1h: a REAL suite outside this harness is invisible to every arm --------
+# The stand-in is ORPHANED (its parent exits at once), so it descends from launchd,
+# not from this harness: exactly what a peer's or another project's suite is. The
+# same scan without the seam must SEE it, or this arm proves nothing.
+# Its own worktree: the detector prints one line per worktree, naming the FIRST
+# process it found there, so sharing arm 1's worktree would hide the orphan.
+OUT_WT="$TMP/wt-outside"
+git -C "$ROOT" worktree add -q --detach "$OUT_WT" HEAD 2>/dev/null || bad "could not create the arm 1h worktree"
+( ( cd "$OUT_WT" && exec node "$TMP/nm/node_modules/.bin/vitest" run ) & echo $! > "$TMP/orphan.pid" )
+ORPHAN="$(cat "$TMP/orphan.pid")"; PIDS+=("$ORPHAN")
+for _ in $(seq 1 40); do ps -o command= -p "$ORPHAN" 2>/dev/null | grep -q 'bin/vitest run' && break; sleep 0.25; done
+if [ "$(ps -o ppid= -p "$ORPHAN" 2>/dev/null | tr -d ' ')" = "$$" ]; then
+  bad "the outside stand-in was not orphaned (its parent is this harness), so arm 1h cannot test anything"
+else
+  in_arm="$("$PF" 2>&1)"; unscoped="$(env -u OPENWOP_PREFLIGHT_TEST_ANCESTOR "$PF" 2>&1)"
+  if ! grep -qF "$OUT_WT" <<<"$unscoped"; then
+    bad "arm 1h is vacuous: without the seam the scan did not see the outside suite either"
+  elif grep -qF "$OUT_WT" <<<"$in_arm"; then
+    bad "an outside (real) suite is visible to the arms — a peer's gate can hang this self-test"
+  else
+    ok "hermetic: a suite this harness did not start is invisible to its arms (and visible without the seam)"
+  fi
+fi
+kill_tree "$ORPHAN"
+git -C "$ROOT" worktree remove --force "$OUT_WT" 2>/dev/null
 
 # --- arm 1b/1c (H36): the gate's NON-vitest lanes are competitors too ---------
 # A full `npm run ci` is vitest for ~20 min and then a frontend build + Playwright
@@ -456,11 +496,12 @@ sleep 600 & HOLDER="$!"; PIDS+=("$HOLDER")
 hold_claim() { mkdir -p "$CLAIM_TMP"; printf '%s\t%s\t/elsewhere/peer-worktree\n' "$HOLDER" "$(/bin/ps -o lstart= -p "$HOLDER" | sed 's/^ *//;s/ *$//')" > "$CLAIM_TMP/info"; }
 
 # 9. opt-out: skips the wait, still prints who is there.
-hold_claim
+hold_claim; claim_before="$(cat "$CLAIM_TMP/info")"
 # A tiny cap too, so an opt-out that stopped working reads as a red (it would
 # wait the cap and print the banner) instead of hanging this test for 90 minutes.
 t0=$(date +%s); out="$("${CIENV[@]}" OPENWOP_CI_NO_WAIT=1 OPENWOP_CI_WAIT_MAX_MIN=0.05 "$PF" --ci 2>&1)"; rc=$?; dt=$(( $(date +%s) - t0 ))
-if [ "$rc" -eq 0 ] && [ "$dt" -lt 2 ] && grep -q 'OPENWOP_CI_NO_WAIT=1: not waiting' <<<"$out" && grep -q 'peer-worktree' <<<"$out"; then
+if [ "$rc" -eq 0 ] && kill -0 "$HOLDER" 2>/dev/null && [ "$(cat "$CLAIM_TMP/info" 2>/dev/null)" = "$claim_before" ] \
+   && grep -q 'OPENWOP_CI_NO_WAIT=1: not waiting' <<<"$out" && grep -q 'peer-worktree' <<<"$out" && no_poll_wait "$out"; then
   ok "OPENWOP_CI_NO_WAIT=1: does not wait, and still names the competitor"
 else
   bad "opt-out did not behave (rc=$rc, ${dt}s)"; printf '%s\n' "$out" | sed 's/^/      /'
@@ -495,15 +536,15 @@ kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null; rm -rf "$CLAIM_TMP"
 #     RUNNING gate's claim, and only for that ---------------------------------
 WCENV=(env OPENWOP_PREFLIGHT_POLL_S=1)
 # W1. no claim -> starts at once and takes none.
-t0=$(date +%s); "${WCENV[@]}" "$PF" --wait-claim=5 >/dev/null 2>&1; rc=$?; dt=$(( $(date +%s) - t0 ))
-[ "$rc" -eq 0 ] && [ "$dt" -lt 2 ] && [ ! -d "$CLAIM_TMP" ] && ok "--wait-claim: no claim → starts at once, takes none" \
+t0=$(date +%s); out="$("${WCENV[@]}" "$PF" --wait-claim=5 2>&1)"; rc=$?; dt=$(( $(date +%s) - t0 ))
+[ "$rc" -eq 0 ] && [ -z "$out" ] && [ ! -d "$CLAIM_TMP" ] && ok "--wait-claim: no claim → starts at once, takes none" \
   || bad "--wait-claim with no claim: rc=$rc ${dt}s claim=$( [ -d "$CLAIM_TMP" ] && echo taken || echo none)"
 # W2. a running vitest in ANOTHER worktree, and no claim -> still starts at once.
 #     Waiting on processes would deadlock two waiting suites (each IS one).
 if make_fake_vitest "$CLAIM_WT"; then
   FV="$LAST_PID"
-  t0=$(date +%s); "${WCENV[@]}" "$PF" --wait-claim=5 >/dev/null 2>&1; rc=$?; dt=$(( $(date +%s) - t0 ))
-  [ "$rc" -eq 0 ] && [ "$dt" -lt 2 ] && ok "--wait-claim ignores a peer's running vitest (claim only: two waiters cannot deadlock)" \
+  t0=$(date +%s); out="$("${WCENV[@]}" "$PF" --wait-claim=5 2>&1)"; rc=$?; dt=$(( $(date +%s) - t0 ))
+  [ "$rc" -eq 0 ] && [ -z "$out" ] && kill -0 "$FV" 2>/dev/null && [ ! -d "$CLAIM_TMP" ] && ok "--wait-claim ignores a peer's running vitest (claim only: two waiters cannot deadlock)" \
     || bad "--wait-claim waited on a process, not a claim (rc=$rc ${dt}s)"
   kill_tree "$FV"; wait "$FV" 2>/dev/null
 else
@@ -533,8 +574,9 @@ rm -rf "$CLAIM_TMP"
 # W5. a claim held by THIS worktree (the gate's own vitest) never waits.
 sleep 600 & OWN="$!"; PIDS+=("$OWN")
 mkdir -p "$CLAIM_TMP"; printf '%s\t%s\t%s\n' "$OWN" "$(/bin/ps -o lstart= -p "$OWN" | sed 's/^ *//;s/ *$//')" "$(cd "$ROOT" && pwd -P)" > "$CLAIM_TMP/info"
-t0=$(date +%s); "${WCENV[@]}" "$PF" --wait-claim=5 >/dev/null 2>&1; rc=$?; dt=$(( $(date +%s) - t0 ))
-[ "$rc" -eq 0 ] && [ "$dt" -lt 2 ] && [ -d "$CLAIM_TMP" ] && ok "--wait-claim: our own worktree's claim never blocks (and is left alone)" \
+claim_before="$(cat "$CLAIM_TMP/info")"
+t0=$(date +%s); out="$("${WCENV[@]}" "$PF" --wait-claim=5 2>&1)"; rc=$?; dt=$(( $(date +%s) - t0 ))
+[ "$rc" -eq 0 ] && [ -z "$out" ] && kill -0 "$OWN" 2>/dev/null && [ "$(cat "$CLAIM_TMP/info" 2>/dev/null)" = "$claim_before" ] && ok "--wait-claim: our own worktree's claim never blocks (and is left alone)" \
   || bad "--wait-claim blocked on or dropped our own claim (rc=$rc ${dt}s)"
 kill "$OWN" 2>/dev/null; wait "$OWN" 2>/dev/null; rm -rf "$CLAIM_TMP"
 
@@ -721,7 +763,7 @@ rm -rf "$CLAIM_TMP" "$MARKS"/G4.* "$MARKS"/G5.*
 # 13d. opt-out: OPENWOP_CI_WAIT_FOREIGN=0 does not wait on it (it still prints).
 make_fake_vitest "$FOREIGN" >/dev/null || bad "third fake foreign vitest never visible"; FV="$LAST_PID"
 t0=$(date +%s); out="$(cd "$WT4" && "${FENV[@]}" OPENWOP_CI_WAIT_FOREIGN=0 bash "$WT4/scripts/preflight-suite.sh" --ci 2>&1)"; rc=$?; dt=$(( $(date +%s) - t0 ))
-[ "$rc" -eq 0 ] && [ "$dt" -lt 8 ] && grep -q 'foreign-project' <<<"$out" \
+[ "$rc" -eq 0 ] && kill -0 "$FV" 2>/dev/null && claimed_without_poll "$out" && grep -q 'foreign-project' <<<"$out" \
   && ok "OPENWOP_CI_WAIT_FOREIGN=0: proceeds, still naming the foreign suite (${dt}s)" \
   || { bad "the foreign opt-out did not behave (rc=$rc, ${dt}s)"; printf '%s\n' "$out" | sed 's/^/      /' | tail -10; }
 kill "$FV" 2>/dev/null; wait "$FV" 2>/dev/null
@@ -757,7 +799,7 @@ kill "$(cat "$MARKS/G4.sleep" 2>/dev/null)" 2>/dev/null; wait "$G4" 2>/dev/null
 rm -rf "$CLAIM_TMP" "$MARKS"/G4.*
 echo $((CORES * 3)) > "$LOADF"
 t0=$(date +%s); out="$(cd "$WT4" && "${LENV[@]}" OPENWOP_CI_WAIT_LOAD_PER_CORE=0 bash "$WT4/scripts/preflight-suite.sh" --ci 2>&1)"; rc=$?; dt=$(( $(date +%s) - t0 ))
-[ "$rc" -eq 0 ] && [ "$dt" -lt 8 ] && ok "OPENWOP_CI_WAIT_LOAD_PER_CORE=0: does not wait on load (${dt}s)" \
+[ "$rc" -eq 0 ] && [ "$(cat "$LOADF")" = "$((CORES * 3))" ] && claimed_without_poll "$out" && ok "OPENWOP_CI_WAIT_LOAD_PER_CORE=0: does not wait on load (${dt}s)" \
                                    || { bad "the load opt-out did not behave (rc=$rc, ${dt}s)"; printf '%s\n' "$out" | sed 's/^/      /' | tail -8; }
 rm -rf "$CLAIM_TMP"
 t0=$(date +%s); out="$(cd "$WT4" && "${LENV[@]}" OPENWOP_CI_WAIT_MAX_MIN=0.05 bash "$WT4/scripts/preflight-suite.sh" --ci 2>&1)"; rc=$?; dt=$(( $(date +%s) - t0 ))
@@ -793,8 +835,13 @@ out="$(cd "$WT5" && "${DENV[@]}" bash "$WT5/scripts/preflight-suite.sh" 2>&1)"
 [ -z "$(foreign_block "$out")" ] && ok "an IDLE foreign \`vitest run\` (below the CPU floor) is not waited on" \
                                  || { bad "an idle foreign suite was listed"; printf '%s\n' "$out" | sed 's/^/      /' | tail -8; }
 t0=$(date +%s); out="$(cd "$WT4" && "${DENV[@]}" OPENWOP_CI_WAIT_MAX_MIN=1 bash "$WT4/scripts/preflight-suite.sh" --ci 2>&1)"; rc=$?; dt=$(( $(date +%s) - t0 ))
-[ "$rc" -eq 0 ] && [ "$dt" -lt 8 ] && ok "...and --ci proceeds past it at once (${dt}s)" \
-                                   || { bad "--ci waited on an idle foreign suite (rc=$rc, ${dt}s)"; printf '%s\n' "$out" | sed 's/^/      /' | tail -6; }
+# Scan/subprocess latency is not a contention wait. A background-priority run
+# on a many-worktree desktop took 53s yet correctly reported clear after 0s.
+# Assert the policy decision directly; the file watchdog still bounds hangs.
+[ "$rc" -eq 0 ] && kill -0 "$LAST_PID" 2>/dev/null \
+  && claimed_without_poll "$out" && [ -z "$(foreign_block "$out")" ] \
+  && ok "...and --ci claims without polling past the live idle suite (wall ${dt}s)" \
+  || { bad "--ci did not admit the live idle suite without contention (rc=$rc, wall ${dt}s)"; printf '%s\n' "$out" | sed 's/^/      /' | tail -6; }
 kill "$LAST_PID" 2>/dev/null; wait "$LAST_PID" 2>/dev/null; rm -rf "$CLAIM_TMP"
 make_foreign "$IDLE" --config x || bad "watch-mode foreign stub never visible"
 out="$(cd "$WT5" && "${GENV[@]}" bash "$WT5/scripts/preflight-suite.sh" 2>&1)"   # floor 0: only the ARGV can exclude it

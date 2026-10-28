@@ -5,6 +5,14 @@
  * expanded definition validates (R8), and persisting it via the existing builder
  * registry resolves byte-identically (R3) — so a `:fork` replays the same DAG.
  * Exercises the real vendored pack (examples/workflow-chain-packs/market-intel-digest).
+ *
+ * R3 goes through DURABLE storage and a cold cache: the in-memory registry hands
+ * back the same object it was given, so a same-instance read could never differ
+ * (8fw5g6-pl-r3-durable was vacuous that way); another instance (the one a
+ * `:fork` may land on) reads the JSON row. Sabotages witnessed (/grade-tests 8f W5,
+ * 8fw5g6-pl-*): an unfrozen config, params dropped from the id (collision), a
+ * non-deterministic prefix (R2), a bare-typeId rewrite, the category prettifier,
+ * the single primary output, and the durable row's contents (-r3-durable-r2).
  */
 
 import { beforeAll, describe, expect, it } from 'vitest';
@@ -17,7 +25,9 @@ import {
   prettifyPackCategory,
   _resetChainRegistryForTest,
 } from '../src/host/workflowChainPackLoader.js';
-import { registerWorkflow, getRegisteredWorkflow } from '../src/host/workflowsRegistry.js';
+import { registerWorkflowDurable, getRegisteredWorkflowAsync, __resetWorkflowRegistryForTests } from '../src/host/workflowsRegistry.js';
+import { setDurableStorage, tryDurableStorage } from '../src/host/durable/durableStore.js';
+import { openStorage } from '../src/storage/index.js';
 
 beforeAll(() => {
   _resetChainRegistryForTest();
@@ -103,12 +113,21 @@ describe('workflow-chain pack loader — expansion (RFC 0013 §expansion)', () =
     expect(sysA).not.toBe(sysB);
   });
 
-  it('R3 — persisting the expansion via the builder registry resolves identically', () => {
-    const def = expandChain(chain(), { params: { topic: 'Renewals' } });
-    registerWorkflow(def);
-    const resolved = getRegisteredWorkflow(def.workflowId);
-    expect(resolved).toBeDefined();
-    expect(JSON.stringify(resolved)).toBe(JSON.stringify(def)); // byte-stable → :fork-safe
+  it('R3 — persisting the expansion via the builder registry resolves identically', async () => {
+    const prev = tryDurableStorage();
+    setDurableStorage(await openStorage('memory://'));
+    try {
+      const def = expandChain(chain(), { params: { topic: 'Renewals' } });
+      const expected = JSON.stringify(def);
+      await registerWorkflowDurable(def);
+      __resetWorkflowRegistryForTests(); // a cold instance: only the durable row remains
+      const resolved = await getRegisteredWorkflowAsync(def.workflowId);
+      expect(resolved).not.toBeNull();
+      expect(JSON.stringify(resolved)).toBe(expected); // byte-stable through storage → :fork-safe
+    } finally {
+      __resetWorkflowRegistryForTests();
+      setDurableStorage(prev);
+    }
   });
 
   it('"just copy" (no params): still expands portably — no variables[], ZERO residual tokens (frozen empty)', () => {

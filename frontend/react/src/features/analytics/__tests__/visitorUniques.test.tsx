@@ -29,6 +29,10 @@ vi.mock('../analyticsClient.js', async (importOriginal) => ({
   getEvents: (...a: Parameters<typeof Client.getEvents>) => getEvents(...a),
   getTrend: (...a: Parameters<typeof Client.getTrend>) => getTrend(...a),
   getNavReport: () => getNavReport(),
+  // ADR 0951 — the behavior-capture section reads its own status; inert here.
+  getHeatPages: async () => [],
+  getHeatmap: async () => { throw new Error('not read in this suite'); },
+  getBehaviorSettings: async () => ({ heatmaps: { enabled: false }, replay: { enabled: false, storageConfigured: false, consentEnabled: false, available: false, retentionDays: 30 } }),
   listOrgs: async () => [{ orgId: 'org:1', name: 'Acme' }],
 }));
 vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({

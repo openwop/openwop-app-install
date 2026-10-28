@@ -18,6 +18,10 @@
  *   degraded vs breaching — a polluted population is not a failing one
  *   unknown  vs empty     — a no-op instrument vs a quiet host: different fix
  *   not_projectable vs unknown — one is fixed by an env var, one is not
+ *
+ * Every state is asserted EXACTLY (`toBe('empty')`, never `not.toBe('stale')`),
+ * because a neighbour state satisfies a negative. Sabotage-witnessed by
+ * /grade-tests wave 61 (8fw3g1-slo-*).
  */
 
 import { describe, expect, it } from 'vitest';
@@ -306,15 +310,24 @@ describe('ADR 0556 P2 — `stale` still works, and is reachable only by declarin
   it('goes stale when the emitter stops, and KEEPS the last-known value', () => {
     const r = projectRows([SPEC], input({ 'openwop.dispatch.outbox.oldest_age': NOW - 600_000 }))[0]!;
     expect(r.state).toBe('stale');
-    // The value is not discarded — it is still the most recent truth we have.
-    expect(r.observed).not.toBeNull();
+    // The value is not discarded — it is still the most recent truth we have
+    // (the fixture's 1 pending of 2 points = 0.5).
+    expect(r.observed).toBeCloseTo(0.5, 9);
     expect(r.lastSampleAt).toBe(NOW - 600_000);
   });
 
   it('is `empty`, not `stale`, when the emitter never ran at all', () => {
     // A disabled daemon is not a failed one, and they need different actions.
-    const r = projectRows([SPEC], input({}))[0]!;
-    expect(r.state).not.toBe('stale');
+    // An emitter that never ran has NO freshness stamp AND no data in the
+    // reader. The old fixture kept the two live points in the snapshot, which
+    // is a state the host cannot be in (recording stamps the freshness map), so
+    // the row was computed — `healthy` — and the case's `not.toBe('stale')` was
+    // satisfied by it; a sabotage to `healthy` stayed green
+    // (8fw3g1-slo-stale-empty, round 1 other-red). Exact state now.
+    const r = projectRows([SPEC], { ...input({}), snapshot: [] })[0]!;
+    expect(r.state).toBe('empty');
+    expect(r.observed).toBeNull();
+    expect(r.lastSampleAt).toBeNull();
   });
 });
 
@@ -374,6 +387,20 @@ describe('ADR 0556 P2 — the evaluators compute what the objective says', () =>
     expect(row(rows, 'M1').sampleCount).toBe(100);
     expect(row(rows, 'M1').observed).toBeCloseTo(0.97, 6);
     expect(row(rows, 'M1').state).toBe('healthy');
+
+    // The second half of the title: a point with NO `outcome` label stays IN the
+    // denominator (`notIn` excludes only a present, listed value). The first
+    // fixture had no such point, so excluding unlabelled points stayed green
+    // (8fw3g1-slo-notin-absent, round 1). Hand-computed: 97 ok of 97+3+3 = 103.
+    const withUnlabelled = project([counter('openwop.provider.call', [
+      [{ provider: 'anthropic', outcome: 'ok' }, 97],
+      [{ provider: 'anthropic', outcome: 'provider_timed_out' }, 3],
+      [{ provider: 'openai', outcome: 'byok_required' }, 500],
+      [{ provider: 'anthropic' }, 3],
+    ])]);
+    expect(row(withUnlabelled, 'M1').sampleCount).toBe(103);
+    expect(row(withUnlabelled, 'M1').observed).toBeCloseTo(0.941748, 6);
+    expect(row(withUnlabelled, 'M1').state).toBe('breaching');
   });
 
   it('computes a percentile row EXACTLY as the share within the threshold', () => {

@@ -1,6 +1,19 @@
 /**
- * A13 — real vm sandbox (RFC 0035). Verifies isolation + the failure taxonomy:
- * success, capability-denied, escape-attempt, timeout.
+ * A13 — real vm sandbox (RFC 0035, `host/sandbox.ts runInSandbox`). Verifies
+ * isolation + the failure taxonomy: success, capability-denied, escape-attempt,
+ * timeout, and the AGENTRT-1 prototype-chain escape hardening.
+ *
+ * Every refusal is asserted as one whole result (`ok:false` + the exact code,
+ * plus the message where it names the cause), so an escape that SUCCEEDS
+ * (`ok:true` with the real `process`) or a refusal for an unrelated reason
+ * cannot pass.
+ *
+ * Sabotage witnessed red (8f grade-tests wave 2): a host-call failure re-thrown
+ * as an outer-realm object (`8fw2g3-sbx-errrealm`), the host Proxy handing out
+ * an outer constructor (`-sbx-hostctor`), host-call results left outer-realm
+ * (`-sbx-retrealm`), the timeout pattern broken (`-sbx-timeout`), the
+ * ReferenceError classification removed (`-sbx-escape`), and the allow-list
+ * check removed (`-sbx-allow`).
  */
 
 import { describe, expect, it } from 'vitest';
@@ -17,24 +30,20 @@ describe('sandbox (A13 / RFC 0035)', () => {
     expect(ok).toEqual({ ok: true, value: 'v' });
 
     const denied = runInSandbox("host('fs.read', '/etc/passwd')", { allowedHostCalls: ['kv.get'] });
-    expect(denied.ok).toBe(false);
-    if (!denied.ok) expect(denied.error.code).toBe('sandbox_capability_denied');
+    expect(denied).toMatchObject({ ok: false, error: { code: 'sandbox_capability_denied', message: expect.stringContaining('fs.read') } });
   });
 
   it('reports an escape attempt when reaching for ambient globals', () => {
     const r = runInSandbox("require('node:fs')");
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.error.code).toBe('sandbox_escape_attempt');
+    expect(r).toMatchObject({ ok: false, error: { code: 'sandbox_escape_attempt', message: expect.stringMatching(/require is not defined/) } });
 
     const p = runInSandbox('process.env.SECRET');
-    expect(p.ok).toBe(false);
-    if (!p.ok) expect(p.error.code).toBe('sandbox_escape_attempt');
+    expect(p).toMatchObject({ ok: false, error: { code: 'sandbox_escape_attempt', message: expect.stringMatching(/process is not defined/) } });
   });
 
   it('times out a runaway synchronous loop', () => {
     const r = runInSandbox('while (true) {}', { timeoutMs: 50 });
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.error.code).toBe('sandbox_timeout');
+    expect(r).toMatchObject({ ok: false, error: { code: 'sandbox_timeout' } });
   });
 
   // Regression: node:vm is NOT escape-proof on its own — the classic break is
@@ -48,14 +57,12 @@ describe('sandbox (A13 / RFC 0035)', () => {
         allowedHostCalls: ['kv.get'],
         hostCall: () => 'v',
       });
-      expect(r.ok).toBe(false);
-      if (!r.ok) expect(r.error.code).toBe('sandbox_escape_attempt');
+      expect(r).toMatchObject({ ok: false, error: { code: 'sandbox_escape_attempt', message: expect.stringMatching(/process is not defined/) } });
     });
 
     it('blocks the generic Function-constructor escape', () => {
       const r = runInSandbox("[].constructor.constructor('return process')()");
-      expect(r.ok).toBe(false);
-      if (!r.ok) expect(r.error.code).toBe('sandbox_escape_attempt');
+      expect(r).toMatchObject({ ok: false, error: { code: 'sandbox_escape_attempt', message: expect.stringMatching(/process is not defined/) } });
     });
 
     it('blocks escape via a host-call return value (results are context-native)', () => {
@@ -63,8 +70,7 @@ describe('sandbox (A13 / RFC 0035)', () => {
         allowedHostCalls: ['kv.get'],
         hostCall: () => ({ value: 'v' }),
       });
-      expect(r.ok).toBe(false);
-      if (!r.ok) expect(r.error.code).toBe('sandbox_escape_attempt');
+      expect(r).toMatchObject({ ok: false, error: { code: 'sandbox_escape_attempt', message: expect.stringMatching(/process is not defined/) } });
     });
 
     it('a host call still returns usable data (a plain context-native object)', () => {
@@ -85,21 +91,21 @@ describe('sandbox (A13 / RFC 0035)', () => {
         "try { host('fs.read','/etc/passwd') } catch (e) { e.constructor.constructor('return process')(); }",
         { allowedHostCalls: ['kv.get'] },
       );
-      expect(denied.ok).toBe(false);
-      if (!denied.ok) expect(denied.error.code).toBe('sandbox_escape_attempt');
+      expect(denied).toMatchObject({ ok: false, error: { code: 'sandbox_escape_attempt', message: expect.stringMatching(/process is not defined/) } });
 
       const throwing = runInSandbox(
         "try { host('kv.get','k') } catch (e) { e.constructor.constructor('return process')(); }",
         { allowedHostCalls: ['kv.get'], hostCall: () => { throw new Error('boom'); } },
       );
-      expect(throwing.ok).toBe(false);
-      if (!throwing.ok) expect(throwing.error.code).toBe('sandbox_escape_attempt');
+      expect(throwing).toMatchObject({ ok: false, error: { code: 'sandbox_escape_attempt', message: expect.stringMatching(/process is not defined/) } });
     });
 
+    // Twin of the denied leg in 'allows only allow-listed host calls' (same call, same
+    // allow-list), kept here as the control for the caught-error escape case above: with
+    // no `constructor` walk, the SAME denied call is capability_denied, not an escape.
     it('a denied host call without an escape attempt is classified capability_denied', () => {
       const r = runInSandbox("host('fs.read','/etc/passwd')", { allowedHostCalls: ['kv.get'] });
-      expect(r.ok).toBe(false);
-      if (!r.ok) expect(r.error.code).toBe('sandbox_capability_denied');
+      expect(r).toMatchObject({ ok: false, error: { code: 'sandbox_capability_denied', message: expect.stringContaining('fs.read') } });
     });
   });
 });

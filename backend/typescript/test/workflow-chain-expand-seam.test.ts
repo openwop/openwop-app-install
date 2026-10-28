@@ -2,7 +2,9 @@
  * RFC 0013 — the `/host/sample/workflow-chain:expand` host-expansion witness seam
  * (drives `workflow-chain-host-expansion.test.ts` non-vacuously against the published
  * `vendor.openwop.workflow-chain-sample` fixture). Pins the wire shape + negatives so
- * the published legs can't regress silently.
+ * the published legs can't regress silently: node-id rewrite, chain capabilities
+ * propagated onto every node, `<node>.<port>` edge refs, the fixture's own version
+ * echoed, and the three typed refusals (unknown pack, unknown chain, missing chainId).
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -16,14 +18,26 @@ const TOKEN = 'dev-token';
 const PATH = '/host/sample/workflow-chain:expand';
 const PACK = 'vendor.openwop.workflow-chain-sample';
 
-async function post(body: unknown): Promise<{ status: number; body: Record<string, unknown> }> {
+/** The seam's wire shape (`routes/workflowChainExpandSeam.ts` `handle`), and the
+ *  error envelope it answers with. One response type, so no per-site casts. */
+interface ExpandSeamResponse {
+  expansionId?: string;
+  chainId?: string;
+  packName?: string;
+  packVersion?: string;
+  nodes?: Array<{ id: string; typeId: string; capabilities?: string[] }>;
+  edges?: Array<{ from: string; to: string }>;
+  error?: string;
+}
+
+async function post(body: unknown): Promise<{ status: number; body: ExpandSeamResponse }> {
   const res = await fetch(`${BASE}${PATH}`, {
     method: 'POST',
     headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
     body: JSON.stringify(body),
   });
-  let b: Record<string, unknown> = {};
-  try { b = (await res.json()) as Record<string, unknown>; } catch { /* no body */ }
+  let b: ExpandSeamResponse = {};
+  try { b = (await res.json()) as ExpandSeamResponse; } catch { /* no body */ }
   return { status: res.status, body: b };
 }
 
@@ -57,7 +71,7 @@ describe('RFC 0013 workflow-chain:expand witness seam', () => {
     expect(fixture, 'the pinned suite ships the sample chain pack fixture').not.toBeNull();
     expect(body.packVersion).toMatch(/^\d+\.\d+\.\d+$/);
     expect(body.packVersion).toBe(fixture!.version);
-    const nodes = body.nodes as Array<{ id: string; typeId: string; capabilities?: string[] }>;
+    const nodes = body.nodes ?? [];
     expect(nodes).toHaveLength(1);
     // node-id rewrite: chainId dots → underscores, hyphens preserved, expansionId prefix.
     expect(nodes[0]!.id).toMatch(/^vendor_openwop_workflow-chain-sample_summarize-text_[a-f0-9]+_/);
@@ -72,11 +86,12 @@ describe('RFC 0013 workflow-chain:expand witness seam', () => {
       parameters: { url: 'https://e.com/a', targetLength: 'executive-summary' },
     });
     expect(status).toBe(200);
-    const edges = body.edges as Array<{ from: string; to: string }>;
+    const edges = body.edges ?? [];
     expect(edges).toHaveLength(1);
     expect(edges[0]!.from).toMatch(/_fetch\.body$/);
     expect(edges[0]!.to).toMatch(/_summarize\.sourceText$/);
-    for (const n of body.nodes as Array<{ capabilities?: string[] }>) {
+    expect(body.nodes ?? []).toHaveLength(2);
+    for (const n of body.nodes ?? []) {
       expect(n.capabilities).toEqual(['side-effectful']);
     }
   });

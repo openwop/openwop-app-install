@@ -13,6 +13,17 @@
  * localStorage, so the fallback would be laundered into a user's choice, survive after an
  * operator set a real binding, and be re-PUT by the heal path — which for a plain member
  * now 403s. Leg 2 pins that the flag distinguishes the two.
+ *
+ * ORDER IS PINNED (`shuffle: false`). Leg 4 seeds the managed key into the app's
+ * storage through `bootstrapManagedProvider()`, and no exported seam removes a
+ * seeded secret (`Storage` has no delete for it; `_clearManagedCacheForTests` only
+ * drops the decrypt cache). So leg 3's "no managed key seeded" premise holds only
+ * BEFORE leg 4 runs; under `--sequence.shuffle` it would read leg 4's key
+ * (reasoned from the code, not measured red).
+ *
+ * Tracker TST-BGF-15. Red when: `stored` is not `config !== null` (leg 2); the
+ * readiness check is dropped or `valid` is reported without a default (leg 3); or
+ * a seeded managed tier is not reported (leg 4).
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Server } from 'node:http';
@@ -23,11 +34,12 @@ let server: Server;
 let BASE = '';
 const AC = '/host/openwop-app/byok/active-config';
 
+let loginSeq = 0;
 async function login(): Promise<string> {
   const res = await fetch(`${BASE}/host/openwop-app/test/login`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ email: `optionb-${Date.now()}@acme.test` }),
+    body: JSON.stringify({ email: `optionb-${++loginSeq}-${Date.now()}@acme.test` }),
   });
   return (res.headers.get('set-cookie') ?? '').split(';')[0] ?? '';
 }
@@ -47,7 +59,7 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
 
-describe('ADR 0711 option B — the effective default is reported, not invented', () => {
+describe('ADR 0711 option B — the effective default is reported, not invented', { shuffle: false }, () => {
   it('leg 1: with nothing stored the route answers with `stored` present and a boolean', async () => {
     const c = await login();
     const r = await call(AC, c);

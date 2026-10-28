@@ -13,6 +13,27 @@
  *  - C1: the timer sweep claims first, so its resume must be PRECLAIMED or D1
  *    strands every timed wait.
  *
+ * Tracker: TST-BDC-2 (docs/steward/TEST-ASSESSMENT.md).
+ *
+ * Red when (sabotage-witnessed, wave 60): the accept path stops claiming (or
+ * audits an override before it claims); a lost claim always or never returns
+ * quietly; a closed run log is not mapped to 409; the run cancel stops closing
+ * its own gates or lets a failed close abort it; the terminal-run refusal
+ * moves after the claim; the token lane stops requiring a named `voter`;
+ * ledger votes stop deduplicating by voter; a group ACL stops checking
+ * eligibility or the signed voter binding; MCP stops refusing a gate that
+ * needs a named approver; the lazy timeout leaves the choke point; the timer
+ * sweep's resume is not preclaimed.
+ *
+ * Double guards (recorded, wave 60):
+ *  - a voterless quorum vote is refused by `assertTokenQuorumVote` ("on this
+ *    lane must name its `voter`", the OUTER check, asserted by message) and
+ *    again by `recordQuorumVote` ("must identify its voter"), which the token
+ *    lane therefore never reaches.
+ *  - a group ACL vote needs BOTH eligibility and the signed per-approver link;
+ *    the "outside the group" cases send a VALID signature so eligibility is the
+ *    check that refuses, and the real-member case refuses an unsigned member.
+ *
  * @see docs/adr/0778-interrupts-inbox-decide-integrity.md
  */
 import { mkdtempSync } from 'node:fs';
@@ -62,13 +83,13 @@ const WF = {
 
 function gateWorkflow(workflowId: string, gate: { typeId: string; config: Record<string, unknown> }): WorkflowDefinition {
   return {
-    workflowId, name: workflowId, version: '1.0.0',
+    workflowId,
     nodes: [
       { nodeId: 'gate', typeId: gate.typeId, config: gate.config },
       { nodeId: 'after', typeId: 'core.noop', config: {} },
     ],
     edges: [{ edgeId: 'e1', sourceNodeId: 'gate', targetNodeId: 'after', triggerRule: 'all_success' }],
-  } as unknown as WorkflowDefinition;
+  };
 }
 
 beforeAll(() => {
@@ -140,14 +161,14 @@ describe('ADR 0778 D1 — the accept path claims, like both reject paths', () =>
     await resolveAndResume(storage, hostSuite, interruptId, { action: 'accept', voter: 'approver-a' }, { capabilityToken: true });
     const store = racing(storage, interruptId, { action: 'reject', reason: 'timeout' });
     await expect(resolveAndResume(store, hostSuite, interruptId, { action: 'accept', voter: 'approver-b' }, { capabilityToken: true }))
-      .rejects.toMatchObject({ httpStatus: 409 });
+      .rejects.toMatchObject({ httpStatus: 409, message: 'interrupt already resolved — a different decision won' });
   });
 
   it('a REJECT that loses the claim to an ACCEPT is a 409, not "OK" (grade-code APCD-3)', async () => {
     const { interruptId } = await suspended(WF.single);
     const store = racing(storage, interruptId, { action: 'accept' });
     await expect(resolveAndResume(store, hostSuite, interruptId, { action: 'reject' }, { capabilityToken: true }))
-      .rejects.toMatchObject({ httpStatus: 409 });
+      .rejects.toMatchObject({ httpStatus: 409, message: 'interrupt already resolved — a different decision won' });
   });
 
   it('a claim won as the run log closes answers 409, not a 500 (grade-code APCD-6)', async () => {
@@ -198,6 +219,11 @@ describe('ADR 0778 D3 — a cancelled run closes its own gates', () => {
       },
     });
     await expect(cancelRunAndCascade(flaky, run, 'user-cancelled')).resolves.toBe('cancelled');
+    // The cancel completed past the failed close: the run is cancelled, and the
+    // gate the failed write could not close is still open (the terminal-run rule
+    // keeps it out of every inbox).
+    expect((await storage.getRun(run.runId))?.status).toBe('cancelled');
+    expect(await storage.listOpenInterrupts(run.runId)).toHaveLength(1);
   });
 
   it('a stray open gate on a TERMINAL run is refused before any claim, and stays unconsumed', async () => {
@@ -214,7 +240,7 @@ describe('ADR 0778 D4 — the token lane counts real, eligible voters', () => {
     const { interruptId } = await suspended(WF.quorumOpen);
     for (let i = 0; i < 2; i++) {
       await expect(resolveAndResume(storage, hostSuite, interruptId, { action: 'accept' }, { capabilityToken: true }))
-        .rejects.toMatchObject({ httpStatus: 400 });
+        .rejects.toMatchObject({ httpStatus: 400, message: 'A quorum vote on this lane must name its `voter`.' });
     }
     const tally = await tallyDecisions(interruptId);
     expect(tally.accepts.length + tally.rejects.length).toBe(0);
@@ -242,9 +268,11 @@ describe('ADR 0778 D4 — the token lane counts real, eligible voters', () => {
 
   it('a GROUP-only quorum gate refuses a voter outside the group (was: any voter, no signature)', async () => {
     const { interruptId } = await suspended(WF.quorumGroup);
+    const token = (await storage.getInterrupt(interruptId))!.token;
     for (const voter of ['mallory-1', 'mallory-2']) {
-      await expect(resolveAndResume(storage, hostSuite, interruptId, { action: 'accept', voter }, { capabilityToken: true }))
-        .rejects.toMatchObject({ httpStatus: 403 });
+      // A VALID signed link for a non-member: eligibility is what refuses it.
+      await expect(resolveAndResume(storage, hostSuite, interruptId, { action: 'accept', voter, voterSig: signVoterBinding(token, voter) }, { capabilityToken: true }))
+        .rejects.toMatchObject({ httpStatus: 403, message: 'The `voter` is not an eligible approver for this gate.' });
     }
     expect((await storage.getInterrupt(interruptId))?.resolvedAt).toBeUndefined();
   });
@@ -261,7 +289,7 @@ describe('ADR 0778 D4 — the token lane counts real, eligible voters', () => {
     const token = (await storage.getInterrupt(interruptId))!.token;
     // A member WITHOUT the signature is refused — the shared token is not enough.
     await expect(resolveAndResume(storage, hostSuite, interruptId, { action: 'accept', voter: 'member-adr0778-alice' }, { capabilityToken: true }))
-      .rejects.toMatchObject({ httpStatus: 403 });
+      .rejects.toMatchObject({ httpStatus: 403, message: 'This vote requires the signed per-approver link from your notification email.' });
     for (const voter of ['member-adr0778-alice', 'member-adr0778-bob']) {
       await resolveAndResume(storage, hostSuite, interruptId, { action: 'accept', voter, voterSig: signVoterBinding(token, voter) }, { capabilityToken: true });
     }
@@ -271,14 +299,16 @@ describe('ADR 0778 D4 — the token lane counts real, eligible voters', () => {
 
   it('a GROUP-only single-approver gate refuses a voter outside the group (was: open)', async () => {
     const { interruptId } = await suspended(WF.groupSingle);
-    await expect(resolveAndResume(storage, hostSuite, interruptId, { action: 'accept', voter: 'mallory' }, { capabilityToken: true }))
-      .rejects.toMatchObject({ httpStatus: 403 });
+    const token = (await storage.getInterrupt(interruptId))!.token;
+    await expect(resolveAndResume(storage, hostSuite, interruptId, { action: 'accept', voter: 'mallory', voterSig: signVoterBinding(token, 'mallory') }, { capabilityToken: true }))
+      .rejects.toMatchObject({ httpStatus: 403, message: 'The `voter` is not an eligible approver for this gate.' });
     expect((await storage.getInterrupt(interruptId))?.resolvedAt).toBeUndefined();
   });
 });
 
 describe('ADR 0778 D5 — MCP never consumes a gate that needs a named approver', () => {
-  const deps = { storage, hostSuite, principal: { principalId: 'mcp:peer', tenants: ['default'] } as unknown as Principal };
+  const principal: Principal = { principalId: 'mcp:peer', tenants: ['default'], token: 'mcp-peer-test-token' };
+  const deps = { storage, hostSuite, principal };
 
   it('a quorum gate is refused and stays OPEN for the inbox (was: consumed, run stranded)', async () => {
     const { run, interruptId } = await suspended(WF.quorumOpen);
@@ -303,9 +333,15 @@ describe('ADR 0778 D5 — MCP never consumes a gate that needs a named approver'
 describe('ADR 0778 D7 — expiry is checked at the choke point', () => {
   it('an overdue gate cannot be approved through resolveAndResume (every lane, not just the node route)', async () => {
     const { run, interruptId } = await suspended(WF.timed);
-    await new Promise((r) => setTimeout(r, 10));
-    await expect(resolveAndResume(storage, hostSuite, interruptId, { action: 'accept' }, { capabilityToken: true }))
-      .rejects.toMatchObject({ httpStatus: 409 });
+    // Past the 1 ms deadline by a clock move, not a sleep.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(Date.now() + 60_000);
+      await expect(resolveAndResume(storage, hostSuite, interruptId, { action: 'accept' }, { capabilityToken: true }))
+        .rejects.toMatchObject({ httpStatus: 409, message: 'approval gate timed out (auto-rejected; reason: timeout)' });
+    } finally {
+      vi.useRealTimers();
+    }
     await __awaitRunResumeChainForTests(run.runId);
     const events = await storage.listEvents(run.runId);
     expect(events.some((e) => e.type === 'node.started' && e.nodeId === 'after'), 'an overdue gate was approved').toBe(false);

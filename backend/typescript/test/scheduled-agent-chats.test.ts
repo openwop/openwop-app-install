@@ -78,7 +78,7 @@ describe('scheduled agent chats', () => {
   });
 
   it('pause disables the job; resume re-enables', async () => {
-    const chat = await createScheduledChat(T, SCOPE, 'u1', { agentId: 'iris', prompt: 'p', conversationId: 'c2', cronExpr: '*/5 * * * *' });
+    const chat = await createScheduledChat(T, SCOPE, 'u1', { agentId: 'iris', prompt: 'p', conversationId: 'c2', cronExpr: '0 * * * *' });
     await setScheduledChatEnabled(T, SCOPE, chat.chatId, false);
     expect((await getJob(`schedchat-${chat.chatId}`))!.enabled).toBe(false);
     expect((await getScheduledChat(T, SCOPE, chat.chatId))!.enabled).toBe(false);

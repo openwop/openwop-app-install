@@ -6,7 +6,7 @@ export const messages = {
   eyebrow: 'Marketing',
   title: 'Domaines personnalisés',
   lede: 'Servez vos pages publiées, tunnels et boutique sur votre propre nom d’hôte.',
-  howItWorks: 'Ajoutez un nom d’hôte, publiez l’enregistrement TXT ci-dessous sur _openwop-verify.<hostname>, puis Vérifiez. Le TLS et le routage du nom d’hôte sont configurés par votre opérateur (voir le guide de déploiement) — un domaine actif ici est la moitié « propriété ».',
+  howItWorks: 'Ajoutez un nom d’hôte, publiez l’enregistrement TXT indiqué dans Enregistrements DNS sur _openwop-verify.<hostname>, puis cliquez sur Vérifier. Une fois la propriété vérifiée, l’équipe de la plateforme émet le certificat HTTPS du nom d’hôte et le dirige vers votre site ; la liste des enregistrements DNS indique tout autre enregistrement à ajouter.',
   notEnabledTitle: 'Les domaines personnalisés ne sont pas activés',
   notEnabledBody: 'Demandez à un administrateur d’activer la fonctionnalité dans Admin → Bascules de fonctionnalités.',
   emptyTitle: 'Aucun domaine pour l’instant',

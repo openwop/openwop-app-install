@@ -30,7 +30,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { OpenwopError } from '../../types.js';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { slugify, uniqueSlug } from '../../host/slug.js';
-import { optionalCleanString, cleanString } from '../../host/boundedStrings.js';
+import { cleanContent, optionalCleanContent, optionalCleanString } from '../../host/boundedStrings.js';
 // PODU-1 (ADR 0603 §4) — a DIRECT cross-feature read of the documents service, the
 // precedent set by `notebooks/notebooksService.ts:41-44` (and sharing / chat-export /
 // priority-matrix / strategy). The transcript the public page needs IS an ADR 0053
@@ -496,18 +496,18 @@ function readShowInput(input: Record<string, unknown>, existing?: PodcastShow): 
     ? (input.type as 'episodic' | 'serial')
     : existing?.type ?? 'episodic';
   return {
-    title: cleanString(title, TITLE_MAX, existing?.title ?? title),
-    author: cleanString(author, SHORT_MAX, existing?.author ?? author),
+    title: cleanContent(title, TITLE_MAX, 'title', existing?.title ?? title),
+    author: cleanContent(author, SHORT_MAX, 'author', existing?.author ?? author),
     description: input.description !== undefined
-      ? cleanString(input.description, TEXT_MAX)
+      ? cleanContent(input.description, TEXT_MAX, 'description')
       : existing?.description ?? '',
     languageCode: (optionalCleanString(input.languageCode, 16) ?? existing?.languageCode ?? 'en').trim(),
     ...(optionalCleanString(input.imageMediaRef, 512) ? { imageMediaRef: optionalCleanString(input.imageMediaRef, 512)! } : existing?.imageMediaRef ? { imageMediaRef: existing.imageMediaRef } : {}),
-    ...(optionalCleanString(input.category, SHORT_MAX) ? { category: optionalCleanString(input.category, SHORT_MAX)! } : existing?.category ? { category: existing.category } : {}),
-    ...(optionalCleanString(input.subcategory, SHORT_MAX) ? { subcategory: optionalCleanString(input.subcategory, SHORT_MAX)! } : existing?.subcategory ? { subcategory: existing.subcategory } : {}),
+    ...(optionalCleanContent(input.category, SHORT_MAX, 'category') ? { category: optionalCleanContent(input.category, SHORT_MAX, 'category')! } : existing?.category ? { category: existing.category } : {}),
+    ...(optionalCleanContent(input.subcategory, SHORT_MAX, 'subcategory') ? { subcategory: optionalCleanContent(input.subcategory, SHORT_MAX, 'subcategory')! } : existing?.subcategory ? { subcategory: existing.subcategory } : {}),
     explicit: typeof input.explicit === 'boolean' ? input.explicit : existing?.explicit ?? false,
-    ...(optionalCleanString(input.ownerName, SHORT_MAX) ? { ownerName: optionalCleanString(input.ownerName, SHORT_MAX)! } : existing?.ownerName ? { ownerName: existing.ownerName } : {}),
-    ...(optionalCleanString(input.ownerEmail, SHORT_MAX) ? { ownerEmail: optionalCleanString(input.ownerEmail, SHORT_MAX)! } : existing?.ownerEmail ? { ownerEmail: existing.ownerEmail } : {}),
+    ...(optionalCleanContent(input.ownerName, SHORT_MAX, 'ownerName') ? { ownerName: optionalCleanContent(input.ownerName, SHORT_MAX, 'ownerName')! } : existing?.ownerName ? { ownerName: existing.ownerName } : {}),
+    ...(optionalCleanContent(input.ownerEmail, SHORT_MAX, 'ownerEmail') ? { ownerEmail: optionalCleanContent(input.ownerEmail, SHORT_MAX, 'ownerEmail')! } : existing?.ownerEmail ? { ownerEmail: existing.ownerEmail } : {}),
     // Review F6 — an explicit '' CLEARS a directory URL (these are the first
     // merge-only fields on a PUBLIC surface; a wrong Apple link must be
     // removable, not just replaceable).
@@ -679,7 +679,7 @@ export async function setEpisodePublish(
     ...(slug ? { slug } : {}),
     published: patch.published,
     ...(patch.published ? { publishedAt: e.publishedAt ?? now() } : {}),
-    ...(typeof patch.descriptionOverride === 'string' ? { descriptionOverride: cleanString(patch.descriptionOverride, TEXT_MAX) } : {}),
+    ...(typeof patch.descriptionOverride === 'string' ? { descriptionOverride: cleanContent(patch.descriptionOverride, TEXT_MAX, 'descriptionOverride') } : {}),
     ...(typeof patch.explicitOverride === 'boolean' ? { explicitOverride: patch.explicitOverride } : {}),
     ...(typeof patch.durationSeconds === 'number' && patch.durationSeconds > 0 ? { durationSeconds: Math.round(patch.durationSeconds) } : {}),
     updatedAt: now(),

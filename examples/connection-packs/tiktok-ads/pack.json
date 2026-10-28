@@ -1,11 +1,11 @@
 {
   "name": "core.openwop.connections.tiktok-ads",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "kind": "connection",
-  "description": "TikTok Ads connection pack (RFC 0095) \u2014 OAuth2 provider for the TikTok Business (Marketing) API. Reach is `openapi`: the manifest declares the TikTok business-api OAuth hosts and points at the Marketing API reference. Carries NO secret; the operator supplies the app id/secret host-side (ADR 0024 \u00a77). The third ad platform Campaign Studio dispatches to (ADR 0167 Phase 3) \u2014 TikTok authenticates with an `Access-Token` header (not `Authorization: Bearer`), handled host-side by the ads-dispatch adapter.",
+  "description": "TikTok Ads connection pack — OAuth2 provider for the TikTok Business (Marketing) API. Reach is `openapi`: the manifest declares the TikTok business-api OAuth hosts and points at the Marketing API reference. Carries NO secret; the operator supplies the app id/secret host-side. The third ad platform Campaign Studio dispatches to — TikTok authenticates with an `Access-Token` header (not `Authorization: Bearer`), handled host-side by the ads-dispatch adapter.",
   "license": "Apache-2.0",
   "engines": {
-    "openwop": ">=1.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "provider": {
     "id": "tiktok-ads",

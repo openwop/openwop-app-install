@@ -5,6 +5,15 @@
  * window disclosure), the two-half estimate, and the grounded diagnosis tool
  * (fail-empty without an acting user; foreign run indistinguishable empty;
  * deep links compose the ADR 0475 debug loop).
+ *
+ * Sabotage that turns it red (wave 64 probes, all witnessed): the spoof strip
+ * (8fw5g2-fli-spoof), the ifAbsentKey never-overwrite (-fli-never-overwrite),
+ * the fork's cost-key delete (-fli-fork-strip), success-rate / hotspot / segment
+ * arithmetic (-fli-successrate, -fli-hotspots, -fli-segment), the static floor
+ * (-fli-static-floor), and diagnose's acting-user / tenant / non-failed guards
+ * (-fli-diag-acting, -fli-diag-tenant, -fli-diag-nonfailed). The estimate's
+ * OWNER fence is witnessed with a workflow that exists but is owned by another
+ * tenant (8fw5g2-fli-estimate-owner-r2).
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -15,6 +24,8 @@ import { applyCostRollup, stampRunCostOnTerminal } from '../src/observability/co
 import { buildRunRecord } from '../src/host/runDispatch.js';
 import { percentile, clearFleetStatsCache } from '../src/host/workflowFleetStats.js';
 import { bareRunId } from './support/bareRunId.js';
+import { registerWorkflow } from '../src/host/workflowsRegistry.js';
+import { recordOwnership } from '../src/host/workflowOwnership.js';
 
 describe('workflow fleet insights (ADR 0476, sqlite memory app)', () => {
   let server: http.Server;
@@ -59,7 +70,7 @@ describe('workflow fleet insights (ADR 0476, sqlite memory app)', () => {
       if (r.body.status && !['pending', 'running'].includes(r.body.status)) return r.body.status;
       await new Promise((res) => setTimeout(res, 25));
     }
-    return 'timeout';
+    throw new Error(`run ${runId} did not settle after 200 polls (25 ms apart)`);
   }
 
   it('percentile: nearest-rank; empty → null', () => {
@@ -121,7 +132,7 @@ describe('workflow fleet insights (ADR 0476, sqlite memory app)', () => {
       // frozen-lie guard); inheritance would read 1.0.
       const fork = await call<{ runId: string }>('POST', `/runs/${src.body.runId}:fork`, { mode: 'replay' });
       expect(fork.status).toBe(201);
-      await settle(fork.body.runId);
+      expect(await settle(fork.body.runId), 'the fork itself must run to completion').toBe('completed');
       clearFleetStatsCache(); // the fork witness must read FRESH data, not the cache
       const stats2 = await call<{ workflows: Array<{ workflowId: string; costUsdTotal: number }> }>('GET', `${API}/stats`);
       expect(stats2.body.workflows.find((w) => w.workflowId === WF_COST)!.costUsdTotal).toBe(0.5);
@@ -140,7 +151,7 @@ describe('workflow fleet insights (ADR 0476, sqlite memory app)', () => {
       const stats = await call<{
         rowsConsidered: number; truncated: boolean; sinceOldest: string | null;
         workflows: Array<{
-          workflowId: string; completed: number; failed: number; successRate: number | null;
+          workflowId: string; runs: number; completed: number; failed: number; successRate: number | null;
           p50Ms: number | null; p95Ms: number | null; costUsdTotal: number;
           topFailures: Array<{ nodeId: string; count: number }>;
         }>;
@@ -150,18 +161,22 @@ describe('workflow fleet insights (ADR 0476, sqlite memory app)', () => {
       expect(stats.body.truncated).toBe(false);
       expect(stats.body.sinceOldest).toBeTruthy();
 
+      // Other cases also launch WF / WF_FAIL runs, so counts are asserted as
+      // relations over the row (shuffle-safe), never as a file-order total.
       const okRow = stats.body.workflows.find((w) => w.workflowId === WF)!;
       expect(okRow.completed).toBeGreaterThanOrEqual(1);
+      expect(okRow.completed).toBe(okRow.runs);
       expect(okRow.failed).toBe(0);
       expect(okRow.successRate).toBe(1);
-      expect(okRow.p50Ms).not.toBeNull();
-      expect(okRow.p95Ms).not.toBeNull();
+      expect(okRow.p50Ms).toEqual(expect.any(Number));
+      expect(okRow.p95Ms).toBeGreaterThanOrEqual(okRow.p50Ms!);
       expect(okRow.costUsdTotal).toBe(0); // noop runs record no spend
 
       const failRow = stats.body.workflows.find((w) => w.workflowId === WF_FAIL)!;
+      expect(failRow.failed).toBeGreaterThanOrEqual(1);
+      expect(failRow.failed).toBe(failRow.runs);
       expect(failRow.successRate).toBe(0);
-      expect(failRow.topFailures.length).toBeGreaterThan(0);
-      expect(failRow.topFailures[0]!.nodeId).toBe('boom');
+      expect(failRow.topFailures).toEqual([{ nodeId: 'boom', count: failRow.failed }]);
     });
 
     it('draft/debug/eval runs are segmented OUT of the outcome figures (grade-data H2)', async () => {
@@ -195,18 +210,40 @@ describe('workflow fleet insights (ADR 0476, sqlite memory app)', () => {
 
   describe('cost estimate', () => {
     it('unknown workflow is a 404 (owner posture)', async () => {
-      expect((await call('GET', `${API}/does-not-exist/estimate`)).status).toBe(404);
+      const NOT_FOUND = (workflowId: string) => ({ status: 404, body: { error: 'workflow_not_found', message: 'Workflow not found in this catalog.', details: { workflowId } } });
+      const missing = await call('GET', `${API}/does-not-exist/estimate`);
+      expect(missing).toEqual(NOT_FOUND('does-not-exist'));
+      // The OWNER fence, not just a missing id: a workflow that IS registered but
+      // owned by another tenant answers the same literal 404 to this caller.
+      const FOREIGN = 'fleet-wf-foreign-owned';
+      registerWorkflow({ workflowId: FOREIGN, nodes: [{ nodeId: 'a', typeId: 'core.noop' }], edges: [] });
+      await recordOwnership('tenant-someone-else', FOREIGN, { name: FOREIGN, nodeCount: 1 });
+      expect(await call('GET', `${API}/${FOREIGN}/estimate`)).toEqual(NOT_FOUND(FOREIGN));
+      // Positive control: an owned workflow answers 200 on the same route.
+      expect((await call('GET', `${API}/${WF}/estimate`)).status).toBe(200);
     });
 
     it('historical from stamps; static floor from AI-node composition', async () => {
-      // WF_COST has a stamped run (0.5) → historical present; no AI nodes → no static.
+      // Its OWN delayed workflow with ONE stamped run (0.5) → historical present;
+      // no AI nodes → no static. (It used to read WF_COST's stamp from the
+      // end-to-end case, so it reddened whenever shuffle ran it first.)
+      const WF_EST = 'fleet-wf-estimate';
+      expect((await call('POST', API, {
+        workflowId: WF_EST, nodes: [{ nodeId: 'wait', typeId: 'core.delay', config: { durationMs: 400 } }], edges: [],
+        metadata: { name: WF_EST, lifecycle: { transient: true, generatedBy: 'test' } },
+      })).status).toBe(201);
+      const src = await call<{ runId: string }>('POST', '/runs', { workflowId: WF_EST, inputs: {} });
+      expect(src.status).toBe(201);
+      applyCostRollup(bareRunId(src.body.runId), { 'openwop.cost.usd': 0.5 });
+      expect(await settle(src.body.runId)).toBe('completed');
       clearFleetStatsCache();
       const est = await call<{ historical?: { medianUsd: number; samples: number }; static?: unknown }>(
-        'GET', `${API}/${WF_COST}/estimate`,
+        'GET', `${API}/${WF_EST}/estimate`,
       );
       expect(est.status).toBe(200);
       expect(est.body.historical).toBeTruthy();
       expect(est.body.historical!.medianUsd).toBe(0.5);
+      expect(est.body.historical!.samples).toBe(1);
       expect(est.body.static).toBeUndefined();
 
       // WF_AI: no run history → no historical; one model-configured node → static floor.
@@ -238,7 +275,7 @@ describe('workflow fleet insights (ADR 0476, sqlite memory app)', () => {
       expect(await settle(bad.body.runId)).toBe('failed');
       const res = JSON.parse((await runTool({ runId: bareRunId(bad.body.runId) }, {})).content) as { note?: string; failedNodeId?: string };
       expect(res.failedNodeId).toBeUndefined();
-      expect(res.note).toBeTruthy();
+      expect(res.note).toBe('Diagnosis is only available on a human-initiated turn.');
     });
 
     it('a foreign-tenant run is an indistinguishable empty', async () => {
@@ -259,7 +296,7 @@ describe('workflow fleet insights (ADR 0476, sqlite memory app)', () => {
       };
       expect(res.failedNodeId).toBe('boom');
       expect(res.failedNode?.typeId).toBe('core.fail');
-      expect(res.error?.code).toBeTruthy();
+      expect(res.error?.code).toBe('deterministic_fail'); // core.fail's default code (bootstrap/nodes.ts)
       expect(res.links?.runDetail).toBe(`/runs/${bareRunId(bad.body.runId)}`);
       expect(res.links?.debugInBuilder).toContain(`/builder/${WF_FAIL}?debugRun=${bareRunId(bad.body.runId)}`);
     });

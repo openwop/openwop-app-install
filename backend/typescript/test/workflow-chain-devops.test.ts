@@ -7,9 +7,17 @@
  * rules automatically. These chains use short chain-local prompts — they do
  * NOT dispatch the code-reviewer / git-author agent packs (no-parallel-
  * architecture: chains and agents coexist as different surfaces).
+ *
+ * "Registered typeIds" is read from the node packs themselves (every
+ * `packs/<pack>/pack.json` `nodes[].typeId`, 757 at 19d13e682), not from a
+ * hand-copied list, so a renamed or removed node type reds the chain that still
+ * references it. Sabotages witnessed (/grade-tests 8f W5, 8fw5g6-dv-*): the
+ * category keyword, the stale-issues URL, a connectionRef on a chain node, a
+ * second primary output, and a non-deterministic expansion.
  */
 
 import { beforeAll, describe, expect, it } from 'vitest';
+import { existsSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -20,6 +28,7 @@ import {
   chainRequirements,
   _resetChainRegistryForTest,
 } from '../src/host/workflowChainPackLoader.js';
+import { readPackManifest } from './helpers/readPackManifest.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const IN_TREE_ROOT = join(__dirname, '..', '..', '..', 'examples', 'workflow-chain-packs');
@@ -33,13 +42,15 @@ beforeAll(() => {
 const PACK = 'core.openwop.workflows.devops';
 const CHAINS = ['devops.pr-review', 'devops.release-notes', 'devops.ci-failure-explainer', 'devops.stale-issues'];
 
-const KNOWN_TYPEIDS = new Set([
-  'core.ai.chatCompletion',
-  'feature.notifications.nodes.notify',
-  'core.trigger.webhook',
-  'core.openwop.http.webhook-verify',
-  'core.openwop.http.fetch',
-]);
+/** Every node typeId a node pack declares — the SSoT the host registers from. */
+const PACKS_ROOT = join(__dirname, '..', '..', '..', 'packs');
+const KNOWN_TYPEIDS: ReadonlySet<string> = new Set(
+  readdirSync(PACKS_ROOT)
+    .map((d) => join(PACKS_ROOT, d, 'pack.json'))
+    .filter((f) => existsSync(f))
+    .flatMap((f) => readPackManifest<{ nodes?: Array<{ typeId?: unknown }> }>(f).nodes ?? [])
+    .flatMap((n) => (typeof n.typeId === 'string' ? [n.typeId] : [])),
+);
 
 describe('devops pack — discovery + typeIds', () => {
   it('loads all four chains with the DevOps category (keyword, not prettified "Devops")', () => {
@@ -50,6 +61,11 @@ describe('devops pack — discovery + typeIds', () => {
       expect(entry!.category).toBe('DevOps');
     }
     expect(listChains().filter((c) => c.packName === PACK)).toHaveLength(4);
+  });
+
+  it('the registered-typeId set is read from the node packs (a broken read would assert nothing)', () => {
+    expect(KNOWN_TYPEIDS.size).toBeGreaterThan(101); // 757 measured at 19d13e682; a non-vacuity bound, not a ratchet
+    expect(KNOWN_TYPEIDS.has('core.ai.chatCompletion')).toBe(true);
   });
 
   it.each(CHAINS)('%s references only registered typeIds', (id) => {

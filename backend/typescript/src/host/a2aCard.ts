@@ -88,15 +88,28 @@ export function a2aCardCapabilities(): { streaming: boolean; pushNotifications: 
   };
 }
 
+/**
+ * ADR 0962 D8 — the ONE list of agents the A2A surface may name: PACK agents
+ * (globally keyed, tenant-less dispatch) that do not opt out with
+ * `a2aExposed: false`. The 0.3 card and the `message/send` router both read it
+ * (`isA2aDispatchable`), so the card never advertises what the router refuses.
+ */
+export function a2aListedAgents(): ReturnType<ReturnType<typeof getAgentRegistry>['list']> {
+  return getAgentRegistry().list().filter((a) => !a.ownerTenant && a.a2aExposed !== false);
+}
+
+/** Whether `message/send` may dispatch this agent (same predicate as the card). */
+export function isA2aDispatchable(agentId: string): boolean {
+  return a2aListedAgents().some((a) => a.agentId === agentId);
+}
+
 /** The 0.3 card's `skills[]` — one per installed PACK agent (see below). */
 function legacySkills(): Array<Record<string, unknown>> {
   // Grade-pass fix (ADR 0379): PACK agents only. a2a dispatch is tenant-less
   // (`agentExists` finds pack agents only, post-#1954), so advertising user
   // agents would be a dishonest wire claim — and a cross-tenant leak of every
   // tenant's persona/label/description on a well-known URL.
-  return getAgentRegistry()
-    .list()
-    .filter((a) => !a.ownerTenant)
+  return a2aListedAgents()
     .map((a) => ({
       id: a.agentId,
       name: a.label ?? a.persona,

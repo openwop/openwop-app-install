@@ -9,13 +9,21 @@
  *    distinguishable from "not recorded"
  *  - `recordMergeDecision` is pure and never invents a record
  *  - existing callers are unaffected (every field optional)
+ *
+ * Tracker TST-BKX-5. The dispatch cases register their OWN agent: the in-process
+ * registry is empty in this file, and an earlier `if (!agentId) return` let both
+ * cases pass without asserting anything (w65 probe vacuous). Red when the result
+ * stops carrying provenance (success, escalation or failure), the pending default
+ * or an explicit decision is lost, or recordMergeDecision mutates its input —
+ * each sabotage-witnessed (w65).
  */
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import {
   runAgentDispatch,
   echoProvenance,
   recordMergeDecision,
   type AgentDispatchProvenance,
+  type AgentDispatchRequest,
 } from '../src/host/agentDispatch.js';
 import { getAgentRegistry } from '../src/executor/agentRegistry.js';
 
@@ -32,10 +40,17 @@ const FULL: AgentDispatchProvenance = {
   budget: { maxUsd: 0.5, maxTokens: 20000 },
 };
 
-function anyAgentId(): string | null {
-  const agents = getAgentRegistry().list();
-  return agents[0]?.agentId ?? null;
-}
+const AGENT = 'prov.agent';
+beforeAll(() => {
+  getAgentRegistry().register({
+    agentId: AGENT, persona: 'Prov', modelClass: 'general', systemPrompt: 'x',
+    packName: 'test', packVersion: '0', toolAllowlist: [],
+    handoff: {
+      taskSchema: { type: 'object', required: ['goal'] },
+      validateTask: (v: unknown) => (v && typeof v === 'object' && 'goal' in v ? { ok: true } : { ok: false, errors: 'missing goal' }),
+    },
+  });
+});
 
 describe('echoProvenance / recordMergeDecision (pure)', () => {
   it('absent stays absent — the dispatcher never fabricates attribution', () => {
@@ -66,21 +81,29 @@ describe('echoProvenance / recordMergeDecision (pure)', () => {
 
 describe('runAgentDispatch echo', () => {
   it('omits provenance entirely when the caller supplies none (no shape change for existing callers)', () => {
-    const agentId = anyAgentId();
-    if (!agentId) return; // no manifest agents installed in this environment
-    const result = runAgentDispatch({ agentId, task: { goal: 'x' } } as never);
+    const req: AgentDispatchRequest = { agentId: AGENT, task: { goal: 'x' } };
+    const result = runAgentDispatch(req);
+    expect(result.status).toBe('completed');
     expect(result.provenance).toBeUndefined();
     expect('provenance' in result).toBe(false);
   });
 
-  it('echoes provenance onto the result when supplied', () => {
-    const agentId = anyAgentId();
-    if (!agentId) return;
-    const result = runAgentDispatch({ agentId, task: { goal: 'x' }, provenance: FULL } as never);
-    expect(result.provenance?.parentAgentId).toBe('host:kickbot');
-    expect(result.provenance?.workflowId).toBe('openwop-app.kicktodo.plan-generation');
-    expect(result.provenance?.mergeDecision).toBe('pending');
+  it('echoes provenance onto the result when supplied — on success, escalation AND failure', () => {
+    const ok = runAgentDispatch({ agentId: AGENT, task: { goal: 'x' }, provenance: FULL });
+    expect(ok.status).toBe('completed');
+    expect(ok.provenance?.parentAgentId).toBe('host:kickbot');
+    expect(ok.provenance?.workflowId).toBe('openwop-app.kicktodo.plan-generation');
+    expect(ok.provenance?.mergeDecision).toBe('pending');
     // Context refs are ids only — no content ever rides the record.
-    expect(result.provenance?.contextRefs).toEqual(['artifact:plan-draft-3']);
+    expect(ok.provenance?.contextRefs).toEqual(['artifact:plan-draft-3']);
+
+    const escalated = runAgentDispatch({ agentId: AGENT, task: { goal: 'x' }, provenance: FULL, simulateConfidence: 0.1 });
+    expect(escalated.status).toBe('escalated');
+    expect(escalated.provenance?.parentAgentId).toBe('host:kickbot');
+
+    const failed = runAgentDispatch({ agentId: AGENT, task: { nope: 1 }, provenance: FULL });
+    expect(failed.status).toBe('failed');
+    expect(failed.error?.code).toBe('task_schema_violation');
+    expect(failed.provenance?.parentAgentId).toBe('host:kickbot');
   });
 });

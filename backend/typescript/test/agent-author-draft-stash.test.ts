@@ -5,7 +5,16 @@
  *   - the routes are SELF-scoped: an anonymous caller gets { draft: null },
  *     a signed-in caller reads/deletes ONLY their own row
  *   - the subject eraser actually deletes (ADR 0464 self-policing — the
- *     build ratchet does not reach feature-owned collections)
+ *     build ratchet does not reach feature-owned collections) AND is registered
+ *     with the subject-erasure fan-out
+ *
+ * Tracker TST-BKW-3. Red when the acting-user or validation gate in
+ * `surface.stashDraft` is dropped, the GET reads another subject's row, the
+ * eraser stops deleting, or its `registerSubjectEraser` call is removed — each
+ * sabotage-witnessed (w65). Recorded double guard: the anonymous `{ draft: null }`
+ * is ALSO what an unguarded read returns, because no stash can exist for an
+ * anonymous subject (the route never writes one) — removing the anon branch
+ * alone cannot change the answer.
  */
 
 import http from 'node:http';
@@ -15,6 +24,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { getAgentRegistry } from '../src/executor/agentRegistry.js';
 import { buildAgentAuthorSurface } from '../src/features/agent-author/surface.js';
+import { registeredSubjectEraserIds, subjectEraserId } from '../src/host/subjectErasure.js';
+import type { BundleScope } from '../src/host/inMemorySurfaces.js';
 import {
   eraseAgentDraftStashForSubject,
   getStashedDraft,
@@ -43,18 +54,26 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-function client(): { get: (p: string) => Promise<{ status: number; body: any }>; post: (p: string, b?: unknown) => Promise<{ status: number; body: any }>; del: (p: string) => Promise<{ status: number; body: any }> } {
+interface DraftBody { draft: { persona: string; agentId: string } | null; stashedAt?: string }
+interface LoginBody { user: { userId: string } }
+interface Res<T> { status: number; body: T }
+
+function client(): { get: (p: string) => Promise<Res<DraftBody>>; login: (b: unknown) => Promise<Res<LoginBody>>; del: (p: string) => Promise<Res<undefined>> } {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<{ status: number; body: any }> => {
+  const call = async (method: string, path: string, body?: unknown): Promise<{ status: number; json: unknown }> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
-    for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    for (const ck of getSetCookies(res.headers)) { const m = /(__session=[^;]+)/.exec(ck); if (m?.[1]) cookie = m[1]; }
+    return { status: res.status, json: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
   };
-  return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), del: (p) => call('DELETE', p) };
+  return {
+    get: async (p) => { const r = await call('GET', p); return { status: r.status, body: r.json as DraftBody }; },
+    login: async (b) => { const r = await call('POST', '/host/openwop-app/test/login', b); return { status: r.status, body: r.json as LoginBody }; },
+    del: async (p) => { const r = await call('DELETE', p); return { status: r.status, body: undefined }; },
+  };
 }
 
 const DRAFT_URL = '/host/openwop-app/agent-author/draft';
@@ -62,13 +81,15 @@ const VALID = { persona: 'Stash Nova', agentId: 'test.stash.backing' };
 
 describe('surface stashDraft — the validation gate', () => {
   it('refuses without an acting user (typed failure, not a silent no-op)', async () => {
-    const s = buildAgentAuthorSurface({ tenantId: 't-stash' } as Parameters<typeof buildAgentAuthorSurface>[0]);
-    await expect((s as { stashDraft: (a: unknown) => Promise<unknown> }).stashDraft({ draft: VALID })).rejects.toThrow(/acting user/);
+    const scope: BundleScope = { tenantId: 't-stash' };
+    const s = buildAgentAuthorSurface(scope);
+    await expect(s.stashDraft!({ draft: VALID })).rejects.toThrow(/acting user/);
   });
 
   it('refuses an invalid draft; stashes a valid one', async () => {
-    const s = buildAgentAuthorSurface({ tenantId: 't-stash', actingUserId: 'user-a' } as Parameters<typeof buildAgentAuthorSurface>[0]);
-    const stashDraft = (s as { stashDraft: (a: unknown) => Promise<{ stashed: boolean; persona: string }> }).stashDraft;
+    const scope: BundleScope = { tenantId: 't-stash', actingUserId: 'user-a' };
+    const s = buildAgentAuthorSurface(scope);
+    const stashDraft = s.stashDraft!;
     await expect(stashDraft({ draft: { persona: 'X', agentId: 'invented.nope' } })).rejects.toThrow(/not valid/);
     const out = await stashDraft({ draft: VALID });
     expect(out).toEqual({ stashed: true, persona: 'Stash Nova' });
@@ -85,9 +106,9 @@ describe('routes — self-scoped', () => {
 
     const tenantId = `org:stash-${Date.now()}`;
     const c = client();
-    const login = await c.post('/host/openwop-app/test/login', { email: `stash-${Date.now()}@acme.test`, tenantId });
+    const login = await c.login({ email: `stash-${Date.now()}@acme.test`, tenantId });
     expect(login.status).toBe(201);
-    const userId = login.body.user.userId as string;
+    const userId = login.body.user.userId;
 
     // Nothing stashed yet — the TRUE state, not a masked failure.
     expect((await c.get(DRAFT_URL)).body.draft).toBeNull();
@@ -98,7 +119,7 @@ describe('routes — self-scoped', () => {
 
     const got = await c.get(DRAFT_URL);
     expect(got.status).toBe(200);
-    expect(got.body.draft.persona).toBe('Route Nova'); // own row, not the foreign one
+    expect(got.body.draft?.persona).toBe('Route Nova'); // own row, not the foreign one
     expect(got.body.stashedAt).toBeTruthy();
 
     expect((await c.del(DRAFT_URL)).status).toBe(204);
@@ -115,5 +136,7 @@ describe('subject eraser (ADR 0464 self-policing)', () => {
     await eraseAgentDraftStashForSubject('t-erase', 'subject-x');
     expect(await getStashedDraft('t-erase', 'subject-x')).toBeNull();
     expect((await getStashedDraft('t-erase', 'subject-y'))?.draft.persona).toBe('Keep Me');
+    // Self-policing means REACHABLE by the erasure fan-out, not just callable.
+    expect(registeredSubjectEraserIds()).toContain(subjectEraserId(eraseAgentDraftStashForSubject));
   });
 });

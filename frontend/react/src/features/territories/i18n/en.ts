@@ -184,4 +184,12 @@ export const messages = {
   quotaMixedTitle: 'This total adds quota rows that use different currencies, so it is shown without a symbol.',
   currencyRequired: 'Pick a currency — an amount with no currency cannot be compared with the deals.',
   currencyNone: "No currency",
+  // ADR 0954 D5 — lead-routing rules.
+  targetLeads: "Leads (lead routing)",
+  ruleTarget_contact: "Lead",
+  field_band: "Lead grade",
+  field_source: "Lead source",
+  field_stage: "Lifecycle stage",
+  field_company: "Company name",
+  field_score: "Lead score",
 } as const;

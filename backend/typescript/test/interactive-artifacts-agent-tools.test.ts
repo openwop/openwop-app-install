@@ -23,6 +23,8 @@ import {
   INTERACTIVE_ARTIFACTS_GET_TOOL_ID,
   INTERACTIVE_ARTIFACTS_RENDER_TOOL_ID,
 } from '../src/features/interactive-artifacts/agentTools.js';
+import { hostExtStorage } from '../src/host/hostExtPersistence.js';
+import { ensureConversationMeta } from '../src/host/conversationStore.js';
 
 const TENANT = 'default';
 
@@ -32,6 +34,14 @@ beforeAll(async () => {
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { void (server.address() as AddressInfo); res(); }); });
+  // ADR 0996 — `get` reads a chat-viz artifact only for someone who may
+  // read its conversation, so the conversations these cases render in are real,
+  // owned by the acting user, the way the chat-sessions route records them.
+  const now = new Date().toISOString();
+  for (const id of ['conv-1', 'conv-get']) {
+    await hostExtStorage().createChatSession({ sessionId: id, tenantId: TENANT, title: id, createdAt: now, updatedAt: now, messageCount: 0 });
+    await ensureConversationMeta(TENANT, id, { type: 'agent', ownerUserId: 'u-1' });
+  }
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
@@ -93,6 +103,8 @@ describe('interactive-artifacts agent tools (CFP-1 / A10)', () => {
     expect(await get(provider())).toEqual({ artifact: null });
     // another tenant, authenticated, the same real key → empty (the record's tenant re-check)
     expect(await get(createAgentToolProvider({ tenantId: 'tenant-other', actingUserId: 'u-2' }))).toEqual({ artifact: null });
+    // same tenant, another member who cannot read the conversation → empty (CE62-F1)
+    expect(await get(provider({ actingUserId: 'u-2' }))).toEqual({ artifact: null });
   });
 
   // DATA-1 — the synthetic runId carries the tenant, so two tenants rendering

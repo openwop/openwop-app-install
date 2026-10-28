@@ -98,7 +98,7 @@ describe('ADR 0351 P1 — provider path via the seam', () => {
 
     await setRetrievalConfig(TENANT, ORG, col.collectionId, 'u1', { embedder: 'provider' });
     const first = await searchDetailed(TENANT, ORG, col.collectionId, 'picking errors', 5);
-    expect(first.embedding).toEqual({ mode: 'provider', model: 'fake-embed-1' });
+    expect(first.embedding).toEqual({ mode: 'provider', model: 'fake-embed-1', provider: 'openai', funding: 'byok' }) // ADR 0904 P5 — provenance names the provider + who pays;
     expect(first.hits.length).toBeGreaterThan(0); // dense over provider vectors
     const chunksAfterFirst = counter.chunks;
     // The local→provider switch REBUILDS the namespace: every chunk embedded under the provider.
@@ -134,7 +134,7 @@ describe('ADR 0351 P1 — provider path via the seam', () => {
     // Not marked hydrated on failure — the next search retries and recovers.
     fail = false;
     const recovered = await searchDetailed(TENANT, ORG, col.collectionId, 'robotic picking', 5);
-    expect(recovered.embedding).toEqual({ mode: 'provider', model: 'fake-embed-1' });
+    expect(recovered.embedding).toEqual({ mode: 'provider', model: 'fake-embed-1', provider: 'openai', funding: 'byok' }) // ADR 0904 P5 — provenance names the provider + who pays;
     expect(recovered.hits.length).toBeGreaterThan(0);
   });
 

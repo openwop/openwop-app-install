@@ -179,6 +179,7 @@ const usesLapse = (text: string): boolean => /\b(ownerPublicRuntimeLapsed|checkO
 
 /** Every public runtime the gating audit named (G9). Removing one is a reviewed diff. */
 const LAPSE_LANES = [
+  'features/campaign-connectors/catalogFeed.ts', // ADR 0952 INTWF-1 — the product feed + catalog push follow the store's own commerce predicate
   'features/campaign-connectors/routes.ts', // pixels + conversions relay
   'features/chat-widget/publicGateway.ts',  // public widget gateway (§8.2)
   'features/commerce/routes.ts',            // storefront, product, checkout, one-click, quote accept

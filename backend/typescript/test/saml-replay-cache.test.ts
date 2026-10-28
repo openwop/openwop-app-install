@@ -4,6 +4,16 @@
  * single-use (consumed on validate) and expire, so a captured SAMLResponse
  * can't be replayed — and it must live in shared Storage, not process memory,
  * so mint-on-instance-A / consume-on-instance-B works under scale-out.
+ *
+ * The consume itself is node-saml's: `validateInResponseTo` calls the cache's
+ * `removeAsync` after a successful validate. This file pins the ADAPTER's half
+ * (`host/auth/samlSso.ts createSamlReplayCache`) — that `removeAsync` really
+ * deletes, that the 10-minute TTL holds in both directions, and the shared key.
+ *
+ * Sabotage witnessed red (8f grade-tests wave 2): `removeAsync` a no-op
+ * (`8fw2g3-saml-remove`), the TTL check doubled (`-saml-ttl-check`), the TTL
+ * shortened to one minute (`-saml-ttl-short-r2`; round 1 was vacuous, no leg
+ * read inside the TTL), and the shared key prefix dropped (`-saml-prefix`).
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { createSamlReplayCache } from '../src/host/auth/samlSso.js';
@@ -30,7 +40,7 @@ describe('createSamlReplayCache', () => {
     expect(await cache.getAsync('req-1')).toBe('2026-01-01T00:00:00Z');
   });
 
-  it('is single-use: a consumed id no longer validates (replay defeated)', async () => {
+  it('is single-use: removeAsync consumes the id (node-saml calls it on validate), so a replay no longer validates', async () => {
     const { storage } = fakeStorage();
     const cache = createSamlReplayCache(storage);
     await cache.saveAsync('req-2', 'v');
@@ -42,12 +52,17 @@ describe('createSamlReplayCache', () => {
   it('expires a stale request id after the TTL', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
-    const { storage } = fakeStorage();
+    const { storage, map } = fakeStorage();
     const cache = createSamlReplayCache(storage);
     await cache.saveAsync('req-3', 'v');
-    // 11 minutes later (> 10m TTL) → expired.
+    await cache.saveAsync('req-3b', 'w');
+    // 9m59s later (inside the 10m TTL) → still valid. A shortened TTL reds here.
+    vi.setSystemTime(new Date('2026-01-01T00:09:59Z'));
+    expect(await cache.getAsync('req-3b')).toBe('w');
+    // 11 minutes later (> 10m TTL) → expired, and the stale row is deleted.
     vi.setSystemTime(new Date('2026-01-01T00:11:00Z'));
     expect(await cache.getAsync('req-3')).toBeNull();
+    expect(map.has('saml:reqid:req-3')).toBe(false);
   });
 
   it('persists in shared storage (mint + consume can cross instances)', async () => {

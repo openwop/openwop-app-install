@@ -1,3 +1,19 @@
+/**
+ * Agent pack loader — RFC 0070 / RFC 0003 §C/§D manifest resolution and the
+ * RFC 0072 §C peer-dependency disposition (refused vs degraded).
+ *
+ * The traversal case refers to a file that EXISTS outside the pack, so only the
+ * RFC 0003 §C lexical guard and the ADR 0826 D2.3 real-path guard can refuse it
+ * (the earlier `../../../../etc/passwd` resolved to a missing path and was
+ * refused by the existence check instead — w65 probe vacuous). The two guards
+ * are a recorded double guard; the probe breaks both.
+ *
+ * Tracker TST-BKY-4. Red when both traversal guards are removed, an unmet
+ * optional peer-dep is refused instead of degraded, a satisfied one is not
+ * skipped, strict mode loads a required-unmet pack, or the agent's `degraded[]`
+ * is dropped — each sabotage-witnessed (w65). Fixtures are attested (ADR 0555
+ * P0) so a refusal is never just "untrusted pack".
+ */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -32,14 +48,17 @@ describe('agentLoader — RFC 0070 / RFC 0003 §C/§D manifest resolution', () =
   });
 
   it('rejects a systemPromptRef that escapes the pack root (RFC 0003 §C)', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'agentpack-'));
+    const root = mkdtempSync(join(tmpdir(), 'agentpack-'));
+    const dir = join(root, 'pack');
     try {
       mkdirSync(join(dir, 'prompts'), { recursive: true });
+      // A REAL file outside the pack root — only the traversal guards can refuse it.
+      writeFileSync(join(root, 'outside.md'), 'HOST SECRET outside the pack');
       writeFileSync(join(dir, 'prompts', 'ok.md'), 'safe prompt body');
       writeFileSync(join(dir, 'pack.json'), JSON.stringify({
         name: 'local.test.agents', version: '1.0.0', nodes: [],
         agents: [
-          { agentId: 'local.test.agents.evil', persona: 'Evil', modelClass: 'general', systemPromptRef: '../../../../etc/passwd' },
+          { agentId: 'local.test.agents.evil', persona: 'Evil', modelClass: 'general', systemPromptRef: '../outside.md' },
           { agentId: 'local.test.agents.good', persona: 'Good', modelClass: 'general', systemPromptRef: 'prompts/ok.md' },
         ],
       }));
@@ -53,8 +72,9 @@ describe('agentLoader — RFC 0070 / RFC 0003 §C/§D manifest resolution', () =
       expect(loaded.map((a) => a.agentId)).toEqual(['local.test.agents.good']);
       expect(getAgentRegistry().has('local.test.agents.evil')).toBe(false);
       expect(getAgentRegistry().has('local.test.agents.good')).toBe(true);
+      expect(loaded.map((a) => a.systemPrompt).join('\n')).not.toContain('HOST SECRET');
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });
@@ -112,16 +132,22 @@ describe('loadAgentsFromManifest — RFC 0072 §C degraded[] + strict refuse', (
       { 'agents.manifestRuntime': 'supported', 'agents.memoryBackends': 'supported' },
       { 'agents.memoryBackends': { optional: true } },
     );
-    const loaded = loadAgentsFromManifest(dir, { hostSatisfies: (c) => c === 'agents.manifestRuntime' });
-    expect(loaded[0].degraded).toEqual(['agents.memoryBackends']);
-    rmSync(dir, { recursive: true, force: true });
+    try {
+      const loaded = loadAgentsFromManifest(dir, { hostSatisfies: (c) => c === 'agents.manifestRuntime' });
+      expect(loaded[0].degraded).toEqual(['agents.memoryBackends']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('strict mode refuses a pack with a required-unmet tier (no agents loaded)', () => {
     const dir = seedPack({ 'agents.manifestRuntime': 'supported', 'host.agentRuntime': 'supported' });
-    const loaded = loadAgentsFromManifest(dir, { hostSatisfies: (c) => c === 'agents.manifestRuntime', strict: true });
-    expect(loaded).toEqual([]);
-    expect(getAgentRegistry().has('local.test.tiers.worker')).toBe(false);
-    rmSync(dir, { recursive: true, force: true });
+    try {
+      const loaded = loadAgentsFromManifest(dir, { hostSatisfies: (c) => c === 'agents.manifestRuntime', strict: true });
+      expect(loaded).toEqual([]);
+      expect(getAgentRegistry().has('local.test.tiers.worker')).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

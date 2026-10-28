@@ -9,6 +9,14 @@
  * Uses the in-process sqlite (`memory://`) control plane, which the durable
  * adapters read/write through — so "durable" here means Storage-backed and
  * cross-instance-correct, exercised over the real HTTP surface.
+ *
+ * PROTECTED (advertised-capability honesty: discovery's `host-surfaces`
+ * `implementation`). A round trip alone cannot say WHICH tier served it, so the
+ * "through the durable backend" claim rests on sabotage witnesses that break
+ * ONLY the durable adapter's write (grade-tests 8f w2: sm-kv-durable,
+ * sm-fs-durable, sm-table-durable — each reddened its round-trip case, so the
+ * seam route really dispatches to the durable tier) and sm-advert-kv for the
+ * advert.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';

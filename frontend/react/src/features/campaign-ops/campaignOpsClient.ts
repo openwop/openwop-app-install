@@ -14,16 +14,31 @@ import { authedHeaders, config, fetchOpts } from '../../client/config.js';
 
 export type ClientStatus = 'active' | 'paused' | 'archived';
 export type ClientMode = 'preview' | 'live';
+/** ADR 0924 D4 — who approves this client's changes. */
+export type ApprovalPolicyMode = 'agency' | 'client';
+
+/** ADR 0924 D5 — a person at the client who approves through a private link. */
+export interface ClientApprover {
+  approverId: string; orgId: string; email: string; displayName: string;
+  status: 'active' | 'suspended' | 'revoked'; createdAt: string;
+}
+/** One approver's link to one change set. The URL is shown once. */
+export interface SentApprovalLink { approverId: string; displayName: string; email: string; url: string; expiresAt?: string }
+
+/** ADR 0962 D7. */
+export type ExternalAgentsAccess = 'off' | 'read' | 'request';
 
 export interface ClientAccount {
   tenantId: string; orgId: string; displayName: string;
-  status: ClientStatus; mode: ClientMode; approvalPolicy: string;
+  status: ClientStatus; mode: ClientMode; approvalPolicy: ApprovalPolicyMode;
   synthetic?: boolean; createdAt: string; updatedAt: string;
+  /** ADR 0962 D7 — what outside agents (MCP) may do for this client. Absent ⇒ off. */
+  externalAgents?: ExternalAgentsAccess;
 }
 
 export interface CampaignAsset {
   assetId: string; orgId: string; destination: string;
-  locator: { pageId: string }; label: string; editableFields: string[];
+  locator: { pageId: string } | { templateId: string; campaignIds?: string[] }; label: string; editableFields: string[];
   lastKnown?: { version: number; contentHash: string; readAt: string };
 }
 
@@ -79,7 +94,7 @@ const approvalsBase = `${config.baseUrl}/host/openwop-app/approvals`;
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
 const enc = encodeURIComponent;
 
-async function asJson<T>(res: Response): Promise<T> {
+export async function asJson<T>(res: Response): Promise<T> {
   if (!res.ok) {
     let message = '';
     let reason: string | undefined;
@@ -102,7 +117,7 @@ const send = async <T>(method: 'POST' | 'PATCH', url: string, body: unknown): Pr
 export async function listClients(): Promise<{ clients: ClientAccount[]; agencyAdmin: boolean }> {
   return get('/clients');
 }
-export async function updateClient(orgId: string, patch: { mode?: ClientMode; status?: ClientStatus; name?: string }): Promise<ClientAccount> {
+export async function updateClient(orgId: string, patch: { mode?: ClientMode; status?: ClientStatus; name?: string; approvalPolicy?: ApprovalPolicyMode; externalAgents?: ExternalAgentsAccess }): Promise<ClientAccount> {
   return (await send<{ client: ClientAccount }>('PATCH', `${base}/clients/${enc(orgId)}`, patch)).client;
 }
 export async function listAssets(orgId: string): Promise<CampaignAsset[]> {
@@ -140,4 +155,101 @@ export async function approveChangeSet(approvalId: string, expectedChangeSetHash
 }
 export async function rejectChangeSet(approvalId: string, note?: string): Promise<void> {
   await send('POST', `${approvalsBase}/${enc(approvalId)}/reject`, note ? { note } : {});
+}
+
+// ── ADR 0924 D5 — client approvers ──
+export async function listApprovers(orgId: string): Promise<{ approvers: ClientApprover[]; portalEnabled: boolean }> {
+  return get(`/clients/${enc(orgId)}/approvers`);
+}
+export async function addApprover(orgId: string, input: { email: string; displayName: string }): Promise<ClientApprover> {
+  return (await send<{ approver: ClientApprover }>('POST', `${base}/clients/${enc(orgId)}/approvers`, input)).approver;
+}
+export async function removeApprover(orgId: string, approverId: string): Promise<void> {
+  await asJson(await fetch(`${base}/clients/${enc(orgId)}/approvers/${enc(approverId)}`, fetchOpts({ method: 'DELETE', headers: authedHeaders() })));
+}
+/** Mints a fresh link per active approver (replacing earlier ones). */
+export async function sendApprovalLinks(orgId: string, changeSetId: string): Promise<SentApprovalLink[]> {
+  return (await send<{ links: SentApprovalLink[] }>('POST', `${base}/clients/${enc(orgId)}/change-sets/${enc(changeSetId)}/approval-links`, {})).links;
+}
+
+// ── The client's campaign team (ADR 0943 P4) ──
+
+export interface TeamEvalScore {
+  suiteRef: string; runId: string; completedAt?: string;
+  aggregateScore?: number; passed?: boolean; passedCount?: number; taskCount?: number;
+}
+export interface TeamAgent { agentId: string; label: string; eval: TeamEvalScore | null }
+export interface TeamMember {
+  role: TeamAgent & { description?: string; modelClass: string; teamRole: boolean };
+  binding: { bindingId: string; agent: TeamAgent; model?: { provider: string; model: string } } | null;
+  narrowerBindings: number;
+}
+export type TeamEvalsState = { available: true } | { available: false; reason: 'feature_disabled' | 'not_entitled' | 'feature_unavailable' };
+export interface TeamView { members: TeamMember[]; evals: TeamEvalsState; canEdit: boolean }
+
+export async function getTeam(orgId: string): Promise<TeamView> {
+  return get<TeamView>(`/clients/${enc(orgId)}/team`);
+}
+/** Replace the agent a role runs as for this client (one row per role). */
+export async function bindRoleAgent(orgId: string, pinnedAgentId: string, agentId: string): Promise<void> {
+  await asJson<unknown>(await fetch(`${base}/clients/${enc(orgId)}/agent-bindings`, fetchOpts({ method: 'PUT', headers: jsonHeaders(), body: JSON.stringify({ pinnedAgentId, agentId }) })));
+}
+/** Go back to the role's default agent for this client. */
+export async function unbindRoleAgent(orgId: string, bindingId: string): Promise<void> {
+  const res = await fetch(`${base}/clients/${enc(orgId)}/agent-bindings/${enc(bindingId)}`, fetchOpts({ method: 'DELETE', headers: authedHeaders() }));
+  if (!res.ok) await asJson<unknown>(res);
+}
+
+// ── Client memory (ADR 0944) ──
+
+export interface ClientNote { id: string; content: string; contentTrust: 'trusted' | 'untrusted'; authoredBy?: string; createdAt: string }
+export interface ClientNoteProposal {
+  proposalId: string; content: string; rationale?: string;
+  status: 'pending' | 'approved' | 'rejected'; createdAt: string;
+}
+export interface ClientRecallEntry { id: string; content: string; contentTrust: 'trusted' | 'untrusted'; createdAt: string; expiresAt?: string }
+export interface ClientMemorySources { collectionIds: string[]; available: Array<{ collectionId: string; name: string }> }
+export interface ClientMemoryPurgeReport {
+  notes: number; recallEntries: number; vectors: { purged: number; failed: string[] };
+  receipts: number; proposals: number; snapshots: number; sources: number; complete: boolean;
+}
+
+const sendRaw = async (method: 'DELETE' | 'PUT' | 'POST', url: string, body?: unknown): Promise<Response> => {
+  const res = await fetch(url, fetchOpts({ method, headers: jsonHeaders(), ...(body !== undefined ? { body: JSON.stringify(body) } : {}) }));
+  if (!res.ok) await asJson(res);
+  return res;
+};
+
+export async function listClientNotes(orgId: string): Promise<ClientNote[]> {
+  return (await get<{ notes: ClientNote[] }>(`/clients/${enc(orgId)}/memory/notes`)).notes;
+}
+export async function addClientNote(orgId: string, content: string): Promise<void> {
+  await send('POST', `${base}/clients/${enc(orgId)}/memory/notes`, { content });
+}
+/** `recallCleared:false` = the note is deleted but may still be recalled briefly. */
+export async function removeClientNote(orgId: string, noteId: string): Promise<{ recallCleared: boolean }> {
+  const res = await sendRaw('DELETE', `${base}/clients/${enc(orgId)}/memory/notes/${enc(noteId)}`);
+  if (res.status === 204) return { recallCleared: true };
+  const body = (await res.json()) as { recallCleared?: boolean };
+  return { recallCleared: body.recallCleared !== false };
+}
+export async function listClientNoteProposals(orgId: string): Promise<ClientNoteProposal[]> {
+  return (await get<{ proposals: ClientNoteProposal[] }>(`/clients/${enc(orgId)}/memory/proposals?status=pending`)).proposals;
+}
+export async function decideClientNoteProposal(orgId: string, proposalId: string, decision: 'approve' | 'reject'): Promise<void> {
+  await send('POST', `${base}/clients/${enc(orgId)}/memory/proposals/${enc(proposalId)}/${decision}`, {});
+}
+export async function listClientRecall(orgId: string): Promise<ClientRecallEntry[]> {
+  return (await get<{ entries: ClientRecallEntry[] }>(`/clients/${enc(orgId)}/memory/recall`)).entries;
+}
+export async function getClientMemorySources(orgId: string): Promise<ClientMemorySources> {
+  return get(`/clients/${enc(orgId)}/memory/sources`);
+}
+export async function setClientMemorySources(orgId: string, collectionIds: string[]): Promise<string[]> {
+  const res = await sendRaw('PUT', `${base}/clients/${enc(orgId)}/memory/sources`, { collectionIds });
+  return ((await res.json()) as { collectionIds: string[] }).collectionIds;
+}
+export async function purgeClientMemory(orgId: string): Promise<ClientMemoryPurgeReport> {
+  const res = await sendRaw('DELETE', `${base}/clients/${enc(orgId)}/memory`);
+  return ((await res.json()) as { report: ClientMemoryPurgeReport }).report;
 }

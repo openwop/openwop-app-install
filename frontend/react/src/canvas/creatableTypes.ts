@@ -32,7 +32,7 @@ export const CREATABLE_CANVAS_TYPES: readonly CreatableCanvasType[] = [
   { canvasTypeId: 'canvas.slides', toggleId: 'slides', basePath: '/host/openwop-app/slides', editorPath: '/slides', nameKey: 'type_slides', hintKey: 'typeHint_slides' },
   { canvasTypeId: 'canvas.drawing', toggleId: 'drawings', basePath: '/host/openwop-app/drawings', editorPath: '/drawings', nameKey: 'type_drawing', hintKey: 'typeHint_drawing' },
   { canvasTypeId: 'canvas.cad', toggleId: 'cad', basePath: '/host/openwop-app/cad', editorPath: '/cad', nameKey: 'type_cad', hintKey: 'typeHint_cad' },
-  { canvasTypeId: 'canvas.campaign', toggleId: 'campaign-studio', basePath: '/host/openwop-app/campaign-studio', editorPath: '/campaign-studio', nameKey: 'type_campaign', hintKey: 'typeHint_campaign' },
+  { canvasTypeId: 'canvas.campaign', toggleId: 'campaign-studio', basePath: '/host/openwop-app/campaign-studio', editorPath: '/campaign-studio/plans', nameKey: 'type_campaign', hintKey: 'typeHint_campaign' },
   { canvasTypeId: 'canvas.app-builder', toggleId: 'app-builder', basePath: '/host/openwop-app/app-builder', editorPath: '/app-builder', nameKey: 'type_app', hintKey: 'typeHint_app' },
   { canvasTypeId: 'canvas.document', toggleId: 'document-editor', basePath: '/host/openwop-app/document-editor', editorPath: '/document-editor', nameKey: 'type_document', hintKey: 'typeHint_document' },
 ];

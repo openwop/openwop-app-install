@@ -497,8 +497,15 @@ export function apiKeyRateLimitMiddleware(): RequestHandler {
 }
 
 /** Per-session run-quota middleware. Mount on POST /v1/runs only.
- *  Enforces: 10 runs/min sliding window, 50 runs/day, 5 concurrent. */
-export function runQuotaMiddleware(): RequestHandler {
+ *  Enforces: 10 runs/min sliding window, 50 runs/day, 5 concurrent.
+ *
+ *  ADR 0987 D2 — `concurrencyInStore: true` is for a route whose run insert takes
+ *  the admission (`runAdmissionFor`): the store counts the scope's running runs
+ *  across instances, so the per-process map does NOT gate it (that map counts only
+ *  this instance, only for 60 s, and only until a terminal event, so it would
+ *  refuse a slot a suspended run had released). Every other mount keeps the map
+ *  until ADR 0987 P2 moves it to the store. */
+export function runQuotaMiddleware(opts: { concurrencyInStore?: boolean } = {}): RequestHandler {
   return (req, res, next) => {
     if (process.env.OPENWOP_RATELIMIT_DISABLED === 'true') { next(); return; }
     const limits = loadLimits();
@@ -563,7 +570,7 @@ export function runQuotaMiddleware(): RequestHandler {
     // Sessions keep `sessionConcurrent`.
     const slotKey = keyId ?? key;
     const concurrentCap = keyId ? limits.keyConcurrent : isSession ? limits.sessionConcurrent : 0;
-    if (concurrentCap > 0) {
+    if (concurrentCap > 0 && !opts.concurrencyInStore) {
       const inflight = (sessionInflightRuns.get(slotKey) ?? []).filter((r) => now - r.startedAtMs < 60_000);
       if (inflight.length >= concurrentCap) {
         rejectRateLimited(res, keyId ? 'key_concurrent' : 'session_concurrent', 10);
@@ -615,8 +622,36 @@ export function runQuotaMiddleware(): RequestHandler {
     // Stash the session key on the request so the route handler can
     // call reserveConcurrentSlot with the real runId once it's created.
     (req as Request & { _sessionKey?: string })._sessionKey = slotKey;
+    // ADR 0987 D2 — the same scope and cap, carried to the run insert, which
+    // counts it from authoritative run state across every instance.
+    if (concurrentCap > 0) {
+      (req as Request & { _runAdmission?: RunAdmission })._runAdmission = {
+        key: createHash('sha256').update(`runs.concurrent\u0000${slotKey}`).digest('hex').slice(0, 32),
+        cap: concurrentCap,
+        reason: keyId ? 'key_concurrent' : 'session_concurrent',
+      };
+    }
     next();
   };
+}
+
+/** ADR 0987 D2 — the concurrency admission `runQuotaMiddleware` computed for this
+ *  request: a digest of the scope (never the raw session, key or IP), its cap, and
+ *  the reason a refusal reports. */
+export interface RunAdmission { key: string; cap: number; reason: 'key_concurrent' | 'session_concurrent' }
+
+/** The admission to pass to the run insert, or undefined outside
+ *  `runQuotaMiddleware`, with rate limiting disabled, or with no cap. */
+export function runAdmissionFor(req: Request): { key: string; cap: number } | undefined {
+  const a = (req as Request & { _runAdmission?: RunAdmission })._runAdmission;
+  return a ? { key: a.key, cap: a.cap } : undefined;
+}
+
+/** Answer a run insert the store refused for concurrency (`AdmissionRefusedError`)
+ *  with the same 429 envelope the in-process check sends. */
+export function refuseRunAdmission(req: Request, res: import('express').Response): void {
+  const a = (req as Request & { _runAdmission?: RunAdmission })._runAdmission;
+  rejectRateLimited(res, a?.reason ?? 'session_concurrent', 10);
 }
 
 /**

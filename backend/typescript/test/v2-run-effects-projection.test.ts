@@ -6,17 +6,31 @@
  * the schema requires; and a projection over escapes alone would read EMPTY for
  * a correctly-suppressed effect, so `v2-effect-seam-no-refire` would pass while
  * witnessing nothing — a green leg certifying the obligation it cannot see.
+ *
+ * TENANT BINDING IS DOUBLE-GUARDED: the route mints `effectId` as
+ * `<tenant>/<digest>` (`effectIdFor`), and the major-2 response hygiene
+ * projects every `effectId` key that is still bare (`v2Ids.ts`, ADR 0723). So
+ * returning the bare digest alone stays green (round-1 probe re-unbound-id:
+ * vacuous); a WRONG tenant segment is left alone by the projection and is red
+ * (re-unbound-id-r2). Witnessed: `attempt` in the preimage → the retry case
+ * red; a random suffix → the determinism case red; spreading the row → the
+ * content-free case red.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
-import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import Ajv2020 from 'ajv/dist/2020.js';
+import type { ValidateFunction } from 'ajv';
 
 import { createApp } from '../src/index.js';
 import { openStorage } from '../src/storage/index.js';
 
-let server: Server; let base = ''; let dbPath = ''; let storage: Awaited<ReturnType<typeof openStorage>>;
+let server: Server; let base = ''; let dbDir = ''; let storage: Awaited<ReturnType<typeof openStorage>>;
+let validate: ValidateFunction;
 const AUTH = { Authorization: 'Bearer dev-token', 'Content-Type': 'application/json' };
 const V2 = { ...AUTH, 'OpenWOP-Version': '2' };
 
@@ -28,18 +42,28 @@ beforeAll(async () => {
   // EMPTY `effects[]` and passed while asserting nothing. Sabotaging the route
   // (leak the provider result; randomise the effectId) left them green, which is
   // how the vacuity surfaced.
-  const { mkdtempSync } = await import('node:fs');
-  const { tmpdir } = await import('node:os');
-  dbPath = join(mkdtempSync(join(tmpdir(), 'owp-effects-')), 'app.db');
-  const dsn = `sqlite://${dbPath}`;
+  dbDir = mkdtempSync(join(tmpdir(), 'owp-effects-'));
+  const dsn = `sqlite://${join(dbDir, 'app.db')}`;
   process.env.OPENWOP_STORAGE_DSN = dsn;
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   const app = await createApp({ port: 0, storageDsn: dsn, serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   storage = await openStorage(dsn);
   server = await new Promise<Server>((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  // Compile the projection schema ONCE (every v2 schema is added for its $refs).
+  const root = join(process.cwd(), '..', '..', 'schemas', 'v2');
+  const ajv = new Ajv2020({ strict: false, allErrors: true, validateFormats: false });
+  for (const f of readdirSync(root).filter((x) => x.endsWith('.schema.json') && x !== 'effect-ledger-projection.schema.json')) {
+    const schema = JSON.parse(readFileSync(join(root, f), 'utf8')) as { $id?: string };
+    if (schema.$id === undefined || ajv.getSchema(schema.$id) === undefined) ajv.addSchema(schema);
+  }
+  validate = ajv.compile(JSON.parse(readFileSync(join(root, 'effect-ledger-projection.schema.json'), 'utf8')) as object);
 });
-afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
+afterAll(async () => {
+  await new Promise<void>((r) => server.close(() => r()));
+  await storage.close();
+  rmSync(dbDir, { recursive: true, force: true });
+});
 
 async function makeRun(): Promise<string> {
   const res = await fetch(`${base}/runs`, {
@@ -53,18 +77,12 @@ describe('run effects projection (RFC 0173 §C.2)', () => {
   it('answers 200 with a schema-valid body — the shape `idempotency` promises', async () => {
     const wireId = await makeRun();
     expect(wireId, 'no run means the legs below assert nothing').not.toBe('');
+    // A POPULATED projection: an empty `effects[]` is schema-valid trivially.
+    await storage.putInvocation({ runId: wireId.split('/').pop() ?? '', nodeId: 'n0', attempt: 1, invocationId: 'inv-0' }, { ok: true });
     const res = await fetch(`${base}/runs/${encodeURIComponent(wireId)}/effects`, { headers: V2 });
     expect(res.status).toBe(200);
-    const body = await res.json() as Record<string, unknown>;
-
-    const { default: Ajv2020 } = await import('ajv/dist/2020.js');
-    const { readdirSync } = await import('node:fs');
-    const root = join(process.cwd(), '..', '..', 'schemas', 'v2');
-    const ajv = new Ajv2020({ strict: false, allErrors: true, validateFormats: false });
-    for (const f of readdirSync(root).filter((x) => x.endsWith('.schema.json') && x !== 'effect-ledger-projection.schema.json')) {
-      try { ajv.addSchema(JSON.parse(readFileSync(join(root, f), 'utf8'))); } catch { /* duplicate $id */ }
-    }
-    const validate = ajv.compile(JSON.parse(readFileSync(join(root, 'effect-ledger-projection.schema.json'), 'utf8')) as object);
+    const body = await res.json() as { effects: unknown[] };
+    expect(body.effects.length, 'the planted attempt is projected, so the schema check is over a real record').toBeGreaterThan(0);
     expect(validate(body), `violates the projection schema: ${JSON.stringify(validate.errors ?? []).slice(0, 600)}`).toBe(true);
     // Non-vacuity: the validator must reject something, or a mis-compiled
     // schema would report every body clean.
@@ -98,6 +116,7 @@ describe('run effects projection (RFC 0173 §C.2)', () => {
     // the check runs before any lookup.)
     const foreign = await fetch(`${base}/runs/${encodeURIComponent('other-tenant/aaaaaaaaaaaaaaaaaaaa')}/effects`, { headers: V2 });
     expect(foreign.status).toBe(403);
+    expect(((await foreign.json()) as { error?: string }).error).toBe('id_tenant_mismatch');
 
     // A SAME-TENANT id that names no run is 404 — this is where an oracle would
     // actually live, and it must not answer 200 with an empty list.
@@ -106,6 +125,7 @@ describe('run effects projection (RFC 0173 §C.2)', () => {
     const ghost = await fetch(`${base}/runs/${encodeURIComponent(`${tenant}/zzzzzzzzzzzzzzzzzzzzzz`)}/effects`, { headers: V2 });
     expect(ghost.status, 'an empty 200 would confirm nothing exists — but a 200 for ANY unreadable run is the leak').not.toBe(200);
     expect(ghost.status).toBe(404);
+    expect(((await ghost.json()) as { error?: string }).error).toBe('not_found');
   });
 
   it('effectId is DETERMINISTIC across reads and tenant-bound', async () => {

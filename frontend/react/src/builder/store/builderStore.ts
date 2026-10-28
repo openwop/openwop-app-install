@@ -12,7 +12,7 @@
  */
 
 import { applyEditOpsToGraph, type EditOp } from '../pair/suggestionModel.js';
-import { create } from 'zustand';
+import { create, type StateCreator } from 'zustand';
 import type { RunEventDoc } from '@openwop/openwop';
 import type { BuilderEdge, BuilderNode, SavedWorkflow } from '../schema/workflow.js';
 import { catalogEntry, defaultConfigFor } from '../palette/catalogRegistry.js';
@@ -389,6 +389,10 @@ export interface BuilderState {
   past: Snapshot[];
   future: Snapshot[];
 
+  /** ADR 0960 D3 — true only on a `createReadOnlyBuilderStore` instance: the
+   *  canvas disables every edit affordance. The builder's own store is false. */
+  readOnly: boolean;
+
   /** Live run overlay. Null when no run is being watched. Ephemeral —
    *  never snapshotted (undo/redo) or persisted to localStorage. */
   overlay: RunOverlay | null;
@@ -545,7 +549,9 @@ function clone(s: { nodes: BuilderNode[]; edges: BuilderEdge[] }): Snapshot {
   };
 }
 
-export const useBuilderStore = create<BuilderState>((set, get) => ({
+/** The builder store's state + actions, shared by the singleton below and by
+ *  the read-only run-view instances (`builder/store/readOnlyBuilderStore.ts`). */
+export const builderStoreInitializer: StateCreator<BuilderState> = (set, get) => ({
   workflowId: '',
   name: i18n.t('builder:untitledWorkflow'),
   defaultInputs: '{}',
@@ -557,6 +563,7 @@ export const useBuilderStore = create<BuilderState>((set, get) => ({
   selectedEdgeId: null,
   past: [],
   future: [],
+  readOnly: false,
   overlay: null,
   debugSession: null,
   failureHeat: null,
@@ -1054,7 +1061,10 @@ export const useBuilderStore = create<BuilderState>((set, get) => ({
   setCollabPeers(peers) {
     set({ collabPeers: peers });
   },
-}));
+});
+
+export const useBuilderStore = create<BuilderState>(builderStoreInitializer);
+
 
 function pushHistory(
   set: (partial: Partial<BuilderState>) => void,

@@ -63,6 +63,9 @@ function mintedRefs(): { label: string; ref: string }[] {
     { label: 'resolveAgentMemoryScope(per-user, no actor)', ref: resolveAgentMemoryScope({ profileId: 'p1', memoryScope: 'per-user' }, undefined) },
     { label: 'resolveAgentMemoryScope(per-user, actor)', ref: resolveAgentMemoryScope({ profileId: 'p1', memoryScope: 'per-user' }, { userId: 'u9' }) },
     { label: 'resolveAgentMemoryScope(default)', ref: resolveAgentMemoryScope({ profileId: 'p1' }, undefined) },
+    // ADR 0944 — the client org scope and its `:no-org` sentinel.
+    { label: 'resolveAgentMemoryScope(per-org, client)', ref: resolveAgentMemoryScope({ profileId: 'p1', memoryScope: 'per-org' }, { client: { orgId: 'org_9f2c4e1a' } }) },
+    { label: 'resolveAgentMemoryScope(per-org, no client)', ref: resolveAgentMemoryScope({ profileId: 'p1', memoryScope: 'per-org' }, undefined) },
   ];
 }
 

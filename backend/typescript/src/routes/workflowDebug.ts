@@ -33,6 +33,7 @@ import { getRegisteredWorkflowAsync } from '../host/workflowsRegistry.js';
 import { loadOwnedRun } from '../host/runAccess.js';
 import { resolveRunDefinition } from '../host/resolveRunDefinition.js';
 import { isAgentEvalRun } from '../host/evals/agentEvalRun.js';
+import { inheritedRunMetadata } from '../host/inheritedRunMetadata.js';
 import { insertRunWithStartContext } from '../host/runInsert.js';
 import { withRunLimit } from '../host/runLimitSeam.js';
 import { launchSubjectOf } from '../features/featureRoute.js';
@@ -452,6 +453,15 @@ export function registerWorkflowDebugRoutes(app: Express, deps: { storage: Stora
           // closed, arriving from the other direction.
           const inheritedCompaction = (source.metadata as Record<string, unknown> | undefined)?.compaction;
           if (inheritedCompaction !== undefined) run.metadata.compaction = inheritedCompaction;
+          // ADR 0942 review (P1) — the same rule for every REGISTERED inherited host
+          // stamp (`host/inheritedRunMetadata.ts`: the ADR 0941 goal, the ADR 0942
+          // autonomy policy and fork posture). They are reserved, so `buildRunRecord`
+          // stripped them; a redrive inherits them from the STORED SOURCE ROW, so it
+          // runs under the policy its source ran under and never acquires one it
+          // lacked. (The autonomy contributor then marks the redrive attended.)
+          for (const [k, v] of Object.entries(inheritedRunMetadata(source.metadata as Record<string, unknown> | undefined))) {
+            if (!(k in run.metadata)) run.metadata[k] = v;
+          }
           // ADR 0551 P1 — `enqueueDispatch`: a redrive resolves its definition
           // from the catalog/pinned revision, so the durable worker can too.
           // (The debug-run lane above deliberately does NOT enqueue — it

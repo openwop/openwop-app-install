@@ -1,6 +1,11 @@
 /**
  * ADR 0585 P0 — the lease heartbeat, asserted through BEHAVIOUR.
  *
+ * Tracker TST-BG3-6. Red when: `heartbeatDue` leaves the wait branch's race, the
+ * loop stops calling `renewDispatchLeaseIfDue()`, or a detached `setInterval`
+ * renewal is added beside the loop-driven one (both cases). Ceiling: the wake
+ * MECHANISM is not pinned (see below).
+ *
  * COMPANION TO `adr0585-p0-lease-heartbeat.test.ts`, NOT A REPLACEMENT, and
  * narrower than its first draft claimed. That file pins the renewal PREDICATE
  * (`isLeaseRenewalDue`) and the additive invariants; its wiring legs read

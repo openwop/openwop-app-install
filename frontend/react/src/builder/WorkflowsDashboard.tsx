@@ -47,6 +47,7 @@ import { StateCard } from '../ui/StateCard.js';
 import { ViewToggle, useViewMode } from '../ui/ViewToggle.js';
 import { ArrowUpIcon, ArrowDownIcon, WorkflowIcon } from '../ui/icons/index.js';
 import { WorkflowCard, WorkflowRow } from './WorkflowCardViews.js';
+import { fromChainNotices } from './fromChainNotices.js';
 
 type SortBy = 'updated' | 'created' | 'name';
 type SortDir = 'asc' | 'desc';
@@ -271,21 +272,9 @@ export function WorkflowsDashboard() {
     setPreflightError(null);
     try {
       const out = await instantiateChain(preflightChain.chainId, params);
-      // §Correction (grade-ux TPI-3) — a template copied with blank REQUIRED
-      // inputs used to land in the builder indistinguishable from a complete
-      // one: no badge, no banner, an enabled Run button. The host computed the
-      // gap and only logged it. "Just copy" stays; going silent about the
-      // consequence does not.
-      if (out.incompleteNodes?.length) {
-        const fields = [...new Set(out.incompleteNodes.flatMap((n) => n.missing))];
-        toast.warning(t('templateIncompleteConfig', {
-          count: out.incompleteNodes.length,
-          fields: fields.join(', '),
-        }));
-      }
-      if (out.warnings?.length) {
-        toast.warning(t('templateNeedsSetup', { nodes: out.warnings.join(', ') }));
-      }
+      // §Correction (grade-ux TPI-3) + XCH-UP-3 — a copy with blank required
+      // config or blank template inputs says so (fromChainNotices).
+      for (const note of fromChainNotices(out, t)) toast.warning(note);
       // ADR 0766 D3 / grade-ux U-2 — installed, but not the version the template
       // was built for. Named by label, with both versions, so it cannot read as
       // "not installed" (which is what the old `typeId@pinned` warning said).

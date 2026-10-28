@@ -25,4 +25,8 @@ export const APPROVAL_GATE_TYPE_IDS: ReadonlySet<string> = new Set([
   'core.hitl.ask-user',
   'core.hitl.form-request',
   'kanban.board.review',
+  // ADR 0942 D5 — the campaign autonomy gate (approval lane decided by the policy).
+  'feature.campaign-orchestration.nodes.autonomy-gate',
+  // ADR 0950 P2 — the experiment promotion gate (the same ADR 0942 decision).
+  'feature.experiments.nodes.policy-gate',
 ]);

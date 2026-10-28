@@ -10,8 +10,12 @@
  *
  * Service-level on purpose: it drives the same `createLink` / `resolveShared` /
  * `adoptLink` the routes call, with real org + member rows.
+ *
+ * Tracker TST-BHF-1. Red when (sabotage-witnessed, wave 62): the publisher re-check
+ * skips the shared-workspace ROOT membership test (`publisherAbsence`), or `adoptLink`
+ * skips the adopter's resource entitlement.
  */
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -21,7 +25,7 @@ import { openStorage } from '../src/storage/index.js';
 import { createOrg, createMember, deleteMember } from '../src/host/accessControlService.js';
 import { adoptLink, createLink, resolveShared, __resetPublisherVerdictsForTests } from '../src/features/sharing/sharingService.js';
 import { createEntry, updateEntry } from '../src/features/prompts/promptLibraryService.js';
-import { createUserTemplate } from '../src/host/promptStore.js';
+import { createTenantTemplate } from '../src/host/tenantPromptTemplates.js';
 
 const WS = 'ws:adr0887-presence';
 let SUB = '';
@@ -29,7 +33,7 @@ let SUB = '';
 beforeAll(async () => {
   initInMemorySurfaces({ dataDir: mkdtempSync(join(tmpdir(), 'openwop-adr0887-')) });
   initHostExtPersistence(await openStorage('memory://'));
-  createUserTemplate({ templateId: 'tpl-0887p', version: '1.0.0', kind: 'user', text: 'Presence body', name: 'tpl-0887p' });
+  await createTenantTemplate(WS, { templateId: 'tpl-0887p', version: '1.0.0', kind: 'user', text: 'Presence body', name: 'tpl-0887p' });
   // The workspace root (orgId === tenantId) and one sub-org.
   await createOrg({ tenantId: WS, orgId: WS, name: 'WS', createdBy: 'owner', ownerSubject: 'owner' });
   SUB = (await createOrg({ tenantId: WS, name: 'Sub', createdBy: 'owner', ownerSubject: 'owner' })).orgId;
@@ -38,7 +42,6 @@ beforeAll(async () => {
     await createMember({ tenantId: WS, orgId: SUB, subject, displayName: subject, roles: ['editor'] });
   }
 });
-afterAll(() => { vi.useRealTimers(); });
 
 describe('ADR 0887 D1 — a publisher removed from the workspace ROOT is gone, sub-org twin or not', () => {
   it('the link darkens although the sub-org row still grants workspace:write', async () => {
@@ -74,7 +77,8 @@ describe('ADR 0887 D5 — adopting is publishing', () => {
     }
     await updateEntry(WS, SUB, entry.entryId, 'other', { name: 'Adoptable', promptRef: 'tpl-0887p', visibility: 'private' });
 
-    await expect(adoptLink(WS, SUB, link.token, 'third')).rejects.toMatchObject({ httpStatus: 403, code: 'forbidden' });
+    // ADR 0993 D2 — the private prompt's entitlement answers the uniform 404.
+    await expect(adoptLink(WS, SUB, link.token, 'third')).rejects.toMatchObject({ httpStatus: 404, code: 'not_found' });
     const adopted = await adoptLink(WS, SUB, link.token, 'other');
     expect(adopted.createdBy).toBe('other');
     __resetPublisherVerdictsForTests();

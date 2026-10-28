@@ -26,6 +26,7 @@ import {
 } from '../src/host/kanbanService.js';
 import {
   composeBlockerNote,
+  isHeldForReview,
   recoverCardForTerminalRun,
   reconcileStrandedCards,
   cardPointerFromRunMetadata,
@@ -118,14 +119,18 @@ describe('ADR 0535 P2 — restore on a terminal run', () => {
     expect((await getCard(cardId))?.columnId).toBe('todo');
   });
 
-  it('a cancelled run restores WITHOUT a blame note', async () => {
+  // ADR 0963 D3 / A2 — superseded "WITHOUT a note": a cancel must HOLD the card
+  // (the loop does not retry what stopped), and the note must not blame anyone.
+  it('a cancelled run restores HELD, with a neutral note that blames no one', async () => {
     const cardId = await pickedCard('run-3');
     await seedRun('run-3', 'cancelled', heartbeatMeta(cardId));
 
     expect(await recoverCardForTerminalRun(storage, 'run-3', 'cancelled')).toBe(true);
     const card = await getCard(cardId);
     expect(card?.columnId).toBe('todo');
-    expect(card?.blockerNote, 'a human stopping the run is not a fault').toBeUndefined();
+    expect(card && isHeldForReview(card), 'a stopped card waits for a person').toBe(true);
+    expect(card?.blockerNote).toContain('was cancelled');
+    expect(card?.blockerNote, 'a stop is not a fault').not.toMatch(/fail|you /i);
   });
 
   it('a completed run leaves the card alone', async () => {

@@ -14,6 +14,12 @@
  * (seeded) id, and a host system workflow stay runnable by everyone.
  *
  * Route-level on purpose: the boundary is two cookie sessions on two tenants.
+ *
+ * Tracker TST-BLO-4. Sabotage-witnessed (w62): red when the funnel's foreign
+ * check is skipped (run-create, sub-workflow, binding, trigger subscription,
+ * starter, canvas invoke, a fork of a shared id), :fork stops re-authorizing,
+ * the wildcard operator exemption is removed, the shared-id exit is removed, or
+ * the M7 read guard stops asking the predicate.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -25,7 +31,8 @@ import type { Storage } from '../src/storage/storage.js';
 import type { HostAdapterSuite } from '../src/host/index.js';
 import { registerWorkflow } from '../src/host/workflowsRegistry.js';
 import { recordOwnership, removeOwnership } from '../src/host/workflowOwnership.js';
-import { startWorkflowRun } from '../src/host/runStarter.js';
+import { startWorkflowRun, type StartRunDeps } from '../src/host/runStarter.js';
+import type { WorkflowDefinition } from '../src/executor/types.js';
 import { createCanvasSurface } from '../src/host/canvasSurface.js';
 
 const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
@@ -52,7 +59,7 @@ describe('ADR 0823 — cross-tenant workflow launch', () => {
     };
   }
 
-  const noopDef = (workflowId: string, marker: string) => ({
+  const noopDef = (workflowId: string, marker: string): WorkflowDefinition => ({
     workflowId,
     metadata: { name: marker },
     nodes: [{ nodeId: 'a', typeId: 'core.noop', config: { marker } }],
@@ -104,7 +111,7 @@ describe('ADR 0823 — cross-tenant workflow launch', () => {
   it('a SHARED (seeded) id owned by another tenant stays runnable', async () => {
     // What a seeder does: one shared definition, a per-tenant ownership row.
     const shared = 'tmpl.adr0823-shared-witness';
-    registerWorkflow({ ...noopDef(shared, 'shared'), nodes: [{ nodeId: 'a', typeId: 'core.noop' }] } as never);
+    registerWorkflow({ ...noopDef(shared, 'shared'), nodes: [{ nodeId: 'a', typeId: 'core.noop' }] });
     await recordOwnership('org:alice', shared, { name: 'shared', nodeCount: 1 });
     const r = await bob('POST', '/runs', { workflowId: shared, inputs: {} });
     expect(r.status, JSON.stringify(r.body)).toBe(201);
@@ -112,7 +119,7 @@ describe('ADR 0823 — cross-tenant workflow launch', () => {
 
   it('a tenant\'s own ADR 0789 FORK of a shared workflow resolves as OWNED (run + starter); others are refused', async () => {
     const shared = 'tmpl.adr0823-fork-witness';
-    registerWorkflow({ ...noopDef(shared, 'shared'), nodes: [{ nodeId: 'a', typeId: 'core.noop' }] } as never);
+    registerWorkflow({ ...noopDef(shared, 'shared'), nodes: [{ nodeId: 'a', typeId: 'core.noop' }] });
     await recordOwnership('org:bob', shared, { name: 'shared', nodeCount: 1 });
     // Bob edits the shared definition: the save copy-on-write FORKS it to a new id.
     const saved = await bob('POST', '/host/openwop-app/workflows', noopDef(shared, 'bob edit'));
@@ -121,7 +128,8 @@ describe('ADR 0823 — cross-tenant workflow launch', () => {
     expect(forkId).not.toBe(shared);
     expect((await bob('POST', '/runs', { workflowId: forkId, inputs: {} })).status).toBe(201);
     // A schedule / agent launch of the fork goes through the starter.
-    expect(await startWorkflowRun({ storage, hostSuite } as never, { tenantId: 'org:bob', workflowId: forkId, inputs: {} } as never)).toEqual(expect.any(String));
+    const starterDeps: StartRunDeps = { storage, hostSuite };
+    expect(await startWorkflowRun(starterDeps, { tenantId: 'org:bob', workflowId: forkId, inputs: {} })).toEqual(expect.any(String));
     // The fork is Bob's own content now — not shared, so Alice cannot run it.
     expect((await alice('POST', '/runs', { workflowId: forkId, inputs: {} })).status).toBe(404);
   });
@@ -205,21 +213,27 @@ describe('ADR 0823 — cross-tenant workflow launch', () => {
   it('host-event binding: B cannot bind A\'s workflow (the same refusal as an unknown id)', async () => {
     const r = await bob('POST', '/host/openwop-app/host-events/bindings', { eventType: 'host.cms.page.published', workflowId: ALICE_WF });
     const unknown = await bob('POST', '/host/openwop-app/host-events/bindings', { eventType: 'host.cms.page.published', workflowId: 'wf-xtenant-never-registered' });
-    expect(r.status, JSON.stringify(r.body)).toBe(unknown.status);
-    expect(r.status).not.toBe(201);
+    // The ownership refusal itself (routes/hostEvents.ts), identical to the unknown id's.
+    expect(r.status, JSON.stringify(r.body)).toBe(422);
+    expect(unknown.status).toBe(422);
+    expect(r.body?.error).toBe('workflow_not_found');
+    expect(unknown.body?.error).toBe('workflow_not_found');
   });
 
   it('trigger subscription: B cannot bind A\'s workflow (the same refusal as an unknown id)', async () => {
     const r = await bob('POST', '/trigger-subscriptions', { source: 'form', workflowId: ALICE_WF, verification: { mode: 'none' } });
     const unknown = await bob('POST', '/trigger-subscriptions', { source: 'form', workflowId: 'wf-xtenant-never-registered', verification: { mode: 'none' } });
-    expect(r.status, JSON.stringify(r.body)).toBe(unknown.status);
-    expect(r.status).not.toBe(201);
+    // The ownership refusal itself (routes/triggerBridge.ts), identical to the unknown id's.
+    expect(r.status, JSON.stringify(r.body)).toBe(404);
+    expect(unknown.status).toBe(404);
+    expect(String(r.body?.message)).toContain('cannot bind a subscription to a workflow the caller cannot start');
+    expect(r.body?.message).toBe(unknown.body?.message);
   });
 
   it('starter-driven launch (schedules, agents, host events, webhooks): refused for B, allowed for A', async () => {
-    const deps = { storage, hostSuite };
-    expect(await startWorkflowRun(deps as never, { tenantId: 'org:bob', workflowId: ALICE_WF, inputs: {} } as never)).toBeNull();
-    expect(await startWorkflowRun(deps as never, { tenantId: 'org:alice', workflowId: ALICE_WF, inputs: {} } as never)).toEqual(expect.any(String));
+    const deps: StartRunDeps = { storage, hostSuite };
+    expect(await startWorkflowRun(deps, { tenantId: 'org:bob', workflowId: ALICE_WF, inputs: {} })).toBeNull();
+    expect(await startWorkflowRun(deps, { tenantId: 'org:alice', workflowId: ALICE_WF, inputs: {} })).toEqual(expect.any(String));
   });
 
   it('cross-canvas invoke: B cannot invoke A\'s workflow as a child run', async () => {

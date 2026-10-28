@@ -8,6 +8,10 @@
  * it. What remains here are the pure conversions that surface had relied on:
  *   - the MiniMax hex→base64 audio-payload conversion (`hexToBase64`);
  *   - opaque-voiceId → real-provider-voice resolution (`resolveMiniMaxVoice`).
+ *
+ * What breaks it (sabotage-witnessed, /grade-tests wave 61, 8fw3g1-spu-*): a
+ * wrong hex decode (the expectation is the literal "SUQz", never computed), or
+ * an opaque id passed through to MiniMax unresolved.
  */
 
 import { describe, expect, it } from 'vitest';

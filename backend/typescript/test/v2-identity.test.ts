@@ -9,6 +9,10 @@
  * end-to-end HTTP legs are the conformance scenarios
  * (`v2-owner-subject-required`, `v2-id-grammar`, `v2-idempotency-key-grammar`,
  * `v2-interrupt-token-scheme`).
+ *
+ * Witnessed (8f W4): id-foreign-tenant, id-opaque-guard, id-values-not-keys,
+ * id-session-lane, id-keyclass, id-snapshot-open, id-mac-skip, id-legacy-form,
+ * plus the -r2 re-probes of id-alg-skip, id-kid-skip, id-anon-issuer.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -29,7 +33,7 @@ import {
 import { runOwnerV2, projectV2OwnerEcho, ANON_SUBJECT_ISSUER, SESSION_SUBJECT_ISSUER, LEGACY_SUBJECT_ISSUER, anonOwnerStamp } from '../src/host/runOwner.js';
 import { closeV2Snapshot } from '../src/host/v2Snapshot.js';
 import { runWireUrls } from '../src/host/runWireUrls.js';
-import { mintInterruptToken, verifyInterruptToken } from '../src/host/interruptToken.js';
+import { mintInterruptToken, verifyInterruptToken, type TokenVerdict } from '../src/host/interruptToken.js';
 
 const UUID = '8a8bdcd3-5214-4b8b-8ccb-6ed1938b04ab';
 
@@ -125,6 +129,12 @@ describe('identity.md §1.1 — the closed v2 owner block', () => {
     const owner = runOwnerV2({ tenantId: 'default', metadata: { owner: anonOwnerStamp('anon0123456789ab') } });
     expect(owner.subject.lane).toBe('anonymous');
     expect(owner.subject.kind).toBe('anonymous');
+    // DOUBLE GUARD (honest, named — runOwner.ts toV2Subject): the anon ISSUER rule
+    // and the kind ⇔ lane rule both turn this stamp anonymous, so either alone
+    // is vacuous (8f W4 probe id-anon-issuer). A stamp under the anon issuer with
+    // `kind: user` is not accepted by runOwner at all (it reads as the legacy
+    // subject — measured 8f W4 round 2), so the issuer rule has no input of its
+    // own. Probe id-anon-issuer-r2 removes both rules.
   });
 
   it('§A.2 — `keyClass` survives only on saml / scim', () => {
@@ -215,10 +225,26 @@ describe('identity.md §4 — the resume token scheme', () => {
   it('an unadvertised alg, an unheld kid, a bad MAC and a malformed token are all one code', () => {
     const token = mintInterruptToken();
     const [, , kid, payload, mac] = token.split('.') as [string, string, string, string, string];
-    expect(verifyInterruptToken(`ow2.hs512.${kid}.${payload}.${mac}`).form).toBe('invalid');
-    expect(verifyInterruptToken(`ow2.hs256.nokid.${payload}.${mac}`).form).toBe('invalid');
-    expect(verifyInterruptToken(`ow2.hs256.${kid}.${payload}.${mac}X`).form).toBe('invalid');
-    expect(verifyInterruptToken('ow2.hs256.short').form).toBe('invalid');
+    // One CODE (`invalid`) but four distinct refusals. Each leg asserts its own
+    // reason: the MAC check also rejects a relabelled alg or kid (the MAC covers
+    // both), so `form === 'invalid'` alone left the alg and kid checks unwitnessed
+    // (8f W4 probes id-alg-skip / id-kid-skip were vacuous).
+    const verdict = (t: string): { form: TokenVerdict['form']; reason?: string } => {
+      const v = verifyInterruptToken(t);
+      return v.form === 'invalid' ? { form: v.form, reason: v.reason } : { form: v.form };
+    };
+    const alg = verdict(`ow2.hs512.${kid}.${payload}.${mac}`);
+    expect(alg.form).toBe('invalid');
+    expect(alg.reason).toBe('alg hs512 is not advertised in interrupt.tokenAlgs');
+    const unheld = verdict(`ow2.hs256.nokid.${payload}.${mac}`);
+    expect(unheld.form).toBe('invalid');
+    expect(unheld.reason).toBe('kid nokid is not held by this host');
+    const badMac = verdict(`ow2.hs256.${kid}.${payload}.${mac}X`);
+    expect(badMac.form).toBe('invalid');
+    expect(badMac.reason).toBe('the token MAC does not verify');
+    const malformed = verdict('ow2.hs256.short');
+    expect(malformed.form).toBe('invalid');
+    expect(malformed.reason).toBe('the token is outside the ow2.<alg>.<kid>.<payload>.<mac> grammar');
   });
 
   it('a token without the prefix is this host’s drained v1 credential, not a refusal', () => {

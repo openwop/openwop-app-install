@@ -54,6 +54,7 @@ export const messages = {
   lookupFailedBody: 'La lectura de \u201c{{subjectKey}}\u201d fall\u00f3, as\u00ed que a\u00fan no se sabe nada sobre esta persona. Eso no es lo mismo que no tener registro de consentimiento: reint\u00e9ntalo antes de concluir nada.',
   // Category chips
   categoryAnalytics: 'analítica',
+  categorySessionReplay: 'grabación de sesiones',
   categoryMarketing: 'márquetin',
   categoryNecessaryOnly: 'solo necesarias',
 

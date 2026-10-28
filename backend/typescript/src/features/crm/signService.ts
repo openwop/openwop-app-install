@@ -14,6 +14,8 @@
  * @see docs/adr/0402-crm-booking-and-esign.md §b
  */
 
+import { renderTransactional } from '../../host/transactionalEmail.js';
+import { SIGN_REQUEST_KIND, SIGN_COMPLETED_KIND, SIGN_LEGAL_NOTICE, type SignEmailData } from './signTemplates.js';
 import { createHmac } from 'node:crypto';
 import { OpenwopError } from '../../types.js';
 import { createLogger } from '../../observability/logger.js';
@@ -33,8 +35,7 @@ const log = createLogger('crm.sign');
 
 /** The non-negotiable legal-scope statement (ADR 0402 §b). Ships verbatim on the
  *  signing page and in the certificate — an honest capability claim. */
-const SIGN_LEGAL_NOTICE =
-  'This is a lightweight electronic-signature record (signer intent plus a cryptographic hash binding the signature to the exact signed content, with an audit trail). It is suitable for internal approvals and general business agreements under e-signature statutes that recognize electronic records (e.g. US ESIGN / UETA). It is NOT a qualified or advanced electronic signature under eIDAS, does not use a trust-service-provider certificate, and does not perform government-ID identity verification.';
+// ADR 0905 D6 — the legal notice moved with the email copy to `signTemplates.ts`.
 
 /** Whether the e-sign surface is exposed (default on when crm is on). */
 export function esignEnabled(): boolean {
@@ -283,11 +284,8 @@ function publicOriginFromEnv(): string {
  *  the link is the signed certificate, not a request to act. */
 async function emailSignerCompletion(to: string, title: string, certUrl: string): Promise<void> {
   try {
-    await activeProvider().send({
-      to,
-      subject: `Signed: ${title}`,
-      body: [`Everyone has signed "${title}".`, '', `Download the signed certificate: ${certUrl}`, '', SIGN_LEGAL_NOTICE].join('\n'),
-    });
+    const m = renderTransactional<SignEmailData>(SIGN_COMPLETED_KIND, { title, url: certUrl });
+    await activeProvider().send({ to, subject: m.subject, body: m.text });
   } catch (err) {
     log.warn('sign completion email failed', { error: err instanceof Error ? err.message : String(err) });
   }
@@ -295,11 +293,8 @@ async function emailSignerCompletion(to: string, title: string, certUrl: string)
 
 async function emailSigner(to: string, title: string, url: string): Promise<void> {
   try {
-    await activeProvider().send({
-      to,
-      subject: `Signature requested: ${title}`,
-      body: [`You have been asked to review and sign "${title}".`, '', `Open to sign: ${url}`, '', SIGN_LEGAL_NOTICE].join('\n'),
-    });
+    const m = renderTransactional<SignEmailData>(SIGN_REQUEST_KIND, { title, url });
+    await activeProvider().send({ to, subject: m.subject, body: m.text });
   } catch (err) {
     log.warn('signer invite email failed', { error: err instanceof Error ? err.message : String(err) });
   }

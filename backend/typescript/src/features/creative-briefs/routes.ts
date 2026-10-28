@@ -8,6 +8,7 @@
  * brief→markdown projection (no new render stack).
  */
 
+import { getGroundingSettings, setGroundingSettings } from './groundingSettings.js';
 import type { Request } from 'express';
 import { ownerStampFromRequest } from '../../host/runOwner.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
@@ -32,8 +33,19 @@ import { seedRunVariables } from '../../host/variablesRuntime.js';
 import { reserveConcurrentSlot } from '../../middleware/rateLimit.js';
 import { CREATIVE_BRIEFS_REEL_ID } from './reelWorkflow.js';
 import { runLinks } from '../../middleware/protocolVersion.js';
+import { resolveHeadlessAiDescribed, resolveHeadlessAiForSpec } from '../../host/headlessAi.js';
+import { runJudgeEval, FIDELITY_RULESET_VERSION, type ProviderErrorSummary } from '../../host/creativeFidelity/index.js';
+import { createLogger } from '../../observability/logger.js';
 
 const FEATURE = { toggleId: 'creative-briefs', label: 'Creative Briefs' };
+const log = createLogger('creative-briefs.routes');
+/** Workspaces with a judge check in flight on this instance (spend guard). */
+const judgeChecksRunning = new Set<string>();
+
+/** The provider's status and codes for the log line; its message is never logged. */
+const providerErrorFields = (e: ProviderErrorSummary | undefined): Record<string, unknown> =>
+  (e ? { ...(e.status !== undefined ? { providerStatus: e.status } : {}), providerCodes: e.codes.join(',') } : {});
+
 const ORG = '/host/openwop-app/creative-briefs/orgs/:orgId';
 
 type Scope = 'workspace:read' | 'workspace:write' | 'host:members:manage';
@@ -94,6 +106,53 @@ export function registerCreativeBriefsRoutes(deps: RouteDeps): void {
   const { app, storage, hostSuite } = deps;
   const authz = (req: Request, scope: Scope) => authorizeOrgScope(req, FEATURE, scope);
   const notFound = (briefId: string): OpenwopError => new OpenwopError('not_found', 'Creative brief not found.', 404, { briefId });
+
+  // ADR 0945 Q1 — the client's product-grounding settings (edit mode opt-in).
+  // Reading needs membership; changing needs the client org's admin authority.
+  app.get(`${ORG}/grounding-settings`, async (req, res, next) => {
+    try {
+      const { orgId, tenantId } = await authz(req, 'workspace:read');
+      res.json(await getGroundingSettings(tenantId, orgId));
+    } catch (err) { next(err); }
+  });
+  app.put(`${ORG}/grounding-settings`, async (req, res, next) => {
+    try {
+      const { orgId, tenantId, user } = await authz(req, 'host:members:manage');
+      const body = (req.body ?? {}) as { editModeEnabled?: unknown };
+      if (typeof body.editModeEnabled !== 'boolean') throw new OpenwopError('validation_error', '`editModeEnabled` must be true or false.', 400, { field: 'editModeEnabled' });
+      res.json(await setGroundingSettings(tenantId, orgId, user.userId, { editModeEnabled: body.editModeEnabled }));
+    } catch (err) { next(err); }
+  });
+
+  // ADR 0945 P2 — the judge check: the fixture's known-bad edits sent to a real
+  // vision model on the caller's own BYOK key. The caller names
+  // {provider, model, credentialRef}, or sends none of them to test whatever
+  // the fidelity check would use today. It spends the workspace's key, so it
+  // needs admin authority, and one runs at a time per workspace.
+  app.post(`${ORG}/fidelity/judge-check`, async (req, res, next) => {
+    try {
+      const { tenantId, user } = await authz(req, 'host:members:manage');
+      const body = (req.body ?? {}) as { provider?: unknown; model?: unknown; credentialRef?: unknown };
+      const named = [body.provider, body.model, body.credentialRef].filter((v) => v !== undefined).length;
+      if (named !== 0 && named !== 3) throw new OpenwopError('validation_error', 'Send provider, model and credentialRef together, or none of them.', 400, { field: 'provider' });
+      const described = named === 3
+        ? await resolveHeadlessAiForSpec({ tenantId, actorId: user.userId }, body, 'image')
+        : await resolveHeadlessAiDescribed(tenantId, 'image', { featureId: FEATURE.toggleId, actingSubject: user.userId });
+      if (!described) throw new OpenwopError('validation_error', 'No vision-capable AI provider is available. Choose one of your AI keys and a vision model.', 422, { reason: 'no_vision_provider' });
+      if (judgeChecksRunning.has(tenantId)) throw new OpenwopError('conflict', 'A judge check is already running for this workspace.', 409, {});
+      judgeChecksRunning.add(tenantId);
+      try {
+        const report = await runJudgeEval(described.dispatch);
+        log.info('fidelity_judge_check', {
+          tenantId, provider: described.provider, model: described.model, route: described.route,
+          calls: report.calls, completed: report.completed, passed: report.passed,
+          cases: report.cases.map((c) => `${c.id}:${c.error ?? c.outcome}:${c.passed ? 'ok' : 'miss'}`).join(','),
+          ...providerErrorFields(report.cases.find((c) => c.providerError)?.providerError),
+        });
+        res.json({ provider: described.provider, ...(described.model ? { model: described.model } : {}), route: described.route, rulesetVersion: FIDELITY_RULESET_VERSION, checkedAt: new Date().toISOString(), ...report });
+      } finally { judgeChecksRunning.delete(tenantId); }
+    } catch (err) { next(err); }
+  });
 
   app.get(`${ORG}/briefs`, async (req, res, next) => {
     try {

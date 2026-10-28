@@ -17,7 +17,9 @@ import {
   expandChain,
   _resetChainRegistryForTest,
 } from '../src/host/workflowChainPackLoader.js';
-import { evaluateCondition } from '../src/executor/scheduler.js';
+import {
+  buildGraph, buildNodeInputs, evaluateCondition, freshSnapshot, markCompleted, releaseDownstream,
+} from '../src/executor/scheduler.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const IN_TREE_ROOT = join(__dirname, '..', '..', '..', 'examples', 'workflow-chain-packs');
@@ -37,6 +39,8 @@ describe('it-support.incident-triage — exclusive severity routing', () => {
     const schema = (classify.config as { outputSchema: { properties: { severity: { enum: string[] } } } }).outputSchema;
     expect(schema.properties.severity.enum).toEqual(['major', 'routine']);
     // classify.data → route.value wires the structured field into the router's predicate base.
+    // (Twin of the authored half of "wires classify.data → route.value…" below, which
+    // checks the same edge on the EXPANDED graph through the real buildNodeInputs.)
     const wire = chain.dag.edges!.find((e) => e.from === 'classify.data')!;
     expect(wire.to).toBe('route.value');
   });
@@ -82,6 +86,10 @@ describe('it-support.incident-triage — exclusive severity routing', () => {
     );
     expect(bareToStakeholders).toEqual([]);
 
+    // This case is the STRUCTURAL precondition. The behavioural reject witness (real
+    // gate handler, real UI payloads, real scheduler) is
+    // `workflow-chain-effect-reject-witness.test.ts` (and the run-level
+    // `workflow-chain-it-support-execution.test.ts`).
     // A reject folds to a noop terminal (never core.fail — that would corrupt successRate).
     const rejectEdge = chain.dag.edges!.find((e) => e.from === 'majorApprove' && e.to === 'majorReject')!;
     expect(rejectEdge.condition).toEqual({ type: 'falsy', left: 'approved' });
@@ -95,7 +103,6 @@ describe('it-support.incident-triage — exclusive severity routing', () => {
   // own branch-emission is covered by core.openwop.flow's pack tests; here we
   // verify the wiring around it (buildNodeInputs) and the edge gating (scheduler).
   it('wires classify.data → route.value so the router predicate sees the severity', async () => {
-    const { buildGraph, freshSnapshot, markCompleted, buildNodeInputs } = await import('../src/executor/scheduler.js');
     const def = expandChain(getChain('it-support.incident-triage')!.chain, { params: { alert: 'db down' } });
     const classifyId = def.nodes.find((n) => n.typeId === 'core.ai.structuredOutput')!.nodeId;
     const routeId = def.nodes.find((n) => n.typeId === 'core.flow.router')!.nodeId;
@@ -111,7 +118,6 @@ describe('it-support.incident-triage — exclusive severity routing', () => {
   });
 
   it('routes ONLY the matching branch end-to-end on the expanded graph', async () => {
-    const { buildGraph, freshSnapshot, markCompleted, releaseDownstream } = await import('../src/executor/scheduler.js');
     const def = expandChain(getChain('it-support.incident-triage')!.chain, { params: { alert: 'db down' } });
     const idOf = (typeId: string) => def.nodes.find((n) => n.typeId === typeId)!.nodeId;
     const routeId = idOf('core.flow.router');

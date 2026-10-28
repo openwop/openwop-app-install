@@ -31,12 +31,24 @@ export interface ProposalProvenance {
   synthesizerModel?: string;
 }
 
+/** RFC 0249 §C — the closed pointer to the v2 GET that serves the installed bytes. */
+export interface InstalledArtifact {
+  kind: ProposalKind;
+  /** A GET operation in `spec/v2/path-manifest.json`. */
+  operationId: string;
+  /** The path parameter that operation takes; for a template, `artifact.templateId`. */
+  id: string;
+  version?: string;
+}
+
 /** Present ONLY on an applied proposal (schema `if state===applied then activation required`). */
 export interface ProposalActivation {
   /** The RFC 0051 approval that released the apply, when `activation: approval-gate`. */
   approvalId?: string | null;
-  /** Opaque ref to the installed artifact — derived from the stored bytes, never re-synthesized. */
+  /** Ref to what the installer really wrote (a `prompt:<id>@<version>` PromptRef for a template). */
   installedArtifactRef: string;
+  /** ADR 0972 D6 — set by every installer that has a v2 read-back. */
+  installedArtifact?: InstalledArtifact;
 }
 
 export interface Proposal {

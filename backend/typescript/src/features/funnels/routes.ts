@@ -7,7 +7,10 @@
 import type { Request, Response } from 'express';
 import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
-import { authorizeOrgScope } from '../featureRoute.js';
+import { authorizeOrgScope, publicBaseUrl } from '../featureRoute.js';
+import { runnableBlueprints, FILLED_BY_GENERATE } from './blueprints.js';
+import { generateFunnelFromBlueprint } from './generateService.js';
+import { resolveServerOutcome } from './stepOutcome.js';
 import { resolveToggle } from '../../host/featureToggles/service.js';
 import { ownerPublicRuntimeLapsed } from '../../host/publicLapse.js';
 import { getOrg } from '../../host/accessControlService.js';
@@ -21,7 +24,7 @@ import { createLogger } from '../../observability/logger.js';
 import {
   listFunnels, getFunnel, createFunnel, updateFunnel, deleteFunnel,
   publishFunnel, unpublishFunnel, archiveFunnel,
-  getPublishedFunnelBySlug, publicFunnelStep, setStepExperiment, stopStepExperiment,
+  getPublishedFunnelBySlug, publicFunnelStep, setStepExperiment, stopStepExperiment, SERVER_OUTCOME_KINDS, funnelPublicUrl,
   type Funnel, type PublicFunnelStep,
 } from './funnelsService.js';
 import { stepExperimentResults } from './funnelStats.js';
@@ -104,6 +107,36 @@ async function emitStepEvent(
 export function registerFunnelsRoutes(deps: RouteDeps): void {
   const { app } = deps;
 
+  // ADR 0948 P3a (D5) — the blueprints a writer may start, and starting one. The
+  // Funnel Architect's `openwop:funnels.blueprints` / `.generate` tools call the SAME
+  // service after the same org check, so the two doors cannot disagree.
+  app.get(`${BASE}/blueprints`, async (req: Request, res: Response, next) => {
+    try {
+      await authorizeOrgScope(req, FEATURE, 'workspace:read');
+      res.json({ blueprints: runnableBlueprints(), filledByGenerate: FILLED_BY_GENERATE });
+    } catch (err) { next(err); }
+  });
+  app.post(`${BASE}/generate`, async (req: Request, res: Response, next) => {
+    try {
+      const { user, orgId, tenantId } = await authorizeOrgScope(req, FEATURE, 'workspace:write');
+      const b = (req.body ?? {}) as Record<string, unknown>;
+      const str = (v: unknown): string => (typeof v === 'string' ? v.trim() : '');
+      if (!str(b.blueprintId)) throw new OpenwopError('validation_error', 'blueprintId is required.', 400, { field: 'blueprintId' });
+      if (!str(b.briefId)) throw new OpenwopError('validation_error', 'briefId is required.', 400, { field: 'briefId' });
+      if (b.params !== undefined && (b.params === null || typeof b.params !== 'object' || Array.isArray(b.params))) {
+        throw new OpenwopError('validation_error', 'params must be an object of the blueprint\'s parameters.', 400, { field: 'params', code: 'invalid_params' });
+      }
+      const params = (b.params ?? {}) as Record<string, unknown>;
+      const out = await generateFunnelFromBlueprint({ storage: deps.storage, hostSuite: deps.hostSuite }, {
+        tenantId, actingUserId: user.userId, orgId,
+        blueprintId: str(b.blueprintId), briefId: str(b.briefId),
+        ...(str(b.campaignId) ? { campaignId: str(b.campaignId) } : {}),
+        params,
+      });
+      res.status(out.started ? 201 : 200).json(out);
+    } catch (err) { next(err); }
+  });
+
   app.get(`${BASE}/funnels`, async (req: Request, res: Response, next) => {
     try {
       const { orgId, tenantId } = await authorizeOrgScope(req, FEATURE, 'workspace:read');
@@ -116,7 +149,9 @@ export function registerFunnelsRoutes(deps: RouteDeps): void {
       const { orgId, tenantId } = await authorizeOrgScope(req, FEATURE, 'workspace:read');
       const funnel = await getFunnel(tenantId, orgId, req.params.funnelId);
       if (!funnel) throw new OpenwopError('not_found', 'Funnel not found.', 404, {});
-      res.json({ funnel });
+      // ADR 0948 P6a — the one public URL (the platform viewer until custom-domain
+      // funnels are served; never a link that would not work).
+      res.json({ funnel, publicUrl: await funnelPublicUrl(funnel, publicBaseUrl(req)) });
     } catch (err) { next(err); }
   });
 
@@ -126,7 +161,7 @@ export function registerFunnelsRoutes(deps: RouteDeps): void {
       const b = req.body ?? {};
       const funnel = await createFunnel({
         tenantId, orgId, createdBy: user.userId,
-        name: b.name, slug: b.slug, steps: b.steps,
+        name: b.name, slug: b.slug, steps: b.steps, campaignId: b.campaignId,
       });
       res.status(201).json({ funnel });
     } catch (err) { next(err); }
@@ -136,7 +171,7 @@ export function registerFunnelsRoutes(deps: RouteDeps): void {
     try {
       const { orgId, tenantId } = await authorizeOrgScope(req, FEATURE, 'workspace:write');
       const b = req.body ?? {};
-      const funnel = await updateFunnel(tenantId, orgId, req.params.funnelId, { name: b.name, slug: b.slug, steps: b.steps, completionCta: b.completionCta });
+      const funnel = await updateFunnel(tenantId, orgId, req.params.funnelId, { name: b.name, slug: b.slug, steps: b.steps, completionCta: b.completionCta, campaignId: b.campaignId, primaryHostname: b.primaryHostname });
       if (!funnel) throw new OpenwopError('not_found', 'Funnel not found.', 404, {});
       res.json({ funnel });
     } catch (err) { next(err); }
@@ -301,8 +336,22 @@ export function registerFunnelsRoutes(deps: RouteDeps): void {
       if (rawOutcome !== undefined && !(STEP_OUTCOMES as readonly string[]).includes(rawOutcome)) {
         throw new OpenwopError('validation_error', `outcome must be one of: ${STEP_OUTCOMES.join(', ')}`, 400, { field: 'outcome' });
       }
-      const outcome = rawOutcome as StepOutcome | undefined;
       const vk = await consentedVisitor(tenantId, req); const utm = utmParams(req);
+      const submissionId = typeof req.query.submission === 'string' ? req.query.submission.slice(0, 128) : '';
+      // ADR 0948 D4 — a webinar or application step's outcome is the SERVER's to
+      // derive (attendance, a verdict); a visitor never picks their own branch.
+      const fromStepPre = funnel.steps.find((s) => s.stepId === from);
+      let outcome = rawOutcome as StepOutcome | undefined;
+      if (fromStepPre && SERVER_OUTCOME_KINDS.includes(fromStepPre.kind)) {
+        if (rawOutcome !== undefined) throw new OpenwopError('validation_error', 'This step\'s outcome is decided by the server.', 400, { field: 'outcome', code: 'outcome_server_derived' });
+        // ADR 0948 P2c — the offer capability rides headers, so it never lands in a URL.
+        const offerOrder = req.get('x-openwop-funnel-order');
+        const offerToken = req.get('x-openwop-funnel-offer');
+        outcome = await resolveServerOutcome(tenantId, orgId, funnel, fromStepPre, {
+          ...(submissionId ? { submissionId } : {}),
+          ...(offerOrder && offerToken ? { offer: { orderId: offerOrder.slice(0, 128), token: offerToken.slice(0, 128) } } : {}),
+        });
+      }
       const ctx: RoutingContext = { ...(outcome ? { outcome } : {}), ...(Object.keys(utm).length ? { utm } : {}) };
       const resolved = resolveNextStepIx(funnel.steps, from, ctx);
       if ('error' in resolved) throw new OpenwopError('validation_error', 'Unknown from step.', 400, { field: 'from' });
@@ -328,7 +377,6 @@ export function registerFunnelsRoutes(deps: RouteDeps): void {
       // the response the visitor sees is identical either way, so this suppresses
       // an ANALYTICS EVENT without opening the spam oracle. An unknown or
       // cross-tenant id reads as not-held, i.e. exactly today's behaviour.
-      const submissionId = typeof req.query.submission === 'string' ? req.query.submission.slice(0, 128) : '';
       const held = submissionId ? await isSubmissionHeld(tenantId, submissionId) : false;
       if (held) log.info('funnel_completion_withheld', { funnelId: funnel.funnelId, stepId: fromStep.stepId, reason: 'submission_quarantined' });
       else await emitStepEvent(tenantId, orgId, funnel, 'funnel.step_completed', { stepId: fromStep.stepId, kind: fromStep.kind, ix: fromIx, ...(fromServed?.experiment ? { experiment: fromServed.experiment } : {}) }, vk, utm, outcome);

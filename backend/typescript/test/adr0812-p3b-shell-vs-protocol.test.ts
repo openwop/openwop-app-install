@@ -18,7 +18,9 @@
  * navigation answered 400, rolled back; see `adr0812-shell-navigation-retired-host`).
  *
  * So this file pins today's behaviour, MEASURED on `48fcab3b2`, on a host that
- * has retired 1.x as prod has. P3b must keep it green.
+ * has retired 1.x as prod has. P3b must keep it green. Tracker: TST-BVC-4.
+ * Red when (wave 60 probes w60g4-shell-*): the shell route stops passing a
+ * protocol client on, or stops excluding the vendor space.
  * - Every shared root, and a path under it: a browser gets the shell (200 html),
  *   and an API client gets JSON and never the shell.
  * - Vendor `/host/openwop-app/*`: a browser never gets the shell.
@@ -90,11 +92,9 @@ describe('ADR 0812 P3b step 1 — shared roots: a browser gets the shell, an API
     }
   });
 
-  // MEASURED: this leg is MASKED today. A protocol client is rewritten to `/v1…`
-  // before the shell route runs, so the shell's own `isProtocolClient → next()` is
-  // never exercised: deleting it leaves this file green. It becomes load-bearing
-  // the moment P3b removes the rewrite, and is then this leg's witness. The P3b
-  // routing PR must re-run that sabotage and show this leg going red.
+  // P3b removed the rewrite, so the shell's own `isProtocolClient → next()` is
+  // now the guard: deleting it reds this leg and the next (w60g4-shell-protocol-
+  // client, wave 60). Before P3b this leg was masked by the `/v1` rewrite.
   it('a protocol client gets JSON and never the shell, whether it names the version or only accepts JSON', async () => {
     for (const r of roots) {
       for (const path of [r, `${r}/${PROBE}`]) {

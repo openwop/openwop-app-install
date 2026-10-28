@@ -50,11 +50,11 @@ afterEach(() => {
 function writeClaude(obj: unknown): void {
   writeFileSync(join(claudeDir, '.credentials.json'), JSON.stringify(obj), 'utf8');
 }
-function writeClaudeRaw(raw: string): void {
-  writeFileSync(join(claudeDir, '.credentials.json'), raw, 'utf8');
-}
 function writeCodex(obj: unknown): void {
   writeFileSync(join(codexDir, 'auth.json'), JSON.stringify(obj), 'utf8');
+}
+function writeCodexRaw(raw: string): void {
+  writeFileSync(join(codexDir, 'auth.json'), raw, 'utf8');
 }
 
 describe('subscriptionLoginDetected — Claude (anthropic) is never detected (ADR 0756)', () => {
@@ -62,11 +62,6 @@ describe('subscriptionLoginDetected — Claude (anthropic) is never detected (AD
   // so even a valid, renewable Claude Code login is never a reason to advertise.
   it('returns false for a valid renewable Claude login', () => {
     writeClaude({ claudeAiOauth: { accessToken: 'at', refreshToken: 'rt', expiresAt: 1 } });
-    expect(subscriptionLoginDetected('anthropic')).toBe(false);
-  });
-
-  it('returns false (no throw) on malformed JSON', () => {
-    writeClaudeRaw('{ not json');
     expect(subscriptionLoginDetected('anthropic')).toBe(false);
   });
 });
@@ -83,8 +78,20 @@ describe('subscriptionLoginDetected — Codex (openai)', () => {
   });
 
   it('detects ChatGPT/OAuth auth (tokens.refresh_token)', () => {
-    writeCodex({ tokens: { access_token: 'exp', refresh_token: 'rt' } });
+    // refresh_token ONLY: with an access_token beside it, the access arm alone
+    // detected it and the refresh arm was never needed (8fw3g2-cli-refresh was
+    // vacuous in round 1).
+    writeCodex({ tokens: { refresh_token: 'rt' } });
     expect(subscriptionLoginDetected('openai')).toBe(true);
+  });
+
+  // MOVED here from the Claude describe (wave 61, same title): `anthropic` never
+  // reads a file, so the case there could not reach the shared reader's
+  // malformed-JSON branch (8fw3g2-cli-malformed was vacuous). Codex does read it.
+  it('returns false (no throw) on malformed JSON', () => {
+    writeCodexRaw('{ not json');
+    expect(() => subscriptionLoginDetected('openai')).not.toThrow();
+    expect(subscriptionLoginDetected('openai')).toBe(false);
   });
 
   it('rejects an empty auth.json', () => {

@@ -6,6 +6,13 @@
  * first run seeds the baseline). The repo-wide conventions suite
  * (workflow-chain-knowledge-inbox.test.ts) additionally covers gating and
  * live-param rules for this pack automatically.
+ *
+ * `KNOWN_TYPEIDS` is this pack's AUTHORED PALETTE, not a registry read: no host
+ * caller passes `expandChain`'s `isTypeIdKnown`, so there is no product
+ * predicate to read. The case asserts "only palette ids", and says so. The
+ * per-source key round trip is proven end to end by
+ * `workflow-chain-content-execution.test.ts`; the structural case here is the
+ * cheap, diagnostic twin.
  */
 
 import { beforeAll, describe, expect, it } from 'vitest';
@@ -51,7 +58,7 @@ describe('content pack — discovery + typeIds', () => {
     expect(listChains().filter((c) => c.packName === PACK)).toHaveLength(2);
   });
 
-  it.each(CHAINS)('%s references only registered typeIds', (id) => {
+  it.each(CHAINS)('%s references only the content palette typeIds (no stray or typo\'d id)', (id) => {
     const chain = getChain(id)!.chain;
     for (const n of chain.dag.nodes) {
       expect(KNOWN_TYPEIDS.has(n.typeId), `${id}:${n.id} → ${n.typeId}`).toBe(true);
@@ -87,12 +94,14 @@ describe('content pack — expansion', () => {
     'content.page-watch': { pageUrl: 'https://example.com/pricing' },
   };
 
-  it.each(CHAINS)('%s expands to a validated, deterministic definition', (id) => {
+  it.each(CHAINS)('%s expands to a validated, deterministic, frozen definition', (id) => {
     const chain = getChain(id)!.chain;
     const def = expandChain(chain, { params: sampleParams[id]! });
     expect(def.workflowId.startsWith(`${id}:`)).toBe(true);
     expect(def.nodes).toHaveLength(chain.dag.nodes.length);
     expect(def.nodes.filter((n) => n.outputRole === 'primary')).toHaveLength(1);
     expect(expandChain(chain, { params: sampleParams[id]! })).toEqual(def);
+    // Frozen (RFC 0013 Path A): no param token survives into the persisted nodes.
+    expect(JSON.stringify(def.nodes)).not.toContain('{{params');
   });
 });

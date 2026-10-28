@@ -1,8 +1,8 @@
 {
   "name": "vendor.openwop-app.campaign-intel.agents",
-  "version": "1.2.2",
+  "version": "1.4.0",
   "kind": "node",
-  "description": "Campaign Intelligence agent pack \u2014 the Campaign Intelligence Analyst, a manifest agent whose tools are the registerFeatureAgentTool reads over the intel surface (budget-optimize, forecast, plan-budget, pacing, attribution). It answers natural-language budget + forecast questions ('how should I allocate my budget across platforms?') over the performance store, from the one chat. Read-only, org-scoped; recommends, the human decides.",
+  "description": "Campaign Intelligence agent pack — the Campaign Intelligence Analyst, a manifest agent whose tools are the registerFeatureAgentTool reads over the intel surface (budget-optimize, forecast, plan-budget, pacing, attribution, caps) plus one proposal tool (propose-reallocation, ADR 0952 D8: it opens an approval and changes no budget). It answers natural-language budget + forecast questions ('how should I allocate my budget across platforms?') over the performance store, from the one chat. Read-only, org-scoped; recommends, the human decides.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": [
@@ -24,9 +24,10 @@
   "agents": [
     {
       "agentId": "vendor.openwop-app.campaign-intel.agents.intelligence-analyst",
+      "a2aExposed": false,
       "persona": "RESEARCH",
       "label": "Campaign Intelligence Analyst",
-      "description": "Answers data-backed budget + performance questions over your campaign data \u2014 budget reallocation toward higher ROAS, creative-fatigue detection, outcome forecasts, goal-based budget planning, budget-pacing bands, and attribution \u2014 reading the performance store through org-scoped tools. Recommends; the human decides.",
+      "description": "Answers data-backed budget + performance questions over your campaign data — budget reallocation toward higher ROAS, creative-fatigue detection, outcome forecasts, goal-based budget planning, budget-pacing bands, attribution, and spend caps, and it can propose a budget reallocation for a human to approve — reading the performance store through org-scoped tools. Recommends; the human decides.",
       "modelClass": "research",
       "systemPromptRef": "prompts/intelligence-analyst.md",
       "toolAllowlist": [
@@ -34,7 +35,9 @@
         "openwop:campaign-intel.forecast",
         "openwop:campaign-intel.plan-budget",
         "openwop:campaign-intel.pacing",
-        "openwop:campaign-intel.attribution"
+        "openwop:campaign-intel.attribution",
+        "openwop:campaign-intel.caps",
+        "openwop:campaign-intel.propose-reallocation"
       ],
       "memoryShape": {
         "scratchpad": true,
@@ -43,7 +46,8 @@
       },
       "confidence": {
         "defaultThreshold": 0.6
-      }
+      },
+      "evalSuiteRef": "evals/intelligence-analyst.json"
     }
   ],
   "runtime": {

@@ -368,3 +368,14 @@ cover missing, empty, truncated and malformed metadata, stale recovery, and fail
 publication; existing concurrent-gate assertions remain unchanged.
 
 > **Integration correction 2026-10-09:** the frontend static subshell removes its own temporary log directory on exit and signals, in addition to the parent gate terminating its owned process subtree. Failure, abort and canonical gate witnesses cover this cleanup.
+
+### Recovery completion of the parked import experiment — 2026-10-21
+
+The original `2f045093d` experiment is retained in this branch's ancestry. The
+final candidate keeps only the four direct external-library deferrals (mammoth,
+jsonata, nodemailer, tar-stream) at their existing asynchronous call sites. The
+first-party renderer/slides deferrals are removed: as measured above, esbuild
+hoists their static external imports, so they added asynchronous plumbing without
+removing the production eager loads. No gate-speed or cold-start saving is claimed.
+Existing document import/export, SMTP, data integration and pack validation tests
+are the behavioral gates; full combined CI validation is pending.

@@ -6,7 +6,10 @@
  *   - its totals account for every `hostsurf:` row (no row lost to the parse);
  *   - the gauge runs once per UTC hour across instances sharing one Storage;
  *   - no gauge line carries a tenant id;
- *   - `OPENWOP_STORAGE_GROWTH_GAUGE=false` turns it off.
+ *   - `OPENWOP_STORAGE_GROWTH_GAUGE=false` turns it off. *
+ * Tracker TST-BFC-6. Red when: the hourly lease check is removed; the off
+ * switch is ignored; the sqlite aggregate stops cutting the tenant at its
+ * delimiter.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';

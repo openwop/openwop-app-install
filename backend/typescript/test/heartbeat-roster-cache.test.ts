@@ -50,7 +50,7 @@ function counting(): { list: () => Promise<string[]>; calls: () => number } {
 }
 
 describe('the roster-change token', () => {
-  it('moves on every kind of roster write', async () => {
+  it('moves on every membership or config write', async () => {
     const t0 = await readRosterVersion();
     const e = await member();
     const t1 = await readRosterVersion();
@@ -58,11 +58,18 @@ describe('the roster-change token', () => {
     await updateRosterEntry(TENANT, e.rosterId, { persona: 'Sal' });
     const t2 = await readRosterVersion();
     expect(t2).not.toBe(t1);
-    await recordHeartbeat(TENANT, e.rosterId);
-    const t3 = await readRosterVersion();
-    expect(t3).not.toBe(t2);
     expect(await deleteRosterEntry(TENANT, e.rosterId)).toBe(true);
-    expect(await readRosterVersion()).not.toBe(t3);
+    expect(await readRosterVersion()).not.toBe(t2);
+  });
+
+  // ADR 0963 D5 — this file used to assert the OPPOSITE ("moves on every kind of
+  // roster write", heartbeat included), which pinned the defect: every pass that
+  // heartbeat anyone forced the next tick to re-list every tenant.
+  it('does NOT move when a heartbeat is stamped — that is pass state, not membership', async () => {
+    const e = await member();
+    const before = await readRosterVersion();
+    await recordHeartbeat(TENANT, e.rosterId);
+    expect(await readRosterVersion()).toBe(before);
   });
 
   it('does not move on a delete that removed nothing', async () => {

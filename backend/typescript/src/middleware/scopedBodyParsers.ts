@@ -25,10 +25,20 @@ export function mountScopedBodyParsers(app: Express): void {
   // global 1mb parser; body-parser is a no-op once req._body is set, so
   // registration order is precedence order.
   app.use('/host/openwop-app/media', express.json({ limit: '12mb' }));
+  // ADR 0958 P3 — vendor asset intake: ≤ 8 MiB of files per request as base64
+  // (the route's own cap), so 12mb of JSON. Scoped to the one upload path.
+  const intakeJson = express.json({ limit: '12mb' });
+  app.use('/host/openwop-app/collab/grants', (req, res, next) =>
+    req.method === 'POST' && /^\/[^/]+\/intakes$/.test(req.path) ? intakeJson(req, res, next) : next(),
+  );
   // ADR 0334 4b-3 — DOCX import carries a base64 .docx (~10mb cap enforced in the
   // route); the default 1mb parser would reject it. Scoped to document-editor so
   // the larger limit doesn't widen every route.
   app.use('/host/openwop-app/document-editor', express.json({ limit: '12mb' }));
+  // ADR 0992 D6 — one exported conversation (openwop-v1, or one ChatGPT conversation
+  // the SPA picked out of an archive) routinely exceeds 1mb. The route still caps
+  // turns (2,000) and characters per turn (100,000). Scoped to the import path only.
+  app.use('/host/openwop-app/chat-export/import', express.json({ limit: '10mb' }));
   // Inbound provider webhooks (ADR 0024 §6) need the EXACT raw bytes to verify a
   // provider HMAC, so this scoped parser stashes them on `req.rawBody` before the
   // global parser consumes the stream. Registered first; body-parser no-ops once
@@ -85,9 +95,11 @@ export function mountScopedBodyParsers(app: Express): void {
   }));
   // Email bounce/complaint webhook (ADR 0241) — the provider (SendGrid/Postmark)
   // signs the EXACT raw body, so capture it before the global parser. 2mb bounds
-  // a provider event batch (the route also caps event count).
+  // a provider event batch (the route also caps event count). ADR 0994 D4: Amazon
+  // SNS posts its (JSON) message as `text/plain`, so that type parses as JSON too.
   app.use('/host/openwop-app/public-email/events', express.json({
     limit: '2mb',
+    type: ['application/json', 'text/plain'],
     verify: (req, _res, buf) => {
       (req as import('express').Request).rawBody = Buffer.from(buf);
     },

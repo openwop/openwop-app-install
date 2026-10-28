@@ -70,10 +70,14 @@ const CLASSIFICATION: ReadonlyArray<readonly [string, boolean]> = [
   ['openwop:campaign-channels.channels', true],
   ['openwop:campaign-channels.generate', false],
   ['openwop:campaign-intel.attribution', false],
+  ['openwop:campaign-intel.caps', false],
+  ['openwop:campaign-intel.propose-reallocation', false],
   ['openwop:campaign-intel.budget-optimize', false],
   ['openwop:campaign-intel.forecast', false],
   ['openwop:campaign-intel.pacing', false],
   ['openwop:campaign-intel.plan-budget', false],
+  ['openwop:campaign-orchestration.get-campaign', false], // ADR 0941 P5: a campaign projection, not a schema
+  ['openwop:campaign-orchestration.get-autonomy', false],
   ['openwop:campaign-orchestration.run', false],
   ['openwop:campaign-orchestration.status', false],
   ['openwop:campaign-studio.get-design', true],
@@ -100,6 +104,7 @@ const CLASSIFICATION: ReadonlyArray<readonly [string, boolean]> = [
   ['openwop:core.rag.retriever-contextual-compression', false],
   ['openwop:creative-briefs.list', false],
   ['openwop:crm.lead.capture', false],
+  ['openwop:crm.lead.qualify', false], // ADR 0954 P4: write acknowledgement, no schema/catalog output
   ['openwop:dealers.list-dealers', false],
   ['openwop:dealers.list-outlets', false],
   ['openwop:dealers.list-registrations', false],
@@ -122,6 +127,7 @@ const CLASSIFICATION: ReadonlyArray<readonly [string, boolean]> = [
   ['openwop:email.draft', false],
   ['openwop:email.get-campaign', false],
   ['openwop:email.save-draft', false],
+  ['openwop:email.submit-for-review', false], // review mutation; returns no schema
   ['openwop:entities.describe-type', true],
   ['openwop:entities.query', false],
   ['openwop:feature.agent-author.nodes.draft', false],
@@ -166,7 +172,9 @@ const CLASSIFICATION: ReadonlyArray<readonly [string, boolean]> = [
   ['openwop:feature.workflow-author.nodes.validate', false],
   ['openwop:forms.list-forms', false],
   ['openwop:forms.list-submissions', false],
+  ['openwop:funnels.blueprints', true],
   ['openwop:funnels.draft', false],
+  ['openwop:funnels.generate', false],
   ['openwop:funnels.get', false],
   ['openwop:funnels.list', false],
   ['openwop:funnels.step-stats', false],
@@ -439,8 +447,10 @@ describe('schema-read exemption completeness (ADR 0604 / TOCC-2)', () => {
   it('the runtime registry is fully booted — the denominator is real', () => {
     // Without this the whole file is vacuous: an empty registry makes every
     // "for each id" assertion below pass by iterating nothing. The floor is the
-    // measured count at authoring time.
-    expect(builtinAgentToolIds().length).toBeGreaterThanOrEqual(201);
+    // MEASURED count: 211 registered ids on 2404797bf (2026-10-22; was 201 at
+    // authoring, 2026-08-23). Cases 2 and 3 pin the exact set, so this floor only
+    // has to equal the truth, never lag it.
+    expect(builtinAgentToolIds().length).toBeGreaterThanOrEqual(211);
     expect(builtinAgentToolIds()).toContain('openwop:schema.lookup');
     expect(builtinAgentToolIds()).toContain('openwop:feature.crm.nodes.segment-vocabulary'); // a PROJECTED id
   });
@@ -466,8 +476,9 @@ describe('schema-read exemption completeness (ADR 0604 / TOCC-2)', () => {
   it('every schema-carrying tool is actually EXEMPT at the transform boundary', () => {
     const shouldBeExempt = CLASSIFICATION.filter(([, s]) => s).map(([id]) => id);
     // Floor: the loop is vacuous empty. Raised 18 → 23 by the five review-H4
-    // flips; a floor that lags the population lets a deletion pass unseen.
-    expect(shouldBeExempt.length).toBeGreaterThanOrEqual(23);
+    // flips, then 23 → 25 to the measured `true` rows on 2404797bf (2026-10-22);
+    // a floor that lags the population lets a deletion pass unseen.
+    expect(shouldBeExempt.length).toBeGreaterThanOrEqual(25);
     for (const id of shouldBeExempt) {
       expect(isSchemaReadExempt(id), `${id} is schema-carrying but NOT exempt`).toBe(true);
       expect(builtinAgentTool(id)?.schemaCarrying, `${id} must DECLARE it, not only be listed`).toBe(true);
@@ -515,7 +526,8 @@ describe('schema-read exemption completeness (ADR 0604 / TOCC-2)', () => {
 
   it('NEGATIVE CONTROL — a classified-false tool is NOT exempt', () => {
     const plainData = CLASSIFICATION.filter(([, s]) => !s).map(([id]) => id);
-    expect(plainData.length).toBeGreaterThan(150);
+    // Floor = the measured `false` rows on 2404797bf (2026-10-22): 186.
+    expect(plainData.length).toBeGreaterThanOrEqual(186);
     for (const id of plainData) {
       expect(isSchemaReadExempt(id), `${id} is classified plain data but is exempt`).toBe(false);
     }

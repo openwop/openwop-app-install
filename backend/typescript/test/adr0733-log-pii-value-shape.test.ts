@@ -1,5 +1,7 @@
 /**
- * ADR 0733 — value-shaped PII at the log sink.
+ * ADR 0733 — the value-shaped email scanner the log sink uses (tracker TST-BAB-1).
+ * (This file drives the scanner and `maskPiiDeep` directly; the logger's
+ * `values: MASK_PII_VALUES` wiring is outside it.)
  *
  * The ADR 0077 P2 mask is KEY-aware: it masks the value of a field whose NAME looks like
  * PII. That leaves the case this file pins — an address embedded in the VALUE of an
@@ -8,13 +10,20 @@
  * These are the boundary tests the existing `pii-log-masking.test.ts` cannot be: that
  * file pins the `msg`-vs-fields boundary and stays green either way, so it would not
  * notice this invariant changing. (The trap named in the ADR 0077 correction note.)
+ *
+ * Red when (sabotage-witnessed, wave 60): the value pass is skipped; object keys
+ * are not scanned; the straddle extension is removed; the extension is unbounded;
+ * the local part is unbounded (`+`); an all-numeric or one-letter final label is
+ * accepted; operational keys are masked whole; `sanitizeFreeText` starts
+ * redacting emails. CEILING: the `indexOf('@')` fast path is a cost guard — a
+ * string with no `@` can never match the scanner, so no output can witness it.
  */
 import { describe, expect, it } from 'vitest';
 import { maskEmailsInText, maskPiiDeep, looksLikePiiName, EMAIL_SCANNER_SHAPE } from '../src/host/dataClassification.js';
 import { sanitizeFreeText } from '../src/byok/textRedaction.js';
 
 describe('ADR 0733 — the gap the key-aware mask cannot see', () => {
-  it('the key pass alone leaves an email inside an operational field (the defect)', () => {
+  it('CONTROL: with `values` off, the key pass leaves a value-embedded address (the value pass is the switch)', () => {
     expect(looksLikePiiName('error')).toBe(false);
     const out = maskPiiDeep({ error: 'unique violation: alice@example.com' }, { heuristic: true }) as Record<string, unknown>;
     expect(String(out.error)).toContain('alice@example.com');
@@ -43,7 +52,7 @@ describe('ADR 0733 — the gap the key-aware mask cannot see', () => {
     expect(out.stack).toContain('at fn (x.ts:1:1)'); // substring-scoped, not whole-value
   });
 
-  it('does NOT touch a string with no `@` (the guard that makes scanning every leaf affordable)', () => {
+  it('a string with no `@` comes back unchanged (the fast path; recorded limit: no output can tell it from a full scan)', () => {
     const msg = 'run 42 completed in 13ms';
     expect(maskEmailsInText(msg)).toBe(msg);
   });
@@ -93,9 +102,13 @@ describe('ADR 0733 — the scanner is bounded (no ReDoS on the error path)', () 
 
   it('still stops scanning shortly past the cap — the cost bound survives the straddle fix', () => {
     // The straddle extension must be BOUNDED or the cap means nothing. An address-char
-    // run longer than one maximal address is cut anyway, leaving the rest verbatim.
-    const out = maskEmailsInText(`${'x'.repeat(8100)}@${'y'.repeat(4000)}.com`);
-    expect(out).toContain('y'.repeat(200)); // the far tail was never scanned
+    // run longer than one maximal address (EMAIL_MAX_LEN, 320) is cut at cap + 320, and
+    // the rest is left verbatim — the ADR 0733 cost trade, documented there. The tail
+    // carries an address so that scanning it WOULD change the output: unbounded, the
+    // scanner reaches `…yyyalice@example.com` and masks it.
+    const text = `${'x'.repeat(8100)}${'y'.repeat(4000)}alice@example.com`;
+    const out = maskEmailsInText(text);
+    expect(out).toBe(text);
   });
 });
 

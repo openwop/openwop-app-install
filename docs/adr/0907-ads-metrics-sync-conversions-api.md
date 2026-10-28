@@ -286,7 +286,10 @@ real token was used.
   that lacks `containsEuPoliticalAdvertising`, on every API version. `publishAd` now takes
   `euPoliticalAdvertising`. It is never defaulted, because it is an attestation: a live Google dispatch
   without it fails closed (`missing_eu_political_declaration`) before the spend gate. Passing it through
-  the `campaign-channels` publish node is a gap filed against that feature.
+  the `campaign-channels` publish node is a gap filed against that feature. *(Closed 2026-10-19: `publish-ad-variants` 1.3.0 passes `euPoliticalAdvertising`
+  through as given. It refuses a malformed value, maps a missing one to a typed
+  `eu_political_declaration_required`, and never defaults it. No campaign or org field exists to
+  default from.)*
 - **D1 fixed the TikTok sender but did not switch it on.** Per D2, a sender with no sandbox transcript
   stays `unsupported`. The fixed TikTok sender has never been exercised against TikTok, so P4 gated it
   together with Google. Meta CAPI (ADR 0297) stays live.
@@ -318,7 +321,11 @@ real token was used.
   whichever lands second carries the sum.
 - **Gaps found, not fixed here:** `packs/vendor.myndhyve.ads-publish-{meta,google}` still pin `v21.0` /
   `v18`. That is a second, signed ad-egress path, and the tripwire does not cover it. The vendored chain
-  and node packs are registry-pinned in production, so they need a registry publish to ship.
+  and node packs are registry-pinned in production, so they need a registry publish to ship. *(CORRECTED 2026-10-19: false. Prod's `OPENWOP_INSTALL_PACKS` names no campaign pack.
+  `feature.campaign-connectors.nodes` ships in the image (`Dockerfile` `COPY packs`). `campaign-sync` ships from
+  `examples/workflow-chain-packs`, and the loader's version-aware tie-break (WF-DUP-2) would prefer the newer
+  vendored copy even over an installed registry copy. Neither needs a registry publish; `check-pack-pin-drift`
+  reports none unshipped. The claim came from that script's docstring without checking whether these packs are pinned.)*
 
 **Track 2 is still open** (§ Open decisions for David):
 - **P6:** run `ads-sandbox-verify.mjs <platform> conversion|metrics|google-upload` on test accounts,

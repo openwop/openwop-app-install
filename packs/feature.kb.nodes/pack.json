@@ -1,7 +1,7 @@
 {
   "name": "feature.kb.nodes",
-  "version": "1.2.1",
-  "description": "Knowledge Base feature node pack — workflow nodes over the `ctx.features.kb` surface shipped by the KB feature. `search` retrieves chunks from one collection; `rag` retrieves + builds an augmented prompt + citations for an agent/callPrompt downstream; `list-collections` discovers a collectionId. Those three are role:\"action\" reads (recorded → replay/fork serve the recorded result). v1.2.0 (ADR 0643 D2) adds `reindex-drain`, the ONLY role:\"side-effect\" node here: it drives one bounded slice of an already-started embedding-spec reindex, and its terminal branch flips the collection's serving namespace and DELETES the old one — so the derived side-effect floor is what stops a `mode:'replay'` fork re-executing it. It is NOT a general-purpose verb: the surface refuses it unless a `running`/`paused` job already exists (only the `host:org:manage` REST door can create one) AND the executing run's workflowId is the host-minted `kb.reindex:<tenantId>:<orgId>:<collectionId>` — declaring the node in an arbitrary tenant…",
+  "version": "1.3.0",
+  "description": "Knowledge Base feature nodes over ctx.features.kb. Search and RAG can hydrate indexes and call paid embedding, contextual-enrichment or reranking providers. Search/RAG remain action reads and declare side-effectful because their provider calls and index hydration must not repeat on replay; forks serve the recorded node outcome. List collections remains an action read of current state. Reindex drain remains a side-effect with its existing scheduler-only authorization (ADR 0643 D2; ADR 0904 replay correction).",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": [
@@ -22,23 +22,29 @@
       "category": "integration",
       "role": "action",
       "inputSchemaRef": "schemas/search.input.json",
-      "outputSchemaRef": "schemas/search.output.json"
+      "outputSchemaRef": "schemas/search.output.json",
+      "capabilities": [
+        "side-effectful"
+      ]
     },
     {
       "typeId": "feature.kb.nodes.rag",
       "version": "1.0.0",
       "label": "KB RAG (retrieve + augment)",
-      "description": "Retrieve + assemble a grounded augmented prompt + citations via ctx.features.kb.rag. Inputs: { orgId, collectionId, query, topK? }. Output: { augmentedPrompt, citations, contexts } — feed augmentedPrompt to a downstream callPrompt/agent (generation is run-scoped).",
+      "description": "Retrieve + assemble a grounded augmented prompt + citations via ctx.features.kb.rag. Inputs: { orgId, collectionId, query, topK? }. Output: { augmentedPrompt, citations, contexts } \u2014 feed augmentedPrompt to a downstream callPrompt/agent (generation is run-scoped).",
       "category": "integration",
       "role": "action",
       "inputSchemaRef": "schemas/rag.input.json",
-      "outputSchemaRef": "schemas/rag.output.json"
+      "outputSchemaRef": "schemas/rag.output.json",
+      "capabilities": [
+        "side-effectful"
+      ]
     },
     {
       "typeId": "feature.kb.nodes.list-collections",
       "version": "1.0.0",
       "label": "KB List Collections",
-      "description": "Lists an org's KB collections via ctx.features.kb.listCollections — discover a collectionId before search/rag. Inputs: { orgId }. Output: { collections }. Tenant-guarded.",
+      "description": "Lists an org's KB collections via ctx.features.kb.listCollections \u2014 discover a collectionId before search/rag. Inputs: { orgId }. Output: { collections }. Tenant-guarded.",
       "category": "integration",
       "role": "action",
       "inputSchemaRef": "schemas/list-collections.input.json",
@@ -48,7 +54,7 @@
       "typeId": "feature.kb.nodes.reindex-drain",
       "version": "1.0.0",
       "label": "KB Reindex Drain",
-      "description": "Drives ONE bounded slice of an in-progress KB reindex via ctx.features.kb.reindexDrain — embed the next `maxChunks` into the staging namespace, then CUT OVER when the staging space is whole. Inputs: { orgId, collectionId, maxChunks? }. Output: { status, embeddedChunks, totalChunks, done, error? }. STRUCTURALLY scoped: the surface refuses unless a running/paused job already exists (created only by the admin-gated REST start) AND the run's workflowId is the host-minted `kb.reindex:<tenantId>:<orgId>:<collectionId>`. Never touches media extraction (replay-unsafe by design) — it re-embeds existing durable chunk text only.",
+      "description": "Drives ONE bounded slice of an in-progress KB reindex via ctx.features.kb.reindexDrain \u2014 embed the next `maxChunks` into the staging namespace, then CUT OVER when the staging space is whole. Inputs: { orgId, collectionId, maxChunks? }. Output: { status, embeddedChunks, totalChunks, done, error? }. STRUCTURALLY scoped: the surface refuses unless a running/paused job already exists (created only by the admin-gated REST start) AND the run's workflowId is the host-minted `kb.reindex:<tenantId>:<orgId>:<collectionId>`. Never touches media extraction (replay-unsafe by design) \u2014 it re-embeds existing durable chunk text only.",
       "category": "integration",
       "role": "side-effect",
       "capabilities": [

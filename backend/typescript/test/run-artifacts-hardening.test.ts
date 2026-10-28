@@ -6,6 +6,24 @@
  * ART-6: the base64 media detector requires the value to DECODE to non-trivial bytes, so a
  *   charset-valid all-padding string can't mint an empty media asset (it falls through to an
  *   inline run-event artifact instead).
+ *
+ * Breaks it (round-1 probes, witnessed): the cursor comparison `<`→`<=`
+ * (8fw2g2-rah-cursor), the lower clamp (rah-lower), a cursor on the last page
+ * (rah-lastcursor), the newest-first sort (rah-sort), the ART-6 decode floor
+ * (rah-art6). The UPPER clamp (500) needs a set larger than the cap: round 1's
+ * 3-row fixture returned 3 either way (8fw2g2-rah-upper VACUOUS), so the clamp
+ * case now seeds 501 rows (8fw2g2-rah-upper-r2).
+ *
+ * "is tenant-scoped" was round-1 VACUOUS for a FIXTURE reason first: both tenants
+ * seeded runId 'run', so tB's rows collided with tA's keys and were never
+ * written — the case compared tA against nothing. Each tenant now seeds its own
+ * runId and the case asserts tB's rows exist (positive control).
+ * Round 2 predicted a double guard here (`listArtifacts` also deny-filters on
+ * `canRead(row.orgId)`, and a run-artifact row's `orgId` is its tenantId), but
+ * MEASURED otherwise: removing the tenant filter in `listRunArtifactsForTenant`
+ * alone reddens this case and the pagination case (8fw2g2-rah-tenant-r2
+ * witnessed), so on this read path the tenant filter is the guard. The shared
+ * tenant identity `writeRow` stamps is probed too (8fw2g2-rah-stamp-r2).
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -23,7 +41,10 @@ beforeEach(async () => {
 async function seed(tenantId: string, n: number): Promise<void> {
   for (let i = 1; i <= n; i++) {
     await persistRunArtifact({
-      tenantId, runId: 'run', nodeId: `n${i}`, role: 'deliverable',
+      // The row key is `${runId}:${nodeId}` (global, not tenant-prefixed — real runIds
+      // are UUIDs), so each tenant seeds its OWN runId or the second seed loses the
+      // insert-only CAS and writes nothing.
+      tenantId, runId: `run-${tenantId}`, nodeId: `n${i}`, role: 'deliverable',
       // Asset-class run artifacts (kind:'file' via a serve ref) so they survive the
       // Library's asset filter (ADR 0083 §Amendment); `alt` becomes the title.
       output: { image: { url: `https://cdn.test/a${i}.png`, alt: `Artifact ${i}` } }, now: `2026-06-20T00:00:0${i}.000Z`,
@@ -58,7 +79,19 @@ describe('ART-1 — Library keyset pagination', () => {
   it('clamps limit to [1, 500] and a cursor past the end yields an empty final page', async () => {
     await seed('t', 3);
     expect((await listArtifactsPage('t', undefined, { limit: 0 })).artifacts).toHaveLength(1); // clamped to >=1
-    expect((await listArtifactsPage('t', undefined, { limit: 9999 })).artifacts).toHaveLength(3); // all (cap is generous)
+    // The upper clamp needs MORE rows than the cap, or 9999 and 500 read the same.
+    for (let i = 0; i < 501; i++) {
+      await persistRunArtifact({
+        tenantId: 'tBig', runId: 'big', nodeId: `b${i}`, role: 'deliverable',
+        output: { image: { url: `https://cdn.test/b${i}.png`, alt: `Big ${i}` } },
+        now: new Date(Date.UTC(2026, 5, 20) + i).toISOString(),
+      });
+    }
+    const capped = await listArtifactsPage('tBig', undefined, { limit: 9999 });
+    expect(capped.artifacts).toHaveLength(500); // clamped to <=500…
+    expect(capped.nextCursor).toBeTruthy(); // …with the 501st one page away
+    const rest = await listArtifactsPage('tBig', undefined, { limit: 9999, cursor: capped.nextCursor });
+    expect(rest.artifacts.map((a) => a.title)).toEqual(['Big 0']);
     const last = await listArtifactsPage('t', undefined, { limit: 3 });
     expect(last.nextCursor).toBeUndefined();
     expect((await listArtifactsPage('t', undefined, { limit: 2, cursor: '0000 z' })).artifacts).toEqual([]); // cursor older than everything
@@ -70,6 +103,8 @@ describe('ART-1 — Library keyset pagination', () => {
     const page = await listArtifactsPage('tA', undefined, { limit: 50 });
     expect(page.artifacts.every((a) => a.tenantId === 'tA')).toBe(true);
     expect(page.artifacts).toHaveLength(2);
+    // Positive control: tB's rows exist and are listed for tB.
+    expect((await listArtifactsPage('tB', undefined, { limit: 50 })).artifacts).toHaveLength(2);
   });
 });
 

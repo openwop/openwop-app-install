@@ -212,6 +212,15 @@ export async function addDomain(input: { tenantId: string; orgId: string; create
   return row;
 }
 
+/** Is this domain serving traffic right now? ONE predicate for the host lookup and
+ *  every feature that points a URL at a custom domain (ADR 0948 P6a). ADR 0906 D4 — a
+ *  removed or expired row stops serving the moment it is marked, not when its
+ *  certificate cleanup finishes. */
+export function isServingDomain(d: Pick<CustomDomain, 'status' | 'edge'>): boolean {
+  const leaving = d.edge?.tls === 'releasing' && d.edge.releaseIntent !== 'reissue';
+  return d.status === 'live' && !leaving;
+}
+
 export async function getDomain(tenantId: string, orgId: string, hostname: string): Promise<CustomDomain | null> {
   const d = await domains.get(canonicalHost(hostname));
   return d && d.tenantId === tenantId && d.orgId === orgId ? d : null;
@@ -475,10 +484,7 @@ export async function resolveCustomHost(hostname: string): Promise<HostCacheEntr
   if (stale) {
     const fresh = new Map<string, HostCacheEntry>();
     for (const d of await domains.list()) {
-      // ADR 0906 D4 — a removed or expired row stops serving the moment it is
-      // marked, not when its certificate cleanup finishes.
-      const leaving = d.edge?.tls === 'releasing' && d.edge.releaseIntent !== 'reissue';
-      if (d.status === 'live' && !leaving) fresh.set(d.hostname, { tenantId: d.tenantId, orgId: d.orgId });
+      if (isServingDomain(d)) fresh.set(d.hostname, { tenantId: d.tenantId, orgId: d.orgId });
     }
     hostCache = fresh;
     hostCacheAt = now;

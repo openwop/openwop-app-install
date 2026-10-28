@@ -7,6 +7,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
+// ADR 0991 — the scripts under test publish to the real cross-machine release bus
+// by default; a test must never write to it.
+process.env.OPENWOP_RELEASE_BUS = 'off';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const supervisor = path.join(root, 'scripts/lib/owned-process.mjs');

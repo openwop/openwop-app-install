@@ -1,8 +1,8 @@
 {
   "name": "feature.creative-briefs.nodes",
-  "version": "1.2.1",
+  "version": "1.4.0",
   "kind": "node",
-  "description": "Creative-briefs feature node pack — full ctx.features.creative-briefs surface: list/get reads, a create WRITE that calls the SAME service function the HTTP route calls (the CRM v1.4 write-node precedent), and the ADR 0399 ad-layout renderer: brief.render (one template) + brief.render-variants (template family fan-out), each a deterministic brief→composed-PNG projection stored as a hash-deduped Media asset with safe-zone warnings. Tenant+org-guarded; role:action (recorded, replay/fork-safe — the recorded mediaAssetId is read verbatim on replay). v1.2.0 adds generate-reel (ADR 0411 P3 — text-to-video via ctx.callVideoGenerator → durable Media asset → reel render; deterministic renderId for replay/fork idempotency).",
+  "description": "Creative-briefs feature node pack — full ctx.features.creative-briefs surface: list/get reads, a create WRITE that calls the SAME service function the HTTP route calls (the CRM v1.4 write-node precedent), and the ADR 0399 ad-layout renderer: brief.render (one template) + brief.render-variants (template family fan-out), each a deterministic brief→composed-PNG projection stored as a hash-deduped Media asset with safe-zone warnings. Tenant+org-guarded. The generating nodes are role:side-effect + side-effectful, so a :fork serves the recorded asset or verdict instead of rendering or paying again (ADR 0945 D8). v1.2.0 adds generate-reel (ADR 0411 P3 — text-to-video via ctx.callVideoGenerator → durable Media asset → reel render; deterministic renderId for replay/fork idempotency). v1.3.0 (ADR 0945 P1) adds compose-product-shot (composite mode: the product photo, background-removed and placed on a generated scene by the deterministic renderer, then checked) and fidelity-check (stage-A perceptual and colour check against the product source), behind the creative-briefs.product-grounded sub-toggle, and reclassifies render, render-variants and generate-reel as side-effect. v1.4.0 (ADR 0945 P2) adds edit-product-scene (edit mode: the product photo's surroundings repainted under a protection mask from its own cut-out, judged, repaired once) and gives fidelity-check the stage-B vision judge.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": [
@@ -46,28 +46,55 @@
       "typeId": "feature.creative-briefs.nodes.generate-reel",
       "version": "1.0.0",
       "label": "Creative Briefs: Generate Reel",
-      "description": "ADR 0411 P3 — generates a REEL (text-to-video) from a brief and stores it as a reel render. Derives a text-to-video prompt from the brief's production fields (title/scene/composition/camera/lighting/messaging + direction), generates the video via ctx.callVideoGenerator (the async lane — host hides polling, honors cancel; NO 4th video generator), promotes the generated video (a host serve URL) to a durable Media asset (createAssetFromServeUrl — SSRF-safe, hash-deduped, capacity-gated), then stores a reel-marked CreativeRender whose mediaAssetId is the video. Deterministic renderId (crender:${runId}:${nodeId}) ⇒ re-run/:fork/replay converges, never duplicates. Inputs: { orgId, briefId, directionIndex?, aspectRatio?('9:16'|'16:9'|'1:1'), durationSeconds?, provider?, model?, credentialRef? }. Output: { render, mediaAssetId }. Fails typed: host_capability_missing (video not wired / no BYOK), not_found (brief), provider_* (generation), validation_error (render cap). role:action, recorded.",
+      "description": "ADR 0411 P3 — generates a REEL (text-to-video) from a brief and stores it as a reel render. Derives a text-to-video prompt from the brief's production fields (title/scene/composition/camera/lighting/messaging + direction), generates the video via ctx.callVideoGenerator (the async lane — host hides polling, honors cancel; NO 4th video generator), promotes the generated video (a host serve URL) to a durable Media asset (createAssetFromServeUrl — SSRF-safe, hash-deduped, capacity-gated), then stores a reel-marked CreativeRender whose mediaAssetId is the video. Deterministic renderId (crender:${runId}:${nodeId}) ⇒ re-run/:fork/replay converges, never duplicates. Inputs: { orgId, briefId, directionIndex?, aspectRatio?('9:16'|'16:9'|'1:1'), durationSeconds?, provider?, model?, credentialRef? }. Output: { render, mediaAssetId }. Fails typed: host_capability_missing (video not wired / no BYOK), not_found (brief), provider_* (generation), validation_error (render cap). role:side-effect (ADR 0945 D8): a :fork serves the recorded output instead of generating (and paying) again.",
       "category": "integration",
-      "role": "action",
-      "capabilities": []
+      "role": "side-effect",
+      "capabilities": ["side-effectful"]
+    },
+    {
+      "typeId": "feature.creative-briefs.nodes.compose-product-shot",
+      "version": "1.0.0",
+      "label": "Creative Briefs: Compose Product Shot",
+      "description": "ADR 0945 P1 — composite mode. Builds an ad from the catalog product's OWN photo: removes its background (ctx.callImageEditor, recorded), generates a product-less scene from scenePrompt (ctx.callImageGenerator) unless backgroundAssetId is given, places the cut-out on the scene with the deterministic renderer (copied, only scaled), then checks the result against the source (stage A). The host refuses a cut-out that is not a background-removed copy of this product's photos (product_depiction_ungrounded). Inputs: { orgId, productId, briefId, templateId, sourceAssetId?, backgroundAssetId?, scenePrompt?, provider?, model?, size?, editProvider?, editModel?, credentialRef?, directionIndex?, copy?{headline,body,cta} }. Output: { mediaAssetId, renderId, cutoutAssetId, backgroundAssetId, sourceAssetId, verdictId, outcome ('pass'|'needs_review'), warnings }. Fails typed: fidelity_failed (verdict fail), product_media_unresolved, product_depiction_ungrounded, not_found (feature off / brief / asset), host_capability_missing (no image provider). Behind creative-briefs.product-grounded. role:side-effect: a :fork serves the recorded output.",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": ["side-effectful"]
+    },
+    {
+      "typeId": "feature.creative-briefs.nodes.fidelity-check",
+      "version": "1.0.0",
+      "label": "Creative Briefs: Fidelity Check",
+      "description": "ADR 0945 P1 — checks a generated asset against the catalog product it depicts and stores a verdict. Composite assets get the deterministic stage-A checks (byte identity of the placed product, source-product derivation, perceptual hashes and colour difference over the product silhouette); other modes are needs_review until the model judge exists — never pass without evidence. Composite and edit assets also get the stage-B vision judge (closed answers on logo, colour, shape, label text, proportions, part count and extra or missing parts) when the workspace has a vision provider. Inputs: { orgId, assetId, maskAssetId? (the cut-out an edit was masked with) }. Output: { verdictId, outcome ('pass'|'needs_review'), checks }. Fails typed: fidelity_failed (verdict fail), validation_error (asset has no generation record), not_found. Behind creative-briefs.product-grounded. role:side-effect: a :fork serves the recorded verdict.",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": ["side-effectful"]
+    },
+    {
+      "typeId": "feature.creative-briefs.nodes.edit-product-scene",
+      "version": "1.0.0",
+      "label": "Creative Briefs: Edit Product Scene",
+      "description": "ADR 0945 P2 — edit mode. Repaints only the SURROUNDINGS of the catalog product's own photo: removes the background (ctx.callImageEditor background-remove) to build a protection mask over the product, then inpaints the rest from the prompt (ctx.callImageEditor inpaint, recorded). The result is judged against the source (stage A inside the mask, plus the vision judge when the workspace has a vision provider; without one the outcome is needs_review, never pass). A failing result gets ONE repair (re-edited with the mismatches as constraints); a second failure is fidelity_failed. A reframed or resized result fails the aspect check, so use a provider that keeps the photo's size (replicate). Inputs: { orgId, productId, prompt, sourceAssetId?, provider? ('replicate'|'openai', default replicate), cutoutProvider? (default replicate when provider is openai, which cannot remove backgrounds), cutoutCredentialRef?, model?, credentialRef? }. Output: { mediaAssetId, cutoutAssetId, sourceAssetId, verdictId, outcome ('pass'|'needs_review'), repaired }. Fails typed: edit_mode_not_enabled (the client org has not opted into edit mode — checked before any spend), fidelity_failed, fidelity_judge_invalid, product_media_unresolved, product_depiction_ungrounded, not_found (feature off), host_capability_missing. Behind creative-briefs.product-grounded. role:side-effect: a :fork serves the recorded output.",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": ["side-effectful"]
     },
     {
       "typeId": "feature.creative-briefs.nodes.render",
       "version": "1.0.0",
       "label": "Creative Briefs: Render Ad",
-      "description": "Renders a brief through one ad-layout template into a composed PNG stored as a Media asset (ADR 0399). Inputs: { orgId, briefId, templateId, directionIndex?, copy?{headline,body,cta}, layers?{background,product}, overrides?{<layerId>:{dx,dy,scale}}, brandId?, animate?{preset:'reveal',frames?,fps?} }. templateId is one of: meta.feed.1x1, meta.story.9x16, tiktok.9x16, linkedin.landscape.191x1, google.display.300x250, google.display.728x90, google.display.160x600, google.display.300x600, google.display.336x280, google.display.250x250, google.display.970x250, google.display.468x60, google.display.320x100, google.display.320x50 (read the live catalog via feature.creative-briefs.nodes.list-render-templates — never guess). animate produces an animated GIF (reveal preset — the foreground fades in; the static PNG is the default). Output: { render, mediaAssetId, warnings } — warnings (safe-zone overlaps, text rule, missing layers) are advisory and never block. Fails typed: not_found (brief/brand), validation_error (unknown template, bad directionIndex, render cap).",
+      "description": "Renders a brief through one ad-layout template into a composed PNG stored as a Media asset (ADR 0399). Inputs: { orgId, briefId, templateId, directionIndex?, copy?{headline,body,cta}, layers?{background,product}, overrides?{<layerId>:{dx,dy,scale}}, brandId?, animate?{preset:'reveal',frames?,fps?} }. templateId is one of: meta.feed.1x1, meta.story.9x16, tiktok.9x16, linkedin.landscape.191x1, google.display.300x250, google.display.728x90, google.display.160x600, google.display.300x600, google.display.336x280, google.display.250x250, google.display.970x250, google.display.468x60, google.display.320x100, google.display.320x50 (read the live catalog via feature.creative-briefs.nodes.list-render-templates — never guess). animate produces an animated GIF (reveal preset — the foreground fades in; the static PNG is the default). Output: { render, mediaAssetId, warnings } — warnings (safe-zone overlaps, text rule, missing layers) are advisory and never block. Fails typed: not_found (brief/brand), validation_error (unknown template, bad directionIndex, render cap). role:side-effect (ADR 0945 D8): a :fork serves the recorded output instead of generating (and paying) again.",
       "category": "integration",
-      "role": "action",
-      "capabilities": []
+      "role": "side-effect",
+      "capabilities": ["side-effectful"]
     },
     {
       "typeId": "feature.creative-briefs.nodes.render-variants",
       "version": "1.0.0",
       "label": "Creative Briefs: Render Ad Variants",
-      "description": "Fans one brief across a template family — one approve, N platform-correct creatives (ADR 0399 §3). Inputs: { orgId, briefId, templateIds: string[], ...same options as render }. Output: { renders[], failures[{templateId,error}] } — per-template failures are reported, not thrown (partial success is visible, never silent).",
+      "description": "Fans one brief across a template family — one approve, N platform-correct creatives (ADR 0399 §3). Inputs: { orgId, briefId, templateIds: string[], ...same options as render }. Output: { renders[], failures[{templateId,error}] } — per-template failures are reported, not thrown (partial success is visible, never silent). role:side-effect (ADR 0945 D8): a :fork serves the recorded output instead of generating (and paying) again.",
       "category": "integration",
-      "role": "action",
-      "capabilities": []
+      "role": "side-effect",
+      "capabilities": ["side-effectful"]
     },
     {
       "typeId": "feature.creative-briefs.nodes.list-render-templates",

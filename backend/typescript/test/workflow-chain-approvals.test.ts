@@ -3,10 +3,16 @@
  * Request Sign-off (open gate) + Two-Stage Sign-off (sequential approval
  * chains via DAG composition, not a new primitive). The repo-wide conventions
  * suite covers gating/live-param rules automatically.
+ *
+ * Wave 64: "registered typeIds" now reads every node pack's `pack.json` (it was a
+ * hand-copied set that stayed green when a pack dropped a node). Sabotage-witnessed
+ * (8fw5g1-ap-*): the stage-one approver param, the stageOne → stageTwo edge, the
+ * zero-config open gate and the keyword-derived category each turn their case red.
  */
 
 import { beforeAll, describe, expect, it } from 'vitest';
 import { dirname, join } from 'node:path';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
   loadWorkflowChainPacks,
@@ -28,11 +34,20 @@ beforeAll(() => {
 const PACK = 'core.openwop.workflows.approvals';
 const CHAINS = ['approvals.request-sign-off', 'approvals.two-stage-sign-off'];
 
-const KNOWN_TYPEIDS = new Set([
-  'core.ai.chatCompletion',
-  'core.chat.approvalGate',
-  'feature.notifications.nodes.notify',
-]);
+/**
+ * The SSoT for "registered": every node typeId a node pack in the repo's `packs/`
+ * declares (`pack.json` → `nodes[].typeId`). Read, never hand-copied — a copied list
+ * stayed green when a pack dropped a node.
+ */
+const PACKS_ROOT = join(__dirname, '..', '..', '..', 'packs');
+const KNOWN_TYPEIDS = new Set(
+  readdirSync(PACKS_ROOT, { withFileTypes: true })
+    .filter((d) => d.isDirectory() && existsSync(join(PACKS_ROOT, d.name, 'pack.json')))
+    .flatMap((d) => {
+      const manifest = JSON.parse(readFileSync(join(PACKS_ROOT, d.name, 'pack.json'), 'utf8')) as { nodes?: Array<{ typeId?: unknown }> };
+      return (manifest.nodes ?? []).map((n) => n.typeId).filter((t): t is string => typeof t === 'string');
+    }),
+);
 
 describe('approvals pack — discovery + typeIds', () => {
   it('loads both chains with the Approvals category', () => {

@@ -2,11 +2,12 @@
 
 This reference app (the React SPA behind `app.openwop.dev`) is designed to
 be re-skinned and re-deployed under your own brand **without forking core
-logic**. Brand identity is isolated into three small seams:
+logic**. Brand identity is isolated into four small seams:
 
 | Seam | What it controls | How you change it |
 |---|---|---|
-| `VITE_BRAND_*` env vars | Brand **strings + asset paths**: product name, wordmark, footer, assistant persona, icon mark, lockup, favicon, document title, fonts, privacy domain/URLs | Set env vars at build time (no code edit) |
+| Appearance (`/appearance`, superadmin) | Most of the identity below, **at runtime**: name, wordmark, logos, favicon, title, colors, fonts, theme, links | No rebuild; see [Brand settings: runtime or build](#brand-settings-runtime-or-build) |
+| `VITE_BRAND_*` env vars | The **build-time defaults** for those strings + asset paths (first paint), plus the build-only settings: meta description, privacy link, app gate | Set env vars at build time (no code edit) |
 | `src/brand/brand.css` | Brand **colors + typography** (CSS custom properties) | Uncomment + set tokens in one file |
 | Asset files in `public/` | The icon mark / lockup image, and any custom favicon/font files you reference | Drop in replacements |
 
@@ -17,6 +18,43 @@ byte-for-byte. Everything below is opt-in.
 > `src/styles/global.css :root` is the app's base design system (see `DESIGN.md §2`); editing it
 > forks the base. Re-brand in `src/brand/brand.css` instead — it loads *after*
 > `global.css` and wins the cascade without touching the synced block.
+
+---
+
+## Brand settings: runtime or build
+
+Most identity no longer needs a rebuild. A superadmin can set it **at runtime** in
+**Appearance** (`/appearance`, under *Deployment & customization*; stored by the
+backend app brand, ADR 0170/0171), and every visitor gets it after the page loads.
+The `VITE_BRAND_*` variables in §1 are the **build-time defaults**: what the page
+shows before that runtime identity arrives (first paint, crawlers, no-JS), and the
+only source for the few settings Appearance does not hold.
+
+| Setting | Runtime (Appearance, no rebuild) | Build-time variable | Notes |
+|---|---|---|---|
+| Product name, wordmark | yes | `VITE_BRAND_PRODUCT_NAME`, `VITE_BRAND_MARK_PRE/EMPHASIS/SUB` | |
+| Tagline, footer, instance name, assistant name | yes | `VITE_BRAND_TAGLINE`, `VITE_BRAND_FOOTER_TEXT`, `VITE_BRAND_INSTANCE_NAME`, `VITE_BRAND_ASSISTANT_NAME` | |
+| Icon mark, lockup (light and dark) | yes | `VITE_BRAND_MARK_SRC`, `VITE_BRAND_MARK_SRC_DARK`, `VITE_BRAND_LOCKUP_SRC`, `VITE_BRAND_LOCKUP_SRC_DARK` | `VITE_BRAND_LOGO_SRC` is a deprecated alias of the mark |
+| Document title, favicon | yes, after load | `VITE_BRAND_DOCUMENT_TITLE`, `VITE_BRAND_FAVICON_SRC` | First paint and the browser tab before load use the build value. Set both if they must match from the first frame |
+| Theme color, colors, typography, theme mode | yes | `VITE_BRAND_THEME_COLOR`, `VITE_BRAND_FONTS_HREF`, `VITE_BRAND_DEFAULT_THEME` (+ `src/brand/brand.css`) | The installable PWA manifest is stamped at BUILD time from name, mark and theme color, so a runtime change does not reach an already-installed app's manifest |
+| Primary domain, home and repo links | yes | `VITE_BRAND_PRIMARY_DOMAIN`, `VITE_BRAND_HOME_URL`, `VITE_BRAND_REPO_URL` | |
+| Shell meta description | **no** | `VITE_BRAND_DESCRIPTION` | Build only; it is what search results show |
+| Privacy link target | **no** | `VITE_BRAND_PRIVACY_URL` | Build only; an app path such as `/p/privacy`, else `/privacy` |
+| App gate | **no** | `VITE_BRAND_APP_GATE_MODE`, `VITE_BRAND_APP_GATE_PASSWORD` | Build only |
+| Desktop / iOS shell identity | n/a | `clients/desktop/branding.json`, `clients/ios/project.yml` | Native build time; see §6 |
+| Server identity (discovery, OpenAPI, prompts) | n/a | backend env, §4 | |
+
+**A misspelled or unsupported `VITE_BRAND_*` name now fails the build** with the
+name and the closest supported one (`VITE_BRAND_PRODUCT_NAM (did you mean
+VITE_BRAND_PRODUCT_NAME?)`), instead of being ignored. The supported set is
+`BRAND_ENV_KEYS` in `src/brand/defaults.ts`. **The compose pack forwards every one
+of them** (`deploy/compose/docker-compose.yml` → `frontend.Dockerfile`): set them in
+the `.env` beside the compose file. Before 2026-10-24 it forwarded only
+`VITE_BRAND_PRODUCT_NAME`, so every other brand variable set for a compose build
+was silently dropped.
+
+*Not yet verified by a test:* outbound email branding, and a browser check of first
+paint before and after the runtime identity loads (gap-closure plan S01-T3; open).
 
 ---
 
@@ -128,8 +166,8 @@ it. A forgotten field ships OpenWOP branding silently — so run the guard below
 | Surface | Override |
 |---|---|
 | Product name / wordmark | `VITE_BRAND_PRODUCT_NAME`, `VITE_BRAND_MARK_PRE/EMPHASIS/SUB` |
-| Header icon mark | `VITE_BRAND_MARK_SRC` (+ drop the square SVG in `public/`; `VITE_BRAND_LOGO_SRC` remains a deprecated alias) |
-| Optional full lockup | `VITE_BRAND_LOCKUP_SRC` (+ drop the lockup SVG in `public/`) |
+| Header icon mark | `VITE_BRAND_MARK_SRC`, dark variant `VITE_BRAND_MARK_SRC_DARK` (+ drop the square SVG in `public/`; `VITE_BRAND_LOGO_SRC` remains a deprecated alias) |
+| Optional full lockup | `VITE_BRAND_LOCKUP_SRC`, dark variant `VITE_BRAND_LOCKUP_SRC_DARK` (+ drop the lockup SVG in `public/`) |
 | **Favicon** | `VITE_BRAND_FAVICON_SRC` (commonly missed → ships the OpenWOP "O") |
 | PWA manifest + mobile `theme-color` | `VITE_BRAND_THEME_COLOR` (the `manifest.webmanifest` is auto-stamped at build from product name + icon mark + this color — no hand-authored manifest) |
 | Document `<title>` | `VITE_BRAND_DOCUMENT_TITLE` |
@@ -140,6 +178,7 @@ it. A forgotten field ships OpenWOP branding silently — so run the guard below
 | Instance / workspace label | `VITE_BRAND_INSTANCE_NAME` |
 | Default theme | `VITE_BRAND_DEFAULT_THEME` |
 | App gate config | `VITE_BRAND_APP_GATE_MODE`, `VITE_BRAND_APP_GATE_PASSWORD` |
+| **Privacy link target** | `VITE_BRAND_PRIVACY_URL` (commonly missed → Privacy links go to the stock `/privacy` page) |
 | Colors / type | `src/brand/brand.css` (§2 below) |
 | Backend / Firebase config | a scrubbed `.env.production` — start from **`.env.production.example`**, never the upstream's `.env.production` (it points at the steward's backend) |
 
@@ -289,7 +328,7 @@ a proposal to the approval inbox rather than running it; a `guided` persona
 runs routine picks immediately but proposes when the picked card is
 **high priority** (the stock seed ships **Devon** guided). This field is
 host-extension ONLY — never serialize it onto the normative
-`/v1/agents/roster` response (`agent-roster-entry.schema.json` is
+`/agents/roster` response (`agent-roster-entry.schema.json` is
 `additionalProperties: false`; leaking it fails conformance). The stock seed
 ships **Nora** in
 `review` so the approval flow is demonstrable out of the box). See

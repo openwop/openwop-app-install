@@ -257,7 +257,8 @@ describe('GEN-IS-1 — every chain node binds the config its implementation hard
         expect(byEdge.get(node.id ?? '')?.has('to'), `${chain.chainId}::${node.id} receives its recipient by edge`).toBe(true);
       }
     }
-    expect(sends.length, 'the campaign-journeys fixture this probe reads has changed shape').toBe(3);
+    // 3 → 8 (ADR 0955 P5): the three blueprints add five sends, each bound by edge.
+    expect(sends.length, 'the campaign-journeys fixture this probe reads has changed shape').toBe(8);
   });
 
   it('the quarantine is honest — every entry still describes a real starved node', () => {

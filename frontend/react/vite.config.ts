@@ -18,7 +18,7 @@ import {
   type NeverCacheRule,
   type OfflineFeature,
 } from './scripts/gen-service-worker.mjs';
-import { BRAND_DEFAULTS, resolveBrandFromEnv } from './src/brand/defaults';
+import { BRAND_DEFAULTS, resolveBrandFromEnv, unknownBrandEnvVars } from './src/brand/defaults';
 import { DEV_FALLBACK_BASE_URL } from './src/client/baseUrlDefault';
 import { chunkFileName } from './scripts/chunkNames.mjs';
 
@@ -89,6 +89,17 @@ const distributionPlugin = (() => {
 })();
 
 export default defineConfig(({ mode }) => {
+  // BRAND-01 (gap-closure plan S01-R3): a `VITE_BRAND_*` name this app does not
+  // read is a typo or a removed setting. Left alone it is silently ignored and the
+  // build ships the default identity in that slot, so refuse it here, in every mode.
+  const unknownBrand = unknownBrandEnvVars(loadEnv(mode, envDir, ''));
+  if (unknownBrand.length > 0) {
+    throw new Error(
+      `[openwop] Build aborted — unknown brand variable(s): ` +
+        unknownBrand.map((u) => (u.didYouMean ? `${u.name} (did you mean ${u.didYouMean}?)` : u.name)).join(', ') +
+        `. The supported VITE_BRAND_* names are listed in frontend/react/WHITE-LABEL.md § "Brand settings: runtime or build".`,
+    );
+  }
   if (mode === 'production') {
     const env = loadEnv(mode, envDir, '');
     const baseUrl = env.VITE_OPENWOP_BASE_URL;
@@ -412,8 +423,9 @@ export default defineConfig(({ mode }) => {
             }
             // ADR 0819 — the LAZY AREA catalogs: `featureToggles` renders only in the
             // lazily-imported admin panel; `assistantAction` (ADR 0862) only in its
-            // lazily-imported card-fields module (src/i18n/resources.ts says why).
-            if (/\/src\/(featureToggles|assistantAction)\/i18n\/en\.ts$/.test(n)) return undefined;
+            // lazily-imported card-fields module; `workforces` and `settings` only in
+            // lazily-imported route pages (src/i18n/resources.ts says why).
+            if (/\/src\/(featureToggles|assistantAction|workforces|settings)\/i18n\/en\.ts$/.test(n)) return undefined;
             if (/\/src\/i18n\//.test(n) || /\/i18n\/(en|[a-z]{2}(-[A-Z]{2})?)\.ts$/.test(n)) return 'i18n';
             return undefined;
           },

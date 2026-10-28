@@ -61,13 +61,15 @@ describe('ADR 0227 — marketing.<channel> resolution matrix', () => {
       // 2. Umbrella-only record (a pre-ADR-0227 record shape) ⇒ governs every channel.
       await recordConsent({ tenantId: T, subjectKey: 's-umbrella', categories: { marketing: true }, source: 'test' });
       expect(await isAllowed(T, 's-umbrella', 'marketing.email')).toBe(true);
-      expect(await isAllowed(T, 's-umbrella', 'marketing.sms')).toBe(true);
+      // ADR 0955 D3: marketing SMS is strict explicit opt-in, so the umbrella no longer reaches it.
+      expect(await isAllowed(T, 's-umbrella', 'marketing.sms')).toBe(false);
       expect(await isAllowed(T, 's-umbrella', 'marketing.push')).toBe(true);
       // 3. Specific OFF + umbrella ON ⇒ the specific governs its channel; the
       //    others fall back to the umbrella; the umbrella ask itself is untouched.
       await recordConsent({ tenantId: T, subjectKey: 's-specific-off', categories: { marketing: true, 'marketing.email': false }, source: 'test' });
       expect(await isAllowed(T, 's-specific-off', 'marketing.email')).toBe(false);
-      expect(await isAllowed(T, 's-specific-off', 'marketing.sms')).toBe(true);
+      expect(await isAllowed(T, 's-specific-off', 'marketing.push')).toBe(true);
+      expect(await isAllowed(T, 's-specific-off', 'marketing.sms')).toBe(false); // ADR 0955 D3: strict
       expect(await isAllowed(T, 's-specific-off', 'marketing')).toBe(true);
       // 4. Specific ON + umbrella OFF ⇒ the specific still governs its channel.
       await recordConsent({ tenantId: T, subjectKey: 's-specific-on', categories: { marketing: false, 'marketing.email': true }, source: 'test' });
@@ -118,13 +120,17 @@ describe('ADR 0227 — sendCampaign gates on marketing.email', () => {
 });
 
 describe('ADR 0227 — journeys eligibility takes a channel', () => {
-  it('email-off contact is ineligible for email (default) but eligible for sms (umbrella fallback)', async () => {
+  // ADR 0955 D3: the SMS ask no longer falls back to the umbrella (strict explicit opt-in),
+  // so the sms leg needs its own recorded `marketing.sms: true`.
+  it('email-off contact is ineligible for email (default) but eligible for sms (explicit sms consent)', async () => {
     const T = 'tChJourney';
     const c = await createContact({ tenantId: T, name: 'Jo', email: 'jo-ch@example.com' });
     await recordConsent({ tenantId: T, subjectKey: c.contactId, categories: { marketing: true, 'marketing.email': false }, source: 'test' });
     try {
       await enableConsent('on');
       expect(await checkEligibility(T, c.contactId)).toEqual({ eligible: false, reason: 'consent' }); // default 'email'
+      expect(await checkEligibility(T, c.contactId, 'sms')).toEqual({ eligible: false, reason: 'consent' }); // umbrella alone: strict
+      await recordConsent({ tenantId: T, subjectKey: c.contactId, categories: { marketing: true, 'marketing.email': false, 'marketing.sms': true }, source: 'test' });
       expect(await checkEligibility(T, c.contactId, 'sms')).toMatchObject({ eligible: true, email: 'jo-ch@example.com' });
     } finally { await enableConsent('off'); }
   });

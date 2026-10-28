@@ -6,6 +6,13 @@
  * branch is a red build), unknown type ⇒ null (the route then 404s — never a
  * partial document), and the shapes that carry structure (comparison table,
  * faq headings, quote attribution) are pinned.
+ *
+ * What breaks it: a CMS type with no markdown branch (or one that renders
+ * nothing), a partial document for an unknown type, or a structural shape that
+ * stops being markdown. Sabotage witnesses (grade-tests 8f w2): md-default,
+ * md-page-null, md-coverage, md-table, md-quote-byline, md-freshness.
+ * Not claimed here: the ADR 0836 D7 CTA href re-check (grade-code lead
+ * MD-CTA-HREF-1).
  */
 import { describe, expect, it } from 'vitest';
 import { SECTION_TYPES, type Section } from '../src/features/cms/cmsService.js';
@@ -40,10 +47,16 @@ describe('sectionMarkdown — coverage (drift gate)', () => {
     for (const type of SECTION_TYPES) {
       const md = sectionMarkdown(fixture(type), BASE);
       expect(md, `sectionMarkdown must handle section type "${type}"`).not.toBeNull();
+      // Handled is not enough: a branch that returns '' serves an empty section.
+      // Every fixture above authors a heading or content, so each must render text.
+      expect(md?.trim().length ?? 0, `section type "${type}" rendered an empty section`).toBeGreaterThan(0);
     }
   });
 
   it('returns null for an unknown/future type → the route 404s', () => {
+    // The file's ONE cast, and deliberate: a stored row from a FUTURE build whose
+    // type is outside today's `Section` union is exactly what this runtime guard
+    // exists for, and no typed literal can express it.
     const bogus = { sectionId: 's', type: 'holo-deck', data: {} } as unknown as Section;
     expect(sectionMarkdown(bogus, BASE)).toBeNull();
     expect(pageMarkdown({ title: 'T', updatedAt: '2026-08-01T00:00:00.000Z', sections: [bogus] }, BASE)).toBeNull();

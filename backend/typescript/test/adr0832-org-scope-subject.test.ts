@@ -8,7 +8,15 @@
  *    person, recorded on a materialized kanban WorkItem from the run scope;
  *  - never a grant: the toggle resolver does not see it (a closed-beta listing
  *    is a grant), and a static scan holds every reader of the field to a known
- *    list, so a new reader is a review, not an accident.
+ *    list, so a new reader is a review, not an accident. The reader list is
+ *    checked BOTH ways: a listed file that no longer reads the field is a stale
+ *    entry and fails (it would otherwise admit an unreviewed reader later).
+ *
+ * Tracker TST-BOS-2. Sabotage-witnessed (w62): red when the field stops being
+ * reserved, runStarter stops stamping it, a child stops inheriting the parent's
+ * person or receives it as the actor, a WorkItem takes `requestedBy` from node
+ * args, the toggle resolver sees the causing member, an unlisted file reads the
+ * field, or a source-shape lane stamps the wrong person.
  */
 import { mkdtempSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -27,18 +35,25 @@ import { registerToggleDefault } from '../src/host/featureToggles/registry.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import type { Storage } from '../src/storage/storage.js';
 import type { RunRecord } from '../src/types.js';
+import type { WorkflowDefinition } from '../src/executor/types.js';
+import { createHostAdapterSuite, type HostAdapterSuite } from '../src/host/index.js';
 
 const TENANT = 'adr0832-subject';
 let storage: Storage;
 
-const catalog = { getWorkflow: async (id: string) => ({ workflowId: id, definition: { workflowId: id, nodes: [], edges: [], variables: [] } }) };
-const hostSuite = { workflowCatalog: catalog, providerPolicyResolver: { resolveForRun: async () => [] } } as unknown as StartRunDeps['hostSuite'];
+const definitionOf = (id: string): WorkflowDefinition => ({ workflowId: id, nodes: [], edges: [], variables: [] });
+let hostSuite: HostAdapterSuite;
 
 beforeAll(async () => {
   storage = await openStorage('memory://');
   initHostExtPersistence(storage);
   initInMemorySurfaces({ dataDir: mkdtempSync(join(tmpdir(), 'openwop-adr0832-')) });
-  setSubWorkflowDispatcher({ storage, hostSuite: hostSuite as never, executeRun: async () => ({}) });
+  hostSuite = {
+    ...createHostAdapterSuite({ storage }),
+    workflowCatalog: { getWorkflow: async (id: string) => ({ workflowId: id, definition: definitionOf(id) }) },
+    providerPolicyResolver: { resolveForRun: async () => [] },
+  };
+  setSubWorkflowDispatcher({ storage, hostSuite, executeRun: async () => ({}) });
 });
 afterAll(async () => { __resetHostExtPersistence(); await storage.close(); });
 
@@ -57,7 +72,8 @@ describe('stamping', () => {
 
   const parent = async (runId: string, metadata: Record<string, unknown>): Promise<void> => {
     const now = new Date().toISOString();
-    await insertRunWithStartContext(storage, { runId, workflowId: 'wf.parent', tenantId: TENANT, status: 'running', inputs: {}, metadata, configurable: {}, createdAt: now, updatedAt: now } as RunRecord);
+    const run: RunRecord = { runId, workflowId: 'wf.parent', tenantId: TENANT, status: 'running', inputs: {}, metadata, configurable: {}, createdAt: now, updatedAt: now };
+    await insertRunWithStartContext(storage, run);
   };
 
   it('a sub-workflow child carries its parent person as orgScopeSubject, never as actor', async () => {
@@ -87,7 +103,7 @@ describe('stamping', () => {
     const out = await kanban.materializeWorkItems({
       boardId: board.id, scope: { kind: 'canvas.example', externalRef: 'c1' }, source: { kind: 'example.plan', id: 'p1', revision: '1' },
       items: [{ key: 'k1', title: 'T', columnId: col }], idempotencyKey: 'idem-1', requestedBy: 'user:forged',
-    } as never) as { workItems: Array<{ workItemId: string }> };
+    });
     expect((await getWorkItem(out.workItems[0]!.workItemId))?.requestedBy).toBe('user:requester');
     expect(JSON.stringify(out), 'the person id is not echoed into run outputs').not.toContain('user:requester');
   });
@@ -98,7 +114,7 @@ describe('stamping', () => {
     const out = await kanban.materializeWorkItems({
       boardId: board.id, scope: { kind: 'canvas.example', externalRef: 'c2' }, source: { kind: 'example.plan', id: 'p2', revision: '1' },
       items: [{ key: 'k1', title: 'T', columnId: board.columns[0]!.id }], idempotencyKey: 'idem-2', requestedBy: 'user:forged',
-    } as never) as { workItems: Array<{ workItemId: string }> };
+    });
     expect((await getWorkItem(out.workItems[0]!.workItemId))?.requestedBy).toBeUndefined();
   });
 
@@ -113,7 +129,7 @@ describe('never a grant', () => {
   it('the toggle resolver does not see it: a closed-beta listing is not served to the causing member', async () => {
     const id = 'adr0832-beta-probe';
     registerToggleDefault({ id, status: 'off', bucketUnit: 'tenant', salt: id });
-    await saveConfig({ id, status: 'beta', bucketUnit: 'tenant', salt: id, betaCohort: ['user:beta-person'] } as never, 'test');
+    await saveConfig({ id, status: 'beta', bucketUnit: 'tenant', salt: id, betaCohort: ['user:beta-person'] }, 'test');
     registerFeatureSurface(id, () => ({ ping: async () => ({ ok: true }) }));
     const asActor = buildFeatureSurfaces({ tenantId: TENANT, actingUserId: 'user:beta-person' })[id]!;
     await expect(asActor.ping!({})).resolves.toEqual({ ok: true });
@@ -147,13 +163,21 @@ describe('never a grant', () => {
       'executor/subWorkflowDispatcher.ts', // stamped: parent person
       'features/channels/channelAgentDispatch.ts', // stamped: poster
       'features/kb/surface.ts', // forwarded as SubjectCaller.orgScopeSubject (org filter only)
+      'features/agent-knowledge/surface.ts', // ADR 0979 D3: NARROWS only — an ACTORLESS run's retrieve forwards it as SubjectCaller.orgScopeSubject, read only by tenantRetrieve's org filter (without it the run is tenant-trusted); never a subject, so a project-bound corpus stays refused (kb-subject-gate-doors "ADR 0979 D3" causing-member leg)
       'features/kb/kbService.ts', // tenantRetrieve's org filter
       'features/media/surface.ts', // its own floor, via assertRunScopeOrg
       'features/bi/surface.ts', // ADR 0846 D3: its own floor, via assertRunScopeOrg (runMetric)
+      'features/campaign-intel/surface.ts', // ADR 0956 D5: NARROWS only — utmLint floors the run's person on the named client org via assertRunScopeOrg
       'features/documents/surface.ts', // ADR 0838 D3: NARROWS only — the person must pass canReadDocument; absent ⇒ unchanged
       'features/crm/surface.ts', // ADR 0838 D3: NARROWS only — e-sign document target read-gated for the person; absent ⇒ unchanged
       'features/cms/surface.ts', // ADR 0859 D3/D4: NARROWS only — a causing member is recorded as a submitterCause, which only REFUSES a self-approval; never notified
+      'features/email/surface.ts', // ADR 0905 recovery: cause only refuses self-approval; no actor or notification grant
+      'features/email/agentTools.ts', // same narrowing-only submission attribution
+      'features/funnels/surface.ts', // ADR 0948 P1b: NARROWS only — a causing member is recorded as a funnel-publish submitterCause, which only REFUSES a self-approval; never notified
       'features/brand/surface.ts', // ADR 0891 D1: NARROWS only — the org-less listBrands keeps only the orgs the person may read (runOrgScopeFilter, cause lane by membership); absent ⇒ tenant-trusted, unchanged
+      'features/campaign-brief/surface.ts', // NARROWS only — a row named by id must sit in an org the person may read (runOrgScopeFilter on the row's org, cause lane by membership); the org-less lists keep only those orgs; absent ⇒ tenant-trusted, unchanged
+
+      'features/campaign-orchestration/surface.ts', // NARROWS only — getCampaign/attachAssets/finalizeFromBrief scope the ROW's org for the person (runOrgScopeFilter, cause lane by membership); the org-less listCampaigns keeps only those orgs; absent ⇒ tenant-trusted, unchanged
       'features/service-desk/surface.ts', // ADR 0878 D1: NARROWS only — getTicket/notifyTicketTeam floor the ticket's own org via assertRunScopeOrg
       'features/assistant/surface.ts', // ADR 0878 D6: NARROWS only — an org's pending action is listed only to a person who may decide it; the personal-owner exit is the ACTOR's only
       'features/computer-use/feature.ts', // ADR 0894 D2: NARROWS only — decide/status floor the SESSION's own org via assertRunScopeOrg (404 when refused); decide additionally requires actingUserId === the opener, so a cause never decides
@@ -166,6 +190,15 @@ describe('never a grant', () => {
       // ({cause}); absent ⇒ refused (no tenant trust). The recorded cause only REFUSES a
       // self-approval (separation of duties), the cms precedent.
       'features/campaign-ops/surface.ts',
+      // ADR 0961 P0: NARROWS only — the autopilot surface binds the run's person
+      // (actingUserId ?? orgScopeSubject) to read/write on the TAGGED campaign's org via
+      // assertRunOrgScope ({cause}); absent ⇒ refused (no tenant trust). A stage run is
+      // stamped with that same causing member (startWorkflowRun's explicit parameter).
+      'features/campaign-autopilot/stageRun.ts',
+      // ADR 0955 D1: NARROWS only — bindJourneyOrg floors a journey verb's client org for the
+      // run's person via assertRunScopeOrg (cause lane by membership); absent ⇒ the chain's
+      // org, the documented residual risk ADR 0954 D3 closes. Never a grant.
+      'features/campaign-journeys/surface.ts',
       'features/campaign-ops/runLauncher.ts', // stamped: the requester (change request) or the approver (execution), via startWorkflowRun's explicit parameter
       'features/entities/namespaceAccess.ts', // ADR 0847 D1: NARROWS only — the run's person must hold the tenant tier + the project namespace; absent ⇒ root tenant-trusted, project refused
       // ADR 0879 D7 — the run-lane conversation WRITE gate. Reviewed claim: it NARROWS. A
@@ -178,10 +211,31 @@ describe('never a grant', () => {
       'executor/types.ts', // NodeContext field doc (the executor threads the reserved key)
       'host/hostCapabilityGates.ts', // EXECUTOR_CTX_POLICY declares it run-context (G14)
       'host/approvalDecision.ts', // stamped: approver (the ADR 0832 D3 role runStarter documents)
+      'host/autonomyPolicy/selfApproval.ts', // ADR 0942: NARROWS only — the cause refuses self-approval; never grants authority
+      'host/autonomyPolicy/enforce.ts', // ADR 0942: carries the frozen requester's cause into self-approval refusal; never grants actor/credential authority
       'features/scheduled-agent-chats/scheduledChatService.ts', // stamped: the schedule's creator (host-written job metadata) + its backfill
+      // ADR 0957 D2 — stamped: the person who set a client report's schedule
+      // (host-written job metadata under a reserved job-id prefix). It only
+      // NARROWS: the fired run's surface calls go through bindRunToClient, which
+      // checks THAT person's scope on the exact client org; absent ⇒ refused.
+      'features/campaign-ops/reports/schedule.ts',
       'host/scheduleDaemon.ts', // forwarded from host-written job metadata onto the run
       'routes/scheduler.ts', // RESERVED job-metadata key — stripped from client metadata
       'host/schedulingService.ts', // DSAR: an erased creator's stamp is scrubbed
+      // ADR 0944 D2: NARROWS only — the client memory binding checks the run's person
+      // (actor, else the causing member as a cause) on the stamped client org via
+      // assertRunScopeOrg; a refusal is the empty sentinel scope, never another scope.
+      'host/runClientOrg.ts',
+      'bootstrap/nodes.ts', // forwarded from ctx into resolveRunMemoryClient (the chat.turn node)
+      'features/crm/leadIntel/runAdmission.ts', // ADR 0954 P3: shared explicit requester stamp and frozen cause match, only narrowing; extracted from routes
+      'features/crm/leadIntel/runReservation.ts', // ADR 0954 P2: cause hash must match the existing frozen primary reservation; verifier only refuses, never grants
+      'features/experiments/promotionService.ts', // ADR 0950: stamps the authenticated requester as cause; never grants actor/tool authority
+      'features/experiments/surface.ts', // ADR 0950: narrows every method to the run's person's org; cause is attribution, not a grant
+      // ADR 0944 D2: NARROWS only — a deep @mention run from a client-bound conversation is
+      // caused by the speaker, so the run lane re-checks THAT person on the stamped client.
+      'host/conversationExchange.ts',
+      'routes/interrupts.ts', // forwards the speaker into startWorkflowRun's explicit parameter
+      'features/campaign-ops/clientContext.ts', // ADR 0944 D5: reads the stamped cause to re-check the run's client (narrows)
     ]);
     const src = join(import.meta.dirname, '../src');
     const found: string[] = [];
@@ -195,6 +249,8 @@ describe('never a grant', () => {
     walk(src);
     expect(found.length, 'the scan must see the known readers').toBeGreaterThanOrEqual(READERS.size);
     expect(found.filter((f) => !READERS.has(f))).toEqual([]);
+    // Two-sided: a listed file that no longer reads the field is a stale entry.
+    expect([...READERS].filter((f) => !found.includes(f))).toEqual([]);
   });
 
   it('the lanes that cannot be driven here stamp the right person (source shape)', () => {

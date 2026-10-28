@@ -1,6 +1,6 @@
 # ADR 0955 — Lifecycle journeys over email and SMS
 
-Status: Proposed
+Status: Accepted (P0/P1/P2a/P2b/P3a/P4a/P4b-warm-up/P5 recovered; qualification pending; P3b, resume-review and test-then-winner open)
 
 Date: 2026-10-19. Program: Campaign Studio (ADRs 0941–0962), Tier 2 — channels.
 Net-new feature planned with `/feature-refinement`; not a MyndHyve port.
@@ -89,6 +89,23 @@ outputs.
 
 ### D2 — One eligibility function per channel, enforced again at the exit
 
+> **Correction 2026-10-20 (P0 `/architect`): the function lives in `features/crm/channelEligibility.ts`,
+> not in `campaign-journeys`.** `campaign-journeys` already imports `email`
+> (`journeyService.ts`, `contactSendCount`), so `email`'s broadcast calling into journeys would
+> cycle. `crm` owns the two records it reads first (the contact and the suppression overlay) and
+> already reads consent, with no reverse edge. `campaign-journeys` exposes it bound to the run's
+> client (`checkJourneyChannelEligibility`, the `channel-eligibility` node). **`sendCampaign`
+> moves onto it in P2** with the send nodes (it still composes consent, topic, suppression and the
+> frequency cap in its loop today); P0 changes no broadcast behaviour.
+>
+> **Correction 2026-10-20 (P0): suppression keys.** Legacy rows keep `${tenant}::${email}` and read
+> as tenant-wide email, so nothing gets less strict and nothing migrates. Every other row (SMS, or
+> any client-sender row) lives at `${tenant}::#${channel}:${address}:${senderOrgId|*}` (address first, so every scope of one number is one prefix for the P1 exit guard); readers
+> verify the row's own `channel`/`senderOrgId`/`address` after the point get, so a contrived key
+> collision can only miss, never misattribute. A check is at most two point reads. Every writer
+> shipped before P0 still writes tenant-wide email; P1 (STOP) and P4 (bounces) are the first
+> sender-scoped writers. The DSAR leg redacts the `#` rows too.
+
 `checkChannelEligibility(tenantId, orgId, contactId, channel, {purpose, topicId?})`
 replaces the email-shaped composite. Its reasons are a closed set:
 `contact_not_found | no_address | consent | consent_unreadable | suppressed |
@@ -113,7 +130,34 @@ deliverability_paused`.
   stays consent-agnostic for transactional use. Marketing SMS uses the new
   `feature.campaign-journeys.nodes.send-sms`, which runs eligibility first.
 
+> **Correction 2026-10-20 (P0 `/architect`): who decides `orgId`, and the legacy rows.**
+> - The run's client comes from the host-written stamps only: ADR 0921's `openwop-app.campaignOps`
+>   (read through `campaign-ops` `runStampOf`) and ADR 0941's run tag `campaignOrchestration.orgId`
+>   (read by key until #5050 lands `readCampaignRunTag`; then that one reader replaces it). Either
+>   naming another client, or the two disagreeing, is `forbidden_scope / wrong_client`; an unreadable
+>   run is refused. A run with a person behind it also needs `workspace:read` on the client.
+> - **Residual risk, accepted for v1:** an actorless, unstamped run (an event-triggered journey)
+>   takes the chain's `orgId`. The chain was authored by a member with `workspace:write`, but
+>   contacts are still tenant-scoped, so nothing yet proves the contact belongs to that client.
+>   ADR 0954 D3 (`LeadProfile` per org) closes it.
+> - `orgId` resolution: a `ClientAccount` ⇒ that client; the workspace root (the agency's house
+>   account) ⇒ `''`; a workspace with **no** client ⇒ `''` whatever org is named (before 0955,
+>   `re-engage-contact` passed `orgId` to say where follow-up work lands, so those workspaces keep
+>   the ADR 0222 keys byte for byte); otherwise a non-client org is 404 and none is
+>   `client_required`.
+> - Client keys are `${tenant}::@org::${orgId}::${journey}::${contact}` (and `…::@grp::…` for
+>   exclusivity), so they cannot collide with the 3-segment legacy keys. **No double send:** a
+>   client enroll first reads the legacy row (and a legacy group incumbent), because a contact
+>   enrolled before its workspace had clients would otherwise get the journey twice.
+> - The enrollment routes, once a workspace has clients, need `orgId` plus `workspace:read`
+>   (list) or `workspace:write` (reset) on that client. They were toggle-only before.
+
 ### D3 — SMS consent and STOP handling
+
+> **Decision 2026-10-20 (Campaign Studio decision 6, still open with David): built the strict
+> way.** `marketing.sms` joins `STRICT_EXPLICIT_OPT_IN` in P1 exactly as written below; records
+> with only the umbrella flag stop permitting SMS. If David chooses grandfathering (Q1), the change
+> is a one-time re-permission campaign plus a dated migration, never a looser evaluator.
 
 - **`marketing.sms` joins `STRICT_EXPLICIT_OPT_IN` (J3).** Only a recorded
   explicit `true` permits it: no umbrella fallback and no opt-out default, the
@@ -139,6 +183,39 @@ deliverability_paused`.
   WhatsApp rule): an opt-out applies even when the feature is off. Non-keyword
   messages go to ADR 0954 D7's conversation lane.
 
+> **Correction 2026-10-20 (P1 `/architect`): what each keyword writes, and to which scope.**
+> Consent is ONE record per subject for the whole workspace, while an agency has one Twilio
+> number per client. Writing `marketing.sms:false` on a STOP to client A's number would silence
+> every client, which contradicts Q3's per-sender proposal. So:
+> - **STOP** (UNSUBSCRIBE, CANCEL, END, QUIT) ⇒ a suppression row scoped to that client's
+>   sender. No consent write.
+> - **STOPALL** ⇒ a workspace-wide SMS suppression row, plus `marketing.sms:false` merged on
+>   both subject keys: the number and the contact it resolves to (`cdp:contact-ident`).
+> - **START / UNSTOP** ⇒ lifts only that sender's own keyword-written opt-out. It never writes
+>   consent (that would widen to every client) and never lifts a STOPALL, a complaint or a
+>   manual hold. After a STOPALL only a consent-bearing flow (the preference centre)
+>   re-permits. See Q7.
+> - **HELP** ⇒ nothing written.
+> - The client comes from the stored binding of the `To` number (`crm/smsSenders.ts`, admin
+>   routes `…/crm/sms-senders`, `host:members:manage` on the client); an unbound number takes
+>   the workspace scope, so a STOP always lands.
+> - **No host reply.** Twilio's default opt-out handling already answers STOP, START and HELP
+>   on long codes and toll-free numbers; a host reply would send the person two messages. If a
+>   sender turns Twilio's handling off, a host reply lane is a later phase.
+> - **Replay.** Twilio signs URL + params with no timestamp, so a captured signed STOP or START
+>   could be replayed. Each `MessageSid` is applied at most once (`crm:sms-inbound-seen`).
+> - **Provider id.** The inbound provider is the connection's own provider id, `twilio` (not a
+>   new `twilio-sms` id): an inbound config is keyed by the connection, whose provider it carries.
+>   Observer-only and ungated, like `zoom-webinar`.
+>
+> **Correction 2026-10-20 (P1): the exit guard.** `host/smsAdapter.ts` refuses, for every caller:
+> a recipient that is not E.164 (`sms_invalid_recipient`, Twilio needs it and it could not be
+> checked), a suppressed recipient (`sms_recipient_opted_out`, checked against the sender's client
+> from the `from` binding, or against EVERY scope when `from` is bound to none), and an unreadable
+> store (`sms_suppression_unreadable`). Twilio's error 21610 (its own opt-out list) maps to
+> `sms_recipient_opted_out`. The generic `sms-send` node still reports a refusal as
+> `status:'success'` with `sent:false`; that pre-existing shape is `J955WF-4`.
+
 ### D4 — Quiet hours
 
 A per-client `ChannelSendPolicy` (`campaign-journeys:send-policy`, key
@@ -152,6 +229,54 @@ again and refuses `quiet_hours` if the window has passed, which loops back to
 the wait. The legal default table (TCPA 8–21 h, stricter state rules) is
 configuration with conservative defaults. See Q2.
 
+> **Correction 2026-10-20 (P2a `/architect`): how the wait is built.** `core.flow.wait`'s `until`
+> reads only static config (`core.openwop.flow/index.mjs` `waitNode`), so it cannot take a
+> run-computed `resumeAt`. `next-send-window` therefore suspends ITSELF with the same ADR 0267
+> timer (`ctx.suspend({kind:'until', timestamp})`): the deadline is frozen in the interrupt, the
+> sweep resumes it, and a `:fork` of the waiting run inherits it (witnessed through the real
+> executor). The `resumeKey` carries the deadline, because the executor short-circuits a
+> re-suspend with a matching key: a node that re-enters to a NEW deadline (the policy changed
+> while it waited) must wait again, not proceed. `send-sms` re-checks the window and waits the
+> same way (the "loop back" in D4). The clock reading is the one Intl wrapper,
+> `host/localClock.ts`, shared with notification quiet hours (opposite semantics: those fail
+> toward delivering, these toward not sending). Unknown zone ⇒ `timezone_unknown`, never a guess.
+> Route callers naming an org that is neither a client nor the root get 404 (the run lane keeps
+> the client-less mapping only for pre-0955 chains). `send-sms` sends from the client's own
+> bound number (the lowest E.164 of that client's bindings), never another client's.
+>
+> **Decision 2026-10-20 (team-lead, David may override): Q7 = per-client SMS consent.** In the
+> agency model each client is a separate sender and brand, and TCPA/CTIA practice ties consent
+> to the brand that collected it, so one opt-in must not cover every client. Built in P2b
+> through ADR 0905 topics. STOPALL stays the global stop; re-permission after STOPALL is only
+> an explicit new opt-in.
+
+> **Correction 2026-10-20 (P2b `/architect`): how per-client SMS consent is built.** ADR 0905
+> topics are opt-OUT only (`consent/topicOptOuts.ts`, architect E5): a topic can narrow a
+> decision, never grant one. So Q7's per-client consent is an opt-IN record beside them in the
+> consent feature, `consent:client-channel` `{tenantId, orgId, subjectKey, channel, granted}`,
+> and the decision stays in the ONE evaluator: `isAllowed(…, 'marketing.sms', {client:{orgId}})`
+> denies on the erasure tombstone, then a workspace-level `false` (STOPALL / an explicit no),
+> then a missing or `false` client grant; topic narrowing still applies after. A
+> workspace-level `true` names no brand and never permits a client by itself. The record has
+> the topic store's lifecycle (PII-declared, erased with the subject, the ADR 0657 D10 write
+> barrier) and a CRM merge rule where a `false` always wins and a `true` lands only where the
+> survivor has no row. Writers in P2b: STOP to client A's number withdraws A's grant; START to
+> A's number records it (both subject keys) unless a STOPALL stands. **The forms sink is NOT a
+> writer yet:** today's forms capture only email consent (`email/formsConsentSink.ts`); SMS
+> capture with its disclosure text is the forms-builder work in the matrix's frontend row, and it
+> must write the collecting org's grant.
+>
+> **Correction 2026-10-20 (P2b): SMS templates and the broadcast.** SMS bodies live in the ADR 0905
+> store as `format:'sms'` (versions, content hash and pins unchanged), fixed at creation
+> (`format_locked`), refused by an email campaign (`template_format`), validated at write and
+> again at send (≤ 10 segments, and the opt-out keyword STOP as an uppercase word — "Reply STOP",
+> "Responde STOP" — which is how Twilio's opt-out works in every language; the first cut required
+> the English "Reply STOP" and would have refused every Spanish or French template). `send-sms`
+> takes `{templateId, templateVersion}` (a pinned version) or inline `text`. The email broadcast
+> now calls `checkChannelEligibility` instead of composing consent, topic and suppression itself,
+> with its old skip reasons unchanged (a topic opt-out is a `consent` skip). The shipped chains'
+> gates moved to `channel-eligibility@1.1.0`, whose `email` output keeps their edges.
+
 ### D5 — Send-time optimization: deterministic and explainable
 
 `feature.campaign-journeys.nodes.send-time` reads the contact's opens and clicks
@@ -161,6 +286,33 @@ client cohort's modal hour, then the template default. It clamps to quiet hours,
 delays at most 24 h, and outputs `{sendAt, basis, histogram}`. The output is
 recorded, so replay waits for the same instant. No model and no vendor black
 box: the operator sees why 10:00 Tuesday was chosen.
+
+> **Correction 2026-10-20 (P3a): the send-time node, and the rung it skips.** Built as
+> `send-time` (role `action`): the modal hour-of-WEEK when it is within 24 h, else the modal
+> hour-of-DAY (D5 says "delays at most 24 h"; a Friday-only reader on a Tuesday would otherwise
+> wait three days), else the default time; ties break to the earliest bucket so the same inputs
+> give the same `sendAt`; the window then wins over the preference (quiet hours are a rule, the
+> preference is a guess), and the node waits on the same durable timer as `next-send-window`. The
+> hours are read in ONE zone (the recipient's, or the first of the country's zones), while the
+> window clamp still intersects all of them. **Not built: the "client cohort's modal hour"
+> rung.** It needs a per-client engagement rollup that does not exist; computing it per send
+> would be the O(tenant) read P0 removed. ADR 0957 owns per-client rollups; when one exists it
+> becomes an input of `chooseSendTime`. Until then the basis goes straight to the default.
+>
+> **Correction 2026-10-20 (P5, J955WF-8): the resume key, and what the node outputs after a
+> wait.** P3a keyed the wait `send-window:${sendAt}`. The host re-invokes the node when the timer
+> fires, and by then the chosen time has just passed, so the node chose the NEXT one, the key
+> never matched, and it re-parked every day forever. The P3a test called the node a second time
+> at exactly `sendAt`, which hid it; only the P5 chain witness, re-invoked by the real sweep a
+> second later, showed it. The key is now the fixed `send-time`. The explanation `{ sendAt, basis,
+> histogram, zone }` is recorded on the suspension (`explain`) BEFORE the wait, because a
+> recomputation after it explains a different time (measured: `contact_hour_of_week` became
+> `contact_hour_of_day`). After a wait the node outputs `{ sendAt: when it fired, waited: true }`.
+>
+> **P3b — blocked (2026-10-20).** The split registration through ADR 0949 and the variant-set pin
+> (the ADR 0905 D3 amendment) need ADR 0949's engine store (#5073, #5079, #5085) and ADR 0946's
+> `VariantSet` (#5088), none merged. The journey split keeps `bucketHoldout` meanwhile (D6's
+> stated fallback).
 
 ### D6 — Experiments through ADR 0949, not beside it
 
@@ -199,6 +351,44 @@ box: the operator sees why 10:00 Tuesday was chosen.
   every marketing send. SMS opt-out rate is tracked as a guardrail
   under D6.
 
+> **Correction 2026-10-20 (P4a `/architect`): where the breaker lives, and what is not built.**
+> - **Owner:** `crm/senderHealth.ts`, beside the suppression overlay. `checkChannelEligibility`
+>   (crm) reads it, and `email` (sends, bounce webhooks) writes it, so no crm→email import
+>   (that would cycle).
+> - **Counters:** per (tenant, sender org, UTC day). The broadcast adds `sent` once per pass (a
+>   lost write under-counts sends, which raises the rates: it fails toward pausing). Each hard
+>   bounce or complaint counts once per (org, day, reason, address), so a redelivered webhook
+>   batch is idempotent. Bounce webhooks are configured per org, which names the sender.
+>   **Journey email sends are not counted** (they go out through the core `email-send` node,
+>   not the broadcast); the breaker reads broadcast volume, where a bad list burns a domain.
+> - **Pause:** over 7 days, at least 500 sends, complaints > 0.1 % or hard bounces > 2 %
+>   (env-tunable) ⇒ a CAS to paused, once, and a notification to the org's owners and admins.
+>   Marketing email only (`checkChannelEligibility` ⇒ `deliverability_paused`; the broadcast
+>   refuses up front, `409 sending_paused`); receipts and invitations keep flowing.
+> - **Resume:** the Email page's "Sending health" card, a person's act (a browser session plus
+>   `host:members:manage`), no workflow verb, no agent tool. **The `email-sending-resume`
+>   PendingApproval kind and the ADR 0942 `email.resume-sending` class are P4b**: ADR 0942's
+>   class registry is unmerged (#5051).
+> - **Domain auth:** SPF and DMARC by DNS, cached 24 h, enforced on the broadcast when the
+>   `email.sender-auth` sub-toggle (a restriction, OFF) is on; a DNS outage is its own refusal.
+>   **DKIM is not checked**: it needs the provider's domain-authentication API and credentials
+>   (OPEN for David).
+> - Hard bounces stay workspace-wide suppressions (D2 said "a hard bounce to one client's sender
+>   suppresses that sender"): a mailbox that does not exist is dead for every sender, so scoping
+>   it would only re-send to a dead address.
+> - **Warm-up caps are P4b** (per-day deferral in both send lanes).
+>
+> **Correction 2026-10-20 (P4b): warm-up as built.** Day N of a sender's sending life allows
+> `ramp[N]` marketing emails (default 50, 100, 250, 500, 1k, 2.5k, 5k, 10k, 20k, 40k; then no
+> ceiling; `OPENWOP_EMAIL_WARMUP_RAMP`). The broadcast caps each pass at today's remaining
+> allowance; at the ceiling it refuses `409 warmup_deferred` with `resumeAt` (the next UTC day),
+> and the campaign keeps its state, so nothing is dropped or skipped. **Opt-in** (`email.warmup`,
+> a restriction, OFF): nothing counted sends before P4a, so turning it on for an established
+> sender would throttle it as new. **Journey email sends are not capped** (they are not counted,
+> P4a). There is no auto-continue: an operator re-sends the next day (the existing continuation),
+> and the health card shows the day's ceiling. The `email-sending-resume` approval-inbox kind
+> waits on ADR 0942 (#5051).
+
 ### D8 — Templates and the ADR 0942 gates
 
 - Journey email nodes reference `{templateId, templateVersion}`, pinned when the
@@ -220,6 +410,14 @@ box: the operator sees why 10:00 Tuesday was chosen.
 - The Lifecycle Marketer agent (ADR 0943) drafts templates (ADR 0905
   `submit-for-review`) and journey drafts (the workflow-author draft → validate
   → persist trio). It has no send tool.
+
+> **Correction 2026-10-20 (P0): the per-contact engagement index.** `email:engagement-by-contact`
+> (key `${tenant}::${contact}::${at}::${id}`) is a denormalized copy written by the one event writer
+> (`putEngagementEvent`); the demo seeder, which backdates through its own handle, writes the copy
+> too. Rows from before the index are copied once per tenant (a marker written only after the copy
+> succeeds). Retention ages the copies with the events; erasure deletes them by contact prefix.
+> `checkEngagement` is one prefix read. Found on the way: the demo seeder's cleanup deleted
+> engagement rows by bare id, which matched nothing; it now deletes by the real key.
 
 ## Feature evaluation matrix
 
@@ -258,9 +456,35 @@ box: the operator sees why 10:00 Tuesday was chosen.
 | P0 | `checkChannelEligibility`, channel- and sender-scoped suppression, enrollment `orgId`, per-contact engagement index | Phone-only contact passes SMS eligibility; a client-B enrollment from a client-A run is refused; no tenant scan in `checkEngagement` |
 | P1 | Strict `marketing.sms`, `twilio-sms` inbound, shared keyword ladder, adapter STOP guard | A STOP blocks the next send from every caller, including the generic node; WhatsApp ladder tests unchanged |
 | P2 | `ChannelSendPolicy`, `next-send-window`, `send-sms` node, `campaign-journeys.sms` toggle, SMS template format | A send outside the window waits and resumes; a fork before the wait inherits `resumeAt` |
+| P2a | (split 2026-10-20, `/architect`) the runtime half: send policy, `next-send-window`, `send-sms`, the sub-toggle | the P2 exit criteria above |
+| P2b | the record half: SMS templates in the ADR 0905 store (`format:'sms'`, versions and pins), per-client SMS consent (Q7), `sendCampaign` on `checkChannelEligibility`, the shipped chains' gates on `channel-eligibility` (`J955WF-1`) | a START or form opt-in to client A does not permit client B; an SMS template edit reopens review; the broadcast and the journey refuse the same recipient for the same reason |
 | P3 | `send-time` node, ADR 0949 registration of splits, variant-set pin (ADR 0905 amendment) | Same inputs give the same `sendAt`; an edit to one variant reopens review |
 | P4 | Domain auth precondition, circuit breaker, warm-up caps | Synthetic complaint spike pauses only that sender; resume needs a person |
 | P5 | Blueprints (`post-webinar`, `abandoned-signup`, `test-then-winner` with ADR 0950), canvas palette | Blueprints load with zero chain errors and instantiate per client |
+
+> **Correction 2026-10-20 (P5, `/architect`): what P5 builds.** Three blueprints:
+> `welcome-email-sms` (the welcome series for a client, with a text a day later at the
+> contact's best time), `post-webinar` and `abandoned-signup`. Each takes `orgId`, gates on
+> `channel-eligibility`, and reaches a send only through a re-check on the sign-off gate's
+> `truthy approved` edge, its address bound from the re-check (the WF-EM shape). **Not built:
+> `test-then-winner`.** ADR 0950 has no implementation and its promotion node does not exist; a
+> blueprint that cannot promote a winner would claim a capability nobody has. **The palette is
+> a group, not a canvas:** every journey node declares `x-paletteCategory: 'journey'` (ADR 0767
+> D4), so the existing builder shows a Journey section. ADR 0267's parked journey canvas
+> (draft and publish) stays parked.
+
+## Implementation record
+
+| Phase | PR / commit | Tests | Notes |
+|---|---|---|---|
+| P0 | #5071 (`3683cff64` + this record) | `adr0955-p0-channel-eligibility.test.ts` (20 cases; seven sabotage witnesses in its header), `workflow-chain-campaign-journeys-execution.test.ts` unchanged and green | Stacked on #4933 (ADR 0905 P4: topic narrowing and the transactional purpose). `feature.campaign-journeys.nodes` 1.3.1 → 1.4.0 (`channel-eligibility` node; `enroll` 1.1.0). Parity fixture: literal call sites 296 → 298, asserted pairs 287 → 289 (coverage up, no new spread). |
+| P1 | #5075 | `adr0955-p1-sms-stop.test.ts` (12 cases through the signed public route and the real adapter, six sabotage witnesses in its header); `consent-channels`, `consent-erasure-tombstone`, `sms-notification-adapter` updated for strict SMS and E.164; WhatsApp suites unchanged and green | Stacked on #5071. Live Twilio row OPEN for David (Q8). |
+| P2a | #5086 | `adr0955-p2-send-window.test.ts` (13 cases: window math incl. +1 intersection and DST, the typed failures, the sub-toggle, the routes, and the exit criteria through the REAL executor and a REAL `:fork` of the waiting run; six sabotage witnesses in its header) | Stacked on #5075. Pack 1.4.0 → 1.5.0 (`next-send-window`, `send-sms`). Served-set floor 352 → 353, served 309 → 310 (`send-sms`). Parity: literal 298 → 300, asserted 289 → 291. |
+| P2b | #5096 | `adr0955-p2b-client-consent.test.ts` (6 cases: per-client consent incl. STOPALL, START/STOP through the signed webhook, the CRM merge rule, SMS templates, the broadcast and the journey refusing for the same reason; six sabotage witnesses in its header). `crm-merge-bounded-reads` warms the new index; `workflow-chain-email-reject-witness` allowance renamed to the new gate type. P0 test updated: a client now needs its own grant | Stacked on #5086. Pack 1.5.0 → 1.6.0 (`channel-eligibility` 1.1.0, `send-sms` 1.1.0); chain pack 1.2.3 (welcome-series, re-engage-contact 1.0.3). FE: SMS in the template format select, a segment hint, SMS templates kept out of the email campaign picker. |
+| P3a | #5097 | `adr0955-p3-send-time.test.ts` (5 cases: the five-event floor, determinism and ties, the 24 h cap, the window clamp, and the node waiting on the timer then explaining its choice; four sabotage witnesses in its header) | Stacked on #5096. Pack 1.6.0 → 1.7.0 (`send-time`). P3b blocked on ADR 0949/0946. |
+| P4a | #5106 | `adr0955-p4-deliverability.test.ts` (6 cases: the floor, the spike pausing only that sender, redelivery counted once, the journey and the broadcast refusing, the person-only resume through HTTP, SPF/DMARC; five sabotage witnesses, and the one gate it cannot witness named in its header); FE `sendingHealth.test.tsx` (3 cases, two witnesses) | Stacked on #5097. New sub-toggle `email.sender-auth` (OFF). P4b: warm-up caps, the resume approval kind with ADR 0942. |
+| P4b (warm-up) | #5107 | `adr0955-p4b-warmup.test.ts` (2 cases: off by default; the pass capped, the deferral over the ceiling, the next day's allowance, past the ramp; four sabotage witnesses); FE `sendingHealth.test.tsx` + 1 case | Stacked on #5106. New sub-toggle `email.warmup` (OFF). The resume approval kind waits on ADR 0942. |
+| P5 | #5113 | `adr0955-p5-blueprints.test.ts` (5 cases: also `post-webinar` and `abandoned-signup` through the real executor (J955WF-10), an unsubscribe mid-journey ending the run COMPLETED through a "stopped" terminal while a withdrawn consent still fails (J955WF-12); earlier: the three blueprints load with zero chain errors; two clients get two workflows, each bound to its own client; `welcome-email-sms` through the REAL executor: sign-off, the email, a one-day durable timer, the send-time timer, a text from the client's own number via a Twilio stub; four sabotage witnesses in its header). `adr0955-p3-send-time.test.ts` re-entry case rewritten (J955WF-8) | Stacked on #5107. Carries the #5110 fix (`core.flow.wait` failed every run after its wait, J955WF-7; `core.openwop.flow` 1.1.4, a NEW pin drift for release). Node pack 1.7.0 → 1.8.0 (`x-paletteCategory: 'journey'` on every node; `send-time` resume fix). Chain pack 1.2.3 → 1.3.0. FE: a Journey palette group in four locales. Declared ratchet raises (the welcome-series shape, required params with no honest default): `chain-config-conformance` 42 → 50, `seeded-chain-unfilled-params` 127 → 130; census floors 3 → 8 sends and 2 → 5 address-gated chains. |
 
 ## Alternatives weighed
 
@@ -297,8 +521,16 @@ ADR 0267 host extension. Nothing is advertised.
    provides credentials.
 5. Breaker thresholds (0.1 % complaints, 2 % hard bounces, window of 500) are
    first guesses from mailbox-provider guidance. Revisit after real sends.
-6. No `/architect` pass has been run yet. Run it before Accepted, focused on D2's
-   exit guard and D3's dual-subject consent merge.
+6. ~~No `/architect` pass has been run yet.~~ P0's pass ran 2026-10-20 (corrections under D2
+   and D1 above). P1's pass covers D2's exit guard and D3's dual-subject consent merge.
+7. ~~**(David, new in P1)**~~ **Decided 2026-10-20 by team-lead (overridable): yes** — see the D4 decision note. Per-client SMS consent. Consent is one record per subject per
+   workspace, so a person who sends STOPALL can be re-permitted only through a consent-bearing
+   flow, and an explicit SMS opt-in to one client is an opt-in for every client of the agency.
+   Proposed: per-client SMS consent through ADR 0905 topics (one SMS topic per client), so a
+   START or a form opt-in is recorded for that client only.
+8. **(David)** The live Twilio row (a real number, a STOP from a real handset reaching the
+   webhook) is OPEN until a Twilio account and number exist (Q4). P1 is witnessed against a
+   local stub with Twilio's documented signing and response shapes.
 
 ## Planning rows
 
@@ -307,3 +539,57 @@ ADR 0267 host extension. Nothing is advertised.
 
 **FEATURES "Future features":**
 `- **Lifecycle journeys over email and SMS (ADR 0955, Proposed 2026-10-19)** — nurture flows as journey chains (the one owner, campaign-journeys; broadcast stays in email), one eligibility check per channel shared by every sender, strict SMS opt-in with inbound STOP/START/HELP and a STOP guard at the SMS adapter, per-client quiet hours as durable waits, deterministic send-time choice, email and SMS tests through ADR 0949, a per-sender deliverability circuit breaker, and ADR 0942 gates at journey publish. Sub-toggle `campaign-journeys.sms` (OFF, tenant). No RFC.`
+
+
+Recovery composition checkpoint — 2026-10-25 (UNVALIDATED): all original journey
+P0–P5 commits are retained on current main. The merge preserves current CRM lead
+erasure, campaign-reference checks, suppression identity validation, CAS hold
+precedence and SMS autonomy content-bound grants. The scoped suppression reader
+extends the existing fail-closed identity check to every channel/sender row;
+storage failures are never treated as absent suppression on insert. No dependency
+or unfilled-parameter ceiling was raised. Generated floors/manifests/parity and
+exact new-chain measurements remain pending until the current gate is finished.
+
+The old P5 flow.wait repair is already present in the approved main artifact.
+The entire main core.openwop.flow 1.2.0 pack, schemas and current timer/input
+regressions are preserved byte-for-byte; no replacement artifact or pin bump is
+proposed for that pack. The original P5 history remains an ancestor.
+
+Before qualification, exercise a START lifting an unsubscribe while a complaint
+or manual hold lands concurrently: the recovered removeSuppressionIf still
+uses a read then unconditional delete. That path must not erase the newer hold.
+Broader send-window, client consent, warm-up and deliverability behavior and all
+original witnesses remain unexecuted in this recovery. Live Twilio/SMS requires
+its separately authorized provider account, recipient and spend; none was used.
+
+The concurrent complaint/manual-hold START witnesses are now authored UNRUN.
+The old failed-STOP fixture has been updated to inject at the storage CAS
+boundary used by main's guarded suppression writer; it no longer mocks an
+obsolete `put` path. No actual provider call has been made for this recovery.
+
+
+Recovery correction — 2026-10-25: a signed START could read its previous STOP
+and then unconditionally delete a newer complaint/operator hold. Both races
+were reproduced through the real signed inbound path and local SMS transport.
+The suppression owner now asks DurableCollection to compare-and-delete the
+exact row it examined, through Storage.kvCompareAndDelete, a single guarded DELETE in both database
+adapters. The existing CAS write contract is unchanged. Losing the comparison
+preserves the newer hold and keeps SMS sending refused. Only a successful
+removal decrements the suppression count or fires deletion hooks. Conditional
+deletes leave tenant index markers to the existing read-side self-healing,
+so a post-removal insert cannot have its fresh marker removed by this caller.
+No second sender, consent, suppression or storage authority is introduced.
+Focused and canonical qualification remain pending; live Twilio and unfinished
+journey phases remain explicitly open.
+
+
+Recovery dependency measurement — 2026-10-25: the sole new undeclared
+feature edge is `campaign-journeys → campaign-ops`, classified as a soft
+read of the existing client owner. It is already recommended, and the client
+store remains readable while that feature's UI is off. The new real enrollment
+case verifies both successful client-scoped enrollment and refusal of an absent
+client in that posture. The census ceiling advances exactly 113 → 114 with
+that identity and reason recorded; no hard disable lock or numeric slack is
+added. Native types and all 83 metadata/client-scope cases in seven suites
+passed. The separate 79-case boundary run is also green. Full canonical
+qualification and live Twilio remain pending.

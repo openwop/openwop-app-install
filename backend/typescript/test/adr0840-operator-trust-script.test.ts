@@ -3,6 +3,10 @@
  * Runs `scripts/ui-plugin-operator-trust.mjs` against a fixture laid out as the
  * corpus vendors it, then hands its output to the host loader. A drift in either
  * canonical form makes the host refuse the pack, and this goes red.
+ *
+ * TST-BWB-6 (grade-tests w62): red when the script's canonical form stops sorting keys
+ * (the host refuses the signature) or when the key file ends up wider than 0600 (the
+ * script's final `chmodSync` decides the mode; the `writeFileSync` mode is a first layer).
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';

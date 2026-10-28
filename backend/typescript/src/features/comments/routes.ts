@@ -13,13 +13,13 @@ import { resolveEffectiveAccess } from '../../host/accessControlService.js';
 import { PREAUTHORIZED_CALLER } from '../../host/subjectAccess.js';
 import {
   RESOURCE_TYPES, isResourceType,
-  listThread, createComment, updateComment, deleteComment, type CommentCaller,
+  listThread, createComment, updateComment, deleteComment, type CommentCaller, COMMENT_WRITE_SCOPE,
 } from './commentsService.js';
 import { emitCommentNotification } from './notifications.js';
 
 const FEATURE = { toggleId: 'comments', label: 'Collaboration / Comments' };
 const ORG = '/host/openwop-app/comments/orgs/:orgId';
-type Scope = 'workspace:read' | 'workspace:write';
+type Scope = 'workspace:read' | typeof COMMENT_WRITE_SCOPE;
 
 /**
  * ADR 0881 D1/D2 — the HTTP caller, every spelling it needs. `subject` is the canonical
@@ -57,7 +57,8 @@ export function registerCommentsRoutes(deps: RouteDeps): void {
         comments: thread,
         viewer: {
           userId: user.userId,
-          canWrite: access.scopes.includes('workspace:write'),
+          // ADR 0947 D2 — the comment-write scope, not workspace edit rights.
+          canWrite: access.scopes.includes(COMMENT_WRITE_SCOPE),
           canModerate: access.roles.includes('admin') || access.roles.includes('owner'),
         },
       });
@@ -67,7 +68,7 @@ export function registerCommentsRoutes(deps: RouteDeps): void {
   // ── add a comment / reply ──
   app.post(`${ORG}/comments`, async (req, res, next) => {
     try {
-      const { user, orgId, tenantId } = await authz(req, 'workspace:write');
+      const { user, orgId, tenantId } = await authz(req, COMMENT_WRITE_SCOPE);
       const body = (req.body ?? {}) as Record<string, unknown>;
       const { comment, notify, unnotifiedMentions } = await createComment({
         tenantId, orgId,
@@ -78,6 +79,11 @@ export function registerCommentsRoutes(deps: RouteDeps): void {
         body: body.body, authorId: user.userId, caller: httpCaller(req, user.userId),
         // ADR 0881 D5 — mentions ride the HTTP lane only.
         ...(body.mentions !== undefined ? { mentions: body.mentions } : {}),
+        // ADR 0947 D2 — a proofing pin, its intent, and (a person only) client visibility.
+        ...(body.anchor !== undefined ? { anchor: body.anchor } : {}),
+        ...(body.intent !== undefined ? { intent: body.intent } : {}),
+        ...(body.visibility !== undefined ? { visibility: body.visibility } : {}),
+        mayShare: true,
       });
       await emitCommentNotification(comment, notify);
       // `unnotifiedMentions` — members mentioned who cannot open this resource, so were
@@ -89,7 +95,7 @@ export function registerCommentsRoutes(deps: RouteDeps): void {
   // ── edit own body / resolve / reopen ──
   app.patch(`${ORG}/comments/:commentId`, async (req, res, next) => {
     try {
-      const { user, orgId, tenantId } = await authz(req, 'workspace:write');
+      const { user, orgId, tenantId } = await authz(req, COMMENT_WRITE_SCOPE);
       const body = (req.body ?? {}) as Record<string, unknown>;
       const patch: { body?: unknown; status?: unknown; mentions?: unknown } = {};
       if (body.body !== undefined) patch.body = requireString(body.body, 'body');
@@ -105,7 +111,7 @@ export function registerCommentsRoutes(deps: RouteDeps): void {
   // ── delete (author or org-admin) ──
   app.delete(`${ORG}/comments/:commentId`, async (req, res, next) => {
     try {
-      const { user, orgId, tenantId } = await authz(req, 'workspace:write');
+      const { user, orgId, tenantId } = await authz(req, COMMENT_WRITE_SCOPE);
       const access = await resolveEffectiveAccess(tenantId, { subject: user.userId, orgId });
       const isAdmin = access.roles.includes('admin') || access.roles.includes('owner');
       // ADR 0659 D1 — moderation. An org admin already had their authority resolved at

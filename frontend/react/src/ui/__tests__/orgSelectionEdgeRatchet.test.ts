@@ -376,9 +376,13 @@ const HAND_ROLLED: readonly string[] = [
   'canvas/CanvasEditorPage.tsx',
   'canvas/CanvasPresentPage.tsx',
   'canvas/CanvasPreviewPage.tsx',
-  'chat/ChatSidebar.tsx',
   'chat/hooks/useCommentsContext.ts',
   'chat/hooks/useConversationActions.tsx',
+  // ADR 0993 D1 — moved here from `chat/ChatSidebar.tsx` with the prompt-command
+  // registration. Checked against both deciding facts: a failed org read registers
+  // no commands and renders nothing (no claim, no hang); it is a plain module, so
+  // the hook cannot be used.
+  'chat/promptCommands.ts',
   'features/advisory-board/AdvisoryBoardPage.tsx',
   'features/agent-knowledge/AgentKnowledgePanel.tsx',
   'features/ambient-work-graph/WorkGraphPage.tsx',

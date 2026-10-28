@@ -22,6 +22,8 @@ import { getEmailSettings } from '../email/emailService.js';
 import { createLogger } from '../../observability/logger.js';
 import { getOrg } from '../../host/accessControlService.js';
 import type { OrgInvitation } from './invitationsService.js';
+import { renderTransactional } from '../../host/transactionalEmail.js';
+import { ORG_INVITATION_KIND, type OrgInvitationData } from './inviteTemplates.js';
 
 const log = createLogger('features.orgs.inviteDelivery');
 
@@ -68,19 +70,17 @@ export async function deliverInviteEmail(input: DeliverInviteInput): Promise<Inv
     // competitors' invite emails exist to avoid), and the expiry must be a
     // human date, not a raw ISO instant.
     const org = await getOrg(invite.orgId);
-    const clean = (v: string): string => v.replace(/[\r\n]+/g, ' ');
-    const orgName = clean(org?.name ?? 'an organization');
-    const inviter = invite.createdByName && !invite.createdByName.includes('@') ? clean(invite.createdByName) : undefined;
-    const expiresDay = invite.expiresAt.slice(0, 10);
+    const inviter = invite.createdByName && !invite.createdByName.includes('@') ? invite.createdByName : undefined;
+    // ADR 0905 D6 — the copy is a registered kind (4 locales, host default locale; the
+    // invite carries no recipient locale). The registry strips header-breaking characters.
+    const message = renderTransactional<OrgInvitationData>(ORG_INVITATION_KIND, {
+      ...(inviter ? { inviter } : {}), orgName: org?.name ?? 'an organization', role: invite.role, acceptUrl, expiresDay: invite.expiresAt.slice(0, 10),
+    });
     await provider.send({
       from,
       to: invite.email,
-      subject: inviter ? `${inviter} invited you to join ${orgName}` : `You've been invited to join ${orgName}`,
-      body:
-        `${inviter ? `${inviter} has invited you` : 'You have been invited'} to join ${orgName} as ${invite.role}.\n\n` +
-        `Accept your invitation:\n${acceptUrl}\n\n` +
-        `This link is single-use and expires on ${expiresDay}. ` +
-        `If you were not expecting this invitation, you can ignore this email.`,
+      subject: message.subject,
+      body: message.text,
       // Send-once: deterministic per invite — a route retry (same inviteId)
       // dedups in the adapter's sent-ledger; a NEW invite gets a new key.
       idempotencyKey: `org-invite:${invite.inviteId}`,

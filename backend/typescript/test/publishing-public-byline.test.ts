@@ -24,6 +24,10 @@
  * a ruling. What is NOT arguable is that it must be a NAME, escaped and
  * bounded — which is what this fix guarantees.
  *
+ * An author the seam cannot name gets no byline at all (the humanized-id
+ * fallback is for in-app rosters, not anonymous readers): the system-site
+ * "By 0b39f331" report, 2026-10-26.
+ *
  * Sabotage-witnessed (/grade-tests 8f wave 1): resolving the creator to the id
  * instead of the display name (8fw1g3-byline-name) and dropping the XML escape
  * (byline-escape-r2 — the escaped case pins the WHOLE escaped creator element).
@@ -125,18 +129,23 @@ describe('CMSA-13 — the anonymous byline must be a NAME, never the internal pr
     expect(list.posts[0]?.authorName).toBe('Ada Lovelace');
   });
 
-  it('with NO display name it degrades to a humanized id — still never the raw principal', async () => {
-    // `subjectDisplay.ts`: "Absent resolvers degrade to fallbacks — never a raw
-    // ref, never a throw." The seam upholds that; the caller must not undo it
-    // with a `?? id` of its own.
+  it('with NO resolvable name the post has NO byline — never a hash, never the principal', async () => {
+    // The seam degrades an unknown subject to a humanized id ("0b39f331") for
+    // in-app rosters. On the anonymous blog that hash is noise, and it is what
+    // a superadmin's post on the system site showed ("By 0b39f331"): the author
+    // is resolved in the site's tenant, where they have no user record. So the
+    // public surfaces drop the byline instead (no <dc:creator>, no authorName).
     const { c, orgId, userId } = await ownerOrg();
     await publishPost(c, orgId, 'Anonymous-ish post');
     const xml = await feed(orgId);
-    expect(xml).toMatch(/<dc:creator>[^<]+<\/dc:creator>/); // present…
-    expect(xml).not.toContain(userId);                       // …but not the principal
-    expect(xml).not.toMatch(/<dc:creator>user:/);
+    expect(xml).toContain('<title>Anonymous-ish post</title>');
+    expect(xml).not.toContain('<dc:creator>');
+    expect(xml).not.toContain(userId);
     const bare = userId.replace(/^user:/, '');
-    expect(xml).not.toContain(bare);                         // nor the bare 32-hex
+    expect(xml).not.toContain(bare.slice(0, 8));
+    const list = await blogList(orgId);
+    expect(list.posts).toHaveLength(1);
+    expect(list.posts[0]).not.toHaveProperty('authorName');
   });
 
   it('an attacker-controlled display name is XML-escaped, not injected', async () => {

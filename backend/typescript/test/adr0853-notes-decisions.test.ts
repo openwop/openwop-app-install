@@ -7,6 +7,16 @@
  *     filing past the per-save cap; re-adding a line is idempotent (same ref);
  *   - an org-level document, a project with no ledger, or a decision record ⇒ nothing;
  *   - the parser takes list markers / bold and ignores "decisions" in prose.
+ *
+ * TST-BWD-4 (grade-tests w62): red when a decision record files, when a ledger-less
+ * project files, when every line (not just new ones) counts toward the per-save cap, when
+ * numbered lines stop parsing, or when the suggestion loses its writer or its link.
+ * TWO RECORDED DOUBLE GUARDS: (1) "only new lines count" in the first case is also held by
+ * `createSuggestion`'s ref idempotency (same document + same text ⇒ same ref), so the
+ * before-filter is witnessed by the cap case, not that one; (2) an org-level document files
+ * nothing even without the `ownerSubject` check, because `e.ownerSubject.id` then throws and
+ * the observer runner (`host/documentVersionObservers.ts`) catches it — the leg stays green
+ * either way, and the decision-record half of the same case is the witnessed one.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -35,22 +45,23 @@ function client() {
   const call = async (method: string, path: string, body?: unknown) => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]!; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) as any };
+    const payload = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    return { status: res.status, body: (payload ?? {}) as { user?: { userId: string }; orgId?: string; id?: string; documentId?: string } };
   };
   return { post: (p: string, b?: unknown) => call('POST', p, b) };
 }
 async function setup(opts: { ledger?: boolean } = {}) {
   const tenantId = `org:d7-${Date.now()}-${n++}`;
   const owner = client();
-  const ownerId = (await owner.post('/host/openwop-app/test/login', { email: `d7-${n++}@acme.test`, tenantId })).body.user.userId as string;
-  const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'NotesCo' })).body.orgId as string;
-  const proj = (await owner.post('/host/openwop-app/projects', { orgId, name: 'Launch' })).body as { id: string };
+  const ownerId = (await owner.post('/host/openwop-app/test/login', { email: `d7-${n++}@acme.test`, tenantId })).body.user!.userId;
+  const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'NotesCo' })).body.orgId!;
+  const proj = { id: (await owner.post('/host/openwop-app/projects', { orgId, name: 'Launch' })).body.id! };
   if (opts.ledger !== false) expect((await owner.post(`/host/openwop-app/team-ledger/projects/${proj.id}`)).status).toBe(201);
   const D = `/host/openwop-app/documents/orgs/${encodeURIComponent(orgId)}/documents`;
   const doc = async (owned: boolean, kind = 'brief'): Promise<string> => {
     const r = await owner.post(D, { title: 'Kickoff notes', kind, format: 'markdown', ...(owned ? { ownerSubject: { kind: 'project', id: proj.id } } : {}) });
     expect(r.status, JSON.stringify(r.body)).toBe(201);
-    return r.body.documentId as string;
+    return r.body.documentId!;
   };
   const save = async (documentId: string, content: string) => {
     const r = await owner.post(`${D}/${encodeURIComponent(documentId)}/versions`, { content });

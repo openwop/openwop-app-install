@@ -1,6 +1,6 @@
 /**
  * feature.cms.nodes — CMS feature nodes over the `ctx.features.cms` surface
- * (ADR 0064 Phase 3 / RFC 0103; write verbs ADR 0204 C6). Six action nodes:
+ * (ADR 0064 Phase 3 / RFC 0103; write verbs ADR 0204 C6). Seven nodes:
  *
  *   get-page             reads a published page resolved for a target locale
  *                        (a tenant-store read — a side-effect → role:action).
@@ -14,6 +14,10 @@
  *   submit-page          submits a DRAFT for review with the SAME approval-
  *                        gate composition as the editor submit. A node can
  *                        draft and submit; it can NEVER publish.
+ *   create-draft-page    creates a DRAFT page (ADR 0948 P1 / ADR 0162). Its page
+ *                        id is derived from the run and node, never an input, so a
+ *                        re-delivered call returns the same page and a node can
+ *                        never claim an existing page as its "draft".
  *
  * All record their outputs; replay/fork read the recorded result rather than
  * re-querying or re-generating. Pure-JS, Node-20 stdlib only.
@@ -249,6 +253,47 @@ export async function submitPage(ctx) {
   return { status: 'success', outputs: out };
 }
 
+/** ADR 0948 P1 — create a DRAFT CMS page. The id is `page:<runId>:<nodeId>[:<key>]`:
+ *  a re-delivered call in the same run returns the same page; a replay fork is served
+ *  the recorded output (role:side-effect); a branch fork is a new run and drafts its
+ *  own page. `key` separates several pages from one node (a loop). The surface only
+ *  ever creates drafts and reports the page's real status. */
+export async function createDraftPage(ctx) {
+  const cms = ensureCms(ctx);
+  if (typeof cms.createDraftPage !== 'function') {
+    throw Object.assign(
+      new Error('host ctx.features.cms does not expose createDraftPage — needs the ADR 0162 surface'),
+      { code: 'host_capability_missing', capability: 'host.sample.cms' },
+    );
+  }
+  const i = args(ctx);
+  const orgId = str(i.orgId);
+  if (!orgId) return { status: 'failed', error: { code: 'validation_error', message: 'create-draft-page requires `orgId`.' } };
+  if (!Array.isArray(i.sections) || i.sections.length === 0) {
+    return { status: 'failed', error: { code: 'validation_error', message: 'create-draft-page requires a non-empty `sections` array of {type, data}.' } };
+  }
+  if (!ctx.runId || !ctx.nodeId) {
+    return { status: 'failed', error: { code: 'run_context_required', message: 'create-draft-page derives its page id from the run; it cannot run outside one.' } };
+  }
+  const key = str(i.key).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64);
+  const pageId = `page:${ctx.runId}:${ctx.nodeId}${key ? `:${key}` : ''}`;
+  const title = str(i.title).trim();
+  const page = await cms.createDraftPage({
+    orgId, title, sections: i.sections, pageId,
+    ...(str(i.slug) ? { slug: str(i.slug) } : {}),
+  });
+  // `createPage` returns an EXISTING row for a fixed id. A re-delivery (same title,
+  // still a draft) is that row; anything else is the node run again with new inputs
+  // in the same run, or a draft published since, so it fails rather than reporting
+  // a stale or live page as this call's draft. (The CMS caps and trims titles.)
+  const got = str(page && page.title);
+  const sameTitle = !title || got === title || (got !== '' && title.length > got.length && title.startsWith(got));
+  if (!page || page.status !== 'draft' || !sameTitle) {
+    return { status: 'failed', error: { code: 'run_page_exists', message: `This run already drafted a different page here (status ${page && page.status}). Give the node a distinct \`key\`.` } };
+  }
+  return { status: 'success', outputs: { page } };
+}
+
 export const nodes = {
   'feature.cms.nodes.get-page': getPage,
   'feature.cms.nodes.list-pages': listPages,
@@ -256,6 +301,7 @@ export const nodes = {
   'feature.cms.nodes.get-draft-page': getDraftPage,
   'feature.cms.nodes.update-section-draft': updateSectionDraft,
   'feature.cms.nodes.submit-page': submitPage,
+  'feature.cms.nodes.create-draft-page': createDraftPage,
 };
 
 export default nodes;

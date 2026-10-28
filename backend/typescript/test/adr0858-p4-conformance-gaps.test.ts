@@ -12,7 +12,10 @@
  *      `getRunAncestry` parent is `null`. The route used to turn ANY
  *      `parentRunId` (a fork stamps one) into `{cause: 'core.subWorkflow'}`.
  *      A dispatched child keeps its parent — the control that a route answering
- *      `null` for everything cannot pass.
+ *      `null` for everything cannot pass. *
+ * Tracker TST-BFA-5. Red when: the ancestry route drops the `forkMode`
+ * discriminator (a fork reports a parent); a dispatched child loses its parent
+ * or its `cause`; the no-plan supervisor records an empty `next-worker`.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';

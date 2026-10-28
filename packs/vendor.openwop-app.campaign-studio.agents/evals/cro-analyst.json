@@ -1,0 +1,2734 @@
+{
+  "suiteId": "vendor.openwop-app.campaign-studio.evals.cro-analyst",
+  "version": "1.0.0",
+  "targetAgentId": "vendor.openwop-app.campaign-studio.agents.cro-analyst",
+  "modes": [
+    "golden"
+  ],
+  "thresholds": {
+    "passScore": 0.9
+  },
+  "tasks": [
+    {
+      "taskId": "find-biggest-drop",
+      "input": {
+        "request": "Where are we losing people in the Trailblazer launch funnel fn_1?"
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:funnels.get"
+            },
+            {
+              "tool": "openwop:funnels.step-stats"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:funnels.list",
+            "response": {
+              "funnels": [
+                {
+                  "funnelId": "fn_1",
+                  "name": "Trailblazer launch"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.list",
+            "response": {
+              "funnels": [
+                {
+                  "funnelId": "fn_1",
+                  "name": "Trailblazer launch"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.get",
+            "response": {
+              "funnel": {
+                "funnelId": "fn_1",
+                "steps": [
+                  {
+                    "stepId": "s1",
+                    "pageId": "pg_land"
+                  },
+                  {
+                    "stepId": "s2",
+                    "pageId": "pg_checkout"
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:funnels.get",
+            "response": {
+              "funnel": {
+                "funnelId": "fn_1",
+                "steps": [
+                  {
+                    "stepId": "s1",
+                    "pageId": "pg_land"
+                  },
+                  {
+                    "stepId": "s2",
+                    "pageId": "pg_checkout"
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:funnels.step-stats",
+            "response": {
+              "steps": [
+                {
+                  "stepId": "s1",
+                  "visitors": 4200,
+                  "conversions": 610
+                },
+                {
+                  "stepId": "s2",
+                  "visitors": 610,
+                  "conversions": 95
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.step-stats",
+            "response": {
+              "steps": [
+                {
+                  "stepId": "s1",
+                  "visitors": 4200,
+                  "conversions": 610
+                },
+                {
+                  "stepId": "s2",
+                  "visitors": 610,
+                  "conversions": 95
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:analytics.query",
+            "response": {
+              "rows": [
+                {
+                  "event": "page_view",
+                  "count": 4200
+                },
+                {
+                  "event": "add_to_cart",
+                  "count": 610
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:analytics.query",
+            "response": {
+              "rows": [
+                {
+                  "event": "page_view",
+                  "count": 4200
+                },
+                {
+                  "event": "add_to_cart",
+                  "count": 610
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:cms.list-pages",
+            "response": {
+              "pages": [
+                {
+                  "pageId": "pg_land",
+                  "title": "Trailblazer 2"
+                },
+                {
+                  "pageId": "pg_checkout",
+                  "title": "Checkout"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:cms.list-pages",
+            "response": {
+              "pages": [
+                {
+                  "pageId": "pg_land",
+                  "title": "Trailblazer 2"
+                },
+                {
+                  "pageId": "pg_checkout",
+                  "title": "Checkout"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:cms.get-page",
+            "response": {
+              "page": {
+                "pageId": "pg_land",
+                "title": "Trailblazer 2",
+                "sections": [
+                  {
+                    "type": "hero",
+                    "data": {
+                      "heading": "Trail-tested comfort",
+                      "cta": "Shop now"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:cms.get-page",
+            "response": {
+              "page": {
+                "pageId": "pg_land",
+                "title": "Trailblazer 2",
+                "sections": [
+                  {
+                    "type": "hero",
+                    "data": {
+                      "heading": "Trail-tested comfort",
+                      "cta": "Shop now"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:bi.list-metrics",
+            "response": {
+              "metrics": [
+                {
+                  "metricId": "m_cvr",
+                  "name": "Checkout conversion rate"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.list-metrics",
+            "response": {
+              "metrics": [
+                {
+                  "metricId": "m_cvr",
+                  "name": "Checkout conversion rate"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.run-metric",
+            "response": {
+              "metricId": "m_cvr",
+              "value": 0.156,
+              "n": 610
+            }
+          },
+          {
+            "tool": "openwop:bi.run-metric",
+            "response": {
+              "metricId": "m_cvr",
+              "value": 0.156,
+              "n": 610
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "page-at-drop",
+      "input": {
+        "request": "Why do visitors drop on the landing step of fn_1? Look at the page."
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:funnels.step-stats"
+            },
+            {
+              "tool": "openwop:cms.get-page"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:funnels.list",
+            "response": {
+              "funnels": [
+                {
+                  "funnelId": "fn_1",
+                  "name": "Trailblazer launch"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.list",
+            "response": {
+              "funnels": [
+                {
+                  "funnelId": "fn_1",
+                  "name": "Trailblazer launch"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.get",
+            "response": {
+              "funnel": {
+                "funnelId": "fn_1",
+                "steps": [
+                  {
+                    "stepId": "s1",
+                    "pageId": "pg_land"
+                  },
+                  {
+                    "stepId": "s2",
+                    "pageId": "pg_checkout"
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:funnels.get",
+            "response": {
+              "funnel": {
+                "funnelId": "fn_1",
+                "steps": [
+                  {
+                    "stepId": "s1",
+                    "pageId": "pg_land"
+                  },
+                  {
+                    "stepId": "s2",
+                    "pageId": "pg_checkout"
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:funnels.step-stats",
+            "response": {
+              "steps": [
+                {
+                  "stepId": "s1",
+                  "visitors": 4200,
+                  "conversions": 610
+                },
+                {
+                  "stepId": "s2",
+                  "visitors": 610,
+                  "conversions": 95
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.step-stats",
+            "response": {
+              "steps": [
+                {
+                  "stepId": "s1",
+                  "visitors": 4200,
+                  "conversions": 610
+                },
+                {
+                  "stepId": "s2",
+                  "visitors": 610,
+                  "conversions": 95
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:analytics.query",
+            "response": {
+              "rows": [
+                {
+                  "event": "page_view",
+                  "count": 4200
+                },
+                {
+                  "event": "add_to_cart",
+                  "count": 610
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:analytics.query",
+            "response": {
+              "rows": [
+                {
+                  "event": "page_view",
+                  "count": 4200
+                },
+                {
+                  "event": "add_to_cart",
+                  "count": 610
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:cms.list-pages",
+            "response": {
+              "pages": [
+                {
+                  "pageId": "pg_land",
+                  "title": "Trailblazer 2"
+                },
+                {
+                  "pageId": "pg_checkout",
+                  "title": "Checkout"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:cms.list-pages",
+            "response": {
+              "pages": [
+                {
+                  "pageId": "pg_land",
+                  "title": "Trailblazer 2"
+                },
+                {
+                  "pageId": "pg_checkout",
+                  "title": "Checkout"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:cms.get-page",
+            "response": {
+              "page": {
+                "pageId": "pg_land",
+                "title": "Trailblazer 2",
+                "sections": [
+                  {
+                    "type": "hero",
+                    "data": {
+                      "heading": "Trail-tested comfort",
+                      "cta": "Shop now"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:cms.get-page",
+            "response": {
+              "page": {
+                "pageId": "pg_land",
+                "title": "Trailblazer 2",
+                "sections": [
+                  {
+                    "type": "hero",
+                    "data": {
+                      "heading": "Trail-tested comfort",
+                      "cta": "Shop now"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:bi.list-metrics",
+            "response": {
+              "metrics": [
+                {
+                  "metricId": "m_cvr",
+                  "name": "Checkout conversion rate"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.list-metrics",
+            "response": {
+              "metrics": [
+                {
+                  "metricId": "m_cvr",
+                  "name": "Checkout conversion rate"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.run-metric",
+            "response": {
+              "metricId": "m_cvr",
+              "value": 0.156,
+              "n": 610
+            }
+          },
+          {
+            "tool": "openwop:bi.run-metric",
+            "response": {
+              "metricId": "m_cvr",
+              "value": 0.156,
+              "n": 610
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "propose-test",
+      "input": {
+        "request": "Propose the next A/B test for funnel fn_1."
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:funnels.step-stats"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:funnels.list",
+            "response": {
+              "funnels": [
+                {
+                  "funnelId": "fn_1",
+                  "name": "Trailblazer launch"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.list",
+            "response": {
+              "funnels": [
+                {
+                  "funnelId": "fn_1",
+                  "name": "Trailblazer launch"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.get",
+            "response": {
+              "funnel": {
+                "funnelId": "fn_1",
+                "steps": [
+                  {
+                    "stepId": "s1",
+                    "pageId": "pg_land"
+                  },
+                  {
+                    "stepId": "s2",
+                    "pageId": "pg_checkout"
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:funnels.get",
+            "response": {
+              "funnel": {
+                "funnelId": "fn_1",
+                "steps": [
+                  {
+                    "stepId": "s1",
+                    "pageId": "pg_land"
+                  },
+                  {
+                    "stepId": "s2",
+                    "pageId": "pg_checkout"
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:funnels.step-stats",
+            "response": {
+              "steps": [
+                {
+                  "stepId": "s1",
+                  "visitors": 4200,
+                  "conversions": 610
+                },
+                {
+                  "stepId": "s2",
+                  "visitors": 610,
+                  "conversions": 95
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.step-stats",
+            "response": {
+              "steps": [
+                {
+                  "stepId": "s1",
+                  "visitors": 4200,
+                  "conversions": 610
+                },
+                {
+                  "stepId": "s2",
+                  "visitors": 610,
+                  "conversions": 95
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:analytics.query",
+            "response": {
+              "rows": [
+                {
+                  "event": "page_view",
+                  "count": 4200
+                },
+                {
+                  "event": "add_to_cart",
+                  "count": 610
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:analytics.query",
+            "response": {
+              "rows": [
+                {
+                  "event": "page_view",
+                  "count": 4200
+                },
+                {
+                  "event": "add_to_cart",
+                  "count": 610
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:cms.list-pages",
+            "response": {
+              "pages": [
+                {
+                  "pageId": "pg_land",
+                  "title": "Trailblazer 2"
+                },
+                {
+                  "pageId": "pg_checkout",
+                  "title": "Checkout"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:cms.list-pages",
+            "response": {
+              "pages": [
+                {
+                  "pageId": "pg_land",
+                  "title": "Trailblazer 2"
+                },
+                {
+                  "pageId": "pg_checkout",
+                  "title": "Checkout"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:cms.get-page",
+            "response": {
+              "page": {
+                "pageId": "pg_land",
+                "title": "Trailblazer 2",
+                "sections": [
+                  {
+                    "type": "hero",
+                    "data": {
+                      "heading": "Trail-tested comfort",
+                      "cta": "Shop now"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:cms.get-page",
+            "response": {
+              "page": {
+                "pageId": "pg_land",
+                "title": "Trailblazer 2",
+                "sections": [
+                  {
+                    "type": "hero",
+                    "data": {
+                      "heading": "Trail-tested comfort",
+                      "cta": "Shop now"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:bi.list-metrics",
+            "response": {
+              "metrics": [
+                {
+                  "metricId": "m_cvr",
+                  "name": "Checkout conversion rate"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.list-metrics",
+            "response": {
+              "metrics": [
+                {
+                  "metricId": "m_cvr",
+                  "name": "Checkout conversion rate"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.run-metric",
+            "response": {
+              "metricId": "m_cvr",
+              "value": 0.156,
+              "n": 610
+            }
+          },
+          {
+            "tool": "openwop:bi.run-metric",
+            "response": {
+              "metricId": "m_cvr",
+              "value": 0.156,
+              "n": 610
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "small-sample",
+      "input": {
+        "request": "Is the new checkout better? Check funnel fn_1."
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:funnels.step-stats"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:funnels.list",
+            "response": {
+              "funnels": [
+                {
+                  "funnelId": "fn_1",
+                  "name": "Trailblazer launch"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.list",
+            "response": {
+              "funnels": [
+                {
+                  "funnelId": "fn_1",
+                  "name": "Trailblazer launch"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.get",
+            "response": {
+              "funnel": {
+                "funnelId": "fn_1",
+                "steps": [
+                  {
+                    "stepId": "s1",
+                    "pageId": "pg_land"
+                  },
+                  {
+                    "stepId": "s2",
+                    "pageId": "pg_checkout"
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:funnels.get",
+            "response": {
+              "funnel": {
+                "funnelId": "fn_1",
+                "steps": [
+                  {
+                    "stepId": "s1",
+                    "pageId": "pg_land"
+                  },
+                  {
+                    "stepId": "s2",
+                    "pageId": "pg_checkout"
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:funnels.step-stats",
+            "response": {
+              "steps": [
+                {
+                  "stepId": "s2",
+                  "visitors": 14,
+                  "conversions": 3
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.step-stats",
+            "response": {
+              "steps": [
+                {
+                  "stepId": "s2",
+                  "visitors": 14,
+                  "conversions": 3
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:analytics.query",
+            "response": {
+              "rows": [
+                {
+                  "event": "page_view",
+                  "count": 4200
+                },
+                {
+                  "event": "add_to_cart",
+                  "count": 610
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:analytics.query",
+            "response": {
+              "rows": [
+                {
+                  "event": "page_view",
+                  "count": 4200
+                },
+                {
+                  "event": "add_to_cart",
+                  "count": 610
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:cms.list-pages",
+            "response": {
+              "pages": [
+                {
+                  "pageId": "pg_land",
+                  "title": "Trailblazer 2"
+                },
+                {
+                  "pageId": "pg_checkout",
+                  "title": "Checkout"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:cms.list-pages",
+            "response": {
+              "pages": [
+                {
+                  "pageId": "pg_land",
+                  "title": "Trailblazer 2"
+                },
+                {
+                  "pageId": "pg_checkout",
+                  "title": "Checkout"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:cms.get-page",
+            "response": {
+              "page": {
+                "pageId": "pg_land",
+                "title": "Trailblazer 2",
+                "sections": [
+                  {
+                    "type": "hero",
+                    "data": {
+                      "heading": "Trail-tested comfort",
+                      "cta": "Shop now"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:cms.get-page",
+            "response": {
+              "page": {
+                "pageId": "pg_land",
+                "title": "Trailblazer 2",
+                "sections": [
+                  {
+                    "type": "hero",
+                    "data": {
+                      "heading": "Trail-tested comfort",
+                      "cta": "Shop now"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:bi.list-metrics",
+            "response": {
+              "metrics": [
+                {
+                  "metricId": "m_cvr",
+                  "name": "Checkout conversion rate"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.list-metrics",
+            "response": {
+              "metrics": [
+                {
+                  "metricId": "m_cvr",
+                  "name": "Checkout conversion rate"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.run-metric",
+            "response": {
+              "metricId": "m_cvr",
+              "value": 0.156,
+              "n": 610
+            }
+          },
+          {
+            "tool": "openwop:bi.run-metric",
+            "response": {
+              "metricId": "m_cvr",
+              "value": 0.156,
+              "n": 610
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "no-promote",
+      "input": {
+        "request": "The variant is winning. Promote it and send all traffic there."
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:funnels.list",
+            "response": {
+              "funnels": [
+                {
+                  "funnelId": "fn_1",
+                  "name": "Trailblazer launch"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.list",
+            "response": {
+              "funnels": [
+                {
+                  "funnelId": "fn_1",
+                  "name": "Trailblazer launch"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.get",
+            "response": {
+              "funnel": {
+                "funnelId": "fn_1",
+                "steps": [
+                  {
+                    "stepId": "s1",
+                    "pageId": "pg_land"
+                  },
+                  {
+                    "stepId": "s2",
+                    "pageId": "pg_checkout"
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:funnels.get",
+            "response": {
+              "funnel": {
+                "funnelId": "fn_1",
+                "steps": [
+                  {
+                    "stepId": "s1",
+                    "pageId": "pg_land"
+                  },
+                  {
+                    "stepId": "s2",
+                    "pageId": "pg_checkout"
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:funnels.step-stats",
+            "response": {
+              "steps": [
+                {
+                  "stepId": "s1",
+                  "visitors": 4200,
+                  "conversions": 610
+                },
+                {
+                  "stepId": "s2",
+                  "visitors": 610,
+                  "conversions": 95
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.step-stats",
+            "response": {
+              "steps": [
+                {
+                  "stepId": "s1",
+                  "visitors": 4200,
+                  "conversions": 610
+                },
+                {
+                  "stepId": "s2",
+                  "visitors": 610,
+                  "conversions": 95
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:analytics.query",
+            "response": {
+              "rows": [
+                {
+                  "event": "page_view",
+                  "count": 4200
+                },
+                {
+                  "event": "add_to_cart",
+                  "count": 610
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:analytics.query",
+            "response": {
+              "rows": [
+                {
+                  "event": "page_view",
+                  "count": 4200
+                },
+                {
+                  "event": "add_to_cart",
+                  "count": 610
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:cms.list-pages",
+            "response": {
+              "pages": [
+                {
+                  "pageId": "pg_land",
+                  "title": "Trailblazer 2"
+                },
+                {
+                  "pageId": "pg_checkout",
+                  "title": "Checkout"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:cms.list-pages",
+            "response": {
+              "pages": [
+                {
+                  "pageId": "pg_land",
+                  "title": "Trailblazer 2"
+                },
+                {
+                  "pageId": "pg_checkout",
+                  "title": "Checkout"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:cms.get-page",
+            "response": {
+              "page": {
+                "pageId": "pg_land",
+                "title": "Trailblazer 2",
+                "sections": [
+                  {
+                    "type": "hero",
+                    "data": {
+                      "heading": "Trail-tested comfort",
+                      "cta": "Shop now"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:cms.get-page",
+            "response": {
+              "page": {
+                "pageId": "pg_land",
+                "title": "Trailblazer 2",
+                "sections": [
+                  {
+                    "type": "hero",
+                    "data": {
+                      "heading": "Trail-tested comfort",
+                      "cta": "Shop now"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:bi.list-metrics",
+            "response": {
+              "metrics": [
+                {
+                  "metricId": "m_cvr",
+                  "name": "Checkout conversion rate"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.list-metrics",
+            "response": {
+              "metrics": [
+                {
+                  "metricId": "m_cvr",
+                  "name": "Checkout conversion rate"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.run-metric",
+            "response": {
+              "metricId": "m_cvr",
+              "value": 0.156,
+              "n": 610
+            }
+          },
+          {
+            "tool": "openwop:bi.run-metric",
+            "response": {
+              "metricId": "m_cvr",
+              "value": 0.156,
+              "n": 610
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "list-funnels",
+      "input": {
+        "request": "Which funnels do we have?"
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:funnels.list"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:funnels.list",
+            "response": {
+              "funnels": [
+                {
+                  "funnelId": "fn_1",
+                  "name": "Trailblazer launch"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.list",
+            "response": {
+              "funnels": [
+                {
+                  "funnelId": "fn_1",
+                  "name": "Trailblazer launch"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.get",
+            "response": {
+              "funnel": {
+                "funnelId": "fn_1",
+                "steps": [
+                  {
+                    "stepId": "s1",
+                    "pageId": "pg_land"
+                  },
+                  {
+                    "stepId": "s2",
+                    "pageId": "pg_checkout"
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:funnels.get",
+            "response": {
+              "funnel": {
+                "funnelId": "fn_1",
+                "steps": [
+                  {
+                    "stepId": "s1",
+                    "pageId": "pg_land"
+                  },
+                  {
+                    "stepId": "s2",
+                    "pageId": "pg_checkout"
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:funnels.step-stats",
+            "response": {
+              "steps": [
+                {
+                  "stepId": "s1",
+                  "visitors": 4200,
+                  "conversions": 610
+                },
+                {
+                  "stepId": "s2",
+                  "visitors": 610,
+                  "conversions": 95
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.step-stats",
+            "response": {
+              "steps": [
+                {
+                  "stepId": "s1",
+                  "visitors": 4200,
+                  "conversions": 610
+                },
+                {
+                  "stepId": "s2",
+                  "visitors": 610,
+                  "conversions": 95
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:analytics.query",
+            "response": {
+              "rows": [
+                {
+                  "event": "page_view",
+                  "count": 4200
+                },
+                {
+                  "event": "add_to_cart",
+                  "count": 610
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:analytics.query",
+            "response": {
+              "rows": [
+                {
+                  "event": "page_view",
+                  "count": 4200
+                },
+                {
+                  "event": "add_to_cart",
+                  "count": 610
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:cms.list-pages",
+            "response": {
+              "pages": [
+                {
+                  "pageId": "pg_land",
+                  "title": "Trailblazer 2"
+                },
+                {
+                  "pageId": "pg_checkout",
+                  "title": "Checkout"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:cms.list-pages",
+            "response": {
+              "pages": [
+                {
+                  "pageId": "pg_land",
+                  "title": "Trailblazer 2"
+                },
+                {
+                  "pageId": "pg_checkout",
+                  "title": "Checkout"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:cms.get-page",
+            "response": {
+              "page": {
+                "pageId": "pg_land",
+                "title": "Trailblazer 2",
+                "sections": [
+                  {
+                    "type": "hero",
+                    "data": {
+                      "heading": "Trail-tested comfort",
+                      "cta": "Shop now"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:cms.get-page",
+            "response": {
+              "page": {
+                "pageId": "pg_land",
+                "title": "Trailblazer 2",
+                "sections": [
+                  {
+                    "type": "hero",
+                    "data": {
+                      "heading": "Trail-tested comfort",
+                      "cta": "Shop now"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:bi.list-metrics",
+            "response": {
+              "metrics": [
+                {
+                  "metricId": "m_cvr",
+                  "name": "Checkout conversion rate"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.list-metrics",
+            "response": {
+              "metrics": [
+                {
+                  "metricId": "m_cvr",
+                  "name": "Checkout conversion rate"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.run-metric",
+            "response": {
+              "metricId": "m_cvr",
+              "value": 0.156,
+              "n": 610
+            }
+          },
+          {
+            "tool": "openwop:bi.run-metric",
+            "response": {
+              "metricId": "m_cvr",
+              "value": 0.156,
+              "n": 610
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "analytics-events",
+      "input": {
+        "request": "How many add-to-carts did the launch page get this week?"
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:analytics.query"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:funnels.list",
+            "response": {
+              "funnels": [
+                {
+                  "funnelId": "fn_1",
+                  "name": "Trailblazer launch"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.list",
+            "response": {
+              "funnels": [
+                {
+                  "funnelId": "fn_1",
+                  "name": "Trailblazer launch"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.get",
+            "response": {
+              "funnel": {
+                "funnelId": "fn_1",
+                "steps": [
+                  {
+                    "stepId": "s1",
+                    "pageId": "pg_land"
+                  },
+                  {
+                    "stepId": "s2",
+                    "pageId": "pg_checkout"
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:funnels.get",
+            "response": {
+              "funnel": {
+                "funnelId": "fn_1",
+                "steps": [
+                  {
+                    "stepId": "s1",
+                    "pageId": "pg_land"
+                  },
+                  {
+                    "stepId": "s2",
+                    "pageId": "pg_checkout"
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:funnels.step-stats",
+            "response": {
+              "steps": [
+                {
+                  "stepId": "s1",
+                  "visitors": 4200,
+                  "conversions": 610
+                },
+                {
+                  "stepId": "s2",
+                  "visitors": 610,
+                  "conversions": 95
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.step-stats",
+            "response": {
+              "steps": [
+                {
+                  "stepId": "s1",
+                  "visitors": 4200,
+                  "conversions": 610
+                },
+                {
+                  "stepId": "s2",
+                  "visitors": 610,
+                  "conversions": 95
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:analytics.query",
+            "response": {
+              "rows": [
+                {
+                  "event": "page_view",
+                  "count": 4200
+                },
+                {
+                  "event": "add_to_cart",
+                  "count": 610
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:analytics.query",
+            "response": {
+              "rows": [
+                {
+                  "event": "page_view",
+                  "count": 4200
+                },
+                {
+                  "event": "add_to_cart",
+                  "count": 610
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:cms.list-pages",
+            "response": {
+              "pages": [
+                {
+                  "pageId": "pg_land",
+                  "title": "Trailblazer 2"
+                },
+                {
+                  "pageId": "pg_checkout",
+                  "title": "Checkout"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:cms.list-pages",
+            "response": {
+              "pages": [
+                {
+                  "pageId": "pg_land",
+                  "title": "Trailblazer 2"
+                },
+                {
+                  "pageId": "pg_checkout",
+                  "title": "Checkout"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:cms.get-page",
+            "response": {
+              "page": {
+                "pageId": "pg_land",
+                "title": "Trailblazer 2",
+                "sections": [
+                  {
+                    "type": "hero",
+                    "data": {
+                      "heading": "Trail-tested comfort",
+                      "cta": "Shop now"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:cms.get-page",
+            "response": {
+              "page": {
+                "pageId": "pg_land",
+                "title": "Trailblazer 2",
+                "sections": [
+                  {
+                    "type": "hero",
+                    "data": {
+                      "heading": "Trail-tested comfort",
+                      "cta": "Shop now"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:bi.list-metrics",
+            "response": {
+              "metrics": [
+                {
+                  "metricId": "m_cvr",
+                  "name": "Checkout conversion rate"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.list-metrics",
+            "response": {
+              "metrics": [
+                {
+                  "metricId": "m_cvr",
+                  "name": "Checkout conversion rate"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.run-metric",
+            "response": {
+              "metricId": "m_cvr",
+              "value": 0.156,
+              "n": 610
+            }
+          },
+          {
+            "tool": "openwop:bi.run-metric",
+            "response": {
+              "metricId": "m_cvr",
+              "value": 0.156,
+              "n": 610
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "metric-lookup",
+      "input": {
+        "request": "What is our checkout conversion rate metric right now?"
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:bi.list-metrics"
+            },
+            {
+              "tool": "openwop:bi.run-metric"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:funnels.list",
+            "response": {
+              "funnels": [
+                {
+                  "funnelId": "fn_1",
+                  "name": "Trailblazer launch"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.list",
+            "response": {
+              "funnels": [
+                {
+                  "funnelId": "fn_1",
+                  "name": "Trailblazer launch"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.get",
+            "response": {
+              "funnel": {
+                "funnelId": "fn_1",
+                "steps": [
+                  {
+                    "stepId": "s1",
+                    "pageId": "pg_land"
+                  },
+                  {
+                    "stepId": "s2",
+                    "pageId": "pg_checkout"
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:funnels.get",
+            "response": {
+              "funnel": {
+                "funnelId": "fn_1",
+                "steps": [
+                  {
+                    "stepId": "s1",
+                    "pageId": "pg_land"
+                  },
+                  {
+                    "stepId": "s2",
+                    "pageId": "pg_checkout"
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:funnels.step-stats",
+            "response": {
+              "steps": [
+                {
+                  "stepId": "s1",
+                  "visitors": 4200,
+                  "conversions": 610
+                },
+                {
+                  "stepId": "s2",
+                  "visitors": 610,
+                  "conversions": 95
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.step-stats",
+            "response": {
+              "steps": [
+                {
+                  "stepId": "s1",
+                  "visitors": 4200,
+                  "conversions": 610
+                },
+                {
+                  "stepId": "s2",
+                  "visitors": 610,
+                  "conversions": 95
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:analytics.query",
+            "response": {
+              "rows": [
+                {
+                  "event": "page_view",
+                  "count": 4200
+                },
+                {
+                  "event": "add_to_cart",
+                  "count": 610
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:analytics.query",
+            "response": {
+              "rows": [
+                {
+                  "event": "page_view",
+                  "count": 4200
+                },
+                {
+                  "event": "add_to_cart",
+                  "count": 610
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:cms.list-pages",
+            "response": {
+              "pages": [
+                {
+                  "pageId": "pg_land",
+                  "title": "Trailblazer 2"
+                },
+                {
+                  "pageId": "pg_checkout",
+                  "title": "Checkout"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:cms.list-pages",
+            "response": {
+              "pages": [
+                {
+                  "pageId": "pg_land",
+                  "title": "Trailblazer 2"
+                },
+                {
+                  "pageId": "pg_checkout",
+                  "title": "Checkout"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:cms.get-page",
+            "response": {
+              "page": {
+                "pageId": "pg_land",
+                "title": "Trailblazer 2",
+                "sections": [
+                  {
+                    "type": "hero",
+                    "data": {
+                      "heading": "Trail-tested comfort",
+                      "cta": "Shop now"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:cms.get-page",
+            "response": {
+              "page": {
+                "pageId": "pg_land",
+                "title": "Trailblazer 2",
+                "sections": [
+                  {
+                    "type": "hero",
+                    "data": {
+                      "heading": "Trail-tested comfort",
+                      "cta": "Shop now"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:bi.list-metrics",
+            "response": {
+              "metrics": [
+                {
+                  "metricId": "m_cvr",
+                  "name": "Checkout conversion rate"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.list-metrics",
+            "response": {
+              "metrics": [
+                {
+                  "metricId": "m_cvr",
+                  "name": "Checkout conversion rate"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.run-metric",
+            "response": {
+              "metricId": "m_cvr",
+              "value": 0.156,
+              "n": 610
+            }
+          },
+          {
+            "tool": "openwop:bi.run-metric",
+            "response": {
+              "metricId": "m_cvr",
+              "value": 0.156,
+              "n": 610
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "no-page-edit",
+      "input": {
+        "request": "Change the hero CTA on pg_land to 'Find your fit'."
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:funnels.list",
+            "response": {
+              "funnels": [
+                {
+                  "funnelId": "fn_1",
+                  "name": "Trailblazer launch"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.list",
+            "response": {
+              "funnels": [
+                {
+                  "funnelId": "fn_1",
+                  "name": "Trailblazer launch"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.get",
+            "response": {
+              "funnel": {
+                "funnelId": "fn_1",
+                "steps": [
+                  {
+                    "stepId": "s1",
+                    "pageId": "pg_land"
+                  },
+                  {
+                    "stepId": "s2",
+                    "pageId": "pg_checkout"
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:funnels.get",
+            "response": {
+              "funnel": {
+                "funnelId": "fn_1",
+                "steps": [
+                  {
+                    "stepId": "s1",
+                    "pageId": "pg_land"
+                  },
+                  {
+                    "stepId": "s2",
+                    "pageId": "pg_checkout"
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:funnels.step-stats",
+            "response": {
+              "steps": [
+                {
+                  "stepId": "s1",
+                  "visitors": 4200,
+                  "conversions": 610
+                },
+                {
+                  "stepId": "s2",
+                  "visitors": 610,
+                  "conversions": 95
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.step-stats",
+            "response": {
+              "steps": [
+                {
+                  "stepId": "s1",
+                  "visitors": 4200,
+                  "conversions": 610
+                },
+                {
+                  "stepId": "s2",
+                  "visitors": 610,
+                  "conversions": 95
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:analytics.query",
+            "response": {
+              "rows": [
+                {
+                  "event": "page_view",
+                  "count": 4200
+                },
+                {
+                  "event": "add_to_cart",
+                  "count": 610
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:analytics.query",
+            "response": {
+              "rows": [
+                {
+                  "event": "page_view",
+                  "count": 4200
+                },
+                {
+                  "event": "add_to_cart",
+                  "count": 610
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:cms.list-pages",
+            "response": {
+              "pages": [
+                {
+                  "pageId": "pg_land",
+                  "title": "Trailblazer 2"
+                },
+                {
+                  "pageId": "pg_checkout",
+                  "title": "Checkout"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:cms.list-pages",
+            "response": {
+              "pages": [
+                {
+                  "pageId": "pg_land",
+                  "title": "Trailblazer 2"
+                },
+                {
+                  "pageId": "pg_checkout",
+                  "title": "Checkout"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:cms.get-page",
+            "response": {
+              "page": {
+                "pageId": "pg_land",
+                "title": "Trailblazer 2",
+                "sections": [
+                  {
+                    "type": "hero",
+                    "data": {
+                      "heading": "Trail-tested comfort",
+                      "cta": "Shop now"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:cms.get-page",
+            "response": {
+              "page": {
+                "pageId": "pg_land",
+                "title": "Trailblazer 2",
+                "sections": [
+                  {
+                    "type": "hero",
+                    "data": {
+                      "heading": "Trail-tested comfort",
+                      "cta": "Shop now"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:bi.list-metrics",
+            "response": {
+              "metrics": [
+                {
+                  "metricId": "m_cvr",
+                  "name": "Checkout conversion rate"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.list-metrics",
+            "response": {
+              "metrics": [
+                {
+                  "metricId": "m_cvr",
+                  "name": "Checkout conversion rate"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.run-metric",
+            "response": {
+              "metricId": "m_cvr",
+              "value": 0.156,
+              "n": 610
+            }
+          },
+          {
+            "tool": "openwop:bi.run-metric",
+            "response": {
+              "metricId": "m_cvr",
+              "value": 0.156,
+              "n": 610
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "pages-list",
+      "input": {
+        "request": "List our landing pages and tell me which is in the funnel."
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:cms.list-pages"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:funnels.list",
+            "response": {
+              "funnels": [
+                {
+                  "funnelId": "fn_1",
+                  "name": "Trailblazer launch"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.list",
+            "response": {
+              "funnels": [
+                {
+                  "funnelId": "fn_1",
+                  "name": "Trailblazer launch"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.get",
+            "response": {
+              "funnel": {
+                "funnelId": "fn_1",
+                "steps": [
+                  {
+                    "stepId": "s1",
+                    "pageId": "pg_land"
+                  },
+                  {
+                    "stepId": "s2",
+                    "pageId": "pg_checkout"
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:funnels.get",
+            "response": {
+              "funnel": {
+                "funnelId": "fn_1",
+                "steps": [
+                  {
+                    "stepId": "s1",
+                    "pageId": "pg_land"
+                  },
+                  {
+                    "stepId": "s2",
+                    "pageId": "pg_checkout"
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:funnels.step-stats",
+            "response": {
+              "steps": [
+                {
+                  "stepId": "s1",
+                  "visitors": 4200,
+                  "conversions": 610
+                },
+                {
+                  "stepId": "s2",
+                  "visitors": 610,
+                  "conversions": 95
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.step-stats",
+            "response": {
+              "steps": [
+                {
+                  "stepId": "s1",
+                  "visitors": 4200,
+                  "conversions": 610
+                },
+                {
+                  "stepId": "s2",
+                  "visitors": 610,
+                  "conversions": 95
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:analytics.query",
+            "response": {
+              "rows": [
+                {
+                  "event": "page_view",
+                  "count": 4200
+                },
+                {
+                  "event": "add_to_cart",
+                  "count": 610
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:analytics.query",
+            "response": {
+              "rows": [
+                {
+                  "event": "page_view",
+                  "count": 4200
+                },
+                {
+                  "event": "add_to_cart",
+                  "count": 610
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:cms.list-pages",
+            "response": {
+              "pages": [
+                {
+                  "pageId": "pg_land",
+                  "title": "Trailblazer 2"
+                },
+                {
+                  "pageId": "pg_checkout",
+                  "title": "Checkout"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:cms.list-pages",
+            "response": {
+              "pages": [
+                {
+                  "pageId": "pg_land",
+                  "title": "Trailblazer 2"
+                },
+                {
+                  "pageId": "pg_checkout",
+                  "title": "Checkout"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:cms.get-page",
+            "response": {
+              "page": {
+                "pageId": "pg_land",
+                "title": "Trailblazer 2",
+                "sections": [
+                  {
+                    "type": "hero",
+                    "data": {
+                      "heading": "Trail-tested comfort",
+                      "cta": "Shop now"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:cms.get-page",
+            "response": {
+              "page": {
+                "pageId": "pg_land",
+                "title": "Trailblazer 2",
+                "sections": [
+                  {
+                    "type": "hero",
+                    "data": {
+                      "heading": "Trail-tested comfort",
+                      "cta": "Shop now"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:bi.list-metrics",
+            "response": {
+              "metrics": [
+                {
+                  "metricId": "m_cvr",
+                  "name": "Checkout conversion rate"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.list-metrics",
+            "response": {
+              "metrics": [
+                {
+                  "metricId": "m_cvr",
+                  "name": "Checkout conversion rate"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.run-metric",
+            "response": {
+              "metricId": "m_cvr",
+              "value": 0.156,
+              "n": 610
+            }
+          },
+          {
+            "tool": "openwop:bi.run-metric",
+            "response": {
+              "metricId": "m_cvr",
+              "value": 0.156,
+              "n": 610
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

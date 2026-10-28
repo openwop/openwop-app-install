@@ -15,6 +15,7 @@ import { registerCommentsAgentTools } from './agentTools.js';
 import { onConversationDeleted } from '../../host/conversationLifecycle.js';
 import { onCanvasDeleted } from '../../host/canvasLifecycle.js';
 import { pruneThreadsForDeletedResources, pruneThreadsForResourceAndComposites } from './commentsService.js';
+import { onMediaAssetDeleted } from '../../host/mediaAssetLifecycle.js';
 
 export const commentsFeature: BackendFeature = {
   id: 'comments',
@@ -41,6 +42,11 @@ export const commentsFeature: BackendFeature = {
       const resourceType = canvasTypeId === 'canvas.document' ? 'canvas_document' : canvasTypeId === 'canvas.slides' ? 'canvas_slides' : null;
       if (!resourceType) return;
       await pruneThreadsForResourceAndComposites(tenantId, resourceType, canvasId);
+    });
+    // ADR 0947 D2 — a deleted media asset leaves no surface for its proofing
+    // threads (pins included); prune them through media's keyed lifecycle seam.
+    onMediaAssetDeleted('comments', async ({ tenantId, assetId }) => {
+      await pruneThreadsForResourceAndComposites(tenantId, 'media_asset', assetId);
     });
   },
   // Face 2 (ADR 0014): `ctx.features.comments` — list/post/resolve for the

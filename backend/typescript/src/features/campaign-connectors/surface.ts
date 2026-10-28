@@ -15,6 +15,8 @@ import { listTenantDispatchRecords, makeAdsAdapter, type AccountMetricsRow } fro
 import { assertOrgScope } from '../../host/accessControlService.js';
 import { hostExtStorage } from '../../host/hostExtPersistence.js';
 import { deliverQueuedConversions, SCHEDULED_CONVERSIONS_TOGGLE } from './conversionDelivery.js';
+import { pushCatalog } from './catalogFeed.js';
+import { configuredPublicBaseUrl } from '../featureRoute.js';
 import { resolveOne } from '../../host/featureToggles/service.js';
 import { buildAudienceUpload } from './audienceService.js';
 import { AD_PLATFORMS, type AdPlatform } from './types.js';
@@ -113,6 +115,20 @@ export function buildCampaignConnectorsSurface(scope: BundleScope): FeatureSurfa
       await assertOrgScope(tenantId, actingUserId, orgId, 'workspace:write', { ...(scope.personalTenant ? { personalTenant: scope.personalTenant } : {}) });
       const adapter = makeAdsAdapter({ storage: hostExtStorage(), tenantId, runId: scope.runId ?? `hostext:capi-run:${orgId}`, actingUserId, orgId });
       return { outcome: 'delivered', ...(await deliverQueuedConversions(adapter, tenantId, orgId)) };
+    },
+    // ADR 0952 D6 (P7) — the scheduled catalog push's ONE call. Same identity rule
+    // as deliverConversions: the RUN OWNER's connections, workspace:write in the
+    // org, never a system identity. Only changed items go; removed items leave.
+    pushCatalog: async (args) => {
+      const orgId = str(args.orgId);
+      const platform = args.platform === 'google' ? 'google' : args.platform === 'meta' ? 'meta' : null;
+      if (!orgId || !platform) return { outcome: 'invalid', error: 'orgId and platform (meta | google) are required' };
+      if (!(await resolveOne('campaign-connectors', { tenantId }))?.enabled) return { outcome: 'disabled' };
+      const actingUserId = scope.actingUserId;
+      if (!actingUserId) return { outcome: 'no_acting_user' };
+      await assertOrgScope(tenantId, actingUserId, orgId, 'workspace:write', { ...(scope.personalTenant ? { personalTenant: scope.personalTenant } : {}) });
+      const deps = { storage: hostExtStorage(), tenantId, runId: scope.runId ?? `hostext:catalog-push:${orgId}`, actingUserId, orgId };
+      return { ...(await pushCatalog(deps, tenantId, orgId, platform, configuredPublicBaseUrl())) };
     },
     importCsv: async (args) => {
       const orgId = str(args.orgId);

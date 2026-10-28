@@ -3,6 +3,10 @@
  * data, so they take the `runs:read` gate `GET /runs` takes. Before this, a key
  * narrowed away from `runs:read` read every agent run's status and workflow
  * through them. RED on `origin/main` (f8a3ea22e) for both routes.
+ *
+ * TST-BWC-1 (grade-tests w62): red when either route drops its
+ * `requireProtocolScope(req, 'runs:read')`. The CONTROL asserts each route's real answer
+ * (fleet 200 with an item list; an unknown roster member 404 `not_found`), not just "not 403".
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -46,8 +50,16 @@ describe('ADR 0846 D6 — agent activity requires runs:read', () => {
     expect(res.headers.get('www-authenticate') ?? '').toMatch(/insufficient_scope/);
   });
 
-  it.each(FEEDS)('CONTROL: %s is not refused for scope with runs:read', async (path) => {
-    const res = await get(path, await key(['workspace:read', 'runs:read']));
-    expect(res.status, 'without this leg a route refusing every key passes the one above').not.toBe(403);
+  // Without these legs a route refusing every key passes the refusal case above.
+  it('CONTROL: /host/openwop-app/fleet/activity answers 200 with an item list for runs:read', async () => {
+    const res = await get(FEEDS[0]!, await key(['workspace:read', 'runs:read']));
+    expect(res.status).toBe(200);
+    expect(Array.isArray(((await res.json()) as { items?: unknown }).items)).toBe(true);
+  });
+
+  it('CONTROL: an unknown roster member is a 404 not_found (past the scope gate) for runs:read', async () => {
+    const res = await get(FEEDS[1]!, await key(['workspace:read', 'runs:read']));
+    expect(res.status).toBe(404);
+    expect(((await res.json()) as { error?: string }).error).toBe('not_found');
   });
 });

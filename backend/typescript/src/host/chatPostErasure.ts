@@ -11,7 +11,7 @@
  * is re-stamped so the search index stops matching the old text. Every conversation
  * type, not only channels: a DM and a branched copy carry the same words.
  *
- * Matching is the D0 set (`subjectRefForms`): channel rows store
+ * Matching is the D0 set (`subjectKeyForms`): channel rows store
  * `userRef(<id>)`, so `user:<hash>` is written as `user:user:<hash>`. Never an alias
  * principal⇄user. Legal hold is asserted by `eraseSubject` before any eraser runs.
  *
@@ -21,12 +21,11 @@
  */
 import { hostExtStorage } from './hostExtPersistence.js';
 import { registerSubjectEraser } from './subjectErasure.js';
-import { ERASED_USER_REF } from './subjectErasureRedaction.js';
-import { subjectRefForms } from './conversationStore.js';
+import { ERASED_USER_REF, subjectKeyForms } from './subjectErasureRedaction.js';
 
 export async function eraseSubjectChatPosts(tenantId: string, subjectKey: string): Promise<void> {
   if (!tenantId || !subjectKey) return;
-  const refs = [...subjectRefForms(subjectKey)].filter((r) => r !== ERASED_USER_REF);
+  const refs = [...subjectKeyForms(subjectKey).forms].filter((r) => r !== ERASED_USER_REF);
   await hostExtStorage().redactChatMessagesByAuthor(tenantId, refs, ERASED_USER_REF, new Date().toISOString());
 }
 

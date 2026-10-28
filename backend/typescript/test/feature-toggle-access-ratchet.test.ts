@@ -53,6 +53,9 @@ const ALLOWED: Record<string, number> = {
   'features/consent/routes.ts': 1,
   'features/crm/bookingRoutes.ts': 2,
   'features/crm/signRoutes.ts': 1,
+  // ADR 0924 D5 — the PUBLIC client approver lane: tenant from the link, and a
+  // client's approver is never paywalled on the agency's plan (the e-sign rule).
+  'features/campaign-ops/portal.ts': 1,
   'features/dealers/routes.ts': 1,
   'features/discovery/routes.ts': 1,
   'features/funnels/routes.ts': 1,
@@ -91,9 +94,14 @@ const ALLOWED: Record<string, number> = {
   // 1: the CRM merge relink (compliance truth, as above). 2 (ADR 0905 D4): the
   // `email-approval-gate` read — OFF loosens a restriction (unapproved sends), so a
   // paywalled read would fail OPEN on a lapsed plan (the territories/consent reason).
-  'features/email/emailService.ts': 2,
+  // 3 (ADR 0955 P4b): the `email.warmup` read — a restriction, same reason as the gate above.
+  'features/email/emailService.ts': 3,
   // A tool gate whose every caller then applies the plan with its own message.
   'features/email/agentTools.ts': 1,
+  // ADR 0955 D7 — the `email.sender-auth` read. A RESTRICTION (on refuses a broadcast from an
+  // unauthenticated domain), so a paywalled read would fail OPEN on a lapsed plan; an
+  // unreadable toggle enforces.
+  'features/email/senderAuth.ts': 1,
 };
 
 function walk(dir: string): string[] {

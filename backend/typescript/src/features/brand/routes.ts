@@ -26,7 +26,7 @@ import { requireString } from '../featureRoute.js';
 import { putBrandFont, listBrandFonts, deleteBrandFont, BRAND_FONT_ROLES, type BrandFontRole } from './brandFonts.js';
 import { BRAND_CHANNELS, type Brand } from './types.js';
 import {
-  listBrands, getBrand, createBrand, updateBrand, deleteBrand, listBrandAudit, sanitizeGovernance,} from './brandService.js';
+  listBrands, getBrand, createBrand, updateBrand, deleteBrand, listBrandAudit, sanitizeGovernance, sanitizeCreativeLocks,} from './brandService.js';
 
 const tenantOf = (req: Request): string => req.tenantId ?? 'default';
 const actingUserOf = (req: Request): string | undefined => req.userId ?? req.principal?.principalId;
@@ -118,6 +118,14 @@ export function governanceChanged(existing: Brand, input: { governance?: unknown
   return norm(next) !== norm(cur);
 }
 
+/** ADR 0946 D4 — creative locks are a guardrail like `compliance`, so a change
+ *  to them takes the governance-change bar (org admin, or the creator setting
+ *  the first lock on an unlocked brand), compared on the sanitized post-image. */
+export function creativeLocksChanged(existing: Brand, input: { creativeLocks?: unknown }): boolean {
+  if (input.creativeLocks === undefined) return false;
+  return JSON.stringify(sanitizeCreativeLocks(input.creativeLocks) ?? null) !== JSON.stringify(existing.creativeLocks ?? null);
+}
+
 async function requireGovernanceChangeAuthority(req: Request, brand: Brand): Promise<void> {
   const isOrgAdmin = await hasOrgScope(req, brand.orgId, 'host:org:manage');
   if (isOrgAdmin) return;
@@ -180,14 +188,14 @@ export function registerBrandRoutes(deps: RouteDeps): void {
     try {
       const brand = await loadBrandScoped(req, 'workspace:write');
       await requireGovernanceAuthority(req, brand);
-      const body = (req.body ?? {}) as Record<string, unknown> & { governance?: unknown; expectedUpdatedAt?: unknown };
+      const body = (req.body ?? {}) as Record<string, unknown> & { governance?: unknown; creativeLocks?: unknown; expectedUpdatedAt?: unknown };
       // Review F3 — the CAS conflict outranks the governance gate: a STALE
       // editor whose governance echo mismatches the current row deserves the
       // 409 reload story, not a misleading "requires an org admin".
       if (typeof body.expectedUpdatedAt === 'string' && body.expectedUpdatedAt !== brand.updatedAt) {
         throw new OpenwopError('conflict', 'This brand changed since you opened it — reload and reapply your edits.', 409, { brandId: brand.id, expected: body.expectedUpdatedAt, actual: brand.updatedAt });
       }
-      if (governanceChanged(brand, body)) await requireGovernanceChangeAuthority(req, brand);
+      if (governanceChanged(brand, body) || creativeLocksChanged(brand, body)) await requireGovernanceChangeAuthority(req, brand);
       // BRAND-CODE-3 — audit the REAL actor, not the 'editor' default.
       const updated = await updateBrand(tenantOf(req), brand.id, body as unknown as Parameters<typeof updateBrand>[2], actingUserOf(req) ?? 'editor');
       if (!updated) throw new OpenwopError('not_found', 'Brand not found.', 404, { brandId: brand.id });

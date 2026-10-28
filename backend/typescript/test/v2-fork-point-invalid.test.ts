@@ -46,23 +46,23 @@ async function makeRun(): Promise<string> {
   return String(body.runId ?? '');
 }
 
-async function fork(runId: string, fromSeq: unknown, _major: '1' | '2'): Promise<{ status: number; code: string }> {
+async function fork(runId: string, fromSeq: unknown): Promise<{ status: number; code: string; message: string }> {
   const res = await fetch(`${base}/runs/${encodeURIComponent(runId)}:fork`, {
     method: 'POST', headers: V2,
     body: JSON.stringify({ mode: 'branch', fromSeq }),
   });
-  const body = await res.json() as { error?: unknown; code?: unknown };
+  const body = await res.json() as { error?: unknown; code?: unknown; message?: unknown };
   const code = typeof body.error === 'string' ? body.error
     : typeof (body.error as { code?: unknown } | undefined)?.code === 'string' ? String((body.error as { code: string }).code)
     : String(body.code ?? '');
-  return { status: res.status, code };
+  return { status: res.status, code, message: String(body.message ?? '') };
 }
 
 describe('fork point refusals (runs.md §Fork)', () => {
   it('a fromSeq past the end of the log is 422 fork_point_invalid, UNPREFIXED at v2', async () => {
     const runId = await makeRun();
     expect(runId, 'the run must exist or the fork legs assert nothing').not.toBe('');
-    const res = await fork(runId, 999_999, '2');
+    const res = await fork(runId, 999_999);
     expect(res.status).toBe(422);
     expect(res.code, 'a registered protocol code MUST NOT travel under the host vendor prefix').toBe('fork_point_invalid');
     expect(res.code.startsWith('openwop-app.'), 'the old spelling was ours and namespaced').toBe(false);
@@ -70,18 +70,21 @@ describe('fork point refusals (runs.md §Fork)', () => {
 
   it('a NEGATIVE fromSeq stays 400 — the request schema pins minimum: 0', async () => {
     const runId = await makeRun();
-    const res = await fork(runId, -1, '2');
+    const res = await fork(runId, -1);
     // I first routed this to 422 as well, on the reasoning that a negative
     // "names no event in the log". An existing test pinning 400 reddened, and it
     // was right: `api/v2/openapi.yaml` constrains fromSeq to `minimum: 0`, so a
     // negative is a SCHEMA violation and never reaches the semantic question.
     expect(res.status, 'a schema violation is malformed input, not a fork-point verdict').toBe(400);
+    expect(res.code).toBe('validation_error');
+    expect(res.message).toContain('fromSeq must be an integer >= 0');
   });
 
   it('a NON-INTEGER fromSeq stays a 400 — malformed input is a different fault', async () => {
     const runId = await makeRun();
-    const res = await fork(runId, 'not-a-number', '2');
+    const res = await fork(runId, 'not-a-number');
     expect(res.status).toBe(400);
-    expect(res.code, 'a malformed body is validation_error, not a fork-point verdict').toContain('validation_error');
+    expect(res.code, 'a malformed body is validation_error, not a fork-point verdict').toBe('validation_error');
+    expect(res.message).toContain('fromSeq must be an integer >= 0');
   });
 });

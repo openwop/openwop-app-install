@@ -30,10 +30,11 @@ export function registerEmailEgressGuard(): void {
     for (const k of keys) {
       if (k && (await isErasureTombstoned(tenantId, k))) return { ok: false, code: 'email_recipient_erased' };
     }
-    // Leg 2 — suppression (bounce / complaint / unsubscribe / manual), every purpose.
-    // v1 does not relax `unsubscribed` for transactional sends — the kind is not
-    // exposed by `suppressionBlocksSend` (EMWF-18).
-    const sup = await suppressionBlocksSend(tenantId, folded || address);
+    // Leg 2 — suppression (bounce / complaint / unsubscribe / manual). An `unsubscribed`
+    // row is a MARKETING opt-out and no longer blocks a transactional send (ADR 0905 D7,
+    // closing EMWF-18: "unsubscribe from everything" never touches transactional mail);
+    // bounces, complaints and manual holds still block every purpose.
+    const sup = await suppressionBlocksSend(tenantId, folded || address, { purpose: purpose === 'transactional' ? 'transactional' : 'marketing' });
     if (sup === 'suppressed') return { ok: false, code: 'email_recipient_suppressed' };
     if (sup === 'unreadable') return { ok: false, code: 'email_suppression_unreadable' };
     // Leg 3 — consent, when a contact resolves through the INDEX (never a tenant scan).

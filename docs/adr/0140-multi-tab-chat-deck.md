@@ -1,3 +1,14 @@
+> **Correction (2026-10-25, ADR 0978) — four of this ADR's guarantees were narrower than written.**
+> (1) §4 "streaming tabs are never auto-evicted" protected only a streaming chat TURN; a tab
+> waiting on a HITL interrupt or running a `/workflow` was an ordinary LRU victim, and at the
+> hard wall even a pinned one was sacrificed. (2) The "hard ceiling" grew past 24 when every
+> tab was protected. (3) The mount-time stale-empty sweep (added 2026-07-17, #1976) had no
+> ownership predicate and deleted meta-less tenant-shared rows other members also see. (4) The
+> working set was keyed per user, so a workspace switch pruned all of it. ADR 0978 fixes all
+> four (one protected set from the activity report plus server signals; refuse-at-ceiling;
+> the owner-only `isAbandonedEmptyChat` predicate; per-workspace persistence). Also: prod has
+> stored this toggle `on` since 2026-06-25, so "default OFF" describes the declaration, not prod.
+
 # ADR 0140 — Multi-tab chat deck (a bounded working set of live, independent chat sessions)
 
 > **Correction (2026-07-05) — the deck rail now carries a persistent Conversations panel.**

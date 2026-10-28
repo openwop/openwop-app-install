@@ -205,3 +205,79 @@ keys whose target rows the access-members eraser redacts; `collab:snapshot` /
 canvas rows the eraser covers; `canvas:idem` is an ephemeral retry cache with
 `tenantId`, teardown-covered). No age-based pending-approval purge was added
 (§4 ruling stands).
+
+## 8. Correction 2026-10-26 — the doubled `user:user:<hash>` spelling (DSAR-DBL)
+
+> **§2's "a single host store holds one form or the other" was false.** There
+> was a third form, and no eraser that used the shared matcher could see it.
+> `User.userId` is ITSELF `user:<hash>` (`usersService.userIdFor`), and
+> several writers apply `userRef()` (or a literal `` `user:${…}` ``) to it:
+> `userRef(req.userId)` in `routes/chatSessions.ts` (read markers, reactions,
+> feedback, message authors, the DM key), `ensureConversationMeta`
+> (participants), the channel service, KickBot's and the assistant's DM key,
+> manual-test runs, and the pre-0986 arena route. Those rows hold
+> `user:user:<hash>`. `subjectKeyForms('user:<hash>')` returned
+> `{user:<hash>, <hash>}`, so a DSAR keyed by `User.userId` (the users-route
+> key) matched none of them. Three stores had grown private fixes (projects
+> PRJC-1, memory GEN-TWIN-4, the conversation store's `subjectRefForms`). In
+> ADR 0986, #5282 added a fourth (`subjectRefFormsWithDoubled`). Every other
+> store missed the form, including the conversation eraser's own `dmKey` check.
+>
+> **Decision.** Fix the MATCHER, not the writers. `subjectKeyForms` now
+> includes `user:` + the key and `user:` + the scope, i.e. exactly the
+> `userRef()` of the subject's own spellings. It does not add `user:` + the
+> stripped `raw`: for an `agent:X` key, that would bridge into an unrelated
+> person's `user:X` (the projects F2 rule). This drops a bridge that
+> `subjectRefForms` had. `subjectRefForms` and `subjectRefFormsWithDoubled` are
+> deleted, and their callers read `subjectKeyForms(k).forms`.
+> `eraseSubjectKnowledge` (raw-only) also deletes the `user:user:` scope.
+> `manual-tests:run` (a tester's verdicts and free-text notes, with no eraser
+> and invisible to both gates because its only subject field is `subjectRef`)
+> gets `eraseManualTestRunsSubject`.
+>
+> **Side effect, intended.** The lead-intel erasers write one hash-only
+> tombstone per form, so a DSAR now writes one more tombstone (the doubled
+> spelling). It belongs to the same DSAR group and is readmitted with it. Two
+> tests' `tombstonesCleared` counts moved from 2 to 3.
+>
+> **Not done here (a later ADR).** Normalizing the WRITERS (an idempotent
+> `userRef`) would change dedup keys that live rows already hold: DM keys, read
+> markers and reaction keys. That needs a re-key migration. MEASURED read-only
+> in prod on 2026-10-26: 12 of 16 `chat:read-state` rows, 1 of 57 conversation
+> `dmKey`s, 11 participant metas and 61 of 141 `chat_messages.author_subject`
+> rows carry the doubled form. They belong to 3 subjects: two `user:<hex32>`
+> ids, and one legacy `user:<uuid>` id from before `userIdFor` (1 of 39 users
+> still has that shape). The first census counted 2 because its regex matched
+> hex ids only. All 3 still have a live user row and none has a consent
+> tombstone, so no data survived an erasure and no backfill is needed.
+>
+> **The dropped `user:`+raw bridge — nothing relied on it.** The old
+> `subjectRefForms` was `forms ∪ userRef(forms)`. For every key shape except
+> one, the new set is the same: `user:<h>`, a bare `<h>`, `oidc:<sub>`,
+> `session:<id>` and `anon:<sid>` keys all still yield `user:`+key, which is
+> what the principal-fallback writers (`userRef(req.userId ?? principalId)`)
+> store. The only spelling lost is `user:X` for an `agent:X` key, i.e. an
+> agent-keyed DSAR erasing a person-tagged ref. No writer produces that: every
+> `userRef(` / `` `user:${…}` `` argument is a `User.userId`, a principal id or
+> `_anon`, never an agent id, and no key resolver (kicktodo-core, crm,
+> users-email, analytics identity-link) emits an `agent:` key. MEASURED
+> read-only in prod on 2026-10-26 across the stores that used the bridge
+> (conversation participants and dmKey, `chat_messages.author_subject`,
+> `voice:session`, `chat:message-feedback`, `evals:arena-match`) plus read
+> markers and reactions. Every `user:`-tagged ref is one of `user:user:<hex32>`,
+> `user:user:<uuid>`, `user:oidc:*` or `user:session:*`. There is no
+> `user:<raw>` of any other shape, and none of the 14 distinct `user:` refs
+> has a remainder equal to a roster agent id (24 in prod).
+>
+> **Witness.** `test/dsar-doubled-subject-ratchet.test.ts` seeds the doubled
+> form in 11 stores and erases through the real host fan-out. Reverting the
+> matcher reddens 8 of them. Reverting the knowledge fix reddens knowledge.
+> Because dropping the bridge NARROWS erasure, the same file pins it both ways
+> across the six stores that used the bridge (participants, dmKey, chat
+> author, voice session, feedback, arena rater). The positive side covers five
+> key shapes (`user:<hex32>`, legacy `user:<uuid>`, `oidc:`, `session:`,
+> `anon:`), each stored as the key itself and as its `userRef`. Each case
+> erases the row and leaves a same-shape control person intact. The negative
+> side: erasing `agent:X` leaves a person's `user:X` rows alone. Re-adding the
+> bridge reddens the negative, and dropping the `userRef` arms reddens all
+> five `userRef` positives.

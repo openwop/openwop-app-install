@@ -48,6 +48,11 @@ import { eraseSubject } from '../src/host/subjectErasure.js';
 // so the module graph is not charged to the WIRING case's timeout.
 import '../src/features/memory-auto-extract/feature.js';
 import { personSubject } from '../src/host/subject.js';
+import { forgetLearnedFact, forgottenFactMatcher } from '../src/host/subjectMemory.js';
+import { personalChat } from './helpers/personalChatRun.js';
+import type { ExtractorResult } from '../src/features/memory-auto-extract/memoryExtractor.js';
+
+const facts = (...f: string[]) => async (): Promise<ExtractorResult> => ({ status: 'ok', facts: f.map((fact) => ({ fact, category: 'other' as const })), rejected: 0 });
 
 const T = 'grant-erase-tenant';
 const T2 = 'grant-erase-other-tenant';
@@ -64,33 +69,36 @@ beforeEach(async () => {
 
 describe('AGMEM-4 — eraseExtractionGrants', () => {
   it('THE DEFECT, end to end: erasure no longer leaves a live authorisation to re-learn', async () => {
-    // ADR 0666 D1 — the GRANT is filed at the subject the binding reads (verbatim). The eraser
-    // legs below deliberately keep the `user:<id>` spelling: the ERASER is form-tolerant by
-    // design (`subjectKeyForms`), which is the safe direction for a destructive op, while this
-    // authorizing read is exact.
-    await setExtractionGrant(T, 'alice', true, 'alice');
-    await extractConversationMemory(T, 'alice', 'transcript', async () => ['alice lives in Berlin']);
-    expect(await countSubjectNotes(T, personSubject('alice'))).toBe(1);
+    // ADR 0982 D2 — the grant is filed at (home tenant, canonical User.userId), as the route files
+    // it, and the lane writes there too.
+    const p = await personalChat('ge-alice');
+    await setExtractionGrant(p.home, p.userId, true, p.userId);
+    await extractConversationMemory(await p.run(), ['I live in Berlin'], facts('Lives in Berlin'));
+    expect(await countSubjectNotes(p.home, personSubject(p.userId))).toBe(1);
 
     // A DSAR: the host eraser fan-out reaches BOTH the memory and the grant.
-    await eraseSubjectMemory(T, 'user:alice');
-    await eraseExtractionGrants(T, 'user:alice');
+    await eraseSubjectMemory(p.home, p.userId);
+    await eraseExtractionGrants(p.home, p.userId);
 
-    expect(await countSubjectNotes(T, personSubject('alice'))).toBe(0);
-    // The load-bearing assertion: without the grant eraser this was `true`, and the
-    // very next conversation would have re-populated the scope the DSAR cleared.
-    // Assert on the key the grant was actually FILED at ('alice' — see the D1 note above),
-    // not the prefixed spelling. Asserting `'user:alice'` here would be VACUOUS after the
-    // fixture correction: nothing is filed there, so it reads false whether the eraser ran or
-    // not. (The leg's load-bearing assertion is the re-extraction attempt below; these two are
-    // the direct ones, and they should be real too.)
-    expect(await isExtractionGranted(T, 'alice')).toBe(false);
-    expect(await getExtractionGrant(T, 'alice')).toBeNull();
+    expect(await countSubjectNotes(p.home, personSubject(p.userId))).toBe(0);
+    // The load-bearing assertion: without the grant eraser this was `true`, and the very next
+    // conversation would have re-populated the scope the DSAR cleared.
+    expect(await isExtractionGranted(p.home, p.userId)).toBe(false);
+    expect(await getExtractionGrant(p.home, p.userId)).toBeNull();
 
     // …and the fix is real: a fresh extraction attempt now writes nothing.
-    const r = await extractConversationMemory(T, 'alice', 'transcript', async () => ['alice lives in Berlin']);
-    expect(r.skipped).toBe('no-consent');
-    expect(await countSubjectNotes(T, personSubject('alice'))).toBe(0);
+    const r = await extractConversationMemory(await p.run(), ['I live in Berlin'], facts('Lives in Berlin'));
+    expect(r).toEqual({ status: 'skipped', reason: 'no-consent' });
+    expect(await countSubjectNotes(p.home, personSubject(p.userId))).toBe(0);
+  });
+
+  it('ADR 0982 D6 — the person\'s "forget" tombstones are erased with their memory', async () => {
+    const p = await personalChat('ge-forget');
+    const subj = personSubject(p.userId);
+    await forgetLearnedFact(p.home, subj, 'Lives in Berlin');
+    expect((await forgottenFactMatcher(p.home, subj))('lives in berlin.'), 'precondition: tombstoned').toBe(true);
+    await eraseSubjectMemory(p.home, p.userId);
+    expect((await forgottenFactMatcher(p.home, subj))('Lives in Berlin')).toBe(false);
   });
 
   it('matches every spelling of the subject key (`user:<id>` and the bare id)', async () => {

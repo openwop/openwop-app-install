@@ -55,3 +55,30 @@ export function seedLiveComposer(text: string): void {
   }
   stageComposerDraft(text);
 }
+
+/**
+ * ADR 0993 D1 — the composer a slash command was typed in. `seedLiveComposer`
+ * hands text to the FIRST mounted sink, which in the multi-tab deck is tab 1's
+ * (every tab stays mounted). A command that inserts text must reach the composer
+ * it came from, so `ChatInput` marks itself just before it submits, and a command
+ * inserts through this. Falls back to the live lane when nothing is marked.
+ */
+let submitting: LiveComposerSink | null = null;
+
+/** Called by a composer immediately before it hands a submission off. */
+export function markSubmittingComposer(sink: LiveComposerSink): void {
+  submitting = sink;
+}
+
+/** Called by a composer as it unmounts: a closed tab's composer must not keep
+ *  swallowing inserts (code-review P61CR-12). */
+export function forgetSubmittingComposer(sink: LiveComposerSink): void {
+  if (submitting === sink) submitting = null;
+}
+
+/** Insert into the composer that submitted the current command. */
+export function insertIntoSubmittingComposer(text: string): void {
+  if (!text) return;
+  if (submitting?.(text)) return;
+  seedLiveComposer(text);
+}

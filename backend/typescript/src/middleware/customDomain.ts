@@ -20,7 +20,7 @@ import type { NextFunction, Request, Response } from 'express';
 import { canonicalHost, isPlatformHost, resolveCustomHost } from '../host/customDomains.js';
 import { ownerPublicRuntimeLapsed } from '../host/publicLapse.js';
 import { sendError } from './errorEnvelope.js';
-import { vendorPath } from './protocolVersion.js';
+import { VERSION_RESPONSE_HEADER, vendorPath } from './protocolVersion.js';
 
 /** Org-bound public prefixes servable on a custom domain. `public-forms` is
  *  deliberately absent in v1: its path carries no orgId to pin (recorded in
@@ -110,6 +110,44 @@ function overDomainLimit(host: string, now: number): boolean {
   return w.count > domainLimit();
 }
 
+/**
+ * ADR 0940 F2 — white-label a response served on a bound customer hostname.
+ *
+ * The negotiator stamps `OpenWOP-Version` (and `Vary: OpenWOP-Version`) BEFORE
+ * this guard runs. Nothing a customer host serves is a protocol response: it
+ * serves published pages and the storefront only, and versioning §1.4 says a
+ * non-protocol response MUST NOT carry the version. So remove both now, and
+ * refuse any later attempt (the v2 hygiene wrapper, an error envelope,
+ * `res.vary`) to set them again. `X-Powered-By` is disabled app-wide (F1).
+ */
+function whiteLabel(res: Response): void {
+  const versionName = VERSION_RESPONSE_HEADER.toLowerCase();
+  const withoutVersion = (value: number | string | readonly string[]): number | string | readonly string[] => {
+    if (typeof value === 'number') return value;
+    const tokens = (Array.isArray(value) ? value.join(',') : String(value)).split(',').map((t) => t.trim()).filter(Boolean);
+    return tokens.filter((t) => t.toLowerCase() !== versionName).join(', ');
+  };
+  res.removeHeader(VERSION_RESPONSE_HEADER);
+  // Vary is append-only in this host (test/vary-append-only.test.ts): rebuild it
+  // through `res.vary()` from the tokens already declared, minus the version.
+  const vary = res.getHeader('Vary');
+  if (vary !== undefined) {
+    const kept = String(withoutVersion(vary as string | readonly string[]));
+    res.removeHeader('Vary');
+    for (const token of kept.split(',').map((t) => t.trim()).filter(Boolean)) res.vary(token);
+  }
+  const setHeader = res.setHeader.bind(res);
+  res.setHeader = ((name: string, value: number | string | readonly string[]) => {
+    const lower = name.toLowerCase();
+    if (lower === versionName) return res;
+    if (lower === 'vary') {
+      const next = withoutVersion(value);
+      return next === '' ? res : setHeader(name, next);
+    }
+    return setHeader(name, value);
+  }) as Response['setHeader'];
+}
+
 export function customDomainMiddleware() {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     const host = canonicalHost(req.headers.host ?? '');
@@ -130,6 +168,7 @@ export function customDomainMiddleware() {
     }
     try {
       if (!bound) { next(); return; } // not a custom domain — untouched
+      whiteLabel(res);
       if (overDomainLimit(host, Date.now())) {
         // H27-b — `detail` was a NEW TOP-LEVEL key (`additionalProperties: false`
         // forbids it) carrying what is simply the envelope's `message`.

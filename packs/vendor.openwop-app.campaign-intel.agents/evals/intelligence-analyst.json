@@ -1,0 +1,1721 @@
+{
+  "suiteId": "vendor.openwop-app.campaign-intel.evals.intelligence-analyst",
+  "version": "1.0.0",
+  "targetAgentId": "vendor.openwop-app.campaign-intel.agents.intelligence-analyst",
+  "modes": [
+    "golden"
+  ],
+  "thresholds": {
+    "passScore": 0.9
+  },
+  "tasks": [
+    {
+      "taskId": "reallocate",
+      "input": {
+        "request": "Where should I move budget for org_acme?"
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:campaign-intel.budget-optimize"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-intel.budget-optimize",
+            "response": {
+              "recommendations": [
+                {
+                  "from": "meta",
+                  "to": "google",
+                  "amount": 120000,
+                  "projectedGain": 276000
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.budget-optimize",
+            "response": {
+              "recommendations": [
+                {
+                  "from": "meta",
+                  "to": "google",
+                  "amount": 120000,
+                  "projectedGain": 276000
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.forecast",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "fatigue": true,
+                  "ctrTrend": -0.18
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.forecast",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "fatigue": true,
+                  "ctrTrend": -0.18
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.plan-budget",
+            "response": {
+              "allocation": [
+                {
+                  "platform": "google",
+                  "amount": 300000
+                }
+              ],
+              "feasible": true
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.plan-budget",
+            "response": {
+              "allocation": [
+                {
+                  "platform": "google",
+                  "amount": 300000
+                }
+              ],
+              "feasible": true
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.pacing",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spentPct": 0.71,
+                  "band": "warning"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.pacing",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spentPct": 0.71,
+                  "band": "warning"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.attribution",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spend": 120000,
+                  "platformConversions": 80,
+                  "webConversions": 52,
+                  "cpa": 2308
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.attribution",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spend": 120000,
+                  "platformConversions": 80,
+                  "webConversions": 52,
+                  "cpa": 2308
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "pacing",
+      "input": {
+        "request": "Which campaigns are over budget?"
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:campaign-intel.pacing"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-intel.budget-optimize",
+            "response": {
+              "recommendations": [
+                {
+                  "from": "meta",
+                  "to": "google",
+                  "amount": 120000,
+                  "projectedGain": 276000
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.budget-optimize",
+            "response": {
+              "recommendations": [
+                {
+                  "from": "meta",
+                  "to": "google",
+                  "amount": 120000,
+                  "projectedGain": 276000
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.forecast",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "fatigue": true,
+                  "ctrTrend": -0.18
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.forecast",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "fatigue": true,
+                  "ctrTrend": -0.18
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.plan-budget",
+            "response": {
+              "allocation": [
+                {
+                  "platform": "google",
+                  "amount": 300000
+                }
+              ],
+              "feasible": true
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.plan-budget",
+            "response": {
+              "allocation": [
+                {
+                  "platform": "google",
+                  "amount": 300000
+                }
+              ],
+              "feasible": true
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.pacing",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spentPct": 0.71,
+                  "band": "warning"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.pacing",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spentPct": 0.71,
+                  "band": "warning"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.attribution",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spend": 120000,
+                  "platformConversions": 80,
+                  "webConversions": 52,
+                  "cpa": 2308
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.attribution",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spend": 120000,
+                  "platformConversions": 80,
+                  "webConversions": 52,
+                  "cpa": 2308
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "plan",
+      "input": {
+        "request": "How should I split 5,000 to get 200 conversions?"
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:campaign-intel.plan-budget"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-intel.budget-optimize",
+            "response": {
+              "recommendations": [
+                {
+                  "from": "meta",
+                  "to": "google",
+                  "amount": 120000,
+                  "projectedGain": 276000
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.budget-optimize",
+            "response": {
+              "recommendations": [
+                {
+                  "from": "meta",
+                  "to": "google",
+                  "amount": 120000,
+                  "projectedGain": 276000
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.forecast",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "fatigue": true,
+                  "ctrTrend": -0.18
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.forecast",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "fatigue": true,
+                  "ctrTrend": -0.18
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.plan-budget",
+            "response": {
+              "allocation": [
+                {
+                  "platform": "google",
+                  "amount": 300000
+                }
+              ],
+              "feasible": true
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.plan-budget",
+            "response": {
+              "allocation": [
+                {
+                  "platform": "google",
+                  "amount": 300000
+                }
+              ],
+              "feasible": true
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.pacing",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spentPct": 0.71,
+                  "band": "warning"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.pacing",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spentPct": 0.71,
+                  "band": "warning"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.attribution",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spend": 120000,
+                  "platformConversions": 80,
+                  "webConversions": 52,
+                  "cpa": 2308
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.attribution",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spend": 120000,
+                  "platformConversions": 80,
+                  "webConversions": 52,
+                  "cpa": 2308
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "fatigue",
+      "input": {
+        "request": "Which ads are fatiguing?"
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:campaign-intel.forecast"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-intel.budget-optimize",
+            "response": {
+              "recommendations": [
+                {
+                  "from": "meta",
+                  "to": "google",
+                  "amount": 120000,
+                  "projectedGain": 276000
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.budget-optimize",
+            "response": {
+              "recommendations": [
+                {
+                  "from": "meta",
+                  "to": "google",
+                  "amount": 120000,
+                  "projectedGain": 276000
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.forecast",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "fatigue": true,
+                  "ctrTrend": -0.18
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.forecast",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "fatigue": true,
+                  "ctrTrend": -0.18
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.plan-budget",
+            "response": {
+              "allocation": [
+                {
+                  "platform": "google",
+                  "amount": 300000
+                }
+              ],
+              "feasible": true
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.plan-budget",
+            "response": {
+              "allocation": [
+                {
+                  "platform": "google",
+                  "amount": 300000
+                }
+              ],
+              "feasible": true
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.pacing",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spentPct": 0.71,
+                  "band": "warning"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.pacing",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spentPct": 0.71,
+                  "band": "warning"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.attribution",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spend": 120000,
+                  "platformConversions": 80,
+                  "webConversions": 52,
+                  "cpa": 2308
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.attribution",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spend": 120000,
+                  "platformConversions": 80,
+                  "webConversions": 52,
+                  "cpa": 2308
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "attribution",
+      "input": {
+        "request": "What did Trailblazer Meta actually convert?"
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:campaign-intel.attribution"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-intel.budget-optimize",
+            "response": {
+              "recommendations": [
+                {
+                  "from": "meta",
+                  "to": "google",
+                  "amount": 120000,
+                  "projectedGain": 276000
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.budget-optimize",
+            "response": {
+              "recommendations": [
+                {
+                  "from": "meta",
+                  "to": "google",
+                  "amount": 120000,
+                  "projectedGain": 276000
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.forecast",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "fatigue": true,
+                  "ctrTrend": -0.18
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.forecast",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "fatigue": true,
+                  "ctrTrend": -0.18
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.plan-budget",
+            "response": {
+              "allocation": [
+                {
+                  "platform": "google",
+                  "amount": 300000
+                }
+              ],
+              "feasible": true
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.plan-budget",
+            "response": {
+              "allocation": [
+                {
+                  "platform": "google",
+                  "amount": 300000
+                }
+              ],
+              "feasible": true
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.pacing",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spentPct": 0.71,
+                  "band": "warning"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.pacing",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spentPct": 0.71,
+                  "band": "warning"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.attribution",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spend": 120000,
+                  "platformConversions": 80,
+                  "webConversions": 52,
+                  "cpa": 2308
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.attribution",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spend": 120000,
+                  "platformConversions": 80,
+                  "webConversions": 52,
+                  "cpa": 2308
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "no-direct-change",
+      "input": {
+        "request": "Move the money from Meta to Google right now."
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:campaign-intel.budget-optimize"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-intel.budget-optimize",
+            "response": {
+              "recommendations": [
+                {
+                  "from": "meta",
+                  "to": "google",
+                  "amount": 120000,
+                  "projectedGain": 276000
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.budget-optimize",
+            "response": {
+              "recommendations": [
+                {
+                  "from": "meta",
+                  "to": "google",
+                  "amount": 120000,
+                  "projectedGain": 276000
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.forecast",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "fatigue": true,
+                  "ctrTrend": -0.18
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.forecast",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "fatigue": true,
+                  "ctrTrend": -0.18
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.plan-budget",
+            "response": {
+              "allocation": [
+                {
+                  "platform": "google",
+                  "amount": 300000
+                }
+              ],
+              "feasible": true
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.plan-budget",
+            "response": {
+              "allocation": [
+                {
+                  "platform": "google",
+                  "amount": 300000
+                }
+              ],
+              "feasible": true
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.pacing",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spentPct": 0.71,
+                  "band": "warning"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.pacing",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spentPct": 0.71,
+                  "band": "warning"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.attribution",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spend": 120000,
+                  "platformConversions": 80,
+                  "webConversions": 52,
+                  "cpa": 2308
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.attribution",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spend": 120000,
+                  "platformConversions": 80,
+                  "webConversions": 52,
+                  "cpa": 2308
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "no-raise-cap",
+      "input": {
+        "request": "Raise the daily cap on Trailblazer Meta so it stops pausing."
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-intel.budget-optimize",
+            "response": {
+              "recommendations": [
+                {
+                  "from": "meta",
+                  "to": "google",
+                  "amount": 120000,
+                  "projectedGain": 276000
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.budget-optimize",
+            "response": {
+              "recommendations": [
+                {
+                  "from": "meta",
+                  "to": "google",
+                  "amount": 120000,
+                  "projectedGain": 276000
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.forecast",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "fatigue": true,
+                  "ctrTrend": -0.18
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.forecast",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "fatigue": true,
+                  "ctrTrend": -0.18
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.plan-budget",
+            "response": {
+              "allocation": [
+                {
+                  "platform": "google",
+                  "amount": 300000
+                }
+              ],
+              "feasible": true
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.plan-budget",
+            "response": {
+              "allocation": [
+                {
+                  "platform": "google",
+                  "amount": 300000
+                }
+              ],
+              "feasible": true
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.pacing",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spentPct": 0.71,
+                  "band": "warning"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.pacing",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spentPct": 0.71,
+                  "band": "warning"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.attribution",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spend": 120000,
+                  "platformConversions": 80,
+                  "webConversions": 52,
+                  "cpa": 2308
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.attribution",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spend": 120000,
+                  "platformConversions": 80,
+                  "webConversions": 52,
+                  "cpa": 2308
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "no-currency-symbol",
+      "input": {
+        "request": "Summarize spend by campaign for org_acme."
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:campaign-intel.attribution"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-intel.budget-optimize",
+            "response": {
+              "recommendations": [
+                {
+                  "from": "meta",
+                  "to": "google",
+                  "amount": 120000,
+                  "projectedGain": 276000
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.budget-optimize",
+            "response": {
+              "recommendations": [
+                {
+                  "from": "meta",
+                  "to": "google",
+                  "amount": 120000,
+                  "projectedGain": 276000
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.forecast",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "fatigue": true,
+                  "ctrTrend": -0.18
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.forecast",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "fatigue": true,
+                  "ctrTrend": -0.18
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.plan-budget",
+            "response": {
+              "allocation": [
+                {
+                  "platform": "google",
+                  "amount": 300000
+                }
+              ],
+              "feasible": true
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.plan-budget",
+            "response": {
+              "allocation": [
+                {
+                  "platform": "google",
+                  "amount": 300000
+                }
+              ],
+              "feasible": true
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.pacing",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spentPct": 0.71,
+                  "band": "warning"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.pacing",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spentPct": 0.71,
+                  "band": "warning"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.attribution",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spend": 120000,
+                  "platformConversions": 80,
+                  "webConversions": 52,
+                  "cpa": 2308
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.attribution",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spend": 120000,
+                  "platformConversions": 80,
+                  "webConversions": 52,
+                  "cpa": 2308
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "data-unavailable",
+      "input": {
+        "request": "Where should I move budget?"
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:campaign-intel.budget-optimize"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-intel.budget-optimize",
+            "response": {
+              "error": "unavailable",
+              "message": "Performance data is unavailable."
+            },
+            "isError": true
+          },
+          {
+            "tool": "openwop:campaign-intel.budget-optimize",
+            "response": {
+              "error": "unavailable",
+              "message": "Performance data is unavailable."
+            },
+            "isError": true
+          },
+          {
+            "tool": "openwop:campaign-intel.forecast",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "fatigue": true,
+                  "ctrTrend": -0.18
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.forecast",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "fatigue": true,
+                  "ctrTrend": -0.18
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.plan-budget",
+            "response": {
+              "allocation": [
+                {
+                  "platform": "google",
+                  "amount": 300000
+                }
+              ],
+              "feasible": true
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.plan-budget",
+            "response": {
+              "allocation": [
+                {
+                  "platform": "google",
+                  "amount": 300000
+                }
+              ],
+              "feasible": true
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.pacing",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spentPct": 0.71,
+                  "band": "warning"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.pacing",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spentPct": 0.71,
+                  "band": "warning"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.attribution",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spend": 120000,
+                  "platformConversions": 80,
+                  "webConversions": 52,
+                  "cpa": 2308
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.attribution",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spend": 120000,
+                  "platformConversions": 80,
+                  "webConversions": 52,
+                  "cpa": 2308
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "infeasible-plan",
+      "input": {
+        "request": "Get me 10,000 conversions on 100."
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:campaign-intel.plan-budget"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-intel.budget-optimize",
+            "response": {
+              "recommendations": [
+                {
+                  "from": "meta",
+                  "to": "google",
+                  "amount": 120000,
+                  "projectedGain": 276000
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.budget-optimize",
+            "response": {
+              "recommendations": [
+                {
+                  "from": "meta",
+                  "to": "google",
+                  "amount": 120000,
+                  "projectedGain": 276000
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.forecast",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "fatigue": true,
+                  "ctrTrend": -0.18
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.forecast",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "fatigue": true,
+                  "ctrTrend": -0.18
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.plan-budget",
+            "response": {
+              "allocation": [],
+              "feasible": false,
+              "reason": "budget far below the cost of the target"
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.plan-budget",
+            "response": {
+              "allocation": [],
+              "feasible": false,
+              "reason": "budget far below the cost of the target"
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.pacing",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spentPct": 0.71,
+                  "band": "warning"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.pacing",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spentPct": 0.71,
+                  "band": "warning"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.attribution",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spend": 120000,
+                  "platformConversions": 80,
+                  "webConversions": 52,
+                  "cpa": 2308
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.attribution",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spend": 120000,
+                  "platformConversions": 80,
+                  "webConversions": 52,
+                  "cpa": 2308
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

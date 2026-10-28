@@ -376,6 +376,8 @@ Without it the hint and the worker can both dispatch one run.
 > actually run. The hard-require flag was separately proven to fail loudly with
 > no daemon, so the lane cannot silently skip in `ci:full` either.
 
+> **CORRECTED 2026-10-23 (grade-tests wave 61):** the hand-written pg-mem `Storage` double in `test/storage-postgres.test.ts` (`makeStorage()`, the `Postgres storage (pg-mem)` describe) is DELETED: sabotaging the real adapter left every one of its cases green (probes `8fw3g2-pg-ua-copy`, `8fw3g2-pg-run-copy`). The line numbers cited here no longer exist. The file now holds only the `listAudit` builder and the migrated `audit_log` schema case; real-adapter coverage is `storage-adapter-parity.test.ts` plus the Docker-only testcontainers file.
+
 **A row is retired only on OBSERVED evidence.** The worker never concludes "I
 dispatched, therefore done". It deletes the row when it can see the run has left
 `pending` — a fact `executeRun` writes durably before any node runs — or when the
@@ -427,6 +429,8 @@ run-less intent self-heals on the next claim, and that path is tested.
 | `test/storage-adapter-parity.test.ts` | +6 | both adapters: insert-with/without intent, claim→reschedule→complete (postgres half skipped — pg-mem rejects the `SKIP LOCKED` AST) |
 | `test/storage-adapter-parity-testcontainers.test.ts` | +4 | the same against a REAL Postgres, including the `SKIP LOCKED` claim |
 | `test/storage-postgres.test.ts` | — | the hand-rolled hermetic `Storage` grew the four methods |
+
+> **CORRECTED 2026-10-23 (grade-tests wave 61):** the hand-written pg-mem `Storage` double in `test/storage-postgres.test.ts` (`makeStorage()`, the `Postgres storage (pg-mem)` describe) is DELETED: sabotaging the real adapter left every one of its cases green (probes `8fw3g2-pg-ua-copy`, `8fw3g2-pg-run-copy`). The line numbers cited here no longer exist. The file now holds only the `listAudit` builder and the migrated `audit_log` schema case; real-adapter coverage is `storage-adapter-parity.test.ts` plus the Docker-only testcontainers file.
 
 ### Sabotage verification
 
@@ -716,6 +720,14 @@ outbox read must never render as an empty queue, which here would read as
 | `test/operations-dispatch-outbox.test.ts` | 7 | the superadmin gate (fail-closed, row untouched), the projection's exact key set, required reason, audit entry, second-redrive 404, live-pending refusal |
 | `test/storage-postgres.test.ts` | — | the hermetic `Storage` grew the three methods as real SQL |
 
+> **CORRECTED 2026-10-24 (/grade-tests wave 64):** the first row's "TWO REAL BOOTS asserting opposite
+> answers on the same key" stopped being true at the ADR 0812 major-2 cut (ADR 0812:869). The v2 root
+> has no `workspace` record, so both boots now pin that NO profile advertises it. The file still holds
+> the DSN, warn, fail-closed and exact-`true` cases; the advert half is an honest ceiling until a v2
+> projection of `workspace` exists.
+
+> **CORRECTED 2026-10-23 (grade-tests wave 61):** the hand-written pg-mem `Storage` double in `test/storage-postgres.test.ts` (`makeStorage()`, the `Postgres storage (pg-mem)` describe) is DELETED: sabotaging the real adapter left every one of its cases green (probes `8fw3g2-pg-ua-copy`, `8fw3g2-pg-run-copy`). The line numbers cited here no longer exist. The file now holds only the `listAudit` builder and the migrated `audit_log` schema case; real-adapter coverage is `storage-adapter-parity.test.ts` plus the Docker-only testcontainers file.
+
 Every metric assertion is `toEqual` on the whole attribute object read from the
 emission ledger, and every test in the observability file asserts
 `labelViolations()` is EMPTY in `afterEach` — an undeclared label is DROPPED,
@@ -762,3 +774,7 @@ test measures nothing.
   makes the action idempotent, so a replayed request cannot double-queue.
 - **No change to `idempotency.crossRegion`.** It stays absent / `single-region`
   (P4, RFC 0150), and `test/agrade-wire-blocked-residue.test.ts` still pins it.
+
+### Recovery correction — 2026-10-24
+
+An accepted run and its dispatch intent can commit before `startWorkflowRun` seeds the variable bag. A crash or lost insert acknowledgement in that window left the durable worker executing unresolved chain input tokens. After the existing execution claim and hydration, the executor now reconstructs the initial declared variables from accepted inputs/configurable overrides only for a fresh pending non-fork run with no bag. Existing bags and continuation/fork state are preserved. The outbox worker witness executes a real node reading both interpolated config and variables; the lead-grading retry witness also crosses the lost-acknowledgement window through that worker.

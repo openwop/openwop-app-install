@@ -186,3 +186,48 @@ export async function deleteRender(orgId: string, briefId: string, renderId: str
   const res = await fetch(`${base(orgId)}/briefs/${encodeURIComponent(briefId)}/renders/${encodeURIComponent(renderId)}`, fetchOpts({ method: 'DELETE', headers: authedHeaders() }));
   if (!res.ok && res.status !== 204) await asJson(res, 'deleteRender');
 }
+
+/** ADR 0945 Q1 — the client's product-grounding settings (edit mode opt-in). */
+export interface GroundingSettings { editModeEnabled: boolean }
+export async function getGroundingSettings(orgId: string): Promise<GroundingSettings> {
+  const res = await fetch(`${base(orgId)}/grounding-settings`, fetchOpts({ headers: authedHeaders() }));
+  return asJson<GroundingSettings>(res, 'getGroundingSettings');
+}
+export async function setGroundingSettings(orgId: string, editModeEnabled: boolean): Promise<GroundingSettings> {
+  const res = await fetch(`${base(orgId)}/grounding-settings`, fetchOpts({ method: 'PUT', headers: jsonHeaders(), body: JSON.stringify({ editModeEnabled }) }));
+  return asJson<GroundingSettings>(res, 'setGroundingSettings');
+}
+
+/** ADR 0945 P2 — the judge check: the known-bad fixture edits sent to a real
+ *  vision model on one of the workspace's own AI keys. Send a full
+ *  {provider, model, credentialRef}, or nothing to test what the fidelity
+ *  check uses today. */
+export interface JudgeCheckSpec { provider: 'google' | 'anthropic' | 'openai'; model: string; credentialRef: string }
+export type JudgeCheckOutcome = 'pass' | 'fail' | 'needs_review';
+export interface JudgeCheckCase {
+  id: string;
+  expected: 'pass' | 'fail' | 'not_pass';
+  judged?: JudgeCheckOutcome;
+  outcome?: JudgeCheckOutcome;
+  passed: boolean;
+  repaired?: boolean;
+  error?: 'judge_invalid' | 'provider_unavailable';
+  /** The provider's HTTP status and error codes, never its message. */
+  providerError?: { status?: number; codes: string[] };
+}
+export interface JudgeCheckReport {
+  provider: string;
+  model?: string;
+  route: string;
+  rulesetVersion: string;
+  checkedAt: string;
+  cases: JudgeCheckCase[];
+  calls: number;
+  maxCalls: number;
+  completed: boolean;
+  passed: boolean;
+}
+export async function runJudgeCheck(orgId: string, spec?: JudgeCheckSpec): Promise<JudgeCheckReport> {
+  const res = await fetch(`${base(orgId)}/fidelity/judge-check`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify(spec ?? {}) }));
+  return asJson<JudgeCheckReport>(res, 'runJudgeCheck');
+}

@@ -41,7 +41,7 @@ import type { FeatureToggleStatus } from '../../host/featureToggles/types.js';
 import { declaredDefaultWorkspaceTargets } from '../../host/workspaceJoinLedger.js';
 import { getOrg, isWorkspaceOrg } from '../../host/accessControlService.js';
 import { operatorAccessCounts } from '../../host/operatorAccess.js';
-import { listSecretRefs } from '../../byok/secretResolver.js';
+import { factoryKeyProblem } from '../kicktodoFactoryAi.js';
 
 /** The nine KickTodo feature packages (ADR 0414 … 0432). */
 export const KICKTODO_FEATURE_IDS: readonly string[] = [
@@ -198,15 +198,18 @@ export async function buildKicktodoReadiness(input: { tenantId: string; storage?
   if (defaultTenant && creator?.defaultWorkspace === false) factoryReasons.push(`kicktodo-creator resolves OFF where the default workspace lives (${defaultTenant}) — a challenge authored there publishes into the operator's private catalog`);
   if (implementation['blob'] === 'memory') factoryReasons.push('blob surface is in-memory — lesson media does not survive a restart or reach another instance');
 
-  // ADR 0910 D10 — operator access + the Factory's dedicated key (`kicktodo-factory:*`).
+  // ADR 0910 D10 — operator access + the Factory's dedicated key (`features/kicktodoFactoryAi.ts`).
   const operatorAccess: KicktodoReadinessReport['checks']['operatorAccess'] = { eligible: 0, live: 0, warnings: [] };
   if (defaultTenant) {
     try {
       Object.assign(operatorAccess, await operatorAccessCounts(defaultTenant));
       if (operatorAccess.live === 0) operatorAccess.warnings.push('no_live_operator_activation');
-      if (!(await listSecretRefs({ tenantId: defaultTenant })).some((r) => r.startsWith('kicktodo-factory:'))) {
+      // ADR 0975 D2 — the SAME selection the run's pre-flight makes, so "ready"
+      // means a run will start (it said ready while every run refused, 2026-10-25).
+      const factoryKey = await factoryKeyProblem(defaultTenant);
+      if (factoryKey) {
         operatorAccess.warnings.push('factory_credential_missing');
-        factoryReasons.push(`no kicktodo-factory:<provider> key in ${defaultTenant}'s vault — the Factory there falls back to whichever provider key is listed first`);
+        factoryReasons.push(factoryKey);
       }
     } catch {
       operatorAccess.warnings.push('operator_access_unreadable');

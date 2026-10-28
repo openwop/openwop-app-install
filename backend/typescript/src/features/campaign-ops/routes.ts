@@ -17,18 +17,34 @@ import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { assertOrgScope, resolveEffectiveAccess, type Scope } from '../../host/accessControlService.js';
 import { isDurableCaller, isOwnPersonalWorkspace } from '../../host/requestSubject.js';
-import { requireFeatureEnabled, requireOrgScope, tenantOf } from '../featureRoute.js';
+import { publicBaseUrl, requireByokManage, requireFeatureEnabled, requireOrgScope, tenantOf } from '../featureRoute.js';
+import { clientIp } from '../../host/clientIp.js';
+import { suspendCollaboratorsForOrg } from '../../host/externalCollaborators.js';
 import { resolveCallerUser } from '../users/usersGuards.js';
 import { createClient, getClient, listClients, updateClient } from './clientService.js';
 import { addAsset, getAsset, listAssets, refreshAsset, removeAsset } from './assetService.js';
 import { adapterFor } from './adapters/registry.js';
-import type { ClientAccount, ClientMode, ClientStatus } from './types.js';
+import { APPROVAL_POLICY_MODES, EXTERNAL_AGENTS_LEVELS, type ApprovalPolicyMode, type ClientAccount, type ClientMode, type ClientStatus, type ExternalAgentsAccess } from './types.js';
+import { addApprover, countActiveApprovers, decideFromPortal, listApprovers, portalEnabled, revokeAllLinksForClient, revokeApprover, sendApprovalLinks } from './portal.js';
 import { personalTenantOf } from '../../host/requestSubject.js';
 import { answerQuestions, createRequest, editRequest, getRequest, listRequests } from './requestService.js';
 import { diffOf, getChangeSet, listChangeSets, markStaleForRequest } from './changeSetService.js';
 import { startChangeRequestRun } from './runLauncher.js';
 import { requestChangeSetApproval } from './approval.js';
 import { getJob, listJobs, jobIdOf } from './execution.js';
+import { AUTONOMY_TOGGLE, AUTONOMY_TOGGLE_LABEL, applyPolicyChange, describePolicy, parsePolicyBody } from '../../host/autonomyPolicy/index.js';
+
+import { deleteAgentBinding, listAgentBindings, pinsStoredKey, upsertAgentBinding } from './agentBindingService.js';
+import {
+  addClientNote, decideClientNoteProposal, listClientNoteProposals, listClientNotes, listClientRecall, purgeClientMemory, removeClientNote,
+  type ClientNoteProposalStatus,
+} from './clientMemory.js';
+import { getClientContextSources, setClientContextSources } from './clientContext.js';
+import { getClientTeam } from './teamService.js';
+import { listRunReadReceipts } from '../../host/memoryReadReceipts.js';
+import { hostExtStorage } from '../../host/hostExtPersistence.js';
+import { runClientStamp } from '../../host/runClientOrg.js';
+import { listCollections } from '../kb/kbService.js';
 
 export const CAMPAIGN_OPS_TOGGLE = 'campaign-ops';
 const LABEL = 'Campaign operations';
@@ -60,7 +76,7 @@ async function requireAgencyAdmin(req: Request): Promise<void> {
 }
 
 /** The client of `req.params.orgId`, authorized for `scope`; 404 when it is not a client. */
-async function authorizeClient(req: Request, scope: Scope): Promise<{ client: ClientAccount; tenantId: string; userId: string }> {
+export async function authorizeClient(req: Request, scope: Scope): Promise<{ client: ClientAccount; tenantId: string; userId: string }> {
   await requireFeatureEnabled(req, CAMPAIGN_OPS_TOGGLE, LABEL);
   const tenantId = tenantOf(req);
   const orgId = req.params.orgId;
@@ -131,22 +147,183 @@ export function registerCampaignOpsRoutes(deps: RouteDeps): void {
   app.patch(`${BASE}/clients/:orgId`, async (req, res, next) => {
     try {
       const { tenantId } = await authorizeClient(req, 'host:members:manage');
-      const body = (req.body ?? {}) as { status?: unknown; mode?: unknown; name?: unknown };
+      const body = (req.body ?? {}) as { status?: unknown; mode?: unknown; name?: unknown; approvalPolicy?: unknown; externalAgents?: unknown };
       if (body.status !== undefined && !STATUSES.includes(body.status as ClientStatus)) {
         throw new OpenwopError('validation_error', `status MUST be one of ${STATUSES.join(', ')}.`, 400, { field: 'status' });
       }
       if (body.mode !== undefined && !MODES.includes(body.mode as ClientMode)) {
         throw new OpenwopError('validation_error', `mode MUST be one of ${MODES.join(', ')}.`, 400, { field: 'mode' });
       }
+      if (body.approvalPolicy !== undefined && !APPROVAL_POLICY_MODES.includes(body.approvalPolicy as ApprovalPolicyMode)) {
+        throw new OpenwopError('validation_error', `approvalPolicy MUST be one of ${APPROVAL_POLICY_MODES.join(', ')}.`, 400, { field: 'approvalPolicy' });
+      }
+      // ADR 0924 D4 — `client` needs the portal and someone at the client to decide.
+      if (body.approvalPolicy === 'client') {
+        if (!(await portalEnabled(tenantId))) {
+          throw new OpenwopError('validation_error', 'Turn on the client approval portal first.', 409, { reason: 'portal_off' });
+        }
+        if ((await countActiveApprovers(tenantId, req.params.orgId)) === 0) {
+          throw new OpenwopError('validation_error', 'Add a client approver first.', 409, { reason: 'no_client_approver' });
+        }
+      }
+      // ADR 0962 D7 — what outside agents may do for this client (an admin act, like `mode`).
+      if (body.externalAgents !== undefined && !EXTERNAL_AGENTS_LEVELS.includes(body.externalAgents as ExternalAgentsAccess)) {
+        throw new OpenwopError('validation_error', `externalAgents MUST be one of ${EXTERNAL_AGENTS_LEVELS.join(', ')}.`, 400, { field: 'externalAgents' });
+      }
       const client = await updateClient(tenantId, req.params.orgId, {
+        ...(body.externalAgents !== undefined ? { externalAgents: body.externalAgents as ExternalAgentsAccess } : {}),
         ...(body.status !== undefined ? { status: body.status as ClientStatus } : {}),
         ...(body.mode !== undefined ? { mode: body.mode as ClientMode } : {}),
         ...(typeof body.name === 'string' ? { name: body.name } : {}),
+        ...(body.approvalPolicy !== undefined ? { approvalPolicy: body.approvalPolicy as ApprovalPolicyMode } : {}),
       });
       if (!client) throw new OpenwopError('not_found', 'Client not found.', 404, {});
+      // ADR 0921 Q2 — archiving a client ends every approval link it has out,
+      // and (ADR 0958 D7) suspends its signed-in collaborators, so un-archiving
+      // brings none back without an agency member reactivating them.
+      if (client.status === 'archived') {
+        await revokeAllLinksForClient(tenantId, client.orgId);
+        await suspendCollaboratorsForOrg(tenantId, client.orgId, 'system:client-archived');
+      }
       res.json({ client });
     } catch (err) { next(err); }
   });
+
+  // ── ADR 0942 P0 — the client's default autonomy policy ──
+  // The sub-toggle's parent is `campaign-orchestration` (ADR 0941 D5), so it is
+  // AND-gated here in code as well.
+  const requireAutonomyToggles = async (req: Request): Promise<void> => {
+    await requireFeatureEnabled(req, 'campaign-orchestration', 'Campaign Studio');
+    await requireFeatureEnabled(req, AUTONOMY_TOGGLE, AUTONOMY_TOGGLE_LABEL);
+  };
+  // AND-gated: campaign-ops (inside authorizeClient), then the
+  // `campaign-orchestration.autonomy` sub-toggle. Reading needs workspace:read on
+  // the client; setting it is an agency-admin act in either direction (D9), and
+  // a loosen is audited and tells the client org's admins.
+
+  app.get(`${BASE}/clients/:orgId/autonomy-default`, async (req, res, next) => {
+    try {
+      const { tenantId, client } = await authorizeClient(req, 'workspace:read');
+      await requireAutonomyToggles(req);
+      res.json(await describePolicy(tenantId, client.orgId));
+    } catch (err) { next(err); }
+  });
+
+  app.put(`${BASE}/clients/:orgId/autonomy-default`, async (req, res, next) => {
+    try {
+      const { tenantId, client, userId } = await authorizeClient(req, 'workspace:read');
+      await requireAutonomyToggles(req);
+      await requireAgencyAdmin(req);
+      const { input, ifMatch } = parsePolicyBody(req.body);
+      const result = await applyPolicyChange({
+        tenantId, orgId: client.orgId, input, ...(ifMatch !== undefined ? { ifMatch } : {}), actor: userId,
+        authorize: async () => { /* agency admin, checked above, may move the default either way */ },
+      });
+      res.json({ ...(await describePolicy(tenantId, client.orgId)), direction: result.direction, loosened: result.loosened });
+    } catch (err) { next(err); }
+  });
+
+  // ── Client memory (ADR 0944 D4) ──
+  // Curated notes are the trusted lane into the client's shared agent memory:
+  // read on `workspace:read`, written and removed on `workspace:write` of THAT
+  // client. Agent proposals wait outside memory until a person decides them.
+
+  app.get(`${BASE}/clients/:orgId/memory/notes`, async (req, res, next) => {
+    try {
+      const { tenantId } = await authorizeClient(req, 'workspace:read');
+      res.json({ notes: await listClientNotes(tenantId, req.params.orgId) });
+    } catch (err) { next(err); }
+  });
+
+  app.post(`${BASE}/clients/:orgId/memory/notes`, async (req, res, next) => {
+    try {
+      const { tenantId, userId } = await authorizeClient(req, 'workspace:write');
+      const { id } = await addClientNote(tenantId, req.params.orgId, (req.body as { content?: unknown } | undefined)?.content, userId);
+      res.status(201).json({ noteId: id });
+    } catch (err) { next(err); }
+  });
+
+  app.delete(`${BASE}/clients/:orgId/memory/notes/:noteId`, async (req, res, next) => {
+    try {
+      const { tenantId } = await authorizeClient(req, 'workspace:write');
+      const out = await removeClientNote(tenantId, req.params.orgId, req.params.noteId);
+      if (!out.removed) throw new OpenwopError('not_found', 'Note not found.', 404, { noteId: req.params.noteId });
+      // A durable delete whose recall index lagged is reported, never a bare 204.
+      if (!out.recallCleared) { res.json({ recallCleared: false }); return; }
+      res.status(204).end();
+    } catch (err) { next(err); }
+  });
+
+  app.get(`${BASE}/clients/:orgId/memory/proposals`, async (req, res, next) => {
+    try {
+      const { tenantId } = await authorizeClient(req, 'workspace:read');
+      const status = typeof req.query.status === 'string' && ['pending', 'approved', 'rejected'].includes(req.query.status)
+        ? req.query.status as ClientNoteProposalStatus : undefined;
+      res.json({ proposals: await listClientNoteProposals(tenantId, req.params.orgId, status) });
+    } catch (err) { next(err); }
+  });
+
+  // ADR 0944 D4 — what the agents wrote (turn summaries, untrusted), for review.
+  app.get(`${BASE}/clients/:orgId/memory/recall`, async (req, res, next) => {
+    try {
+      const { tenantId } = await authorizeClient(req, 'workspace:read');
+      res.json({ entries: await listClientRecall(tenantId, req.params.orgId) });
+    } catch (err) { next(err); }
+  });
+
+  // ADR 0944 D8 — client off-boarding: empty this client's memory everywhere.
+  // An agency-admin act (it destroys a client's institutional memory).
+  app.delete(`${BASE}/clients/:orgId/memory`, async (req, res, next) => {
+    try {
+      const { tenantId } = await authorizeClient(req, 'workspace:read');
+      await requireAgencyAdmin(req);
+      res.json({ report: await purgeClientMemory(tenantId, req.params.orgId) });
+    } catch (err) { next(err); }
+  });
+
+  // ADR 0944 D5 — which of the client's knowledge collections its campaign
+  // agents search (Q5: an explicit list, never "every collection in the org").
+  app.get(`${BASE}/clients/:orgId/memory/sources`, async (req, res, next) => {
+    try {
+      const { tenantId, userId } = await authorizeClient(req, 'workspace:read');
+      // Preserve the KB service's subject gate for project-bound collections.
+      const available = (await listCollections(tenantId, req.params.orgId, { subject: userId })).map((c) => ({ collectionId: c.collectionId, name: c.name }));
+      const readable = new Set(available.map((c) => c.collectionId));
+      res.json({ collectionIds: (await getClientContextSources(tenantId, req.params.orgId)).filter((id) => readable.has(id)), available });
+    } catch (err) { next(err); }
+  });
+
+  app.put(`${BASE}/clients/:orgId/memory/sources`, async (req, res, next) => {
+    try {
+      const { tenantId, userId } = await authorizeClient(req, 'workspace:write');
+      const ids = await setClientContextSources(tenantId, req.params.orgId, (req.body as { collectionIds?: unknown } | undefined)?.collectionIds, userId);
+      res.json({ collectionIds: ids });
+    } catch (err) { next(err); }
+  });
+
+  // ADR 0944 D6 — "what did the agent recall?": a client run's read receipts
+  // (ids and a content hash, never content). Only this client's receipts.
+  app.get(`${BASE}/clients/:orgId/runs/:runId/memory-receipts`, async (req, res, next) => {
+    try {
+      const { tenantId } = await authorizeClient(req, 'workspace:read');
+      const run = await hostExtStorage().getRun(req.params.runId);
+      const client = runClientStamp(run?.metadata);
+      if (!run || run.tenantId !== tenantId || !client || 'refused' in client || client.orgId !== req.params.orgId) {
+        throw new OpenwopError('not_found', 'Run not found.', 404, { runId: req.params.runId });
+      }
+      const rows = (await listRunReadReceipts(tenantId, req.params.runId)).filter((r) => r.orgId === req.params.orgId);
+      res.json({ receipts: rows.map(({ key: _key, ...r }) => r) });
+    } catch (err) { next(err); }
+  });
+
+  for (const decision of ['approve', 'reject'] as const) {
+    app.post(`${BASE}/clients/:orgId/memory/proposals/:proposalId/${decision}`, async (req, res, next) => {
+      try {
+        const { tenantId, userId } = await authorizeClient(req, 'workspace:write');
+        res.json({ proposal: await decideClientNoteProposal(tenantId, req.params.orgId, req.params.proposalId, decision, userId) });
+      } catch (err) { next(err); }
+    });
+  }
 
   // ── Change requests and change sets (ADR 0923) ──
 
@@ -243,6 +420,56 @@ export function registerCampaignOpsRoutes(deps: RouteDeps): void {
     } catch (err) { next(err); }
   });
 
+  // ── Client approvers and the portal (ADR 0924 D5, P1) ──
+
+  app.get(`${BASE}/clients/:orgId/approvers`, async (req, res, next) => {
+    try {
+      const { tenantId } = await authorizeClient(req, 'workspace:read');
+      res.json({ approvers: await listApprovers(tenantId, req.params.orgId), portalEnabled: await portalEnabled(tenantId) });
+    } catch (err) { next(err); }
+  });
+
+  app.post(`${BASE}/clients/:orgId/approvers`, async (req, res, next) => {
+    try {
+      const { tenantId, userId } = await authorizeClient(req, 'host:members:manage');
+      if (!(await portalEnabled(tenantId))) {
+        throw new OpenwopError('validation_error', 'Turn on the client approval portal first.', 409, { reason: 'portal_off' });
+      }
+      const body = (req.body ?? {}) as { email?: unknown; displayName?: unknown };
+      const approver = await addApprover({ tenantId, orgId: req.params.orgId, email: body.email, displayName: body.displayName, createdBy: userId });
+      res.status(201).json({ approver });
+    } catch (err) { next(err); }
+  });
+
+  app.delete(`${BASE}/clients/:orgId/approvers/:approverId`, async (req, res, next) => {
+    try {
+      const { tenantId, userId, client } = await authorizeClient(req, 'host:members:manage');
+      const approver = await revokeApprover(tenantId, client, req.params.approverId, userId);
+      if (!approver) throw new OpenwopError('not_found', 'Approver not found.', 404, {});
+      res.json({ approver });
+    } catch (err) { next(err); }
+  });
+
+  /** Mint one link per active approver for an in-review change set. The URLs are
+   *  returned once; the operator sends them (no email in v1). The sender is the
+   *  agency authority the approved change is written under. */
+  app.post(`${BASE}/clients/:orgId/change-sets/:changeSetId/approval-links`, async (req, res, next) => {
+    try {
+      const { tenantId, userId, client } = await authorizeClient(req, 'workspace:write');
+      const links = await sendApprovalLinks({ tenantId, client, changeSetId: req.params.changeSetId, sentBy: userId, baseUrl: publicBaseUrl(req) });
+      res.status(201).json({ links });
+    } catch (err) { next(err); }
+  });
+
+  // The client approver's decision. Public (PUBLIC_PATH_PREFIXES); the token is
+  // the authority and the source of tenant, org and change set. The package
+  // itself is read through the sharing viewer (`/shared/:token`).
+  app.post('/host/openwop-app/public-campaign-approval/:token/decision', async (req, res, next) => {
+    try {
+      res.json(await decideFromPortal({ token: req.params.token, ip: clientIp(req), body: req.body }));
+    } catch (err) { next(err); }
+  });
+
   // ── Jobs (ADR 0925) ──
 
   app.get(`${BASE}/clients/:orgId/jobs`, async (req, res, next) => {
@@ -267,6 +494,50 @@ export function registerCampaignOpsRoutes(deps: RouteDeps): void {
       const { tenantId } = await authorizeClient(req, 'workspace:read');
       const job = await getJob(tenantId, req.params.orgId, jobIdOf(tenantId, req.params.approvalId));
       res.json({ job: job ?? null });
+    } catch (err) { next(err); }
+  });
+
+  // ── Agent bindings (ADR 0943 D2) ──
+  // A client's replacement for an agent a chain pins. Frozen into each run at
+  // start; editing one never changes a run that already exists.
+
+  app.get(`${BASE}/clients/:orgId/agent-bindings`, async (req, res, next) => {
+    try {
+      const { tenantId } = await authorizeClient(req, 'workspace:read');
+      res.json({ bindings: await listAgentBindings(tenantId, req.params.orgId) });
+    } catch (err) { next(err); }
+  });
+
+  /** ADR 0943 P4 — the Team tab: each role, the agent it runs as for this client,
+   *  and the last workspace eval. `canEdit` is decided HERE with the write
+   *  predicate the PUT/DELETE routes use, never inferred by the browser. */
+  app.get(`${BASE}/clients/:orgId/team`, async (req, res, next) => {
+    try {
+      const { tenantId, userId } = await authorizeClient(req, 'workspace:read');
+      const canEdit = await authorizeClient(req, 'workspace:write').then(() => true, () => false);
+      res.json({ ...(await getClientTeam(tenantId, req.params.orgId, { userId })), canEdit });
+    } catch (err) { next(err); }
+  });
+
+  /** Create or replace the binding for one (pin, workflow?, node?) scope. A
+   *  binding that pins a stored key spends the agency's key, so it also needs
+   *  the ONE BYOK write predicate (`requireByokManage`, ADR 0943 D6). */
+  app.put(`${BASE}/clients/:orgId/agent-bindings`, async (req, res, next) => {
+    try {
+      const { tenantId, userId } = await authorizeClient(req, 'workspace:write');
+      if (pinsStoredKey(req.body)) await requireByokManage(req);
+      const binding = await upsertAgentBinding({ tenantId, orgId: req.params.orgId, body: req.body, updatedBy: userId });
+      res.json({ binding });
+    } catch (err) { next(err); }
+  });
+
+  app.delete(`${BASE}/clients/:orgId/agent-bindings/:bindingId`, async (req, res, next) => {
+    try {
+      const { tenantId } = await authorizeClient(req, 'workspace:write');
+      if (!(await deleteAgentBinding(tenantId, req.params.orgId, req.params.bindingId))) {
+        throw new OpenwopError('not_found', 'Binding not found.', 404, { bindingId: req.params.bindingId });
+      }
+      res.status(204).end();
     } catch (err) { next(err); }
   });
 

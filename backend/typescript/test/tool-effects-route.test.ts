@@ -3,6 +3,12 @@
  * effect of tools the caller saw, by name. Pins: known read and write resolve;
  * the provider-sanitized spelling resolves to the same tool; an unknown name is
  * OMITTED (never guessed); the list is capped; the route is reachable over HTTP.
+ *
+ * What breaks if this goes red: the turn receipt ("2 reads · 1 change")
+ * mislabels a tool, guesses an effect for an unknown one, or answers an
+ * unbounded list. Wave 61: the cap is pinned as the literal 50 and tested at
+ * the boundary from both sides (the 50th name is answered, the 51st is not),
+ * rather than built from the imported constant.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -38,16 +44,26 @@ describe('chat/tool-effects (ADR 0784 P2)', () => {
 
   it('omits an unknown name rather than guessing', async () => {
     const r = await get(['mcp__github__create_issue', 'openwop:knowledge.search']);
+    expect(r.status).toBe(200);
     expect(r.body.effects).toEqual({ 'openwop:knowledge.search': 'read' });
   });
 
   it('caps the number of names answered', async () => {
-    const many = Array.from({ length: TOOL_EFFECTS_MAX_NAMES + 10 }, () => 'openwop:knowledge.search');
-    const r = await get([...many.slice(0, TOOL_EFFECTS_MAX_NAMES), 'openwop:kanban.add-todo']);
-    expect(r.body.effects['openwop:kanban.add-todo']).toBeUndefined();
+    expect(TOOL_EFFECTS_MAX_NAMES).toBe(50);
+    const fill = (n: number): string[] => Array.from({ length: n }, () => 'openwop:knowledge.search');
+    // 49 + 1: the write is the 50th name, inside the cap, so it is answered…
+    const inside = await get([...fill(49), 'openwop:kanban.add-todo']);
+    expect(inside.status).toBe(200);
+    expect(inside.body.effects).toEqual({ 'openwop:knowledge.search': 'read', 'openwop:kanban.add-todo': 'write' });
+    // …50 + 1: it is the 51st, past the cap, so it is not.
+    const past = await get([...fill(50), 'openwop:kanban.add-todo']);
+    expect(past.status).toBe(200);
+    expect(past.body.effects).toEqual({ 'openwop:knowledge.search': 'read' });
   });
 
   it('answers empty for no names', async () => {
-    expect((await get([])).body).toEqual({ effects: {} });
+    const r = await get([]);
+    expect(r.status).toBe(200);
+    expect(r.body).toEqual({ effects: {} });
   });
 });

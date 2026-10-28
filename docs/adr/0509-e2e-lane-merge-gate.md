@@ -349,3 +349,23 @@ prevent, re-opened by my own hand. #2868 replaces the argument with a check: the
 listener holding the port must be our vite (or its child), or the stage refuses.
 **The reuse flag is safe because it is now verified, not because the timing is
 usually fine.**
+
+
+### Correction — preserve both passes and respect interruption (2026-10-28)
+
+Train 258 was interrupted with exit 143 during required browser tests after a
+memory-pressure warning. The advisory pass then ran and cleared the same default
+Playwright output directory, losing the required failure contexts. Its success
+was not evidence for the interrupted pass. Both passes now use sibling output
+directories (`test-results/required`, `test-results/advisory`); required exit
+130/143 skips launching the advisory pass and proceeds to owned cleanup. Ordinary
+required failure still runs the advisory pass and retains its own nonzero result.
+
+The actual two-pass shell block is exercised with a launcher seam that models
+Playwright output cleanup: required exits 0, 1, 130 and 143 all failed before the
+repair and all pass afterward. This checks orchestration, not application behavior.
+An independent real Playwright fixture (one deliberate assertion failure followed
+by a passing test, without a browser) demonstrates that shared output loses its
+error context and sibling output retains it. Original interrupted browser reds
+remain unexplained: all 11 cases from those three files passed on the unchanged
+candidate with one worker, which alone does not establish a flake or a green gate.

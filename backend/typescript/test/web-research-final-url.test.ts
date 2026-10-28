@@ -7,10 +7,9 @@
  * page it actually read — which matters anywhere a url is hashed, deduped, or
  * shown to a human as provenance.
  */
-// `as unknown as Response` below is the deliberate, minimal fetch-response stub:
-// the surface reads only `ok`/`status`/`url`/`headers.get`/`text()`, and
-// constructing a real `Response` cannot set `url` (it is read-only and derives
-// from an actual request), which is the exact field under test.
+// The stubs are REAL `Response` objects. `url` is read-only on a constructed
+// Response (it derives from an actual request), and it is the exact field under
+// test, so it is defined on the instance with `Object.defineProperty` — no cast.
 import { describe, expect, it, vi, afterEach } from 'vitest';
 
 const fetchMock = vi.hoisted(() => vi.fn());
@@ -27,13 +26,9 @@ vi.mock('undici', async (importActual) => ({
 const { createWebResearchSurface } = await import('../src/host/webResearchSurface.js');
 
 function htmlResponse(finalUrl: string, body: string): Response {
-  return {
-    ok: true,
-    status: 200,
-    url: finalUrl,
-    headers: { get: () => 'text/html' },
-    text: async () => body,
-  } as unknown as Response;
+  const res = new Response(body, { status: 200, headers: { 'content-type': 'text/html' } });
+  Object.defineProperty(res, 'url', { value: finalUrl });
+  return res;
 }
 
 afterEach(() => { fetchMock.mockReset(); });
@@ -61,9 +56,7 @@ describe('fetchBatch — final-url reporting', () => {
   });
 
   it('falls back to the requested url when the response exposes none', async () => {
-    fetchMock.mockResolvedValue({
-      ok: true, status: 200, url: '', headers: { get: () => 'text/html' }, text: async () => '<title>T</title>',
-    } as unknown as Response);
+    fetchMock.mockResolvedValue(htmlResponse('', '<title>T</title>'));
     const surface = createWebResearchSurface({ tenantId: 't1' });
 
     const { pages } = await surface.fetchBatch({ urls: ['https://example.org/a'] });

@@ -14,13 +14,17 @@
  * acting user (fail-closed without one).
  */
 
+import { registerOrgsTransactionalTemplates } from './inviteTemplates.js';
 import type { BackendFeature } from '../types.js';
 import { registerOrgsRoutes } from './routes.js';
 import { buildOrgsSurface } from './surface.js';
 
 export const orgsFeature: BackendFeature = {
   id: 'orgs',
-  registerRoutes: (deps) => registerOrgsRoutes(deps),
+  registerRoutes: (deps) => {
+    registerOrgsRoutes(deps);
+    registerOrgsTransactionalTemplates(); // ADR 0905 D6 — the invitation email's kind
+  },
   toggleDefault: {
     id: 'orgs',
     label: 'Org invitations',

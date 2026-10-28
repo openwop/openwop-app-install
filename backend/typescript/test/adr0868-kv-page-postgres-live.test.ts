@@ -14,6 +14,9 @@
  *     reports the index node returned `limit` rows, not the prefix's 5000;
  *   - `kvCount` counts in the database;
  *   - the durable table and queue surfaces page on it end to end.
+ *
+ * Tracker TST-BFC-2. Live-infra: skipped in `npm run ci`
+ * (OPENWOP_SKIP_TESTCONTAINERS=1), so it is not sabotage-probed in the gate.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { execSync } from 'node:child_process';

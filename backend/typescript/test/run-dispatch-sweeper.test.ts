@@ -9,12 +9,26 @@
  *     parked (waiting-*) runs.
  *   - setRunDispatchLease parks a run out of the sweep until the lease expires.
  *   - sweepOrphanedRuns re-claims the orphan under the sweeper's worker id.
+ *
+ * Breaks it (round-1 probes, witnessed): the createdAt grace (8fw2g2-rds-grace),
+ * the lease-expiry predicate (rds-lease), the status filter (rds-status), the
+ * abandon ceiling (rds-abandon), the closed-log reconcile (rds-reconcile) and
+ * its refused-append fallback (rds-fallback).
+ *
+ * DOUBLE GUARD (by design) on the OLD closed-log case: with the `closedBy`
+ * pre-check removed, the abandon path's `RunLogClosedError` catch reconciles
+ * anyway. The 'YOUNG' case isolates the pre-check (no abandon path under the
+ * ceiling) and 'falls back' isolates the catch (no `runLogClosedBy`), which is
+ * why rds-reconcile and rds-fallback are each witnessed on one case.
+ *
+ * The host suite is the real `createHostAdapterSuite` with only the workflow
+ * catalog replaced (typed, no cast).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import type { Storage } from '../src/storage/storage.js';
 import type { RunRecord } from '../src/types.js';
-import type { HostAdapterSuite } from '../src/host/index.js';
+import { createHostAdapterSuite, type HostAdapterSuite, type WorkflowCatalog } from '../src/host/index.js';
 import { sweepOrphanedRuns } from '../src/host/runDispatchSweeper.js';
 import { setEventLogBackend } from '../src/executor/eventLog.js';
 
@@ -39,6 +53,12 @@ function makeRun(over: Partial<RunRecord> & { runId: string }): RunRecord {
 
 describe('run-dispatch crash recovery', () => {
   let storage: Storage;
+  const stubCatalog: WorkflowCatalog['getWorkflow'] = async (id) => ({ workflowId: id, definition: { workflowId: 'wf-1', nodes: [] } });
+  /** The real host suite with only the workflow catalog replaced. */
+  const suiteWith = (getWorkflow: WorkflowCatalog['getWorkflow'] = stubCatalog): HostAdapterSuite => ({
+    ...createHostAdapterSuite({ storage }),
+    workflowCatalog: { getWorkflow },
+  });
   beforeEach(async () => {
     storage = await openStorage('memory://');
   });
@@ -82,12 +102,7 @@ describe('run-dispatch crash recovery', () => {
 
   it('sweepOrphanedRuns re-claims and reports orphaned runs', async () => {
     await storage.insertRun(makeRun({ runId: 'orphan', status: 'running' }));
-    const hostSuite = {
-      workflowCatalog: { getWorkflow: async () => ({ definition: { workflowId: 'wf-1', nodes: [] } }) },
-      providerPolicyResolver: undefined,
-    } as unknown as HostAdapterSuite;
-
-    const redispatched = await sweepOrphanedRuns({ storage, hostSuite }, 'sweeper-a', NOW);
+    const redispatched = await sweepOrphanedRuns({ storage, hostSuite: suiteWith() }, 'sweeper-a', NOW);
     expect(redispatched).toBe(1);
     // The orphan now belongs to the sweeper (claimed before re-dispatch).
     const run = await storage.getRun('orphan');
@@ -98,12 +113,7 @@ describe('run-dispatch crash recovery', () => {
     setEventLogBackend(storage); // emitTerminalFailure appends run.failed
     // Created > 1h ago and still running → past the re-dispatch ceiling.
     await storage.insertRun(makeRun({ runId: 'stuck', status: 'running', createdAt: new Date(NOW - 2 * HOUR).toISOString() }));
-    const hostSuite = {
-      workflowCatalog: { getWorkflow: async () => ({ definition: { workflowId: 'wf-1', nodes: [] } }) },
-      providerPolicyResolver: undefined,
-    } as unknown as HostAdapterSuite;
-
-    const redispatched = await sweepOrphanedRuns({ storage, hostSuite }, 'sweeper-a', NOW);
+    const redispatched = await sweepOrphanedRuns({ storage, hostSuite: suiteWith() }, 'sweeper-a', NOW);
     expect(redispatched).toBe(0); // abandoned, not re-dispatched
     const run = await storage.getRun('stuck');
     expect(run?.status).toBe('failed');
@@ -114,10 +124,6 @@ describe('run-dispatch crash recovery', () => {
   // Ten such runs sat on production for days: every sweep tried to abandon
   // them, the closed log refused `run.failed`, and each attempt appended one
   // more `run.dead_lettered`. The row follows the log; nothing is appended.
-  const hostSuite = {
-    workflowCatalog: { getWorkflow: async () => ({ definition: { workflowId: 'wf-1', nodes: [] } }) },
-    providerPolicyResolver: undefined,
-  } as unknown as HostAdapterSuite;
   const closeLog = (runId: string, type: string) =>
     storage.appendEvent({ eventId: `e-${runId}`, runId, type, payload: null, timestamp: oldIso });
   const eventTypes = async (runId: string) => (await storage.listEvents(runId)).map((e) => e.type);
@@ -130,7 +136,7 @@ describe('run-dispatch crash recovery', () => {
     await closeLog('ended-cancelled', 'run.cancelled');
     await closeLog('ended-failed', 'run.failed');
 
-    expect(await sweepOrphanedRuns({ storage, hostSuite }, 'sweeper-a', NOW)).toBe(0);
+    expect(await sweepOrphanedRuns({ storage, hostSuite: suiteWith() }, 'sweeper-a', NOW)).toBe(0);
     expect((await storage.getRun('ended-cancelled'))?.status).toBe('cancelled');
     expect((await storage.getRun('ended-failed'))?.status).toBe('failed');
     expect((await storage.getRun('ended-failed'))?.completedAt).toBeTruthy();
@@ -146,10 +152,9 @@ describe('run-dispatch crash recovery', () => {
     // 30 min old: past the grace window, well under the 1 h abandon ceiling.
     await storage.insertRun(makeRun({ runId: 'ended-completed', status: 'running', createdAt: new Date(NOW - HOUR / 2).toISOString() }));
     await closeLog('ended-completed', 'run.completed');
-    const getWorkflow = vi.fn(async () => ({ definition: { workflowId: 'wf-1', nodes: [] } }));
-    const suite = { workflowCatalog: { getWorkflow }, providerPolicyResolver: undefined } as unknown as HostAdapterSuite;
+    const getWorkflow = vi.fn(stubCatalog);
 
-    expect(await sweepOrphanedRuns({ storage, hostSuite: suite }, 'sweeper-a', NOW)).toBe(0);
+    expect(await sweepOrphanedRuns({ storage, hostSuite: suiteWith(getWorkflow) }, 'sweeper-a', NOW)).toBe(0);
     const run = await storage.getRun('ended-completed');
     expect(run?.status).toBe('completed');
     expect(run?.error).toBeUndefined(); // a completed run gets no synthetic error
@@ -162,10 +167,13 @@ describe('run-dispatch crash recovery', () => {
     const old = new Date(NOW - 2 * HOUR).toISOString();
     await storage.insertRun(makeRun({ runId: 'ended-legacy', status: 'running', createdAt: old }));
     await closeLog('ended-legacy', 'run.cancelled');
-    const without = Object.create(storage) as Storage;
-    Object.defineProperty(without, 'runLogClosedBy', { value: undefined });
+    // The same store with the OPTIONAL `runLogClosedBy` absent (a legacy backend).
+    const without: Storage = new Proxy(storage, {
+      get: (target, prop, receiver) => (prop === 'runLogClosedBy' ? undefined : Reflect.get(target, prop, receiver)),
+    });
+    expect(without.runLogClosedBy).toBeUndefined();
 
-    expect(await sweepOrphanedRuns({ storage: without, hostSuite }, 'sweeper-a', NOW)).toBe(0);
+    expect(await sweepOrphanedRuns({ storage: without, hostSuite: suiteWith() }, 'sweeper-a', NOW)).toBe(0);
     expect((await storage.getRun('ended-legacy'))?.status).toBe('cancelled');
     expect(await storage.claimOrphanedRuns('sweeper-b', NOW + HOUR, new Date(NOW).toISOString(), 720_000, 10)).toEqual([]);
   });

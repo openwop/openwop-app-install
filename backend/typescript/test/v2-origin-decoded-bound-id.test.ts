@@ -16,26 +16,21 @@
  * The tenant check is unchanged: it still runs in the path guard.
  *
  * Legs disjoint under sabotage: drop the alias → 1, 2 red; alias without the
- * grammar floor → 4 red (`/runs/<bare>/events` would be mangled); alias on
- * major 1 → 5 red; alias that skips the tenant check → 3 red.
+ * grammar floor → 4, 9 red (`/runs/<bare>/events` would be mangled); alias that
+ * skips the tenant check → 3, 8 red. (Leg 5, major 1, was deleted with major 1.)
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from '../src/index.js';
-import { preferredVersion } from '../src/middleware/protocolVersion.js';
-
-// ADR 0812 P3c-0 — while 1.x is served a bare id on a major-2 path is admitted
-// through the overlap; after the cut it is refused `400 validation_error`.
-// Either way it is read as a BARE id, never misparsed as `<tenant>/<opaque>`
-// (which would answer 403 id_tenant_mismatch / 404).
-const bareAdmitted = () => preferredVersion() !== '2.0';
-function expectReadAsBare(r: { status: number; json: any; text: string }, admitted: number): void {
-  if (bareAdmitted()) expect(r.status, r.text.slice(0, 120)).toBe(admitted);
-  else {
-    expect(r.status, r.text.slice(0, 120)).toBe(400);
-    expect(r.json?.error).toBe('validation_error');
-  }
+// ADR 0812 P3c-0 — a bare id on a major-2 path is refused `400 validation_error`
+// (the 1.x overlap that admitted it is retired; `preferredVersion()` is the
+// constant '2.0'). It is read as a BARE id, never misparsed as
+// `<tenant>/<opaque>` (which would answer 403 id_tenant_mismatch).
+function expectReadAsBare(r: { status: number; json: Body | undefined; text: string }): void {
+  expect(r.status, r.text.slice(0, 120)).toBe(400);
+  expect(r.json?.error).toBe('validation_error');
+  expect(r.json?.message).toContain('the bare form is not admitted');
 }
 
 let server: http.Server; let base = '';
@@ -47,17 +42,18 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
 
-async function req(method: string, path: string, headers: Record<string, string> = {}, body?: unknown) {
+interface Body { runId?: string; webhookId?: string; events?: unknown[]; error?: string; message?: string }
+async function req(method: string, path: string, headers: Record<string, string> = {}, body?: unknown): Promise<{ status: number; json: Body | undefined; text: string }> {
   const res = await fetch(`${base}${path}`, { method, headers: { Authorization: 'Bearer dev-token', 'Content-Type': 'application/json', ...headers }, body: body === undefined ? undefined : JSON.stringify(body) });
-  const text = await res.text(); let json: any; try { json = JSON.parse(text); } catch { json = undefined; }
+  const text = await res.text(); let json: Body | undefined; try { json = JSON.parse(text) as Body; } catch { json = undefined; }
   return { status: res.status, json, text };
 }
 const V2 = { 'OpenWOP-Version': '2' };
 async function createV2(): Promise<string> {
   const r = await req('POST', '/runs', V2, { workflowId: 'conformance-noop', inputs: {} });
   expect(r.status, r.text.slice(0, 160)).toBe(201);
-  expect(String(r.json.runId)).toMatch(/^default\//);
-  return r.json.runId as string; // `default/<opaque>` — the bound id the client holds
+  expect(String(r.json?.runId)).toMatch(/^default\//);
+  return String(r.json?.runId); // `default/<opaque>` — the bound id the client holds
 }
 
 describe('a decoded bound id (what a %2F-normalising proxy forwards) reaches the run', () => {
@@ -67,27 +63,28 @@ describe('a decoded bound id (what a %2F-normalising proxy forwards) reaches the
     const dec = await req('GET', `/runs/${bound}`, V2);
     expect(enc.status).toBe(200);
     expect(dec.status, dec.text.slice(0, 120)).toBe(200);
-    expect(dec.json.runId).toBe(bound);
-    expect(dec.json.runId).toBe(enc.json.runId);
+    expect(dec.json?.runId).toBe(bound);
+    expect(dec.json?.runId).toBe(enc.json?.runId);
   });
   it('2. …and so does a sub-resource: /runs/<tenant>/<opaque>/events/poll', async () => {
     const bound = await createV2();
     const r = await req('GET', `/runs/${bound}/events/poll?afterSequence=0`, V2);
     expect(r.status, r.text.slice(0, 120)).toBe(200);
-    expect(Array.isArray(r.json.events)).toBe(true);
+    expect(Array.isArray(r.json?.events)).toBe(true);
   });
   it('3. a foreign tenant segment in the decoded form is still refused (no existence oracle)', async () => {
     const bound = await createV2();
     const opaque = bound.split('/')[1];
     const r = await req('GET', `/runs/other-tenant/${opaque}`, V2);
-    expect([403, 404]).toContain(r.status);
-    expect(r.json?.error).toMatch(/not_found|id_tenant_mismatch/);
+    // The path guard's own refusal (v2Identity): it names the rule, never the run.
+    expect(r.status, r.text.slice(0, 160)).toBe(403);
+    expect(r.json?.error).toBe('id_tenant_mismatch');
   });
-  it('4. a bare id followed by a short sub-resource is untouched: /runs/<bare>/events/poll', async () => {
+  it('4. a bare id followed by a short sub-resource is not misread as bound: /runs/<bare>/events/poll', async () => {
     const bound = await createV2();
     const opaque = bound.split('/')[1];
     const r = await req('GET', `/runs/${opaque}/events/poll?afterSequence=0`, V2);
-    expectReadAsBare(r, 200);
+    expectReadAsBare(r);
   });
   // ADR 0812 P3c-0 — leg 5 (major 1 leaves /v1/runs/<tenant>/<opaque> a 404) was deleted with major 1.
 });
@@ -101,8 +98,8 @@ describe('a decoded bound WEBHOOK id reaches the subscription (the %2F proxy, ot
   async function createWebhookV2(): Promise<string> {
     const r = await req('POST', '/webhooks', V2, { url: 'https://example.com/hook', events: ['run.completed'] });
     expect(r.status, r.text.slice(0, 160)).toBe(201);
-    expect(String(r.json.webhookId)).toMatch(/^default\//);
-    return r.json.webhookId as string;
+    expect(String(r.json?.webhookId)).toMatch(/^default\//);
+    return String(r.json?.webhookId);
   }
   it('6. DELETE /webhooks/<tenant>/<opaque> — the spelling a %2F-decoding proxy forwards — answers 204', async () => {
     const bound = await createWebhookV2();
@@ -120,14 +117,15 @@ describe('a decoded bound WEBHOOK id reaches the subscription (the %2F proxy, ot
     const bound = await createWebhookV2();
     const opaque = bound.split('/')[1];
     const r = await req('DELETE', `/webhooks/other-tenant/${opaque}`, V2);
-    expect([403, 404]).toContain(r.status);
+    expect(r.status, r.text.slice(0, 160)).toBe(403);
+    expect(r.json?.error).toBe('id_tenant_mismatch');
     // the subscription survived the refused delete
     expect((await req('DELETE', `/webhooks/${encodeURIComponent(bound)}`, V2)).status).toBe(204);
   });
-  it('9. a bare webhook id with its short sub-resource is untouched: /webhooks/<bare>/test', async () => {
+  it('9. a bare webhook id with its short sub-resource is not misread as bound: /webhooks/<bare>/test', async () => {
     const bound = await createWebhookV2();
     const opaque = bound.split('/')[1];
     const r = await req('POST', `/webhooks/${opaque}/test`, V2, {});
-    expectReadAsBare(r, 202);
+    expectReadAsBare(r);
   });
 });

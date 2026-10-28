@@ -22,10 +22,12 @@ import {
   CAMPAIGN_INTEL_PLAN_BUDGET_TOOL_ID,
   CAMPAIGN_INTEL_PACING_TOOL_ID,
   CAMPAIGN_INTEL_ATTRIBUTION_TOOL_ID,
+  CAMPAIGN_INTEL_CAPS_TOOL_ID,
+  CAMPAIGN_INTEL_PROPOSE_REALLOCATION_TOOL_ID,
 } from '../src/features/campaign-intel/agentTools.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
-import { createOrg } from '../src/host/accessControlService.js';
+import { createOrg, createMember } from '../src/host/accessControlService.js';
 import { importCsv } from '../src/features/campaign-connectors/performanceService.js';
 
 const TENANT = 'default';
@@ -74,6 +76,9 @@ const ALL_IDS = [
   // deep-links it from.
   CAMPAIGN_INTEL_PACING_TOOL_ID,
   CAMPAIGN_INTEL_ATTRIBUTION_TOOL_ID,
+  // ADR 0952 D8 — the Media Buyer widening (+2).
+  CAMPAIGN_INTEL_CAPS_TOOL_ID,
+  CAMPAIGN_INTEL_PROPOSE_REALLOCATION_TOOL_ID,
 ];
 
 describe('CFP-1 — registration + pack parity', () => {
@@ -214,7 +219,23 @@ const OTHER_TOOLS: Array<{ id: string; input: Record<string, unknown>; empty: Re
   { id: CAMPAIGN_INTEL_PACING_TOOL_ID, input: {}, empty: { rows: [], unplanned: 0, note: 'No acting user — nothing to read.' } },
   { id: CAMPAIGN_INTEL_ATTRIBUTION_TOOL_ID, input: {}, empty: { rows: [], email: [], unattributedConversions: 0, note: 'No acting user — nothing to read.' } },
   { id: CAMPAIGN_INTEL_PLAN_BUDGET_TOOL_ID, input: { totalBudgetMinor: 500000, targetConversions: 100 }, empty: { plan: null } },
+  { id: CAMPAIGN_INTEL_CAPS_TOOL_ID, input: {}, empty: { caps: [] } },
+  { id: CAMPAIGN_INTEL_PROPOSE_REALLOCATION_TOOL_ID, input: {}, empty: { outcome: 'no_change', dropped: [] } },
 ];
+
+describe('ADR 0952 D8 — the Media Buyer tools', () => {
+  it('propose-reallocation needs workspace:WRITE (a viewer reads caps but cannot propose), and never changes a budget', async () => {
+    await createMember({ orgId: ORG_ID, tenantId: TENANT, displayName: 'V', subject: 'viewer-1', roles: ['viewer'] });
+    const caps = await provider({ actingUserId: 'viewer-1' }).executeTool({ name: CAMPAIGN_INTEL_CAPS_TOOL_ID, input: { orgId: ORG_ID } });
+    expect(JSON.parse(caps.content)).toEqual({ caps: [] });
+    const refused = await provider({ actingUserId: 'viewer-1' }).executeTool({ name: CAMPAIGN_INTEL_PROPOSE_REALLOCATION_TOOL_ID, input: { orgId: ORG_ID } });
+    expect(refused.isError).toBe(true);
+    expect(JSON.parse(refused.content)).toMatchObject({ error: 'forbidden_scope', requiredScope: 'workspace:write' });
+    // The owner may propose; with no dispatched campaigns there is nothing to move.
+    const owner = await provider({ actingUserId: OWNER }).executeTool({ name: CAMPAIGN_INTEL_PROPOSE_REALLOCATION_TOOL_ID, input: { orgId: ORG_ID } });
+    expect(JSON.parse(owner.content)).toEqual({ outcome: 'no_change', dropped: [] });
+  });
+});
 
 describe('CFP-1 — every read tool shares the authority + fail-empty posture', () => {
   it.each(OTHER_TOOLS)('$id: a same-tenant non-member is forbidden_scope', async ({ id, input }) => {

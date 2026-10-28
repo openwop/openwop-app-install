@@ -15,16 +15,16 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { NodeContext } from '../src/executor/types.js';
+import type { NodeContext, NodeOutcome } from '../src/executor/types.js';
 import { openStorage } from '../src/storage/index.js';
 import type { Storage } from '../src/storage/storage.js';
 import { setDurableStorage } from '../src/host/durable/durableStore.js';
 import { createDurableTable } from '../src/host/durable/durableTable.js';
-import { buildHostSurfaceBundle, initInMemorySurfaces } from '../src/host/inMemorySurfaces.js';
+import { buildHostSurfaceBundle, initInMemorySurfaces, type SurfaceFn, type TableSurface } from '../src/host/inMemorySurfaces.js';
 import { tableSchemaProbeNode } from '../src/bootstrap/conformanceTableSchemaProbe.js';
 
-type Fn = (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
-type Table = Record<string, Fn>;
+/** The three methods the probe node calls — what a lax/spy table must supply. */
+type ProbeTable = Pick<TableSurface, 'createTable' | 'insert' | 'update'>;
 
 let base: Storage;
 beforeAll(async () => {
@@ -36,84 +36,103 @@ afterAll(() => { setDurableStorage(null); });
 
 let n = 0;
 const fresh = () => `t_${Date.now().toString(36)}_${n++}`;
-const BACKENDS: ReadonlyArray<readonly [string, (tenantId: string) => Table]> = [
-  ['memory', (tenantId) => buildHostSurfaceBundle({ tenantId }).storage.table as unknown as Table],
-  ['durable', (tenantId) => createDurableTable({ tenantId }) as unknown as Table],
+const BACKENDS: ReadonlyArray<readonly [string, (tenantId: string) => TableSurface]> = [
+  ['memory', (tenantId) => buildHostSurfaceBundle({ tenantId }).storage.table],
+  ['durable', (tenantId) => createDurableTable({ tenantId })],
 ];
 const DECL = { k: 'string', n: 'number' };
 
 async function refusal(p: Promise<unknown>): Promise<string | undefined> {
-  try { await p; return undefined; } catch (e) { return (e as { code?: string }).code; }
+  try { await p; return undefined; } catch (e) {
+    const code: unknown = e instanceof Error && 'code' in e ? e.code : undefined;
+    return typeof code === 'string' ? code : `<no code: ${String(e)}>`;
+  }
+}
+
+/** The node's `result` output, or a thrown error naming the outcome it got instead. */
+function resultOf(o: NodeOutcome): Record<string, unknown> {
+  if (o.status !== 'success') throw new Error(`expected success, got ${JSON.stringify(o)}`);
+  const out = o.outputs;
+  if (typeof out !== 'object' || out === null || !('result' in out)) throw new Error(`no result in ${JSON.stringify(out)}`);
+  const result: unknown = out.result;
+  if (typeof result !== 'object' || result === null) throw new Error(`result is not an object: ${JSON.stringify(result)}`);
+  return Object.fromEntries(Object.entries(result));
 }
 
 for (const [name, make] of BACKENDS) {
   describe(`${name} tableStorage — the declared schema governs every write`, () => {
     it('a well-typed insert completes and returns a minted rowId when the row carries none', async () => {
       const t = make('ten-a'); const table = fresh();
-      expect(await t.createTable!({ table, columns: DECL })).toEqual({ ok: true, created: true });
-      const r = await t.insert!({ table, row: { k: 'control', n: 1 } });
-      expect(typeof r['id']).toBe('string');
-      expect((r['id'] as string).length).toBeGreaterThan(0);
-      const q = await t.query!({ table, filter: { k: 'control' } });
-      expect((q['rows'] as unknown[]).length).toBe(1);
+      expect(await t.createTable({ table, columns: DECL })).toEqual({ ok: true, created: true });
+      const r = await t.insert({ table, row: { k: 'control', n: 1 } });
+      expect(r['id']).toMatch(/^.+$/);
+      const q = await t.query({ table, filter: { k: 'control' } });
+      expect(q['rows']).toEqual([expect.objectContaining({ k: 'control', n: 1 })]);
     });
 
     it('the FIRST insert cannot redefine a declared column (the defect: first insert was the schema)', async () => {
       const t = make('ten-a'); const table = fresh();
-      await t.createTable!({ table, columns: DECL });
-      expect(await refusal(t.insert!({ table, row: { k: 'mistyped', n: 'not-a-number' } }))).toBe('table_schema_violation');
-      expect((await t.count!({ table }))['count']).toBe(0);
+      await t.createTable({ table, columns: DECL });
+      expect(await refusal(t.insert({ table, row: { k: 'mistyped', n: 'not-a-number' } }))).toBe('table_schema_violation');
+      expect((await t.count({ table }))['count']).toBe(0);
     });
 
     it('an update that changes a declared column type is refused, and the row is unchanged', async () => {
       const t = make('ten-a'); const table = fresh();
-      await t.createTable!({ table, columns: DECL });
-      const { id } = await t.insert!({ table, row: { k: 'to-update', n: 2 } }) as { id: string };
-      expect(await refusal(t.update!({ table, id, patch: { n: 'not-a-number' } }))).toBe('table_schema_violation');
-      const rows = (await t.query!({ table, filter: { id } }))['rows'] as Array<{ n: unknown }>;
-      expect(rows[0]?.n).toBe(2);
-      expect(await t.update!({ table, id, patch: { n: 3 } })).toEqual({ updated: 1 }); // control
+      await t.createTable({ table, columns: DECL });
+      const { id } = await t.insert({ table, row: { k: 'to-update', n: 2 } });
+      expect(typeof id).toBe('string');
+      expect(await refusal(t.update({ table, id, patch: { n: 'not-a-number' } }))).toBe('table_schema_violation');
+      expect((await t.query({ table, filter: { id } }))['rows']).toEqual([expect.objectContaining({ k: 'to-update', n: 2 })]);
+      expect(await t.update({ table, id, patch: { n: 3 } })).toEqual({ updated: 1 }); // control
     });
 
     it('upsert is held to the same schema', async () => {
       const t = make('ten-a'); const table = fresh();
-      await t.createTable!({ table, columns: DECL });
-      expect(await refusal(t.upsert!({ table, row: { id: 'u1', k: 'x', n: 'nope' } }))).toBe('table_schema_violation');
-      expect(await t.upsert!({ table, row: { id: 'u1', k: 'x', n: 5 } })).toMatchObject({ upserted: 1 });
+      await t.createTable({ table, columns: DECL });
+      expect(await refusal(t.upsert({ table, row: { id: 'u1', k: 'x', n: 'nope' } }))).toBe('table_schema_violation');
+      expect(await t.upsert({ table, row: { id: 'u1', k: 'x', n: 5 } })).toMatchObject({ upserted: 1 });
     });
 
     it('re-declaring the same schema is idempotent; a conflicting one is refused', async () => {
       const t = make('ten-a'); const table = fresh();
-      await t.createTable!({ table, columns: DECL });
-      expect(await t.createTable!({ table, columns: { n: 'number', k: 'string' } })).toEqual({ ok: true, created: false });
-      expect(await refusal(t.createTable!({ table, columns: { k: 'string', n: 'string' } }))).toBe('table_schema_violation');
-      expect(await refusal(t.createTable!({ table: fresh(), columns: { k: 'date' } }))).toBe('table_schema_violation');
+      await t.createTable({ table, columns: DECL });
+      expect(await t.createTable({ table, columns: { n: 'number', k: 'string' } })).toEqual({ ok: true, created: false });
+      expect(await refusal(t.createTable({ table, columns: { k: 'string', n: 'string' } }))).toBe('table_schema_violation');
+      expect(await refusal(t.createTable({ table: fresh(), columns: { k: 'date' } }))).toBe('table_schema_violation');
     });
 
     it('a declaration is per tenant: another tenant may declare the same table name differently', async () => {
       const table = fresh();
-      await make('ten-a').createTable!({ table, columns: DECL });
-      expect(await make('ten-b').createTable!({ table, columns: { k: 'number' } })).toEqual({ ok: true, created: true });
+      await make('ten-a').createTable({ table, columns: DECL });
+      // Same-tenant control: the conflicting declaration IS refused inside ten-a,
+      // so ten-b's acceptance below is the tenant scope, not a lax createTable.
+      expect(await refusal(make('ten-a').createTable({ table, columns: { k: 'number' } }))).toBe('table_schema_violation');
+      expect(await make('ten-b').createTable({ table, columns: { k: 'number' } })).toEqual({ ok: true, created: true });
     });
 
     it('without createTable the first insert still declares the schema (RFC 0016 §B point 2)', async () => {
       const t = make('ten-a'); const table = fresh();
-      await t.insert!({ table, row: { id: 'a', k: 'x', n: 1 } });
-      expect(await refusal(t.insert!({ table, row: { id: 'b', k: 'y', n: 'two' } }))).toBe('table_schema_violation');
+      await t.insert({ table, row: { id: 'a', k: 'x', n: 1 } });
+      expect(await refusal(t.insert({ table, row: { id: 'b', k: 'y', n: 'two' } }))).toBe('table_schema_violation');
     });
   });
 }
 
-function probeCtx(table: Table, vars: Record<string, string>): NodeContext {
-  return { storage: { table }, variables: { get: (k: string) => vars[k], set: () => undefined } } as unknown as NodeContext;
+function probeCtx(table: ProbeTable, vars: Record<string, string>): NodeContext {
+  return {
+    runId: 'run-probe', nodeId: 'probe', tenantId: 'probe-t', inputs: {}, configurable: {}, attempt: 1, secrets: {},
+    emit: async () => { throw new Error('the table-schema probe emits no events'); },
+    storage: { table },
+    variables: { get: (k: string) => vars[k], set: () => undefined },
+  };
 }
 
 for (const [name, make] of BACKENDS) {
   describe(`core.conformance.table-schema-probe — ${name} backend`, () => {
     it('control completes with { inserted: true, rowId }', async () => {
       const o = await tableSchemaProbeNode.execute(probeCtx(make('probe-t'), { action: 'control', table: fresh() }));
-      expect(o.status, JSON.stringify(o)).toBe('success');
-      const result = (o as { outputs: { result: Record<string, unknown> } }).outputs.result;
+      const result = resultOf(o);
       expect(result['inserted']).toBe(true);
       expect(typeof result['rowId']).toBe('string');
     });
@@ -121,8 +140,8 @@ for (const [name, make] of BACKENDS) {
     for (const action of ['insert-mistyped', 'update-mistyped'] as const) {
       it(`${action} fails the node with the host's rejection code, unchanged`, async () => {
         const o = await tableSchemaProbeNode.execute(probeCtx(make('probe-t'), { action, table: fresh() }));
-        expect(o.status, JSON.stringify(o)).toBe('failure');
-        expect((o as { error: { code: string } }).error.code).toBe('table_schema_violation');
+        if (o.status !== 'failure') throw new Error(`expected failure, got ${JSON.stringify(o)}`);
+        expect(o.error.code).toBe('table_schema_violation');
       });
     }
   });
@@ -131,7 +150,7 @@ for (const [name, make] of BACKENDS) {
 describe('core.conformance.table-schema-probe — it does no checking of its own', () => {
   // A host that ACCEPTS a mistyped write must read executed-fail, not be rescued
   // by a probe that refused on its behalf.
-  const lax: Table = {
+  const lax: ProbeTable = {
     createTable: async () => ({ ok: true }),
     insert: async () => ({ id: 'r1' }),
     update: async () => ({ updated: 1 }),
@@ -142,14 +161,16 @@ describe('core.conformance.table-schema-probe — it does no checking of its own
   });
   it('update-mistyped against a lax table completes and reports the accepted update', async () => {
     const calls: Array<Record<string, unknown>> = [];
-    const spy: Table = { ...lax, update: async (a) => { calls.push(a); return { updated: 1 }; } };
+    const update: SurfaceFn = async (a) => { calls.push(a); return { updated: 1 }; };
+    const spy: ProbeTable = { ...lax, update };
     const o = await tableSchemaProbeNode.execute(probeCtx(spy, { action: 'update-mistyped', table: 't' }));
     expect(o).toMatchObject({ status: 'success', outputs: { result: { updated: true, rowId: 'r1' } } });
     expect(calls).toEqual([{ table: 't', id: 'r1', patch: { n: 'not-a-number' } }]);
   });
   it('every action declares { k: string, n: number } first', async () => {
     const seen: unknown[] = [];
-    const spy: Table = { ...lax, createTable: async (a) => { seen.push(a); return { ok: true }; } };
+    const createTable: SurfaceFn = async (a) => { seen.push(a); return { ok: true }; };
+    const spy: ProbeTable = { ...lax, createTable };
     for (const action of ['control', 'insert-mistyped', 'update-mistyped']) {
       await tableSchemaProbeNode.execute(probeCtx(spy, { action, table: 'decl' }));
     }

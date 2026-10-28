@@ -24,6 +24,7 @@ import i18n from '../i18n/index.js';
 import { writeErrorMessage } from '../lib/writeAccess.js';
 import { readErrorDetail } from '../client/errorEnvelope.js';
 import { featureStoreHref } from '../featureToggles/lockedTargets.js';
+import { skipReasonKey } from './skipReasonKey.js';
 
 /** Cadence preset key → schedules-catalog label key. Keeps the localized label
  *  lookup off the persisted CADENCE_PRESETS (whose `label` is the en fallback). */
@@ -100,35 +101,10 @@ export interface SubjectScheduleRow {
   planLapsed?: { featureId: string };
 }
 
-/** GEN-PRJ-1 — reason code → catalog key (REUSES the assistant lane's copy).
- *  A `Record` so a new reason code on the wire is a compile-time prompt here;
- *  the runtime arm below covers the wire (an unknown code must neither
- *  fabricate a diagnosis nor go silent — the WF-COS-4 round-2 lesson). */
-const SKIP_REASON_KEY: Record<'budget' | 'workflow-unresolved' | 'dispatch-error' | 'feature-disabled' | 'plan-lapsed' | 'actor-inactive' | 'agent-paused' | 'policy-denied' | 'awaiting-approval' | 'goal-closed', string> = {
-  budget: 'agents:recurringSkipBudget',
-  'workflow-unresolved': 'agents:recurringSkipUnresolved',
-  'dispatch-error': 'agents:recurringSkipDispatch',
-  'feature-disabled': 'agents:recurringSkipFeatureDisabled',
-  'plan-lapsed': 'agents:recurringSkipPlanLapsed',
-  'actor-inactive': 'agents:recurringSkipActorInactive',
-  'agent-paused': 'agents:recurringSkipAgentPaused',
-  'policy-denied': 'agents:recurringSkipPolicyDenied',
-  'awaiting-approval': 'agents:recurringSkipAwaitingApproval',
-  'goal-closed': 'agents:recurringSkipGoalClosed',
-};
 /** ADR 0787 D6 — the cadence has no FURTHER slot inside the horizon. Not a
  *  "did not run" (that fire may well have run): it is rendered as its own chip,
  *  never through the skipped-fire line. */
 const NO_NEXT_FIRE = 'no-next-fire';
-function skipReasonKey(reason: string | undefined): string {
-  if (reason !== undefined && Object.prototype.hasOwnProperty.call(SKIP_REASON_KEY, reason)) {
-    return SKIP_REASON_KEY[reason as keyof typeof SKIP_REASON_KEY];
-  }
-  // Adversarial-review F6 — absent ≠ unrecognized: an unmapped wire value means
-  // a reason WAS recorded; saying "no reason was recorded" would assert absence
-  // where the truth is "recorded but not understood".
-  return reason === undefined ? 'agents:recurringSkipUnknown' : 'agents:recurringSkipUnrecognized';
-}
 
 /** The subject-agnostic operations the panel drives. */
 export interface SubjectSchedulesClient {

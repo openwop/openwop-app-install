@@ -1,11 +1,11 @@
 {
   "name": "core.openwop.connections.microsoft365",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "kind": "connection",
-  "description": "Microsoft 365 connection pack (RFC 0095) \u2014 OAuth2 provider for Teams, Outlook (Mail/Calendar), and SharePoint via the Microsoft Graph API. ADR 0033 DEPLOY-GATED. Reach is `openapi` against the Microsoft Graph OpenAPI surface: Microsoft's first-party remote MCP servers are per-tenant/preview (a tenant-templated URL, not a single global https endpoint the manifest can fix), so a stable Graph OpenAPI path is the honest day-1 reach (ADR 0033 \u00a74 capability honesty). Carries NO secret; the operator supplies the OAuth client id/secret host-side (ADR 0024 \u00a77).",
+  "description": "Microsoft 365 connection pack — OAuth2 provider for Teams, Outlook (Mail/Calendar), and SharePoint via the Microsoft Graph API. DEPLOY-GATED. Reach is `openapi` against the Microsoft Graph OpenAPI surface: Microsoft's first-party remote MCP servers are per-tenant/preview (a tenant-templated URL, not a single global https endpoint the manifest can fix), so a stable Graph OpenAPI path is the honest day-1 reach (capability honesty). Carries NO secret; the operator supplies the OAuth client id/secret host-side.",
   "license": "Apache-2.0",
   "engines": {
-    "openwop": ">=1.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "provider": {
     "id": "microsoft365",
@@ -98,12 +98,12 @@
         "ref": "https://graph.microsoft.com/v1.0/$metadata"
       }
     },
+    "apiHosts": [
+      "graph.microsoft.com"
+    ],
     "consumerNodes": [
       "core.openwop.http"
     ],
-    "docsUrl": "https://learn.microsoft.com/en-us/graph/auth-v2-user",
-    "apiHosts": [
-      "microsoft.com"
-    ]
+    "docsUrl": "https://learn.microsoft.com/en-us/graph/auth-v2-user"
   }
 }

@@ -374,20 +374,36 @@ export async function waitNode(ctx) {
   if (typeof ctx.suspend !== 'function') {
     throw Object.assign(new Error('host does not support suspend'), { code: 'HOST_CAPABILITY_MISSING' });
   }
+  let resumedWith;
   switch (mode) {
     case 'duration': {
       const seconds = Math.min(86400, Math.max(0, ctx.config.seconds | 0));
-      return ctx.suspend({ kind: 'duration', seconds });
+      resumedWith = await ctx.suspend({ kind: 'duration', seconds });
+      break;
     }
     case 'until': {
-      return ctx.suspend({ kind: 'until', timestamp: ctx.config.timestamp });
+      // A wired deadline is a recorded DAG value, so a fork checkpoint can
+      // restore it without replaying a producer's side-band variable writes.
+      const wired = ctx.inputs?.timestamp;
+      const timestamp = wired === undefined ? ctx.config.timestamp : wired;
+      if (wired !== undefined && (typeof timestamp !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(timestamp) || !Number.isFinite(Date.parse(timestamp)))) {
+        throw Object.assign(new Error('The wired wait timestamp must be an ISO timestamp.'), { code: 'CONFIG_INVALID' });
+      }
+      resumedWith = await ctx.suspend({ kind: 'until', timestamp });
+      break;
     }
     case 'webhook': {
-      return ctx.suspend({ kind: 'webhook', signatureHint: ctx.config.signatureHint });
+      resumedWith = await ctx.suspend({ kind: 'webhook', signatureHint: ctx.config.signatureHint });
+      break;
     }
     default:
       throw Object.assign(new Error(`unknown wait mode: ${mode}`), { code: 'CONFIG_INVALID' });
   }
+  // `ctx.suspend` throws to park the run and, on resume, RETURNS the resolution value (the
+  // timer sweep's `{ elapsed: true }`, a webhook's body). That value is not a node outcome:
+  // returned bare, the host read it as a failure and every run failed the moment its wait
+  // ended (found by the ADR 0955 P5 chain witness, J955WF-7). Wrap it in the declared `wait.output.json` shape.
+  return { status: 'success', outputs: { resumed: true, ...(resumedWith !== undefined ? { payload: resumedWith } : {}) } };
 }
 
 export async function subWorkflowInvokeNode(ctx) {

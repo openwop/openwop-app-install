@@ -14,6 +14,14 @@
  *  3. the retract's cost does not scale with a scan per row (the 0.4 rows/s cause);
  *  4. it is idempotent over a PARTIALLY applied state (what prod was left in);
  *  5. the listen callback is where the runner starts, and `createApp` never starts it.
+ *
+ * TST-BRT-2. Red when: the v22 boot migration runs the retract again (1); the
+ * runner marks a job done whatever it reported, or re-runs a done job (2b, 2f);
+ * a job's throw escapes the runner (2c); a timed-out job is marked done, or a
+ * timeout stops the remaining jobs (2e); the settled run keeps the in-flight
+ * latch (2f); the retract scans the scheduler jobs once per ownership row (3);
+ * an owner of a pristine seed is skipped (2d, 3, 4); the runner starts before
+ * `app.listen` (5).
  */
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -69,6 +77,10 @@ describe('ADR 0789 §Correction — the retract never gates boot', () => {
     expect(await getOwned('org:boot-b', internalId)).not.toBeNull();
   });
 
+  // Ceiling: `startBackgroundAppJobs` returns its promise without awaiting the
+  // job, so "the caller got control back" holds structurally. What
+  // this case can fail on is the handle: it settles only once the slow job does,
+  // and only then is the job marked done.
   it('2a. the post-listen runner returns BEFORE a slow job finishes', async () => {
     let release!: () => void;
     let finished = false;
@@ -79,9 +91,9 @@ describe('ADR 0789 §Correction — the retract never gates boot', () => {
     const handle = startBackgroundAppJobs(storage, [slow]);
     // The caller got control back while the job is still pending.
     expect(finished).toBe(false);
-    await new Promise((r) => setImmediate(r));
-    await new Promise((r) => setImmediate(r));
+    for (let i = 0; i < 5; i += 1) await new Promise((r) => setImmediate(r));
     expect(finished).toBe(false);
+    expect(await storage.getAppMeta('app_bg_job:test-slow'), 'not done while the job is still running').toBeNull();
     release();
     await handle;
     expect(finished).toBe(true);
@@ -149,7 +161,11 @@ describe('ADR 0789 §Correction — the retract never gates boot', () => {
   it('4. idempotent over a PARTIALLY applied state, and a second pass does nothing', async () => {
     const tenants = ['org:p-1', 'org:p-2', 'org:p-3', 'org:p-4'];
     await plantInternalSeed(tenants);
-    // Simulate the killed deploy: half already retracted.
+    // Simulate the killed deploy: half already retracted. Idempotency here is
+    // held by `allOwnershipByWorkflow()`, which lists only rows that still exist:
+    // the `if (await removeOwnership(...))` guard on the counter is unreachable
+    // from this fixture (it matters only for a row removed mid-pass), so it is
+    // not claimed here.
     const { removeOwnership } = await import('../src/host/workflowOwnership.js');
     await removeOwnership('org:p-1', internalId);
     await removeOwnership('org:p-2', internalId);
@@ -166,7 +182,9 @@ describe('ADR 0789 §Correction — the retract never gates boot', () => {
     const createAppBody = src.slice(src.indexOf('export async function createApp('), src.indexOf('async function main('));
     expect(createAppBody).not.toContain('startBackgroundAppJobs(');
     const listenAt = src.indexOf('app.listen(config.port');
-    const startAt = src.indexOf('startBackgroundAppJobs(storage)');
+    // Ceiling: `main()` cannot be booted in a unit test, so the ordering is read
+    // from the source. The exact token also refuses an awaited start.
+    const startAt = src.indexOf('void startBackgroundAppJobs(storage)');
     expect(listenAt).toBeGreaterThan(0);
     expect(startAt, 'the background runner must start AFTER listen').toBeGreaterThan(listenAt);
   });

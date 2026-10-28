@@ -7,7 +7,8 @@
  * this client, so the client's own discrimination is pinned here).
  *
  * Witnessed (wave 12 probes): returning a value on 404 reds case 1; ignoring the
- * body on 200 reds case 2; widening the hide to `!res.ok` reds case 3.
+ * body on 200 reds case 2; widening the hide to `!res.ok` reds case 3. Row 57: dropping
+ * the `available` read reds the unavailable case; dropping the 401 arm reds the sign-in case.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { getExtractionGrant } from '../memoryExtractionClient.js';
@@ -24,8 +25,18 @@ describe('getExtractionGrant', () => {
   });
 
   it('returns the grant on 200', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => json({ granted: true, updatedAt: '2026-06-24' }, 200)));
-    expect(await getExtractionGrant()).toEqual({ granted: true, updatedAt: '2026-06-24' });
+    vi.stubGlobal('fetch', vi.fn(async () => json({ granted: true, updatedAt: '2026-06-24', available: true }, 200)));
+    expect(await getExtractionGrant()).toEqual({ granted: true, updatedAt: '2026-06-24', available: true });
+  });
+
+  it('ADR 0982 D2 — an account with no personal workspace is reported unavailable, with the reason', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => json({ granted: false, updatedAt: null, available: false }, 200)));
+    expect(await getExtractionGrant()).toEqual({ granted: false, updatedAt: null, available: false, unavailableReason: 'no-personal-workspace' });
+  });
+
+  it('ADR 0982 D2 — a 401 (anonymous; the server refuses them a grant) is "off, sign in", not a load failure', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => json({}, 401)));
+    expect(await getExtractionGrant()).toEqual({ granted: false, updatedAt: null, available: false, unavailableReason: 'sign-in' });
   });
 
   it('a non-404 failure THROWS — never collapses into the 404 hide', async () => {

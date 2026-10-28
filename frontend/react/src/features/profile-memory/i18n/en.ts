@@ -36,7 +36,11 @@ export const messages = {
 
   // Auto-extraction consent (ADR 0120)
   consentLabel: 'Automatically learn durable facts from my chats',
-  consentHint: 'When on, your assistant may save lasting facts it learns during chats. Learned facts are listed below, marked “Auto-learned”, and you can delete them. Turning this OFF stops future learning — it does not delete what was already learned. Off by default.',
+  consentHint: 'When on, each time you start a new chat your assistant reviews the chat you just left and saves lasting facts you stated about yourself. It reads only your own messages, and only chats in your personal workspace. Learned facts are listed below, marked “Auto-learned”, and assistants treat them as unverified. Deleting one also stops it being learned again in the same words. Turning this OFF stops future learning — it does not delete what was already learned. Off by default.',
+  consentUnavailable: 'Learning from chats needs a personal workspace, which this account does not have.',
+  consentSignIn: 'Sign in to let your assistant learn lasting facts from your chats.',
+  consentTurnOff: 'Turn off',
+  removeLearnedConfirmBody: 'Remove this learned fact? It will no longer be recalled, and it will not be learned again in the same words.',
   erasureScopeNote: 'Deleting your account data removes your personal memory. It does not reach what a shared workspace agent remembers from your conversations with it — that recall belongs to the workspace. Ask a workspace admin to clear an agent’s memory from its Memory tab.',
   consentError: 'Could not update the memory-learning setting.',
   consentLoadFailed: 'Could not read whether memory-learning is on. It may be ON — this is not confirmation that it is off.',

@@ -9,7 +9,7 @@
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react';
-import type { RankedCard, RankingResult } from '../workSelectionClient.js';
+import type { HeldCard, RankedCard, RankingResult } from '../workSelectionClient.js';
 
 const { getBoardRanking } = vi.hoisted(() => ({
   getBoardRanking: vi.fn<typeof import('../workSelectionClient.js')['getBoardRanking']>(),
@@ -20,7 +20,7 @@ const { AgentUpNextPanel } = await import('../AgentUpNextPanel.js');
 
 afterEach(() => { cleanup(); vi.resetAllMocks(); });
 
-const ok = (r: RankedCard[]): RankingResult => ({ kind: 'ok', ranked: r });
+const ok = (r: RankedCard[], held: HeldCard[] = []): RankingResult => ({ kind: 'ok', ranked: r, held });
 
 const ranked: RankedCard[] = [
   {
@@ -107,5 +107,22 @@ describe('AgentUpNextPanel', () => {
     // skeleton, so wait for the failure COPY itself — only the error state has it.
     expect(await screen.findByText("Couldn't load the work order. It'll retry shortly.")).toBeTruthy();
     expect(screen.getByRole('heading', { name: /up next/i })).toBeTruthy();
+  });
+
+  // ADR 0963 D3 — a held card is not in the order (the agent will not take it)
+  // but must not vanish either: the panel names it and says how to release it.
+  it('lists held cards apart from the order, with how to release them', async () => {
+    getBoardRanking.mockResolvedValue(ok(ranked.slice(0, 1), [{ cardId: 'h1', title: 'Crashed thing' }]));
+    render(<AgentUpNextPanel boardId="b1" />);
+
+    await screen.findByText(/Crashed thing/);
+    expect(screen.getAllByRole('list')[0]!.textContent, 'a held card is not in the order').not.toContain('Crashed thing');
+    expect(screen.getByRole('group', { name: 'Held' }).textContent).toContain('Clear the note on a card to release it');
+  });
+
+  it('still renders when every To Do card is held', async () => {
+    getBoardRanking.mockResolvedValue(ok([], [{ cardId: 'h1', title: 'Crashed thing' }]));
+    render(<AgentUpNextPanel boardId="b1" />);
+    expect(await screen.findByText(/Crashed thing/)).toBeTruthy();
   });
 });

@@ -15,6 +15,15 @@
  *   4. scheduler daemon → a due schedule fires a real run
  *   5. connector deliverability probe reflects a live relay device
  *   6. /notify returns an honest synthetic receipt (no webhook configured)
+ *
+ * (The live-dispatch model turn once smoked here is carried by
+ * `agent-dispatch-live-real.test.ts` › "completes a real structured-output turn",
+ * the same createAiProvidersAdapter → mock-provider pipeline — cut w65.)
+ *
+ * ADR 0032 twins + RFC 0086 attribution. Tracker TST-BKW-6. Red when the
+ * heartbeat or schedule attribution key is dropped from the activity
+ * projection, the connector probe calls a device-less connector deliverable, or
+ * the synthetic notifier claims `delivered` — each sabotage-witnessed (w65).
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -23,14 +32,10 @@ import http from 'node:http';
 import { createApp } from '../src/index.js';
 import type { Storage } from '../src/storage/storage.js';
 import type { HostAdapterSuite } from '../src/host/index.js';
-import { processDueHeartbeats } from '../src/host/heartbeatService.js';
+import { __setMockArchiveGuardForTest, processDueHeartbeats } from '../src/host/heartbeatService.js';
 import { processDueSchedules } from '../src/host/scheduleDaemon.js';
 import { updateRosterEntry, listRosterTenants, listRoster } from '../src/host/rosterService.js';
 import { registerJob } from '../src/host/schedulingService.js';
-import { createAiProvidersAdapter } from '../src/aiProviders/aiProvidersHost.js';
-import { programMock } from '../src/providers/dispatchMock.js';
-import { getAgentRegistry } from '../src/executor/agentRegistry.js';
-import { runAgentDispatchLive } from '../src/host/agentDispatch.js';
 
 const OP: Record<string, string> = { authorization: 'Bearer dev-token', 'content-type': 'application/json' };
 let server: http.Server;
@@ -38,22 +43,25 @@ let base = '';
 let app: Awaited<ReturnType<typeof createApp>>;
 
 beforeEach(async () => {
+  // ADR 0963 D8 — the seeded twins are all mock archive; see approvals.test.ts.
+  __setMockArchiveGuardForTest(false);
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_RATELIMIT_DISABLED = 'true';
   app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'smoke', serviceVersion: '0', enableConsoleTracer: false });
   await new Promise<void>((r) => { server = app.listen(0, '127.0.0.1', () => { base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; r(); }); });
 });
-afterEach(async () => { await new Promise<void>((r) => server.close(() => r())); });
+afterEach(async () => { __setMockArchiveGuardForTest(true); await new Promise<void>((r) => server.close(() => r())); });
 
-type Json = Record<string, any>;
-async function post(path: string, body?: unknown, headers: Record<string, string> = OP): Promise<{ status: number; body: Json }> {
+async function post<T>(path: string, body?: unknown, headers: Record<string, string> = OP): Promise<{ status: number; body: T }> {
   const res = await fetch(`${base}${path}`, { method: 'POST', headers, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-  return { status: res.status, body: (await res.json().catch(() => ({}))) as Json };
+  return { status: res.status, body: (await res.json().catch(() => ({}))) as T };
 }
-async function get(path: string): Promise<{ status: number; body: Json }> {
+async function get<T>(path: string): Promise<{ status: number; body: T }> {
   const res = await fetch(`${base}${path}`, { headers: OP });
-  return { status: res.status, body: (await res.json().catch(() => ({}))) as Json };
+  return { status: res.status, body: (await res.json().catch(() => ({}))) as T };
 }
+interface FleetFeed { items: Array<{ source: string; rosterId?: string; runId: string }>; truncated: boolean }
+interface ConnectorProbe { ok: boolean; liveRelayDevices: number }
 
 function deps(): { storage: Storage; hostSuite: HostAdapterSuite } {
   return { storage: app.locals.storage as Storage, hostSuite: app.locals.hostSuite as HostAdapterSuite };
@@ -79,13 +87,13 @@ describe('agent autonomy — end-to-end smoke', () => {
     expect(ran).toBeGreaterThanOrEqual(1); // picked a To Do card → started a real run
 
     // 3. The fleet activity feed (index-backed, not a scan) shows it, attributed.
-    const fleet = (await get('/host/openwop-app/fleet/activity')).body;
+    const fleet = (await get<FleetFeed>('/host/openwop-app/fleet/activity')).body;
     expect(fleet.truncated).toBe(false);
     expect(fleet.items.length).toBeGreaterThanOrEqual(1);
-    const hb = fleet.items.find((i: { source: string }) => i.source === 'heartbeat');
+    const hb = fleet.items.find((i) => i.source === 'heartbeat');
     expect(hb).toBeTruthy();
-    expect(hb.rosterId).toBeTruthy();
-    expect(hb.runId).toBeTruthy();
+    expect(hb?.rosterId).toBeTruthy();
+    expect(hb?.runId).toBeTruthy();
   });
 
   it('fires a due schedule through the real daemon', async () => {
@@ -102,58 +110,27 @@ describe('agent autonomy — end-to-end smoke', () => {
     expect(fired).toBeGreaterThanOrEqual(1);
 
     // The schedule run is attributed in the fleet feed.
-    const fleet = (await get('/host/openwop-app/fleet/activity?rosterId=' + encodeURIComponent(agentEntry.rosterId))).body;
-    expect(fleet.items.some((i: { source: string }) => i.source === 'schedule')).toBe(true);
+    const fleet = (await get<FleetFeed>('/host/openwop-app/fleet/activity?rosterId=' + encodeURIComponent(agentEntry.rosterId))).body;
+    expect(fleet.items.some((i) => i.source === 'schedule')).toBe(true);
   });
 
   it('connector deliverability probe reflects a live relay device', async () => {
-    const made = (await post('/host/openwop-app/messaging/connectors', { channel: 'signal', displayName: 'Signal' })).body;
+    const made = (await post<{ connectorId: string }>('/host/openwop-app/messaging/connectors', { channel: 'signal', displayName: 'Signal' })).body;
     await post(`/host/openwop-app/messaging/connectors/${made.connectorId}/enable`, {});
     // No device yet → not deliverable.
-    expect((await post(`/host/openwop-app/messaging/connectors/${made.connectorId}/test`, {})).body.ok).toBe(false);
+    expect((await post<ConnectorProbe>(`/host/openwop-app/messaging/connectors/${made.connectorId}/test`, {})).body.ok).toBe(false);
 
     // Register + activate + heartbeat a signal relay device → deliverable.
-    const reg = (await post('/host/openwop-app/messaging/relay/register', { channel: 'signal' })).body;
-    const act = (await post('/host/openwop-app/messaging/relay/activate', { relayId: reg.relayId, activationCode: reg.activationCode })).body;
+    const reg = (await post<{ relayId: string; activationCode: string }>('/host/openwop-app/messaging/relay/register', { channel: 'signal' })).body;
+    const act = (await post<{ deviceToken: string }>('/host/openwop-app/messaging/relay/activate', { relayId: reg.relayId, activationCode: reg.activationCode })).body;
     await post('/host/openwop-app/messaging/device/heartbeat', { status: 'connected' }, { 'x-openwop-device-token': act.deviceToken, 'content-type': 'application/json' });
-    const probe = (await post(`/host/openwop-app/messaging/connectors/${made.connectorId}/test`, {})).body;
+    const probe = (await post<ConnectorProbe>(`/host/openwop-app/messaging/connectors/${made.connectorId}/test`, {})).body;
     expect(probe.ok).toBe(true);
     expect(probe.liveRelayDevices).toBeGreaterThanOrEqual(1);
   });
 
-  it('runs a real live-dispatch model turn end-to-end (keyless mock provider)', async () => {
-    // Register an agent with a return schema, program the keyless mock provider,
-    // and dispatch a LIVE turn through the app's real AI adapter — the actual
-    // callAI → dispatchStructured → dispatchMock pipeline, no credentials.
-    const nodeId = 'agent.dispatch.smoke';
-    getAgentRegistry().register({
-      agentId: 'smoke.agent', persona: 'Smokey', modelClass: 'chat', systemPrompt: 'Answer.',
-      packName: 'test', packVersion: '0', toolAllowlist: [],
-      handoff: {
-        returnSchema: { type: 'object', required: ['answer'], properties: { answer: { type: 'string' } } },
-        validateReturn: (v: unknown) =>
-          v && typeof v === 'object' && typeof (v as { answer?: unknown }).answer === 'string'
-            ? { ok: true }
-            : { ok: false, errors: 'missing answer' },
-      },
-    });
-    programMock(nodeId, [{ content: '{"answer":"live"}', stopReason: 'end_turn', inputTokens: 4, outputTokens: 2 }]);
-    const hostSuite = app.locals.hostSuite as HostAdapterSuite;
-    const adapter = createAiProvidersAdapter({
-      runId: 'smoke-run', nodeId, tenantId: 'default', attempt: 1,
-      secrets: {}, policyResolver: hostSuite.providerPolicyResolver,
-    });
-    const result = await runAgentDispatchLive(
-      { agentId: 'smoke.agent', task: { q: 'hi' } },
-      { callAI: adapter.callAI, modelOptions: { provider: 'mock', model: nodeId } },
-    );
-    expect(result.status).toBe('completed');
-    expect(result.provider).toBe('mock');
-    expect(result.result).toEqual({ answer: 'live' });
-  });
-
   it('/notify returns an honest synthetic receipt with no webhook configured', async () => {
-    const r = (await post('/host/openwop-app/messaging/notify', { kind: 'email', to: 'a@b.com', text: 'hi' })).body;
+    const r = (await post<{ status: string; detail: string }>('/host/openwop-app/messaging/notify', { kind: 'email', to: 'a@b.com', text: 'hi' })).body;
     expect(r.status).toBe('accepted'); // not 'delivered'
     expect(r.detail).toContain('no provider configured');
   });

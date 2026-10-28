@@ -14,6 +14,18 @@
  *     user's own safe-mode ask, never a workspace/platform/enforce ask;
  *  3. route authority — the flag is honored only for a session with a BOUND
  *     human (`resolved.userId`); a user-less session cannot self-approve.
+ *
+ * WHAT IS BEHAVIOURAL AND WHAT IS NOT (honest ceiling, 8f W4). Invariant 1 and
+ * the sideband's authority/lifecycle are driven through the real functions.
+ * Invariants 2 and 3 are WIRING TRIPWIRES: exact source substrings of
+ * `toolBridge.ts` / `routes.ts`. A behavioural test of the bridge needs a live
+ * agent allowlist, conversation gate and lane firewall (`executeRealtimeToolCall`),
+ * and the route's `resolved.userId` has no unit seam, so a refactor that keeps
+ * the semantics will red these and must update the substring deliberately.
+ *
+ * Witnessed: va-baseline-ignored, va-not-per-tool, va-deny-bypassed,
+ * va-sideband-cross-tenant, va-sideband-any-human, va-sideband-not-consumed,
+ * va-route-unbound-human (source tripwire).
  */
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -22,6 +34,13 @@ import {
   buildFirewallHook,
   SENSITIVE_APPROVAL_TOOLS,
 } from '../src/features/capability-firewall/firewallHook.js';
+// STATIC import (wave-9 lesson): the in-case `await import()` of this module's
+// graph cost 4.3 s of the case's own budget (8f W4 baseline).
+import { resolveHeldSidebandCall, __heldApprovalsForTests } from '../src/features/voice/realtime/openaiSideband.js';
+
+/** The sideband's held-approval row, read off the test seam's own type (the
+ *  interface itself is module-private), so the fixture is checked by tsc. */
+type HeldApproval = Parameters<ReturnType<typeof __heldApprovalsForTests>['set']>[1];
 
 const CODE_EXEC_ID = 'openwop:feature.code-exec.nodes.run';
 const srcOf = (rel: string): string =>
@@ -52,16 +71,20 @@ describe('A7 — one-shot approvedTools semantics (the voice card\'s Approve)', 
 
   it('a hard deny (enforce-mode floor) is NEVER bypassed by the one-shot', () => {
     // The one-shot downgrades ONLY require-approval; an enforce-mode deny for an
-    // unmatched action must survive an approvedTools entry for the same tool.
-    const hook = buildFirewallHook({
-      rules: [],
-      requireApprovalTools: SENSITIVE_APPROVAL_TOOLS,
-      bypassApproval: false,
-      approvedTools: new Set([CODE_EXEC_ID]),
-      mode: 'enforce',
-      defaultDenyVerdict: 'deny',
-    });
-    expect(hook.evaluate([], CODE_EXEC_ID).decision).toBe('deny');
+    // unmatched action must survive an approval entry for the same tool — in the
+    // policy set (`approvedTools`) AND in the baseline set the voice card actually
+    // feeds (`approvedBaselineTools`, ADR 0834 D2).
+    for (const approval of [{ approvedTools: new Set([CODE_EXEC_ID]) }, { approvedBaselineTools: new Set([CODE_EXEC_ID]) }]) {
+      const hook = buildFirewallHook({
+        rules: [],
+        requireApprovalTools: SENSITIVE_APPROVAL_TOOLS,
+        bypassApproval: false,
+        ...approval,
+        mode: 'enforce',
+        defaultDenyVerdict: 'deny',
+      });
+      expect(hook.evaluate([], CODE_EXEC_ID).decision, Object.keys(approval)[0]).toBe('deny');
+    }
   });
 });
 
@@ -91,12 +114,13 @@ describe('A7 — wiring pins (source-level, the voice-tool-parity idiom)', () =>
 
 describe('A7 sideband half — held approvals resolve from the chat (authority + one-shot)', () => {
   it('authority + lifecycle: not_found / forbidden / deny consumes the hold', async () => {
-    const { resolveHeldSidebandCall, __heldApprovalsForTests } = await import('../src/features/voice/realtime/openaiSideband.js');
     const held = __heldApprovalsForTests();
-    held.set('call-1:fc-1', {
+    held.clear(); // module-level state: start from an empty hold table
+    const row: HeldApproval = {
       tenantId: 't1', userId: 'user:opener', conversationId: 'conv-1',
-      name: 'openwop:core.files.write', args: {}, heldAt: 0,
-    } as never);
+      name: 'openwop:core.openwop.http.fetch', args: {}, heldAt: 0,
+    };
+    held.set('call-1:fc-1', row);
 
     // Wrong tenant → not_found (no existence leak across tenants).
     expect((await resolveHeldSidebandCall({ tenantId: 't2', userId: 'user:opener', callId: 'call-1', fcId: 'fc-1', approve: true })).status).toBe('not_found');

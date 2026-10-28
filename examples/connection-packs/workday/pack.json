@@ -1,11 +1,11 @@
 {
   "name": "core.openwop.connections.workday",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "kind": "connection",
-  "description": "Workday connection pack (RFC 0095) \u2014 OAuth2 provider for the Workday REST API (HCM / People). ADR 0033 DEPLOY-GATED. Reach is `openapi`: Workday has no first-party global MCP server, and its OAuth authorize/token endpoints plus REST base are TENANT-SPECIFIC (`https://{instance}.workday.com/{tenant}/...`), supplied per connection via instanceUrlTemplate. The manifest declares the global https hosts and the per-tenant template; the operator fills the tenant at connection time (ADR 0033 \u00a74 capability honesty). Carries NO secret; the operator supplies the API-client id/secret host-side (ADR 0024 \u00a77).",
+  "description": "Workday connection pack — OAuth2 provider for the Workday REST API (HCM / People). DEPLOY-GATED. Reach is `openapi`: Workday has no first-party global MCP server, and its OAuth authorize/token endpoints plus REST base are TENANT-SPECIFIC (`https://{instance}.workday.com/{tenant}/.`), supplied per connection via instanceUrlTemplate. The manifest declares the global https hosts and the per-tenant template; the operator fills the tenant at connection time (capability honesty). Carries NO secret; the operator supplies the API-client id/secret host-side.",
   "license": "Apache-2.0",
   "engines": {
-    "openwop": ">=1.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "provider": {
     "id": "workday",
@@ -44,12 +44,13 @@
         "ref": "https://community.workday.com/sites/default/files/file-hosting/restapi/index.html"
       }
     },
+    "apiHosts": [
+      "workday.com",
+      "myworkday.com"
+    ],
     "consumerNodes": [
       "core.openwop.http"
     ],
-    "docsUrl": "https://community.workday.com/rest-api",
-    "apiHosts": [
-      "workday.com"
-    ]
+    "docsUrl": "https://community.workday.com/rest-api"
   }
 }

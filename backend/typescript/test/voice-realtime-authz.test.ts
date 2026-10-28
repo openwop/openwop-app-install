@@ -42,7 +42,7 @@ async function normalClient(): Promise<(method: string, path: string, body?: unk
       method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
-    for (const ck of getSetCookies(res.headers) as string[]) {
+    for (const ck of getSetCookies(res.headers)) {
       const m = /(__session=[^;]+)/.exec(ck);
       if (m?.[1]) cookie = m[1];
     }
@@ -56,12 +56,21 @@ async function normalClient(): Promise<(method: string, path: string, body?: unk
 describe('RTV-1 — realtime /config is superadmin-gated', () => {
   it('the wildcard admin bearer can PUT + GET the config', async () => {
     expect((await admin('PUT', `${RT}/config`, { provider: 'gemini-live', credentialRef: 'rt-k' })).status).toBe(200);
-    expect((await admin('GET', `${RT}/config`)).status).toBe(200);
+    const got = await admin('GET', `${RT}/config`);
+    expect(got.status).toBe(200);
+    // The round-trip, not just the status: the PUT landed and the GET reads it back.
+    expect(await got.json()).toEqual({ provider: 'gemini-live', credentialRef: 'rt-k' });
   });
 
   it('a non-superadmin signed-in user is 403 on both PUT and GET', async () => {
     const user = await normalClient();
-    expect((await user('PUT', `${RT}/config`, { provider: 'openai-realtime', credentialRef: 'evil' })).status).toBe(403);
-    expect((await user('GET', `${RT}/config`)).status).toBe(403);
+    // Each 403 by the SUPERADMIN gate's own message (`host/superadmin.ts:180`), so an
+    // earlier 403 (toggle subject, MFA, CSRF) cannot stand in for it.
+    const put = await user('PUT', `${RT}/config`, { provider: 'openai-realtime', credentialRef: 'evil' });
+    expect(put.status).toBe(403);
+    expect(((await put.json()) as { message?: string }).message).toBe('Configuring the realtime voice provider requires a superadmin principal.');
+    const get = await user('GET', `${RT}/config`);
+    expect(get.status).toBe(403);
+    expect(((await get.json()) as { message?: string }).message).toBe('Reading the realtime voice provider configuration requires a superadmin principal.');
   });
 });

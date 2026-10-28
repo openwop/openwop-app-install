@@ -13,10 +13,18 @@ import { setKnowledgeBackend } from '../../host/knowledgeSurface.js';
 import { registerKbRoutes } from './routes.js';
 import { tenantRetrieve, TENANT_SCOPED_KB_ORGS } from './kbService.js';
 import { buildKbSurface } from './surface.js';
+import { assertHostEmbedderBootConfig, registerKbEmbeddingBudget } from './embedBudget.js';
+import { assertVertexRerankBootConfig } from './vertexReranker.js';
+import { assertDocAiBootConfig } from './parsers/documentAi.js';
 
 export const kbFeature: BackendFeature = {
   id: 'kb',
   registerRoutes: (deps) => {
+    // ADR 0904 D1 — refuse to boot with operator-funded embeddings and no daily cap.
+    assertHostEmbedderBootConfig();
+    registerKbEmbeddingBudget();
+    assertVertexRerankBootConfig(); // ADR 0904 D8 — no operator-funded reranking uncapped
+    assertDocAiBootConfig(); // ADR 0904 D6 — no operator-funded parsing uncapped, no malformed processor
     registerKbRoutes(deps);
     // Back the `ctx.knowledge` host surface with the REAL tenant KB store (ADR
     // 0014 Phase 0 — the feature owns its infra, like notifications' emit

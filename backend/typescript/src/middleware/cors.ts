@@ -154,6 +154,10 @@ export const HOST_REQUEST_HEADERS: readonly string[] = [
   // ADR 0860 D3 — a public visitor's consent-lane token on the page read and the
   // funnel routes (a GET cannot carry it in a body, and a query lands in logs).
   'X-OpenWOP-Consent-Token',
+  // ADR 0948 P2c — a funnel buyer's post-purchase offer capability (order + token)
+  // on the public `next` route: same reason, a GET with no body and no URL leak.
+  'X-OpenWOP-Funnel-Order',
+  'X-OpenWOP-Funnel-Offer',
   // Derived, not retyped: if `ACT_AS_HEADER` is ever renamed, the allow-list
   // follows automatically. A literal here would silently stop admitting the
   // header the readers actually check — the same drift, one layer over.
@@ -242,7 +246,7 @@ export function corsMiddleware(): RequestHandler {
         // preflight, which is exactly why this class hides.
         res.set('Access-Control-Allow-Headers', ALLOWED_REQUEST_HEADERS.join(', '));
         res.set('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
-        res.set('Access-Control-Expose-Headers', 'ETag');
+        res.set('Access-Control-Expose-Headers', 'ETag, Content-Disposition'); // ADR 0992 D9 — the export download's name
         res.set('Access-Control-Max-Age', '600');
       }
     }

@@ -23,7 +23,7 @@ import { validateWorkflowDefinition, WORKFLOW_ID_PATTERN } from '../host/workflo
 import type { HostAdapterSuite } from '../host/index.js';
 import { tenantOf } from '../host/requestSubject.js';
 import { requireWorkflowWrite } from '../host/workflowWriteAuthority.js';
-import { recordOwnership, listOwned, getOwned, uniqueOwnedName, isWorkflowForeignTo, PUBLIC_WORKFLOW_ID, isSharedWorkflowId, WORKFLOW_SUBJECT_PATTERN } from '../host/workflowOwnership.js';
+import { recordOwnership, listOwned, getOwned, isWorkflowForeignTo, PUBLIC_WORKFLOW_ID, isSharedWorkflowId, WORKFLOW_SUBJECT_PATTERN } from '../host/workflowOwnership.js';
 import { forkSharedWorkflow, retryPendingRepoints, forkOfShared, CANVAS_PRISTINE_HEADER } from '../host/sharedWorkflowFork.js';
 import { lifecycleOf, withLifecycle } from '../host/workflowLifecycle.js';
 import { registerWorkflowComposeTool, registerWorkflowProposeTool, registerComposedWorkflowDecisionHandler } from '../host/workflowComposeTool.js';
@@ -38,11 +38,12 @@ import { estimateWorkflowCost } from '../host/workflowCostEstimate.js';
 import { listBudgetsForTenant, listTodaySpendForTenant } from '../host/workflowBudgets.js';
 import type { Storage } from '../storage/storage.js';
 import { pinMismatches } from '../host/chainPinRule.js';
-import { getChain, listChains, expandChain, reloadWorkflowChainPacks, chainRequirements, coRegisterSubChains, findMissingRequiredConfig, findUnfilledExpansionParams, SubChainError } from '../host/workflowChainPackLoader.js';
+import { getChain, listChains, reloadWorkflowChainPacks, chainRequirements, findMissingRequiredConfig, findUnfilledExpansionParams } from '../host/workflowChainPackLoader.js';
 import { validateChainBackedSubChainBinds } from '../host/chainBackedWorkflows.js';
 import { workflowRoomLive } from '../host/collab/workflowCollabResource.js';
 import { deleteTenantWorkflow } from '../host/tenantWorkflowDelete.js';
 import { assertNoDisabledPacks } from '../host/packEnablement.js';
+import { instantiateOwnedChain } from '../host/chainInstantiation.js';
 import { preserveDroppedFields, parseFieldContract, FIELD_CONTRACT_HEADER } from '../host/preserveDroppedFields.js';
 import { getProvider } from '../features/connections/providerRegistry.js';
 import { getToggleDefault } from '../host/featureToggles/registry.js';
@@ -51,7 +52,7 @@ import { assertInstallable, installFromConfiguredRegistry } from '../packs/insta
 import { requireSuperadmin } from '../host/superadmin.js';
 
 import type { WorkflowDefinition } from '../executor/types.js';
-import { copyWorkflowId, isServerMintedWorkflowId, mintUnique, workflowKind } from '../host/workflowId.js';
+import { isServerMintedWorkflowId, workflowKind } from '../host/workflowId.js';
 import { createLogger } from '../observability/logger.js';
 import { getChainBackedWorkflow } from '../host/chainBackedWorkflows.js';
 import { resolveCallerDisplayName } from '../host/chatContext.js';
@@ -249,81 +250,6 @@ function headMovedConflict(res: Response, workflowId: string, headRevision: stri
   );
 }
 
-/**
- * ADR 0770 D3 (`WBWF-1`) — commit ONE staged sub-chain child. The child id is
- * deterministic per `(tenant, chain, version)` (RFC 0133 §1.3 convergence), so
- * a repeat instantiation lands on a child the tenant may already have EDITED.
- * The old commit was an unconditional overwrite: a fresh `params:{}` expansion
- * replaced the user's edits and rename, un-archived it, ignored a live room,
- * and changed what every earlier parent run replays against. Three outcomes:
- *
- *  - `created` — not owned here, or owned but the definition does not resolve
- *    (a lost fire-and-forget write): register + first revision + ownership,
- *    stamping `mintedRevision`.
- *  - `refreshed` — owned, and the head is still exactly what the host minted
- *    (`mintedRevision`), and no room is live: re-register the fresh expansion.
- *    This keeps re-instantiation as the heal for a child an OLDER host minted —
- *    expansion output changes under a fixed chain version. Lifecycle carries
- *    over (`revisionHashOf` strips it, so an archived-but-pristine child stays
- *    archived).
- *  - `reused` — anything else (edited, a legacy child with no stamp, or a live
- *    room): bound as-is, no write at all.
- *
- * No compensating delete on a later failure: a concurrent request may already
- * have reused a child this request created (architect H3). The worst case is an
- * owned, unreferenced child, as before.
- */
-async function commitSubChainChild(
-  tenantId: string,
-  childDef: WorkflowDefinition,
-  childName: string,
-): Promise<'created' | 'refreshed' | 'reused'> {
-  const id = childDef.workflowId;
-  const owned = await getOwned(tenantId, id);
-  // grade-code WBCD-2 — decide AND write against one FRESH read, with an atomic
-  // swap: deciding from the per-instance cache and then writing blind let an
-  // edit made on another instance (or between the read and the write) be
-  // replaced by the refresh.
-  const fresh = await readRegisteredWorkflowFresh(id);
-  const head = owned ? fresh.def : null;
-  let toWrite = childDef;
-  let outcome: 'created' | 'refreshed' = 'created';
-  if (owned && head) {
-    const headRevision = revisionHashOf(head);
-    // grade-code WBCD-8 — a child minted before `mintedRevision` existed carries
-    // no stamp; it is provably pristine when its history is exactly the one
-    // revision the mint recorded and the head still is that revision.
-    const pristine = owned.mintedRevision !== undefined
-      ? headRevision === owned.mintedRevision
-      : await isSingleRevisionHead(id, tenantId, headRevision);
-    if (!pristine || (await workflowRoomLive(id))) return 'reused';
-    const lc = lifecycleOf(head);
-    toWrite = withLifecycle(childDef, { transient: lc.transient, archivedAt: lc.archivedAt, generatedBy: lc.generatedBy });
-    outcome = 'refreshed';
-  }
-  if (!(await registerWorkflowIfUnchanged(toWrite, fresh.raw))) return 'reused'; // it moved under us — keep theirs
-  await recordRevision(tenantId, toWrite);
-  const lc = lifecycleOf(toWrite);
-  // grade-data D-7 — a chain-version bump rightly mints a NEW child (the id keys
-  // on version), but it must not be a second workflow with the same name: a new
-  // child takes a unique name; a child already owned keeps the one it has.
-  const name = owned?.name ?? await uniqueOwnedName(tenantId, childName);
-  await recordOwnership(tenantId, id, {
-    name,
-    nodeCount: toWrite.nodes.length,
-    ...(lc.transient !== undefined ? { transient: lc.transient } : {}),
-    ...(lc.archivedAt !== undefined ? { archivedAt: lc.archivedAt } : {}),
-    mintedRevision: revisionHashOf(toWrite),
-  });
-  return outcome;
-}
-
-/** grade-code WBCD-8 — true when `workflowId`'s visible history is exactly one
- *  revision and it is the current head (a legacy, never-edited mint). */
-async function isSingleRevisionHead(workflowId: string, tenantId: string, headRevision: string): Promise<boolean> {
-  const rows = (await listRevisions(workflowId)).filter((r) => revisionVisibleTo(tenantId, r));
-  return rows.length === 1 && rows[0]!.revisionHash === headRevision;
-}
 
 export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdapterSuite; storage: Storage }): void {
   // ADR 0369 §6 — the compose-and-run agent tool registers here because this
@@ -1126,90 +1052,15 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
       // config.workflowId resolves) and rewrites config.subChainRef → the minted
       // child id. `OPENWOP_CHAIN_SUBCHAINS=0` flips off runtime child dispatch so the
       // conformance `chain.subchain.unsupported-refused` scenario is witnessable.
-      let expanded;
-      let coRegisteredChildIds: string[] = [];
-      // ADR 0770 D3 — STAGE, CHECK, then COMMIT. `coRegisterSubChains` keeps its
-      // deps interface, but `register`/`own` now only COLLECT: nothing is written
-      // until the parent and every child have expanded and passed the disabled-
-      // pack gate. Before, children were registered + owned first and the gate
-      // ran after (children never at all), so a refusal left owned orphans in
-      // `/builder` and the `/` picker.
-      const staged: Array<{ def: WorkflowDefinition; name: string }> = [];
-      if (found.chain.subChains?.length) {
-        try {
-          // §Correction (grade-code MEDIUM-3 / grade-ux TPI-15 / grade-data DOC-1):
-          // this comment used to claim the route ENFORCES required params and
-          // refuses with `chain_missing_required_param`. It does NOT — that
-          // enforcement was reverted in the same commit because it broke "Use
-          // template = just copy", and the error code exists nowhere in the
-          // codebase. Both branches are permissive by design; the config check
-          // below is a REPORT only. Left corrected rather than deleted so the
-          // next reader knows the honesty gap is still open, not half-closed.
-          const result = await coRegisterSubChains(found.chain, { params, deferred, tenantId: tenantOf(req), requiredConfigKeysFor }, {
-            register: (childDef) => {
-              if (!staged.some((st) => st.def.workflowId === childDef.workflowId)) staged.push({ def: childDef, name: childDef.workflowId });
-            },
-            own: async (wid, nm) => {
-              const st = staged.find((x) => x.def.workflowId === wid);
-              if (st) st.name = nm;
-            },
-            supported: process.env.OPENWOP_CHAIN_SUBCHAINS !== '0',
-          });
-          expanded = result.definition;
-          coRegisteredChildIds = result.registeredChildIds;
-        } catch (err) {
-          if (err instanceof SubChainError) {
-            const status = err.code === 'sub_chain_unsupported' ? 422 : 400;
-            throw new OpenwopError('validation_error', err.message, status, { code: err.code });
-          }
-          throw err;
-        }
-      } else {
-        // §Correction (code-review HIGH #1) — the config REPORT must cover this
-        // branch: 167 of 169 shipped chains have no sub-chains, including
-        // `exec-ops.daily-briefing` (the incident chain), so wiring it only to
-        // the sub-chain branch left the check unreachable for the case that
-        // motivated it.
-        //
-        // Required-param ENFORCEMENT is deliberately NOT applied here. It was,
-        // briefly, and it broke a documented product contract: "Use template =
-        // just copy — copies without a form" (this route's own test) and the
-        // preflight modal's "Confirm never blocks on blanks". A template must be
-        // copyable with blanks and completed in the builder. The incident is
-        // fixed by the AI nodes carrying real defaults, not by refusing the copy.
-        expanded = expandChain(found.chain, { params, deferred, requiredConfigKeysFor });
-      }
-      // R2 — a fresh owned instance id (the published chain id is not the instance id).
-      const workflowId = await mintUnique(() => copyWorkflowId(found.chain.chainId), async (id) => Boolean(await getRegisteredWorkflowAsync(id)));
-      // Preserve the template's name; on a collision with an existing owned
-      // workflow append -2/-3/… (never the raw workflowId). Stamp the resolved
-      // name on BOTH the definition (builder canvas) and the ownership record
-      // (dashboard list) so the two surfaces never disagree.
-      const baseName = (typeof expanded.metadata?.name === 'string' && expanded.metadata.name.trim())
-        ? expanded.metadata.name : found.chain.label;
-      const name = await uniqueOwnedName(tenantOf(req), baseName);
-      const def = { ...expanded, workflowId, metadata: { ...expanded.metadata, name } };
-      // ADR 0194 P3 — the POST choke, now over the parent AND every child, and
-      // BEFORE anything is written (ADR 0770 D3, `WBWF-7`/`WBWF-8`).
-      for (const d of [...staged.map((st) => st.def), def]) await assertNoDisabledPacks(d, tenantOf(req));
-      // Children first (depth-first staging order), so the parent's rewritten
-      // `config.workflowId` always resolves.
-      const reusedChildIds: string[] = [];
-      for (const st of staged) {
-        const outcome = await commitSubChainChild(tenantOf(req), st.def, st.name);
-        if (outcome === 'reused') reusedChildIds.push(st.def.workflowId);
-      }
-      await registerWorkflowDurable(def); // ADR 0770 D2
-      // ADR 0474 — the instantiation IS the first revision.
-      await recordRevision(tenantOf(req), def, { ...(req.userId ? { createdBy: req.userId } : {}) });
-      const lc2 = lifecycleOf(def);
-      await recordOwnership(tenantOf(req), workflowId, {
-        name, nodeCount: def.nodes.length,
-        ...(lc2.transient !== undefined ? { transient: lc2.transient } : {}),
-        ...(lc2.archivedAt !== undefined ? { archivedAt: lc2.archivedAt } : {}),
-        // ADR 0913 — the parent only. Sub-chain children are shared across
-        // instantiations (their id keys on the chain version), so labelling one
-        // would let one subject's erasure delete another's child.
+      // ADR 0959 P0 — the expand → stage → check → commit sequence lives in ONE host
+      // helper (`host/chainInstantiation.ts`), shared with the campaign-playbooks
+      // install, so the two can never drift (architect H1).
+      const { def, workflowId, coRegisteredChildIds, reusedChildIds } = await instantiateOwnedChain({
+        tenantId: tenantOf(req),
+        chain: found.chain,
+        params,
+        deferred,
+        ...(req.userId ? { createdBy: req.userId } : {}),
         ...(subject ? { subject } : {}),
       });
       // R6 — surface node types not installed on this host (best-effort heads-up).

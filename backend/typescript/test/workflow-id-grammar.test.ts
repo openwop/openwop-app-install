@@ -3,8 +3,10 @@
  *
  * Three things are pinned here:
  *  1. every mint produces `wf.<origin>.…` with an origin from the closed set;
- *  2. the browser's mint and legacy mapping equal the server's (the builder
- *     mints offline, so there are two functions — they may not drift);
+ *  2. the browser's mints (`blank`, `dup`) and its client-creatable origin set
+ *     equal the server's (the builder mints offline, so there are two functions —
+ *     they may not drift). There is no browser legacy-id mapping any more;
+ *     `workflowToolName` lives only in the browser module and is pinned below;
  *  3. the RATCHET: no file outside the two mint modules builds a `wf` id by hand
  *     or pattern-matches a workflow id's spelling. Three chat readers did, and
  *     every server-minted workflow ran with no step count, names or builder link.
@@ -170,7 +172,10 @@ describe('ratchet: nothing outside the mint builds or pattern-matches a workflow
   ];
 
   it('scans a real population', () => {
-    expect(files.length).toBeGreaterThan(1500);
+    // Floor = the MEASURED population (grade-tests wave 64, 19d13e682: 3,597 files, re-measured
+    // through this walker at HEAD).
+    // The old floor of 1,500 let half the tree drop out of the scan unnoticed.
+    expect(files.length).toBeGreaterThanOrEqual(3597);
     // The gate can see what it polices: the mint module itself matches both patterns.
     const mint = code(readFileSync(join(REPO, 'backend/typescript/src/host/workflowId.ts'), 'utf8'));
     expect(HAND_MINT.test(mint)).toBe(true);

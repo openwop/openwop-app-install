@@ -13,6 +13,13 @@
  *      DSAR clears it, and it never rides the run lane;
  *  D4  the CRM task writer takes a company link and only a member assignee, and
  *      a removed member's open tasks are unassigned.
+ *
+ * Tracker TST-BHD-4. Red when (sabotage-witnessed, wave 62): the writer floor drops to
+ * read (P1) or the read floor is removed (P2, event cause lane); a computed set may
+ * name another org (P3) or no org without recording why (D2); an outsider can own an
+ * account; removal or DSAR leaves the owner; the owner id rides the run lane; a
+ * surface method is classified twice; or the CRM task writer accepts a non-member
+ * assignee or unassigns a DONE task on removal.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -43,12 +50,19 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
+/** The wire shapes this file reads (parsed JSON). */
+interface Wire {
+  user: { userId: string }; memberId: string; orgId: string; accountId: string; ownerUserId?: string;
+  assignees: Array<{ subject: string }>; me: string[];
+  error?: string; message?: string; details?: { reason?: string; field?: string };
+}
 function client() {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<{ status: number; body: any }> => {
+  const call = async (method: string, path: string, body?: unknown): Promise<{ status: number; body: Wire }> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    const out: unknown = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    return { status: res.status, body: out as Wire }; // wire JSON, typed by the shape above
   };
   return {
     post: (p: string, b?: unknown) => call('POST', p, b),
@@ -66,18 +80,18 @@ async function team() {
   for (const c of [owner, client(), client()]) {
     const r = await c.post('/host/openwop-app/test/login', { email: `a0882p-${Date.now()}-${n++}@acme.test`, tenantId });
     expect(r.status, JSON.stringify(r.body)).toBe(201);
-    ids.push((r.body as { user: { userId: string } }).user.userId);
+    ids.push(r.body.user.userId);
   }
   const [ownerId, editorId, viewerId] = ids as [string, string, string];
   // The editor is ALSO a workspace-root member (assignable as an owner).
   const rootAdd = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(tenantId)}/members`, { displayName: 'Ed Itor', subject: editorId, roles: ['editor'] });
   expect(rootAdd.status, JSON.stringify(rootAdd.body)).toBe(201);
-  const editorRootMemberId = (rootAdd.body as { memberId: string }).memberId;
+  const editorRootMemberId = rootAdd.body.memberId;
   const orgIds: string[] = [];
   for (const name of ['Acme', 'Beta']) {
     const org = await owner.post('/host/openwop-app/orgs', { name });
     expect(org.status, JSON.stringify(org.body)).toBe(201);
-    orgIds.push((org.body as { orgId: string }).orgId);
+    orgIds.push(org.body.orgId);
   }
   const [orgA, orgB] = orgIds as [string, string];
   // editor: member of A only; viewer: viewer of A.
@@ -88,7 +102,7 @@ async function team() {
   // an outsider: a real user whose home is a different tenant.
   const outsider = client();
   const o = await outsider.post('/host/openwop-app/test/login', { email: `a0882p-out-${Date.now()}-${n++}@else.test`, tenantId: `org:a0882p-else-${n++}` });
-  const outsiderId = (o.body as { user: { userId: string } }).user.userId;
+  const outsiderId = o.body.user.userId;
   return { tenantId, orgA, orgB, ownerId, editorId, viewerId, outsiderId, owner, editorRootMemberId };
 }
 
@@ -117,8 +131,10 @@ describe('ADR 0882 probes — ctx.features.csm run lane', () => {
     await expect(asEditor.setHealth!({
       accountId: acct.accountId, orgId: t.orgA, companyId, healthScore: 100, method: 'penalty-sum',
       factors: [{ factor: 'openDeals', weight: 8, value: 0 }, { factor: 'openTasks', weight: 3, value: 0 }],
-    })).rejects.toBeTruthy();
-    expect((await getAccount(acct.accountId))?.healthComputedAt).toBeUndefined();
+    })).rejects.toMatchObject({ code: 'validation_error' });
+    const row = await getAccount(acct.accountId);
+    expect(row?.healthComputedAt).toBeUndefined();
+    expect(row?.healthMeasureFailedReason).toMatch(/named a different CRM org or company/);
   });
 
   it('control: an editor\'s run writes; a personless system run stays tenant-trusted', async () => {
@@ -181,8 +197,10 @@ describe('ADR 0882 D3 — the owner is a workspace member', () => {
     expect(out.body.details?.reason).toBe('invalid_owner');
     const legacy = await t.owner.post(ACC, { name: 'Legacy', ownerUserId: 'oidc:test-someone' });
     expect(legacy.status).toBe(422);
+    expect(legacy.body.details?.reason).toBe('invalid_owner');
     const patchBad = await t.owner.patch(`${ACC}/${encodeURIComponent(ok.body.accountId)}`, { ownerUserId: t.outsiderId });
     expect(patchBad.status).toBe(422);
+    expect(patchBad.body.details?.reason).toBe('invalid_owner');
     expect((await getAccount(ok.body.accountId))?.ownerUserId).toBe(t.editorId);
   });
 
@@ -190,7 +208,7 @@ describe('ADR 0882 D3 — the owner is a workspace member', () => {
     const t = await team();
     const r = await t.owner.get('/host/openwop-app/csm/assignees');
     expect(r.status, JSON.stringify(r.body)).toBe(200);
-    const subjects = (r.body.assignees as Array<{ subject: string }>).map((a) => a.subject);
+    const subjects = r.body.assignees.map((a) => a.subject);
     expect(subjects).toContain(t.editorId);
     expect(subjects).toContain(t.ownerId);
     expect(subjects).not.toContain(t.viewerId); // a member of a sub-org only, not of the root

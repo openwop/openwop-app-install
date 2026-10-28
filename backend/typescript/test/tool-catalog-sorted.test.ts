@@ -5,6 +5,13 @@
  * reads identically, sorted by toolId", RFC 0204 §D.13) flipped between runs.
  * The route now sorts by toolId. These tools are registered in REVERSE name
  * order, so without the sort they come back out of order.
+ *
+ * Protected (wire, RFC 0204 §D.13). Wave 61: the stability case used to compare
+ * two reads of a deterministic route, which no sabotage can make unequal (probe
+ * tc-stable was other-red: only case 1 reddened). It now registers a THIRD tool
+ * between reads and asserts it lands at its toolId position (between aa and zz,
+ * though registered last) while the earlier ids keep their relative order — so
+ * position comes from the id, never from registration time.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -83,7 +90,19 @@ describe('#4339 — the tool catalog list is sorted by toolId, and stable', () =
     expect(await listToolIds('?view=compact')).toEqual(await listToolIds());
   });
 
-  it('an unchanged catalog reads identically', async () => {
-    expect(await listToolIds()).toEqual(await listToolIds());
+  it('an unchanged catalog reads identically, and a later registration lands at its toolId position', async () => {
+    const before = await listToolIds();
+    expect(await listToolIds()).toEqual(before);
+    await registerExposeTool(`sort.mm.${stamp}`, `mm_sort_${stamp}`);
+    const after = await listToolIds();
+    const aa = after.indexOf(`mcp:aa_sort_${stamp}`);
+    const mm = after.indexOf(`mcp:mm_sort_${stamp}`);
+    const zz = after.indexOf(`mcp:zz_sort_${stamp}`);
+    expect(aa).toBeGreaterThanOrEqual(0);
+    // Registered last (after zz and aa), yet it sits strictly between them.
+    expect(mm).toBeGreaterThan(aa);
+    expect(mm).toBeLessThan(zz);
+    // Every id from the first read keeps its relative order.
+    expect(after.filter((id) => before.includes(id))).toEqual(before);
   });
 });

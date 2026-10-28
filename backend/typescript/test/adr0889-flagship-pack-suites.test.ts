@@ -13,8 +13,12 @@
  * A suite that passed both would be a gate that cannot fail. The suites are
  * replay-only (`onMiss:"fail"`), so neither run reaches a real tool: the Agent
  * Author's roster is asserted unchanged.
+ *
+ * Tracker TST-BHG-5. Red when (sabotage-witnessed, wave 62): the in-order trajectory
+ * grader (host/evals/trajectory.ts) accepts any call sequence, so a rule-breaking
+ * script passes both shipped suites.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import { join, dirname } from 'node:path';
@@ -53,19 +57,25 @@ const call = (name: string, input: Record<string, unknown> = {}): Round => ({ to
 const say = (content: string): Round => ({ content });
 
 interface Summary { passed: boolean; passedCount: number; taskCount: number; tasks: Array<{ taskId: string; passed: boolean }> }
+/** A narrow guard over the eval-summary wire JSON (no cast). */
+function isSummary(x: unknown): x is Summary {
+  if (typeof x !== 'object' || x === null) return false;
+  const s = x as { passed?: unknown; passedCount?: unknown; taskCount?: unknown; tasks?: unknown };
+  return typeof s.passed === 'boolean' && typeof s.passedCount === 'number' && typeof s.taskCount === 'number' && Array.isArray(s.tasks);
+}
 
 async function runSuite(suiteRef: string, agentId: string, rounds: Record<string, Round[]>): Promise<Summary> {
   const c = await send('POST', '/runs', { mode: 'eval', evalSuiteRef: suiteRef, agentId, configurable: { mockProvider: { id: 'tool-calls', rounds } } });
   expect(c.status, c.text.slice(0, 400)).toBe(201);
   const runId = String(c.json['runId']);
-  for (let i = 0; i < 400; i += 1) {
+  await vi.waitFor(async () => {
     const r = await send('GET', `/runs/${runId}`);
-    if (['completed', 'failed', 'cancelled'].includes(String(r.json['status']))) break;
-    await new Promise((res) => setTimeout(res, 25));
-  }
+    expect(['completed', 'failed', 'cancelled']).toContain(String(r.json['status']));
+  }, { timeout: 15_000, interval: 25 });
   const s = await send('GET', `/runs/${runId}/eval-summary`);
   expect(s.status, s.text.slice(0, 400)).toBe(200);
-  return s.json as unknown as Summary;
+  if (!isSummary(s.json)) throw new Error(`eval-summary is not a summary: ${s.text.slice(0, 400)}`);
+  return s.json;
 }
 
 const AA = 'vendor.openwop-app.agent-author.agents.agent-author';

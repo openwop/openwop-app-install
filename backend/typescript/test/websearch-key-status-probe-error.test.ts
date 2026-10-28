@@ -14,11 +14,17 @@
  *
  * Lives in its own file because it must mock the secret resolver at module load,
  * which would poison the route-level readiness tests sharing a worker.
+ *
+ * Witnessed (grade-tests w63): a swallowed failure → case 1 red; probeError on a
+ * clean "no" → case 2 red; the env lane gated on a clean vault → case 3 red.
+ * Out of scope here (grade-code WEBKEY-PROBEERR-1): `probeError` forwards the
+ * resolver's raw message to the unauthenticated /readiness unscrubbed.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import type * as SecretResolver from '../src/byok/secretResolver.js';
 
-const resolveSecret = vi.hoisted(() => vi.fn());
+const resolveSecret = vi.hoisted(() => vi.fn<typeof SecretResolver.resolveSecret>());
 vi.mock('../src/byok/secretResolver.js', () => ({ resolveSecret }));
 
 const load = async () => (await import('../src/host/webResearchSurface.js')).hostWebSearchKeyStatus;
@@ -53,10 +59,15 @@ describe('hostWebSearchKeyStatus — a failed read is not an absence', () => {
     expect(status).toEqual({ configured: true, source: 'env' });
   });
 
-  it('never carries the resolved key into the probeError message', async () => {
-    // The message is attacker-visible: /readiness is unauthenticated.
-    resolveSecret.mockRejectedValue(new Error('failed for ref web-search'));
+  it('carries the error MESSAGE only — no stack, no ref, nothing appended', async () => {
+    // The message is attacker-visible: /readiness is unauthenticated. (This case
+    // used to assert "no key-shaped string" on a message that never held one, and
+    // nothing had been resolved — it could not fail. The contract the code makes
+    // is "message only", so that is what is pinned, exactly.)
+    const err = new Error('failed for ref web-search');
+    resolveSecret.mockRejectedValue(err);
     const status = await (await load())();
-    expect(JSON.stringify(status)).not.toMatch(/tvly-|BSA[A-Za-z0-9]/);
+    expect(status).toEqual({ configured: false, source: null, probeError: 'failed for ref web-search' });
+    expect(err.stack, 'fixture guard: the error carries a stack that must not leak').toContain('at ');
   });
 });

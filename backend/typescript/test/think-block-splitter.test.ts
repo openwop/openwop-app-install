@@ -5,6 +5,19 @@
  *
  * Tests cover both the happy paths and the chunk-boundary cases
  * (partial open / close tags split across SSE deltas).
+ *
+ * Consumers: `providers/dispatch.ts` and `providers/dispatchProviderTools.ts`
+ * (reasoning models such as MiniMax-M2.7 stream chain-of-thought inline).
+ * What breaks if this goes red: reasoning leaks into the visible answer (or the
+ * answer is swallowed as reasoning), or a truncated trace is emitted as a
+ * closed `agent.reasoned` block.
+ *
+ * Wave 61: "emits trailing visible content on flush" was cut — it ran the same
+ * no-`<` path as "passes plain text through", and the flush-emits-held-tail
+ * behaviour is carried by "partial open tag at the very end" (probe
+ * tb-flush-trailing reddened that case). "does NOT close a block on flush" was
+ * merged into "drops unclosed think content on flush", whose fixture now ends
+ * on a held partial close tag so the flush drop branch is actually reached.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -72,15 +85,14 @@ describe('ThinkBlockSplitter — visible channel', () => {
     expect(r.visible).toBe('<thinker>');
   });
 
-  it('emits trailing visible content on flush', () => {
-    const r = feed(new ThinkBlockSplitter(), ['tail no newline']);
-    expect(r.visible).toBe('tail no newline');
-  });
-
   it('drops unclosed think content on flush (visible empty for that block)', () => {
-    const r = feed(new ThinkBlockSplitter(), ['visible<think>partial reasoning never closed']);
+    // The trailing `</th` is held back as a possible close tag, so flush()
+    // runs with a non-empty buffer INSIDE the think block: it must drop that
+    // tail (not surface it as visible) and must not close the block.
+    const r = feed(new ThinkBlockSplitter(), ['visible<think>partial reasoning never closed</th']);
     expect(r.visible).toBe('visible');
-    expect(r.closedBlocks.length).toBe(0);
+    expect(r.thinking).toBe('partial reasoning never closed');
+    expect(r.closedBlocks).toEqual([]);
   });
 });
 
@@ -117,11 +129,6 @@ describe('ThinkBlockSplitter — reasoning channel', () => {
     // Block closes; closedBlocks contains the concatenation.
     expect(d3.closedBlocks).toEqual(['step 1 step 2']);
     expect(d3.visible).toBe('final');
-  });
-
-  it('does NOT close a block on flush for an unclosed reasoning block', () => {
-    const r = feed(new ThinkBlockSplitter(), ['<think>incomplete']);
-    expect(r.closedBlocks.length).toBe(0);
   });
 
   it('holds partial close tag until the next chunk resolves it', () => {

@@ -14,10 +14,13 @@ import type { BackendFeature } from '../types.js';
 import { registerCreativeBriefsRoutes } from './routes.js';
 import { registerCreativeBriefsReelWorkflow } from './reelWorkflow.js';
 import { registerCreativeBriefsAgentTools } from './agentTools.js';
-import { buildCreativeBriefsSurface } from './surface.js';
+import { buildCreativeBriefsSurface, CREATIVE_BRIEFS_SURFACE_POLICY } from './surface.js';
 import { registerRenderMediaCascade } from './render/renderService.js';
 import { registerFeatureDataExporter } from '../../host/featureDataExport.js';
 import { exportCreativeBriefsData } from './dataExport.js';
+import { registerGrantResourceKind } from '../../host/externalCollaborators.js';
+import { getBrief, listBriefs } from './creativeBriefsService.js';
+import { briefToSharedMarkdown } from './routes.js';
 
 export const creativeBriefsFeature: BackendFeature = {
   id: 'creative-briefs',
@@ -28,8 +31,28 @@ export const creativeBriefsFeature: BackendFeature = {
     registerCreativeBriefsRoutes(deps);
     registerCreativeBriefsAgentTools(); // XCH-HOLE-7 (round 3) — openwop:creative-briefs.list (ADR 0308 seam)
     registerRenderMediaCascade(); // DATB-1 — prune render rows when their composed PNG is deleted
+    // ADR 0958 P2 — an external designer can be granted an APPROVED brief: the same
+    // approved-only projection the `creative_brief` share link serves (ADR 0353 P4).
+    registerGrantResourceKind('creative-brief', {
+      featureId: 'creative-briefs',
+      actions: ['view'],
+      async exists(tenantId, orgId, id) { return (await getBrief(tenantId, orgId, id)) !== null; },
+      async project(tenantId, orgId, id) {
+        const b = await getBrief(tenantId, orgId, id);
+        if (!b || b.status !== 'approved') return null; // demoted ⇒ dark, like the link
+        return { title: b.title, body: { kind: 'creative_brief', markdown: await briefToSharedMarkdown(b) } };
+      },
+      // Only an approved brief can be shown, so only an approved one is offered.
+      async list(tenantId, orgId) {
+        return (await listBriefs(tenantId, orgId)).filter((b) => b.status === 'approved').map((b) => ({ id: b.briefId, title: b.title }));
+      },
+    });
   },
-  surface: { id: 'creative-briefs', build: buildCreativeBriefsSurface },
+  surface: { id: 'creative-briefs', build: buildCreativeBriefsSurface, orgPolicy: CREATIVE_BRIEFS_SURFACE_POLICY },
+  // ADR 0945 — SOFT: product-grounded creative reads the product catalog. With
+  // commerce OFF those methods refuse (ADR 0820 G11) and every other brief
+  // feature works, so this is a recommendation, not a disable-lock.
+  recommends: ['commerce'],
   toggleDefault: {
     id: 'creative-briefs',
     label: 'Creative Briefs',
@@ -40,4 +63,16 @@ export const creativeBriefsFeature: BackendFeature = {
     bucketUnit: 'tenant',
     salt: 'creative-briefs',
   },
+  // ADR 0945 / ADR 0941 D5 — a sub-toggle: no dependsOn; its consumers check
+  // `creative-briefs` (the surface seam) AND this id in code.
+  extraToggleDefaults: [{
+    id: 'creative-briefs.product-grounded',
+    label: 'Product-grounded creative',
+    description:
+      'Ad and social creative built only from your catalog product\'s own photos: the product is cut out and placed on a generated scene, and every result is checked against the original for shape and colour before it can be used. A sub-capability of Creative Briefs, which must be on as well; it also reads your product catalog.',
+    category: 'Marketing',
+    status: 'off',
+    bucketUnit: 'tenant',
+    salt: 'creative-briefs-product-grounded',
+  }],
 };

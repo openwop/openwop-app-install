@@ -7,6 +7,8 @@ export const messages = {
   // Default hero — the thesis, beside the run ledger (visual: 'run')
   heroHeading: 'Crie fluxos de trabalho multiagente que você pode acompanhar, pausar e *rebobinar.*',
   heroSubheading: 'Desenhe um fluxo de trabalho em uma tela ou descreva-o no chat. Acompanhe cada decisão ao vivo, responda quando a execução parar para perguntar e reproduza qualquer execução a partir de qualquer etapa. Ela roda sobre o OpenWOP, o protocolo de código aberto para orquestração de fluxos de trabalho multiagente, então seus agentes e fluxos podem ir para qualquer host que o implemente.',
+  /** Issue 5226 — the white-label fallback home's one call to action. */
+  neutralCtaLabel: 'Começar',
   heroCtaLabel: 'Comece a criar, sem cadastro',
   heroCtaLabel2: 'Ler o protocolo',
   heroEyebrow: 'O aplicativo de referência do protocolo OpenWOP',
@@ -239,4 +241,13 @@ export const messages = {
   consentFooterLink: "Opções de privacidade",
   consentSavedOn: "Análise de uso ativada.",
   consentSavedOff: "Análise de uso desativada.",
+  consentBodyOptOut: "Contamos visualizações de página, velocidade das páginas e quais versões de página você vê, para melhorar este site, a menos que você desative. A gravação de sessão fica desativada a menos que você a marque.",
+  consentReplayLabel: "Permitir também a gravação de sessão.",
+  consentReplayHint: "Grava como você navega pelas páginas para encontrar o que é difícil de usar. Todo o texto e o que você digita em formulários é ocultado antes de sair do seu navegador, e campos de pagamento, senha e saúde nunca são gravados.",
+  consentReplayStateOn: "A gravação de sessão está ativada para você.",
+  consentReplayStateOff: "A gravação de sessão está desativada para você.",
+  consentReplayTurnOn: "Permitir a gravação de sessão",
+  consentReplayTurnOff: "Parar a gravação de sessão",
+  consentReplaySavedOn: "Gravação de sessão ativada.",
+  consentReplaySavedOff: "Gravação de sessão desativada. As gravações das suas visitas são excluídas.",
 } as const;

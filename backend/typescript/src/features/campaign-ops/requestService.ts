@@ -12,6 +12,7 @@ import { randomUUID } from 'node:crypto';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { cleanString } from '../../host/boundedStrings.js';
 import { OpenwopError } from '../../types.js';
+import { assertCampaignRef } from '../../host/campaignRefs.js';
 import { contentHashOf } from './contentHash.js';
 import { getAsset } from './assetService.js';
 import { getClient } from './clientService.js';
@@ -91,12 +92,16 @@ function cleanText(raw: unknown): string {
 export async function createRequest(input: {
   tenantId: string; orgId: string; text: unknown; assetIds: unknown; campaignId?: string;
   createdBy: string; overrideDuplicate?: { reason: string };
+  /** ADR 0962 D6 — the request came from an outside agent. */
+  via?: { protocol: 'mcp'; runId?: string };
 }): Promise<StoredRequest> {
   const client = await getClient(input.tenantId, input.orgId);
   if (!client) throw new OpenwopError('not_found', 'Client not found.', 404, { orgId: input.orgId });
   if (client.status !== 'active') throw new OpenwopError('validation_error', 'This client is not active.', 409, { reason: 'client_inactive' });
   const text = cleanText(input.text);
   const assetIds = await validateAssetIds(input.tenantId, input.orgId, input.assetIds);
+  // ADR 0941 P2 — the campaign must exist in THIS client org (uniform 404 otherwise).
+  const campaignId = input.campaignId ? (await assertCampaignRef(input.tenantId, input.orgId, input.campaignId)).campaignId : undefined;
   const now = nowIso();
   let duplicateOf: string | undefined;
   if (!input.overrideDuplicate) {
@@ -111,7 +116,7 @@ export async function createRequest(input: {
     requestId: `creq:${randomUUID()}`,
     version: 1,
     text,
-    ...(input.campaignId ? { campaignId: cleanString(input.campaignId, 200, '') } : {}),
+    ...(campaignId ? { campaignId } : {}),
     assetIds,
     answers: [],
     status: duplicateOf ? 'duplicate' : 'interpreting',
@@ -120,6 +125,7 @@ export async function createRequest(input: {
     runIds: [],
     previous: [],
     createdBy: input.createdBy,
+    ...(input.via ? { via: input.via } : {}),
     createdAt: now,
     updatedAt: now,
   };

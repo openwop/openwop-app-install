@@ -1,6 +1,11 @@
 /**
  * ADR 0761 — `extensions["openwop-app.host"].streamBase`: advertised only when
  * OPENWOP_STREAM_BASE_URL is a clean https origin, never otherwise.
+ *
+ * Red when (wave 60 probes, tracker TST-BRA-7): the `https:` check admits `http:`;
+ * the credentials, query or fragment refusal is dropped; an unparseable value is
+ * accepted; the trailing slash is kept; or discovery stops spreading
+ * `streamBaseRecord()` into `extensions["openwop-app.host"]`.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';

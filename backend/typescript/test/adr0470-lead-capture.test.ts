@@ -6,6 +6,12 @@
  * anon-exclusivity (authenticated turns go to the ADR 0208 governed write), the
  * no-authority closed schema, the no-PII-echo result boundary, email validation, and
  * the operator-facing lead summary in the review projection.
+ *
+ * Tracker TST-BG3-2. Red when: the contact is written with another leadSource,
+ * the result echoes the email or the contactId, the EMAIL_RE check is dropped
+ * (an invalid address then becomes a Contact), the `scope.actingUserId` refusal
+ * is skipped, or the review projection changes the anon risk level or the lead
+ * summary.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -55,7 +61,7 @@ describe('ADR 0470 P1 — the anon write tier lands a REAL write (§N3 closed)',
     // The tool succeeded (no fail-closed floor). ADR 0837 D4: it echoes NO
     // contactId (the same answer for captured / known / erased — no oracle) and no PII.
     const round2 = JSON.stringify(captured.round2);
-    expect(round2).toContain('success');
+    expect(round2).toContain('Lead captured — a team member will follow up.');
     expect(round2).not.toContain('acting_user_required');
     expect(round2).not.toContain(contact!.contactId);
     expect(round2).not.toContain('jane@example.com'); // no-PII-echo boundary
@@ -72,6 +78,9 @@ describe('ADR 0470 P1 — the anon write tier lands a REAL write (§N3 closed)',
       autoWriteUnderCap: async () => ({ allowed: true }),
     });
     expect(JSON.stringify(captured.round2)).toContain('validation_error');
+    // The format check's own message, not the later "a valid email is required"
+    // fallback that shares the code.
+    expect(JSON.stringify(captured.round2)).toContain('Ask the visitor for a valid email address');
     expect(await findContactByEmail(TENANT, 'not-an-email')).toBeNull();
   });
 });
@@ -89,7 +98,7 @@ describe('ADR 0470 P1 — anon-EXCLUSIVE boundary (authenticated → governed wr
 
 describe('ADR 0470 P1 — the operator sees the lead in the review projection', () => {
   it('a held lead surfaces "New lead: <name> <email> — <note>" as the card summary + a risk chip', () => {
-    const appr = {
+    const appr: PendingApproval = {
       approvalId: 'appr:anon:run-x:0', tenantId: TENANT, rosterId: '', persona: '', workflowId: '',
       proposal: 'Anonymous visitor requested: openwop:crm.lead.capture', kind: 'anon-surface-write', orgId: 'org-1',
       anonSurfaceWrite: {
@@ -98,7 +107,7 @@ describe('ADR 0470 P1 — the operator sees the lead in the review projection', 
         capturedName: 'Jane', capturedEmail: 'jane@example.com', capturedNote: 'wants a demo',
       },
       status: 'pending', createdAt: '2026-07-23T00:00:00.000Z',
-    } as PendingApproval;
+    };
     const r = approvalToReview(appr);
     expect(r.summary).toBe('New lead: Jane jane@example.com — wants a demo');
     expect(r.risk?.level).toBe('medium');

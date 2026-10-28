@@ -67,6 +67,8 @@ describe('v2Wire — the one seam between the major-2 wire and the v1-shaped SPA
         perKind.get(m[1]!)!.add(parentKey);
       }
       for (const [k, v] of Object.entries(obj)) {
+        // A map's value schema names no field (host/v2Ids.ts): RFC 0252 `fixtureRuns`.
+        if (k === 'additionalProperties' || k === 'patternProperties') { walk(v, undefined); continue; }
         walk(v, ['properties', 'items', '$defs', 'allOf', 'anyOf', 'oneOf'].includes(k) ? parentKey : k);
       }
     };
@@ -139,11 +141,35 @@ describe('v2Wire — the one seam between the major-2 wire and the v1-shaped SPA
     expect(isNotFoundCode(null)).toBe(false);
   });
 
-  it('binds a bare id to the tenant the wire last told us, without a lookup', async () => {
-    fromWireRunId('acme/aaaaaaaaaaaaaaaaaaaa'); // remembers `acme`
+  it('re-binds an id the wire returned to ITS OWN tenant, without a lookup', async () => {
+    fromWireRunId('acme/aaaaaaaaaaaaaaaaaaaa');
     const loader = vi.fn(async () => ({ active: 'should-not-be-called' }));
-    expect(await bindRunIdValue('bbbbbbbbbbbbbbbbbbbb', loader)).toBe('acme/bbbbbbbbbbbbbbbbbbbb');
+    expect(await bindRunIdValue('aaaaaaaaaaaaaaaaaaaa', loader)).toBe('acme/aaaaaaaaaaaaaaaaaaaa');
     expect(loader).not.toHaveBeenCalled();
+  });
+
+  it('kicktodo.com 2026-10-25: an Inbox listing personal-workspace runs does not re-bind another run to the personal tenant', async () => {
+    rememberWireTenant('host-kicktodo'); // the session is in the KickTodo workspace (`/me/workspaces`)
+    // The Inbox lists items from every workspace the person belongs to.
+    unbindRunIds({ items: [{ runId: 'u-0123456789abcdef0123456789abcdef/d529ccdcf46aaaaaaaaa' }] });
+    const loader = vi.fn(async () => ({ active: 'should-not-be-called' }));
+    expect(await bindRunIdValue('6fc86dd1-34f4-4c5e-94ee-2531db5797de', loader)).toBe('host-kicktodo/6fc86dd1-34f4-4c5e-94ee-2531db5797de');
+    // …while the personal run itself still goes back to its own tenant.
+    expect(await bindRunIdValue('d529ccdcf46aaaaaaaaa', loader)).toBe('u-0123456789abcdef0123456789abcdef/d529ccdcf46aaaaaaaaa');
+    expect(loader).not.toHaveBeenCalled();
+  });
+
+  it('an id the wire never returned resolves the ACTIVE tenant from the host, not from other ids', async () => {
+    fromWireRunId('acme/aaaaaaaaaaaaaaaaaaaa');
+    const loader = vi.fn(async () => ({ active: 'org-1' }));
+    expect(await bindRunIdValue('bbbbbbbbbbbbbbbbbbbb', loader)).toBe('org-1/bbbbbbbbbbbbbbbbbbbb');
+    expect(loader).toHaveBeenCalledTimes(1);
+  });
+
+  it('a sign-out forgets the remembered ids too', async () => {
+    fromWireRunId('acme/aaaaaaaaaaaaaaaaaaaa');
+    resetWireTenant();
+    expect(await bindRunIdValue('aaaaaaaaaaaaaaaaaaaa', async () => ({ active: 'org-2' }))).toBe('org-2/aaaaaaaaaaaaaaaaaaaa');
   });
 
   it('resolves the tenant ONCE from the host when nothing has told us yet, then reuses it', async () => {

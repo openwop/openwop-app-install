@@ -11,12 +11,14 @@
  * (→ the node's document fallback) when no LinkedIn connection exists.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { answerCurrencyRead, platformRequests, currencyReads, fixtureCurrency } from './adsCurrencyFixture.js';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from '../src/index.js';
 import type { Storage } from '../src/storage/storage.js';
 import { makeAdsAdapter } from '../src/host/adsAdapter.js';
 import { __resetConnectionsStore, createSecretConnection } from '../src/features/connections/connectionsService.js';
+import { registerProvider } from '../src/features/connections/providerRegistry.js';
 
 interface Hit { method: string; path: string; auth?: string; liVersion?: string; restli?: string; body: Record<string, unknown> }
 
@@ -40,6 +42,7 @@ describe('LinkedIn ads-dispatch adapter (ADR 0223)', () => {
       req.on('data', (c) => (raw += c));
       req.on('end', () => {
         const path = req.url ?? '';
+        if (answerCurrencyRead(path, raw, res)) return;
         hits.push({
           method: req.method ?? '', path, auth: req.headers.authorization,
           liVersion: req.headers['linkedin-version'] as string,
@@ -61,6 +64,9 @@ describe('LinkedIn ads-dispatch adapter (ADR 0223)', () => {
     await new Promise<void>((r) => li.listen(0, '127.0.0.1', r));
     process.env.OPENWOP_LINKEDIN_ADS_API_BASE = `http://127.0.0.1:${(li.address() as AddressInfo).port}`;
 
+    // ADR 0952 defect P9 — the account-currency read is a GET through brokeredFetch,
+    // which pins the provider's apiHosts (the production packs list the platform host).
+    registerProvider({ id: 'linkedin-ads', label: 'LinkedIn Ads', kind: 'oauth2', authFlow: 'manual', reach: 'openapi', scopes: { read: [] }, refreshable: true, defaultScopes: [], consumerNodes: [], apiHosts: ['127.0.0.1'] });
     await createSecretConnection({ tenantId: 'tli', provider: 'linkedin-ads', kind: 'bearer', secret: 'LI_TOKEN', scope: 'user', userId: 'u1' });
     await storage.insertRun({ runId: 'lr-1', workflowId: 'w', tenantId: 'tli', status: 'pending', inputs: null, metadata: {}, configurable: {}, createdAt: 'x', updatedAt: 'x' });
     await storage.insertRun({ runId: 'lr-2-fork', workflowId: 'w', tenantId: 'tli', status: 'pending', inputs: null, metadata: {}, configurable: {}, createdAt: 'x', updatedAt: 'x' });
@@ -71,7 +77,7 @@ describe('LinkedIn ads-dispatch adapter (ADR 0223)', () => {
     await new Promise<void>((r) => li.close(() => r()));
   });
 
-  beforeEach(() => { hits = []; failOn = null; legacyIdHeader = false; });
+  beforeEach(() => { hits = []; platformRequests.length = 0; currencyReads.length = 0; failOn = null; legacyIdHeader = false; });
 
   const adapter = (runId: string, actingUserId = 'u1') =>
     makeAdsAdapter({ storage, tenantId: 'tli', runId, ...(actingUserId ? { actingUserId } : {}), orgId: 'tli' });
@@ -128,14 +134,14 @@ describe('LinkedIn ads-dispatch adapter (ADR 0223)', () => {
     const first = await adapter('lr-1').publishAd(args('lbrief-FORK'));
     expect(first.outcome).toBe('published');
     if (first.outcome !== 'published') return;
-    hits = [];
+    hits = []; platformRequests.length = 0; currencyReads.length = 0;
     const forked = await adapter('lr-2-fork').publishAd(args('lbrief-FORK'));
     expect(forked.outcome).toBe('published');
     if (forked.outcome !== 'published') return;
     expect(forked.reused).toBe(true);
     expect(forked.platform).toBe('linkedin');
     expect(forked.platformCampaignId).toBe(first.platformCampaignId);
-    expect(hits).toHaveLength(0); // the platform was NOT called again
+    expect(hits).toHaveLength(0); expect(platformRequests).toHaveLength(0); // the platform was NOT called again
   });
 
   it('fails closed on a mid-pipeline rejection: no rollback (objects left DRAFT/PAUSED — no spend), no idempotency record', async () => {
@@ -146,7 +152,7 @@ describe('LinkedIn ads-dispatch adapter (ADR 0223)', () => {
     expect(hits.filter((h) => h.method === 'DELETE')).toHaveLength(0); // no rollback calls
     expect(out).not.toHaveProperty('platformCampaignId');
     // No idem record → a corrected retry proceeds with a fresh create.
-    hits = []; failOn = null;
+    hits = []; platformRequests.length = 0; currencyReads.length = 0; failOn = null;
     const retry = await adapter('lr-1').publishAd(args('lbrief-ERR'));
     expect(retry.outcome).toBe('published');
     if (retry.outcome === 'published') expect(retry.reused).toBe(false);
@@ -156,4 +162,18 @@ describe('LinkedIn ads-dispatch adapter (ADR 0223)', () => {
     const out = await adapter('lr-1', 'u-no-conn').publishAd(args('lbrief-NONE'));
     expect(out.outcome).toBe('no_connection');
   });
+  it('publishes KWD exact decimal strings and refuses unknown currencies before the group create', async () => {
+    fixtureCurrency.value = 'KWD';
+    try {
+      expect((await adapter('lr-1').publishAd({ ...args('brief-currency-kwd'), dailyBudgetMinor: 5001 })).outcome).toBe('published');
+      expect(hits.find((hit) => hit.path.endsWith('/adCampaigns'))?.body.dailyBudget).toEqual({ amount: '5.001', currencyCode: 'KWD' });
+      hits = []; platformRequests.length = 0; currencyReads.length = 0;
+      fixtureCurrency.value = 'ZZZ';
+      expect(await adapter('lr-1').publishAd(args('brief-currency-unknown'))).toEqual({ outcome: 'failed', error: 'account_currency_unknown' });
+      expect(hits).toHaveLength(0);
+      expect(platformRequests).toHaveLength(1);
+      expect(currencyReads).toHaveLength(1);
+    } finally { fixtureCurrency.value = 'USD'; }
+  });
+
 });

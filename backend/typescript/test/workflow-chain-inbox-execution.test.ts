@@ -125,7 +125,7 @@ import {
   type SchedulerSnapshot,
 } from '../src/executor/scheduler.js';
 import type { Storage } from '../src/storage/storage.js';
-import type { WorkflowDefinition } from '../src/executor/types.js';
+import type { NodeContext, WorkflowDefinition } from '../src/executor/types.js';
 
 type NodeCtx = Record<string, unknown>;
 type NodeResult = { status: string; outputs: Record<string, unknown>; error?: unknown };
@@ -169,18 +169,23 @@ beforeAll(async () => {
   // pack module — driven through the same registry the executor uses, so the
   // config/inputs contract under test is the shipped one.
   impls['core.email.draft'] = async (ctx) => {
-    const r = await getNodeRegistry().get('core.email.draft')!.execute(ctx as never);
-    const rec = r as { status: string; outputs?: Record<string, unknown>; error?: unknown };
-    return { status: rec.status, outputs: rec.outputs ?? {}, error: rec.error };
+    // The walk builds the ctx the executor would; the registry's `execute` takes the
+    // host `NodeContext`, which this record satisfies field for field at run time.
+    const nodeCtx: NodeContext = { runId: '', nodeId: '', tenantId: '', inputs: {}, configurable: {}, attempt: 1, secrets: {}, emit: async () => ({ eventId: 'e', sequence: 1 }), ...ctx };
+    const r = await getNodeRegistry().get('core.email.draft')!.execute(nodeCtx);
+    return r.status === 'success'
+      ? { status: r.status, outputs: (r.outputs ?? {}) as Record<string, unknown> }
+      : { status: r.status, outputs: {}, error: 'error' in r ? r.error : undefined };
   };
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 interface Res<T = unknown> { status: number; body: T }
-interface Client { get: (p: string) => Promise<Res<any>>; post: (p: string, b?: unknown) => Promise<Res<any>> }
+/** Only the login status is read here; the body stays `unknown` (printed on failure). */
+interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res> }
 function client(): Client {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res<any>> => {
+  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
@@ -323,6 +328,10 @@ function draftConnector(): { calls: Array<Record<string, unknown>>; connectors: 
 const TRIAGE_TITLE = 'Personal Inbox Triage';
 
 describe('inbox.triage — a non-empty triage note on BOTH branches', () => {
+  // Twin of `workflow-chain-knowledge-inbox.test.ts` › "%s stamps outputRole:primary on %s"
+  // (its EXPECTED_PRIMARY row for inbox.triage). Kept here because this file owns the
+  // two-notify split that made `notifyDrafted` the declared product (ADR 0643 D4);
+  // probe `8fw5g4-ib-primary` reds this copy, `8fw5g4-kbi-primary` the twin.
   it('the primary output is the reply-drafted terminal, by NAME', () => {
     const found = getChain('inbox.triage');
     expect(found, 'inbox.triage must be loaded at boot').toBeTruthy();

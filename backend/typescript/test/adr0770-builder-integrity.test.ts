@@ -13,6 +13,16 @@
  *     revision hash, a rename does.
  *   - D5 (`WBWF-6`): `If-Match` with a stale revision is a typed 409; the head read
  *     and every 201 carry the revision the next save must send.
+ *
+ * Red when (wave 60 probes, tracker TST-BRB-2): the D1 gate stops asserting
+ * `workspace:write` for a subject, skips the tenant-owner branch or the personal
+ * key branch; a drag moves the revision hash; `position` validation or the `name`
+ * passthrough is dropped; the If-Match pre-check or the storage CAS is skipped; the
+ * fresh read stops refreshing the cache or the head route reads the cache; a child
+ * is refreshed although edited; a refreshed child loses its archived lifecycle.
+ *
+ * Every case seeds its own state, and the WBCD-2 case restores the tutorial child it
+ * edits, so the file passes in any order (wave 60 shuffle).
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -35,12 +45,28 @@ const saved: Record<string, string | undefined> = {};
 let BASE = '';
 let server: http.Server;
 
-async function call(method: string, path: string, opts: { key?: string; body?: unknown; headers?: Record<string, string> } = {}) {
+interface WfNode { nodeId: string; name?: string; position?: { x: number; y: number } }
+/** The workflow, list, head, from-chain and error bodies these cases read. */
+interface WfBody {
+  error?: string;
+  details?: { reason?: string; requiredScope?: string };
+  revision?: string;
+  workflowId?: string;
+  nodes?: WfNode[];
+  metadata?: Record<string, unknown>;
+  definition?: { nodes: WfNode[] };
+  subChainWorkflowIds?: string[];
+  reusedSubChainWorkflowIds?: string[];
+  workflows?: Array<{ workflowId: string; archivedAt?: string }>;
+}
+
+async function call(method: string, path: string, opts: { key?: string; body?: unknown; headers?: Record<string, string> } = {}): Promise<{ status: number; json: WfBody; headers: Headers }> {
   const headers: Record<string, string> = { authorization: `Bearer ${opts.key ?? TENANT_ENV_KEY}`, ...(opts.headers ?? {}) };
   if (opts.body !== undefined) headers['content-type'] = 'application/json';
   const res = await fetch(`${BASE}${path}`, { method, headers, ...(opts.body !== undefined ? { body: JSON.stringify(opts.body) } : {}) });
   const text = await res.text();
-  let json: any; try { json = JSON.parse(text); } catch { json = text; }
+  let json: WfBody = {};
+  try { json = JSON.parse(text) as WfBody; } catch { /* non-JSON body */ }
   return { status: res.status, json, headers: res.headers };
 }
 const host = (p: string) => `/host/openwop-app${p}`;
@@ -94,6 +120,7 @@ describe('ADR 0770 D1 — workflow writes require workspace:write', () => {
     for (const r of refused) {
       expect(r.status).toBe(403);
       expect(r.json.error).toBe('forbidden_scope');
+      expect(r.json.details?.requiredScope).toBe('workspace:write');
     }
     // …and the viewer can still READ.
     expect((await call('GET', host('/workflows'), { key: VIEWER })).status).toBe(200);
@@ -103,6 +130,10 @@ describe('ADR 0770 D1 — workflow writes require workspace:write', () => {
     expect((await call('POST', host('/workflows'), { key: EDITOR, body: def('wf.adr0770.editor') })).status).toBe(201);
     expect((await call('POST', host('/workflows'), { body: def('wf.adr0770.envkey') })).status).toBe(201);
     expect((await call('POST', host('/workflows'), { key: PERSONAL_KEY, body: def('wf.adr0770.personal') })).status).toBe(201);
+    // …and each write landed: the writer reads it back.
+    expect((await call('GET', `/workflows/wf.adr0770.editor`, { key: EDITOR })).json.workflowId).toBe('wf.adr0770.editor');
+    expect((await call('GET', `/workflows/wf.adr0770.envkey`)).json.workflowId).toBe('wf.adr0770.envkey');
+    expect((await call('GET', `/workflows/wf.adr0770.personal`, { key: PERSONAL_KEY })).json.workflowId).toBe('wf.adr0770.personal');
   });
 });
 
@@ -112,9 +143,9 @@ describe('ADR 0770 D4 — node name + position round-trip; a drag is not an edit
     const first = await call('POST', host('/workflows'), { body: def(id, { name: 'Fetch the brief' }) });
     expect(first.status).toBe(201);
     const got = await call('GET', `/workflows/${id}`);
-    const nodeA = got.json.nodes.find((n: { nodeId: string }) => n.nodeId === 'a');
-    expect(nodeA.position).toEqual({ x: 40, y: 80 });
-    expect(nodeA.name).toBe('Fetch the brief');
+    const nodeA = got.json.nodes?.find((n) => n.nodeId === 'a');
+    expect(nodeA?.position).toEqual({ x: 40, y: 80 });
+    expect(nodeA?.name).toBe('Fetch the brief');
 
     const moved = await call('POST', host('/workflows'), { body: def(id, { name: 'Fetch the brief', x: 999 }) });
     expect(moved.json.revision, 'a drag must not mint a new revision').toBe(first.json.revision);
@@ -145,15 +176,15 @@ describe('ADR 0770 D5 — If-Match save precondition', () => {
     const stale = await call('POST', host('/workflows'), { body: def(id, { name: 'Tab A' }), headers: { 'if-match': `"${v1.json.revision}"` } });
     expect(stale.status).toBe(409);
     expect(stale.json.error).toBe('conflict');
-    expect(stale.json.details.reason).toBe('workflow_head_moved');
+    expect(stale.json.details?.reason).toBe('workflow_head_moved');
     // The current head rides the ETag, not the envelope: error details are
     // entropy-scrubbed (`sanitizeDetails`), which would redact a 64-hex hash.
     expect(stale.headers.get('etag')).toBe(`"${v2.json.revision}"`);
     const after = await call('GET', `/workflows/${id}`);
-    expect(after.json.nodes.find((n: { nodeId: string }) => n.nodeId === 'a').name).toBe('Tab B');
+    expect(after.json.nodes?.find((n) => n.nodeId === 'a')?.name).toBe('Tab B');
 
-    // The race the pre-read cannot see: two writers that both read the same head.
-    // The swap is atomic in storage, so exactly one lands.
+    // The window the pre-read cannot see: two writers that both read the same head.
+    // Sequential here (not a forced race): the second swap carries a stale raw and loses.
     const { raw, def: stored } = await readRegisteredWorkflowFresh(id);
     const a = await registerWorkflowIfUnchanged({ ...stored!, metadata: { name: "racer A" } }, raw);
     const b = await registerWorkflowIfUnchanged({ ...stored!, metadata: { name: "racer B" } }, raw);
@@ -170,16 +201,16 @@ describe('ADR 0770 D5 — the head read is one FRESH read (grade-code WBCD-1)', 
     const v1 = await call('POST', host('/workflows'), { body: def(id, { name: 'v1 on this instance' }) });
     expect(v1.status).toBe(201);
     // Another instance saved v2: storage moved, THIS instance's cache did not.
-    const stored = JSON.parse((await tryDurableStorage()!.kvGet(`wfreg:${id}`))!);
-    stored.nodes[0].name = 'v2 from another instance';
+    const stored = JSON.parse((await tryDurableStorage()!.kvGet(`wfreg:${id}`))!) as { nodes: WfNode[] };
+    stored.nodes[0]!.name = 'v2 from another instance';
     await tryDurableStorage()!.kvSet(`wfreg:${id}`, JSON.stringify(stored));
-    expect((await call('GET', `/workflows/${id}`)).json.nodes[0].name, 'fixture: the cache really is stale').toBe('v1 on this instance');
+    expect((await call('GET', `/workflows/${id}`)).json.nodes?.[0]?.name, 'fixture: the cache really is stale').toBe('v1 on this instance');
 
     const head = await call('GET', host(`/workflows/${id}/head`));
-    expect(head.json.definition.nodes[0].name).toBe('v2 from another instance');
+    expect(head.json.definition?.nodes[0]?.name).toBe('v2 from another instance');
     expect(head.json.revision).not.toBe(v1.json.revision);
     // …and the by-id read on this instance now agrees with it.
-    expect((await call('GET', `/workflows/${id}`)).json.nodes[0].name).toBe('v2 from another instance');
+    expect((await call('GET', `/workflows/${id}`)).json.nodes?.[0]?.name).toBe('v2 from another instance');
     // A save built on the stale v1 canvas with the v1 base is refused, not waved through.
     const stale = await call('POST', host('/workflows'), { body: def(id, { name: 'stale edit' }), headers: { 'if-match': `"${v1.json.revision}"` } });
     expect(stale.status).toBe(409);
@@ -190,7 +221,7 @@ describe('ADR 0770 D3 — re-instantiating a sub-chain template never overwrites
   it('reuses the edited child, refreshes the pristine ones, and keeps an archived child archived', async () => {
     const first = await call('POST', host('/workflows/from-chain'), { body: { chainId: 'tutorial.connect-your-ai' } });
     expect(first.status).toBe(201);
-    const children: string[] = first.json.subChainWorkflowIds;
+    const children: string[] = first.json.subChainWorkflowIds ?? [];
     expect(children.length).toBeGreaterThanOrEqual(2);
     const [edited, archived] = children as [string, string];
 
@@ -201,7 +232,7 @@ describe('ADR 0770 D3 — re-instantiating a sub-chain template never overwrites
 
     // The user edits one child in the builder, and archives another.
     const childDef = (await call('GET', `/workflows/${edited}`)).json;
-    const renamed = { ...childDef, metadata: { ...childDef.metadata, name: 'My phase, my edits' } };
+    const renamed = { ...childDef, metadata: { ...(childDef.metadata ?? {}), name: 'My phase, my edits' } };
     expect((await call('POST', host('/workflows'), { body: renamed })).status).toBe(201);
     expect((await call('POST', host(`/workflows/${archived}/archive`))).status).toBe(200);
 
@@ -210,35 +241,42 @@ describe('ADR 0770 D3 — re-instantiating a sub-chain template never overwrites
     expect(third.json.subChainWorkflowIds, 'the parent still binds the same convergent ids').toEqual(children);
     expect(third.json.reusedSubChainWorkflowIds).toEqual([edited]);
     const after = (await call('GET', `/workflows/${edited}`)).json;
-    expect(after.metadata.name, 'the edit survived the re-instantiation').toBe('My phase, my edits');
+    expect(after.metadata?.name, 'the edit survived the re-instantiation').toBe('My phase, my edits');
 
-    const list = (await call('GET', host('/workflows?includeArchived=true'))).json.workflows as Array<{ workflowId: string; archivedAt?: string }>;
+    const list = (await call('GET', host('/workflows?includeArchived=true'))).json.workflows ?? [];
     expect(list.find((w) => w.workflowId === archived)?.archivedAt, 'a refreshed child keeps its lifecycle').toBeTruthy();
   });
 });
 
-// Runs LAST: it leaves a tutorial child edited, which the pristine-refresh case above must not see.
+// Restores the child it edits (in `finally`), so the pristine-refresh case above
+// sees untouched children whichever order the two run in.
 describe('ADR 0770 D3 — a child edited on ANOTHER instance is reused, not refreshed (grade-code WBCD-2)', () => {
   it('decides from fresh storage, not this instance\'s stale pristine cache', async () => {
     const first = await call('POST', host('/workflows/from-chain'), { body: { chainId: 'tutorial.connect-your-ai' } });
     expect(first.status).toBe(201);
     // The LAST child: the earlier D3 case edited the first and archived the
     // second, so this one is still pristine — the precondition this case needs.
-    const ids = first.json.subChainWorkflowIds as string[];
+    const ids = first.json.subChainWorkflowIds ?? [];
     const child = ids[ids.length - 1]!;
     expect(ids.length, 'fixture: a third, untouched child exists').toBeGreaterThanOrEqual(3);
     expect(first.json.reusedSubChainWorkflowIds ?? [], 'fixture: the child is pristine before the remote edit').not.toContain(child);
     // Another instance saved an edit to the child: storage moved, this
     // instance's cache still holds the pristine mint (exactly what the old
     // cache-based "pristine" decision read).
-    const stored = JSON.parse((await tryDurableStorage()!.kvGet(`wfreg:${child}`))!);
-    stored.metadata = { ...stored.metadata, name: 'Edited on instance B' };
+    const pristineRaw = (await tryDurableStorage()!.kvGet(`wfreg:${child}`))!;
+    const stored = JSON.parse(pristineRaw) as { metadata?: Record<string, unknown> };
+    stored.metadata = { ...(stored.metadata ?? {}), name: 'Edited on instance B' };
     await tryDurableStorage()!.kvSet(`wfreg:${child}`, JSON.stringify(stored));
-
-    const again = await call('POST', host('/workflows/from-chain'), { body: { chainId: 'tutorial.connect-your-ai' } });
-    expect(again.status).toBe(201);
-    expect(again.json.reusedSubChainWorkflowIds).toContain(child);
-    const after = JSON.parse((await tryDurableStorage()!.kvGet(`wfreg:${child}`))!);
-    expect(after.metadata.name, 'the other instance\'s edit survived').toBe('Edited on instance B');
+    try {
+      const again = await call('POST', host('/workflows/from-chain'), { body: { chainId: 'tutorial.connect-your-ai' } });
+      expect(again.status).toBe(201);
+      expect(again.json.reusedSubChainWorkflowIds).toContain(child);
+      const after = JSON.parse((await tryDurableStorage()!.kvGet(`wfreg:${child}`))!) as { metadata?: Record<string, unknown> };
+      expect(after.metadata?.name, 'the other instance\'s edit survived').toBe('Edited on instance B');
+    } finally {
+      // Put the pristine mint back, and refresh this instance's cache from it.
+      await tryDurableStorage()!.kvSet(`wfreg:${child}`, pristineRaw);
+      await readRegisteredWorkflowFresh(child);
+    }
   });
 });

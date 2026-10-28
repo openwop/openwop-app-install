@@ -8,7 +8,7 @@
  * isolation, one-time backfill of pre-index rows, stale-marker self-heal, and that the
  * primary key scheme is unchanged (a plain `get(id)` still works).
  */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import { initHostExtPersistence, DurableCollection } from '../src/host/hostExtPersistence.js';
 import type { Storage } from '../src/storage/storage.js';
@@ -156,5 +156,51 @@ describe('GOV-1 — DurableCollection tenant index', () => {
 
   it('listForTenantProjected requires an indexProjection', async () => {
     await expect(indexed().listForTenantProjected('tA')).rejects.toThrow(/indexProjection/);
+  });
+});
+
+
+describe('conditional entity deletion', () => {
+  it('a stale removal preserves a newer row and does not cascade', async () => {
+    const deleted: string[] = [];
+    const c = new DurableCollection<Row>('test:conditional-stale', (r) => r.id, undefined, (r) => r.tenantId, undefined, async (id) => { deleted.push(id); });
+    const before = { id: 'a', tenantId: 'tA', v: 1 };
+    const after = { ...before, v: 2 };
+    await c.put(before);
+    await c.put(after);
+    expect(await c.compareAndDelete(before)).toBe(false);
+    expect(await c.get('a')).toEqual(after);
+    expect(deleted).toEqual([]);
+  });
+
+  it('a row inserted immediately after removal keeps its tenant index marker', async () => {
+    const c = new DurableCollection<Row>('test:conditional-reinsert', (r) => r.id, undefined, (r) => r.tenantId);
+    const before = { id: 'a', tenantId: 'tA', v: 1 };
+    const after = { ...before, v: 2 };
+    await c.put(before);
+    await c.listForTenantIndexed('tA'); // seal backfill before the interleaving
+    const swap = storage.kvCompareAndDelete.bind(storage);
+    const interleave = vi.spyOn(storage, 'kvCompareAndDelete').mockImplementation(async (...args) => {
+      const result = await swap(...args);
+      if (args[0] === 'hostext:test:conditional-reinsert:a' && result) await c.put(after);
+      return result;
+    });
+    try { expect(await c.compareAndDelete(before)).toBe(true); }
+    finally { interleave.mockRestore(); }
+    expect(await c.get('a')).toEqual(after);
+    expect(await c.listForTenantIndexed('tA')).toEqual([after]);
+  });
+
+  it('only the winning removal cascades and a stale marker self-heals', async () => {
+    const deleted: string[] = [];
+    const c = new DurableCollection<Row>('test:conditional-once', (r) => r.id, undefined, (r) => r.tenantId, undefined, async (id) => { deleted.push(id); });
+    const before = { id: 'a', tenantId: 'tA', v: 1 };
+    await c.put(before);
+    expect(await c.compareAndDelete(before)).toBe(true);
+    expect(await c.compareAndDelete(before)).toBe(false);
+    expect(deleted).toEqual(['a']);
+    expect(await c.get('a')).toBeNull();
+    expect(await c.listForTenantIndexed('tA')).toEqual([]);
+    expect(await storage.kvGet('hostextidx:test:conditional-once:tA:a')).toBeNull();
   });
 });

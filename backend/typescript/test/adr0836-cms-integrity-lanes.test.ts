@@ -26,7 +26,8 @@ import {
   setScheduledPublish, clearScheduledPublish, transitionPage, updatePage, createSharedSection, type Page,
 } from '../src/features/cms/cmsService.js';
 import { processScheduledPublishes } from '../src/features/cms/publishSweep.js';
-import { createExperiment, promoteExperiment } from '../src/features/cms/pageExperimentsService.js';
+import { createExperiment, promoteExperiment, toEngineExperiment } from '../src/features/cms/pageExperimentsService.js';
+import { putExperimentRow } from '../src/host/experiments/store.js';
 import { onCmsPageLifecycle, type CmsPageLifecycleChange } from '../src/host/cmsPageLifecycle.js';
 import { ensureSystemSite, SYSTEM_SITE_ORG, SYSTEM_SITE_TENANT } from '../src/host/systemSite.js';
 import { ensureFeaturesPage } from '../src/host/featuresPage.js';
@@ -268,8 +269,7 @@ describe('ADR 0836 D8 — restore', () => {
     await transitionPage(p.tenantId, p.orgId, p.pageId, 'publish', 'u');
     const [v1] = await listVersions(p.tenantId, p.orgId, p.pageId);
     const exp = await createExperiment({ tenantId: p.tenantId, orgId: p.orgId, pageId: p.pageId, name: 'E', createdBy: 'u', variants: [{ key: 'a', weight: 50, versionId: null }, { key: 'b', weight: 50, versionId: v1!.versionId }] });
-    const running = new DurableCollection<typeof exp>('cms:pageexperiment', (e) => e.experimentId);
-    await running.put({ ...exp, status: 'running', startedAt: new Date().toISOString() });
+    await putExperimentRow(toEngineExperiment({ ...exp, status: 'running', startedAt: new Date().toISOString() }));
     await promoteExperiment(p.tenantId, p.orgId, p.pageId, exp.experimentId, 'b', 'u');
     expect((await getPage(p.tenantId, p.orgId, p.pageId))?.status).toBe('published');
     // Wait for the REPUBLISH to be announced (the initial publish + this one) before
@@ -289,8 +289,7 @@ describe('ADR 0836 D8 — restore', () => {
     const old = { ...v1!, versionId: `pver:legacy-${n++}`, snapshot: { ...v1!.snapshot, sections: [{ ...v1!.snapshot.sections[0]!, data: { heading: '[TODO: write this]' } }] } };
     await versions.put(old);
     const exp = await createExperiment({ tenantId: p.tenantId, orgId: p.orgId, pageId: p.pageId, name: 'E', createdBy: 'u', variants: [{ key: 'a', weight: 50, versionId: null }, { key: 'b', weight: 50, versionId: old.versionId }] });
-    const running = new DurableCollection<typeof exp>('cms:pageexperiment', (e) => e.experimentId);
-    await running.put({ ...exp, status: 'running', startedAt: new Date().toISOString() });
+    await putExperimentRow(toEngineExperiment({ ...exp, status: 'running', startedAt: new Date().toISOString() }));
     await expect(promoteExperiment(p.tenantId, p.orgId, p.pageId, exp.experimentId, 'b', 'u'))
       .rejects.toMatchObject({ details: { reason: 'publish_blocked' } });
     expect((await getPage(p.tenantId, p.orgId, p.pageId))?.status).toBe('published');

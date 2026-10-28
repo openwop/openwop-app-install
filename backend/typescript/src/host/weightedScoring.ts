@@ -18,7 +18,7 @@
  * unscored item ranks last). The result is rounded to 2 dp for display stability.
  */
 
-export type Aggregation = 'weighted-sum' | 'ratio' | 'product-ratio';
+export type Aggregation = 'weighted-sum' | 'ratio' | 'product-ratio' | 'points';
 
 /** Whether a higher 1–10 score is better (`benefit`) or worse (`cost`).
  *  Cost/effort/job-size criteria are `cost` — they drag priority DOWN. */
@@ -39,6 +39,9 @@ export interface Criterion {
   direction: CriterionDirection;
   /** Anchor text for the 1..10 score input (reduces score-gaming, ADR 0058 UX). */
   scaleHint?: string;
+  /** `points` aggregation only (ADR 0954 D1): the most raw units this criterion
+   *  counts (e.g. at most 10 paid orders). Absent ⇒ uncapped. */
+  cap?: number;
 }
 
 /** The configurable, per-list weighted scoring model. */
@@ -107,6 +110,25 @@ export function computePriority(set: CriteriaSet, scores: Record<string, number>
     // `cost` can never be 0 and the quotient can never be non-finite.)
     if (benefitWeight <= 0) return 0;
     return round2(Math.pow(benefit / cost, 1 / (benefitWeight + costWeight)));
+  }
+
+  // ADR 0954 D1 — `points`: an additive point score, Σ min(raw, cap) × weight, over
+  // RAW counts (not 1..10 slider scores) with UNCLAMPED, non-negative weights. It is
+  // what lead scoring has always been (ADR 0297 D3: views × 1 + completions × 5 +
+  // paid orders × 20), expressed in the one engine rather than in a fourth scorer.
+  // Not normalized: a lead's score grows with its activity, and A–F bands are point
+  // floors. Priority-matrix cannot select it (its validator coerces unknown values to
+  // `weighted-sum`); a negative or non-finite raw count or weight contributes 0.
+  if (set.aggregation === 'points') {
+    let total = 0;
+    for (const c of criteria) {
+      const raw = scores[c.id];
+      const n = typeof raw === 'number' && Number.isFinite(raw) && raw > 0 ? raw : 0;
+      const counted = typeof c.cap === 'number' && Number.isFinite(c.cap) && c.cap >= 0 ? Math.min(n, c.cap) : n;
+      const w = typeof c.weight === 'number' && Number.isFinite(c.weight) && c.weight > 0 ? c.weight : 0;
+      total += counted * w;
+    }
+    return round2(total);
   }
 
   if (set.aggregation === 'ratio') {

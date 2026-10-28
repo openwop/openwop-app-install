@@ -14,6 +14,13 @@
  *      impostor is still just a token holder, and needs the approver's signature.
  *  D3  a gate with NO ACL stays open on every lane (documented default).
  *
+ * Tracker TST-BJF. Red when (probe-witnessed, w65): the token lane skips the voter
+ * signature check, or compares only its length; an open non-quorum gate stops
+ * returning early on the token lane; the session lanes treat a declared ACL as open.
+ * The voterless refusal is held twice (the `!voter` 403 and the eligibility/signature
+ * checks, both in `assertTokenQuorumVote`): each alone still refuses — a recorded
+ * double guard; the signature check (the outer one) is probed.
+ *
  * @see docs/adr/0899-interrupt-voter-binding-every-lane.md
  */
 import http from 'node:http';
@@ -27,12 +34,13 @@ import { __awaitRunResumeChainForTests } from '../src/routes/interrupts.js';
 import { signVoterBinding } from '../src/host/interruptVoterBinding.js';
 import type { WorkflowDefinition } from '../src/executor/types.js';
 import type { RunRecord } from '../src/types.js';
+import type { Storage } from '../src/storage/storage.js';
+import type { HostAdapterSuite } from '../src/host/index.js';
 import { getSetCookies } from './headerCookies.js';
 
 let BASE = '';
 let server: http.Server;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any -- app.locals is untyped Express state
-let locals: { storage: any; hostSuite: any };
+let locals: { storage: Storage; hostSuite: HostAdapterSuite };
 
 const WF = { acl: 'wf.adr0899.acl-single', open: 'wf.adr0899.open-single' } as const;
 
@@ -43,7 +51,7 @@ beforeAll(async () => {
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   delete process.env.OPENWOP_DEMO_MODE;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'adr0899', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  locals = (app as unknown as { locals: typeof locals }).locals;
+  locals = { storage: app.locals.storage as Storage, hostSuite: app.locals.hostSuite as HostAdapterSuite };
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   registerHostWorkflow(gateWorkflow(WF.open, {}));
 });
@@ -51,13 +59,13 @@ afterAll(async () => { await new Promise<void>((res) => server.close(() => res()
 
 function gateWorkflow(workflowId: string, acl: Record<string, unknown>): WorkflowDefinition {
   return {
-    workflowId, name: workflowId, version: '1.0.0',
+    workflowId, metadata: { name: workflowId },
     nodes: [
       { nodeId: 'gate', typeId: 'core.approvalGate', config: { prompt: 'Ship it?', actions: ['accept', 'reject'], ...acl } },
       { nodeId: 'after', typeId: 'core.noop', config: {} },
     ],
     edges: [{ edgeId: 'e1', sourceNodeId: 'gate', targetNodeId: 'after', triggerRule: 'all_success' }],
-  } as unknown as WorkflowDefinition;
+  };
 }
 
 let n = 0;
@@ -65,7 +73,7 @@ interface Person { userId: string; cookie: string }
 async function login(tenantId: string): Promise<Person> {
   const res = await fetch(`${BASE}/host/openwop-app/test/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: `ivb899-${Date.now()}-${n++}@acme.test`, tenantId }) });
   let cookie = '';
-  for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]!; }
+  for (const c of getSetCookies(res.headers)) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]!; }
   const userId = ((await res.json()) as { user: { userId: string } }).user.userId;
   return { userId, cookie };
 }
@@ -123,6 +131,7 @@ describe('ADR 0899 D1 — the token route proves the voter on an ACL\'d single-a
     const g = await suspended(t.tenantId, t.approver.userId);
     const res = await post(`/interrupts/${encodeURIComponent(g.token)}`, { resumeValue: { action: 'accept', voter: t.approver.userId } });
     expect(res.status, res.text).toBe(403);
+    expect(res.text).toMatch(/signed per-approver link/);
     expect(await isResolved(g.runId, g.interruptId), 'a refused impostor must not resolve the gate').toBe(false);
   });
 
@@ -131,6 +140,7 @@ describe('ADR 0899 D1 — the token route proves the voter on an ACL\'d single-a
     const g = await suspended(t.tenantId, t.approver.userId);
     const res = await post(`/interrupts/${encodeURIComponent(g.token)}`, { resumeValue: { action: 'accept', voter: t.approver.userId, voterSig: 'not-a-signature' } });
     expect(res.status, res.text).toBe(403);
+    expect(res.text).toMatch(/signed per-approver link/);
     expect(await isResolved(g.runId, g.interruptId)).toBe(false);
   });
 
@@ -139,6 +149,7 @@ describe('ADR 0899 D1 — the token route proves the voter on an ACL\'d single-a
     const g = await suspended(t.tenantId, t.approver.userId);
     const res = await post(`/interrupts/${encodeURIComponent(g.token)}`, { resumeValue: { action: 'accept', voter: t.approver.userId, voterSig: signVoterBinding(g.token, t.peer.userId) } });
     expect(res.status, res.text).toBe(403);
+    expect(res.text).toMatch(/signed per-approver link/);
     expect(await isResolved(g.runId, g.interruptId)).toBe(false);
   });
 
@@ -155,6 +166,7 @@ describe('ADR 0899 D1 — the token route proves the voter on an ACL\'d single-a
     const g = await suspended(t.tenantId, t.approver.userId);
     const res = await post(`/interrupts/${encodeURIComponent(g.token)}`, { resumeValue: { action: 'accept' } });
     expect(res.status, res.text).toBe(403);
+    expect(res.text).toMatch(/not an eligible approver/);
     expect(await isResolved(g.runId, g.interruptId)).toBe(false);
   });
   it('a GROUP-only single-approver gate: an ELIGIBLE member unsigned is refused, signed is accepted', async () => {
@@ -177,6 +189,7 @@ describe('ADR 0899 D1 — the token route proves the voter on an ACL\'d single-a
     const g = await suspended(t.tenantId, { approversList: [t.approver.userId] });
     const unsigned = await post(`/interrupts/${encodeURIComponent(g.token)}`, { resumeValue: { action: 'accept', voter: t.approver.userId } });
     expect(unsigned.status, unsigned.text).toBe(403);
+    expect(unsigned.text).toMatch(/signed per-approver link/);
     expect(await isResolved(g.runId, g.interruptId)).toBe(false);
     const signed = await post(`/interrupts/${encodeURIComponent(g.token)}`, { resumeValue: { action: 'accept', voter: t.approver.userId, voterSig: signVoterBinding(g.token, t.approver.userId) } });
     expect(signed.status, signed.text).toBeLessThan(300);
@@ -190,6 +203,7 @@ describe('ADR 0899 D2 — the token route is identity-free: a cookie does not ma
     const g = await suspended(t.tenantId, t.approver.userId);
     const res = await post(`/interrupts/${encodeURIComponent(g.token)}`, { resumeValue: { action: 'accept', voter: t.approver.userId } }, t.peer.cookie);
     expect(res.status, res.text).toBe(403);
+    expect(res.text).toMatch(/signed per-approver link/);
     expect(await isResolved(g.runId, g.interruptId)).toBe(false);
   });
 
@@ -200,6 +214,7 @@ describe('ADR 0899 D2 — the token route is identity-free: a cookie does not ma
     const g = await suspended(t.tenantId, t.approver.userId);
     const res = await post(`/interrupts/${encodeURIComponent(g.token)}`, { resumeValue: { action: 'accept', voter: t.approver.userId } }, t.approver.cookie);
     expect(res.status, res.text).toBe(403);
+    expect(res.text).toMatch(/signed per-approver link/);
     expect(await isResolved(g.runId, g.interruptId)).toBe(false);
   });
 });

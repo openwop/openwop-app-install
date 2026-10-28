@@ -12,9 +12,16 @@
  * DOUBLE GUARD, named: `navigationOwnershipErrors` drops a `'/'` route prefix, but
  * `'/'` + `/` = `'//'` can never prefix a navigation anyway, so the "/" case holds
  * with or without that filter (probe w51g1-od-root-filter).
- * Sabotage: a feature declaring `offline` without its file, an unowned navigation,
- * reading params as literal, reversing the "below" direction, or ignoring
- * `publicRoutes` each red a case.
+ * BUILD-ONLY DECLARATIONS (P24): a file with no `entitlement` may leave the runtime
+ * field unset, because the runtime reads `offline` only for `entitlement`
+ * (`registry.ts` `featureRoutes` / `lastKnownEntitlementFeatureIds`) and the build
+ * reads the file. That keeps a declaration out of the entry chunk. A file WITH
+ * `entitlement` must still be on the runtime field, unchanged; the ownership case
+ * checks the file's declaration when the runtime field is unset.
+ * Sabotage: a feature declaring `offline` without its file, a file with
+ * `entitlement` missing from the runtime, a runtime value differing from its file,
+ * an unowned navigation (runtime or build-only), reading params as literal,
+ * reversing the "below" direction, or ignoring `publicRoutes` each red a case.
  */
 import { describe, expect, it } from 'vitest';
 import { createElement } from 'react';
@@ -23,23 +30,57 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { FRONTEND_FEATURES } from '../../features/registry.js';
 import { findOfflineDeclarationFiles } from '../../../scripts/gen-service-worker.mjs';
-import { navigationOwnershipErrors, staticPrefix } from '../offlineOwnership.js';
+import { declarationParityErrors, navigationOwnershipErrors, staticPrefix } from '../offlineOwnership.js';
 import type { FeatureRoute } from '../../chrome/featureTypes.js';
+import type { FeatureOffline } from '../offlineTypes.js';
 
 const REGISTRY = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'features', 'registry.ts');
 
+async function declarationsFromFiles(): Promise<Map<string, FeatureOffline>> {
+  const files = findOfflineDeclarationFiles(readFileSync(REGISTRY, 'utf8'), REGISTRY);
+  const out = new Map<string, FeatureOffline>();
+  for (const f of files) out.set(f.id, ((await import(/* @vite-ignore */ f.file)) as { offline: FeatureOffline }).offline);
+  return out;
+}
+
 describe('ADR 0873 D1 — build and runtime see the same declarations', () => {
-  it('every offline.ts the build reads is set, unchanged, on its FrontendFeature — and nothing else declares', async () => {
-    const files = findOfflineDeclarationFiles(readFileSync(REGISTRY, 'utf8'), REGISTRY);
-    const fromFiles = new Map<string, unknown>();
-    for (const f of files) fromFiles.set(f.id, ((await import(/* @vite-ignore */ f.file)) as { offline: unknown }).offline);
-    const fromRuntime = new Map(FRONTEND_FEATURES.filter((f) => f.offline).map((f) => [f.id, f.offline]));
-    expect([...fromRuntime.keys()].sort()).toEqual([...fromFiles.keys()].sort());
-    for (const [id, offline] of fromFiles) expect(fromRuntime.get(id), id).toBe(offline);
+  it('every runtime offline value is its offline.ts unchanged, and a file with an entitlement is on the runtime', async () => {
+    const fromRuntime = new Map(FRONTEND_FEATURES.flatMap((f) => (f.offline ? [[f.id, f.offline] as const] : [])));
+    expect(declarationParityErrors(await declarationsFromFiles(), fromRuntime)).toEqual([]);
   });
 
-  it('every declared navigation is under one of its feature\'s own routes', () => {
-    expect(FRONTEND_FEATURES.flatMap(navigationOwnershipErrors)).toEqual([]);
+  it('every declared navigation is under one of its feature\'s own routes', async () => {
+    const fromFiles = await declarationsFromFiles();
+    const effective = FRONTEND_FEATURES.map((f) => {
+      const offline = f.offline ?? fromFiles.get(f.id);
+      return offline ? { ...f, offline } : f;
+    });
+    expect(effective.flatMap(navigationOwnershipErrors)).toEqual([]);
+  });
+});
+
+describe('ADR 0873 D1 + P24 — declarationParityErrors', () => {
+  const books: FeatureOffline = { navigations: ['/books'] };
+  const gated: FeatureOffline = { navigations: ['/books'], entitlement: 'fail-closed' };
+
+  it('accepts a build-only declaration with no entitlement', () => {
+    expect(declarationParityErrors(new Map([['books', books]]), new Map())).toEqual([]);
+  });
+
+  it('accepts a runtime value that is its file', () => {
+    expect(declarationParityErrors(new Map([['books', gated]]), new Map([['books', gated]]))).toEqual([]);
+  });
+
+  it('refuses a build-only declaration that sets an entitlement (the runtime would not see it)', () => {
+    expect(declarationParityErrors(new Map([['books', gated]]), new Map()))
+      .toEqual(['books: offline.ts sets entitlement, so FrontendFeature.offline must be set']);
+  });
+
+  it('refuses a runtime value without a file, and one that differs from its file', () => {
+    expect(declarationParityErrors(new Map(), new Map([['books', books]])))
+      .toEqual(['books: offline is set but the build reads no offline.ts']);
+    expect(declarationParityErrors(new Map([['books', books]]), new Map([['books', { navigations: ['/books'] }]])))
+      .toEqual(['books: FrontendFeature.offline is not the offline.ts value']);
   });
 });
 

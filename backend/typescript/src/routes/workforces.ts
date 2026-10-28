@@ -9,6 +9,7 @@
  *
  *   PATCH /:workforceId           the CALLER'S TENANT's cutover status (ADR 0775 D2)
  *   PATCH /:workforceId/migration the caller's tenant's migration journey
+ *   GET  /:workforceId/migration/targets the workflows a journey may target
  * VENDOR-NEUTRAL: no external-framework branding. The entity itself is seeded
  * and shared; every write is tenant state behind `requireTenantWrite` (ADR 0775
  * D1). Metrics aggregate from the
@@ -45,6 +46,9 @@ import { evalSuiteEnabled, runWorkforceLiveShadowEval } from '../host/workforceE
 import { demoMode } from '../host/demoMode.js';
 import { requireTenantWrite } from '../features/featureRoute.js';
 import { etagHeader, parseIfMatch } from '../host/entityVersion.js';
+import type { HostAdapterSuite } from '../host/index.js';
+import { resolveTenantWorkflow } from '../host/resolveLaunchDefinition.js';
+import { listOwned } from '../host/workflowOwnership.js';
 
 const WORKFORCE_STATUSES: readonly WorkforceStatus[] = ['shadow', 'piloting', 'production'];
 
@@ -86,6 +90,59 @@ function parseMigrationPatch(body: unknown): MigrationJourneyPatch {
 
 interface Deps {
   storage: Storage;
+  workflowCatalog: HostAdapterSuite['workflowCatalog'];
+}
+
+/** One workflow the migration wizard may offer as a journey's target. */
+interface MigrationTarget {
+  workflowId: string;
+  name: string;
+  /** `workforce` = the workforce's own catalog; `owned` = the tenant's builder list. */
+  source: 'workforce' | 'owned';
+}
+
+/**
+ * ARWF-15 — the workflows a migration journey may target: the workforce's own
+ * catalog entries that RESOLVE for this tenant, then the tenant's own
+ * non-archived workflows (the ownership index the builder lists). The catalog
+ * named 15 ids that resolved nowhere for a release after ADR 0775 P2d, and the
+ * wizard offered exactly those, so every saved target was a dead id.
+ */
+async function migrationTargets(deps: Deps, tenantId: string, wf: Workforce): Promise<MigrationTarget[]> {
+  const out: MigrationTarget[] = [];
+  const seen = new Set<string>();
+  for (const id of wf.workflowCatalog) {
+    if (seen.has(id)) continue;
+    const resolved = await resolveTenantWorkflow(deps.workflowCatalog, tenantId, id);
+    if (!resolved) continue;
+    seen.add(id);
+    const name = (resolved.definition as { name?: unknown }).name;
+    out.push({ workflowId: id, name: typeof name === 'string' && name ? name : id, source: 'workforce' });
+  }
+  for (const o of await listOwned(tenantId)) {
+    if (o.archivedAt || seen.has(o.workflowId)) continue;
+    seen.add(o.workflowId);
+    out.push({ workflowId: o.workflowId, name: o.name ?? o.workflowId, source: 'owned' });
+  }
+  return out;
+}
+
+/** ARWF-15 — a journey target must name a workflow this tenant can resolve.
+ *  The catalog is the authority (not the targets list), so a workflow saved in
+ *  another tab since the list loaded is still accepted. */
+async function assertTargetResolves(deps: Deps, tenantId: string, patch: MigrationJourneyPatch): Promise<void> {
+  if (!patch.target) return;
+  const workflowId = patch.target.workflowId;
+  if (!workflowId || !(await resolveTenantWorkflow(deps.workflowCatalog, tenantId, workflowId))) {
+    throw new OpenwopError(
+      'validation_error',
+      workflowId
+        ? `Target workflow \`${workflowId}\` does not exist in this workspace.`
+        : 'Field `target.workflowId` is required.',
+      400,
+      { field: 'target.workflowId', reason: 'target_workflow_unresolved', workflowId },
+    );
+  }
 }
 
 function tenantOf(req: Request): string {
@@ -265,12 +322,28 @@ export function registerWorkforceRoutes(app: Express, deps: Deps): void {
           workforceId: req.params.workforceId,
         });
       }
+      const patch = parseMigrationPatch(req.body);
+      await assertTargetResolves(deps, tenantOf(req), patch);
       sendJourney(
         res,
-        await patchMigrationJourney(tenantOf(req), req.params.workforceId, parseMigrationPatch(req.body), {
+        await patchMigrationJourney(tenantOf(req), req.params.workforceId, patch, {
           ifMatch: parseIfMatch(req.header('If-Match')),
         }),
       );
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.get('/host/openwop-app/workforces/:workforceId/migration/targets', async (req, res, next) => {
+    try {
+      const wf = await getWorkforce(tenantOf(req), req.params.workforceId);
+      if (!wf) {
+        throw new OpenwopError('not_found', `Workforce \`${req.params.workforceId}\` not found.`, 404, {
+          workforceId: req.params.workforceId,
+        });
+      }
+      res.json({ targets: await migrationTargets(deps, tenantOf(req), wf) });
     } catch (err) {
       next(err);
     }

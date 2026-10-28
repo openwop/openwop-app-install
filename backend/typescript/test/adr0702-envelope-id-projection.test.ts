@@ -5,16 +5,21 @@ import { projectEnvelopeIds, typesRequiringEnvelopeIds } from '../src/storage/en
 /**
  * ADR 0702 — the corpus validates a payload OBJECT ALONE, so a def whose
  * `required` names `nodeId`/`runId` is not satisfied by the envelope carrying
- * them. These are the unit legs; the route-level leg is in
- * `v2-era2-unmapped-type-refused.test.ts`'s neighbourhood.
+ * them. These are the unit legs.
+ *
+ * Tracker TST-BGF-12. Red when the required-id sets stop being derived from the
+ * schema (or shrink below the measured 22 nodeId / 3 runId types), when an
+ * existing id is overwritten, when an id is added to a def that does not declare
+ * it, when an absent nodeId becomes a present-but-undefined key, or when a
+ * non-object payload is spread.
  */
 describe('envelope-id projection', () => {
   it('derives the type sets FROM the schema, and they are not empty', () => {
     // Non-vacuity, and the tripwire on the corpus pin: a projection driven by an
     // empty set is a no-op that passes every "does not corrupt" leg below.
     const { nodeId, runId } = typesRequiringEnvelopeIds();
-    expect(nodeId.size, 'defs requiring nodeId').toBeGreaterThan(10);
-    expect(runId.size, 'defs requiring runId').toBeGreaterThan(0);
+    expect(nodeId.size, 'defs requiring nodeId (measured 22 at the 2026-10-23 corpus pin)').toBeGreaterThanOrEqual(22);
+    expect(runId.size, 'defs requiring runId (measured 3)').toBeGreaterThanOrEqual(3);
     expect(nodeId.has('output.chunk')).toBe(true);
     expect(runId.has('output.chunk')).toBe(true);
     expect(nodeId.has('interrupt.resolved')).toBe(true);

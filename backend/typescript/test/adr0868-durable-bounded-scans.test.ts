@@ -17,6 +17,11 @@
  *     `kvListPage` returns the same pages;
  *   - a heavy read logs `surface_scan_heavy`;
  *   - no durable adapter calls `kvList` directly (ratchet).
+ *
+ * Tracker TST-BFC-1. Red when: an unfiltered table page reads a SCAN_BATCH
+ * instead of `limit + 1`; the claim page grows; `count` reads rows (also reds
+ * the ratchet); the fallback page repeats its cursor row; `surface_scan_heavy`
+ * logs the prefix (and with it the tenant).
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, readdirSync, readFileSync } from 'node:fs';
@@ -122,8 +127,10 @@ describe('ADR 0868 — table pages in the database', () => {
 
   it('memory and durable tables return mixed-case ids in the same (byte) order', async () => {
     const ids = ['b', 'B', 'a', 'A', '_', 'é', 'Z'];
+    const savedEnv = { table: process.env.OPENWOP_SURFACE_TABLE, backend: process.env.OPENWOP_SURFACE_BACKEND };
     initInMemorySurfaces({ dataDir: mkdtempSync(join(tmpdir(), 'adr0868-')) });
     delete process.env.OPENWOP_SURFACE_TABLE; delete process.env.OPENWOP_SURFACE_BACKEND;
+    try {
     const mem = buildHostSurfaceBundle({ tenantId: 'order-t' }).storage.table;
     const dur = createDurableTable({ tenantId: 'order-t' });
     for (const id of ids) { await mem.insert({ table: 'o', row: { id } }); await dur.insert({ table: 'o', row: { id } }); }
@@ -137,6 +144,10 @@ describe('ADR 0868 — table pages in the database', () => {
     const want = [...ids].sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b)));
     expect(await walk(dur)).toEqual(want);
     expect(await walk(mem as typeof dur)).toEqual(want);
+    } finally {
+      if (savedEnv.table === undefined) delete process.env.OPENWOP_SURFACE_TABLE; else process.env.OPENWOP_SURFACE_TABLE = savedEnv.table;
+      if (savedEnv.backend === undefined) delete process.env.OPENWOP_SURFACE_BACKEND; else process.env.OPENWOP_SURFACE_BACKEND = savedEnv.backend;
+    }
   });
 });
 
@@ -188,7 +199,10 @@ describe('ADR 0868 — reads stay inside their prefix and tenant', () => {
     }
     keysRead = [];
     const purged = await purgeTenantDurableSurfaces('purge-a');
-    expect(purged).toBeGreaterThanOrEqual(5);
+    // MEASURED 2026-10-24: 8 rows for the five families seeded above (the
+    // queue and bus keep bookkeeping rows besides their item); a skipped
+    // family lowers it.
+    expect(purged).toBe(8);
     // Only the one-row family probes may land on another tenant's key.
     const foreign = keysRead.filter((k) => k.split(':')[2] === 'purge-b');
     const familyCount = new Set(keysRead.map((k) => k.split(':')[1])).size;

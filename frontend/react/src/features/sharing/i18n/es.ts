@@ -59,6 +59,8 @@ export const messages = {
   typeCreativeBrief: 'Brief creativo',
   typeBookingManage: 'Reserva (creado por la app)',
   typeSignRequest: 'Invitación de firma (creado por la app)',
+  typeCampaignApproval: 'Enlace de aprobación del cliente (creado por la app)',
+  typeCollabInvite: 'Invitación de colaborador (creada por la app)',
   expiryInvalid: 'Introduce un número entero de días (1–3650), o déjalo vacío para que no caduque.',
   linksFailedTitle: 'No se pudieron cargar los enlaces de este espacio',
   linksFailedBody: 'Algo falló de nuestro lado — lo más probable es que tus enlaces sigan existiendo. Inténtalo de nuevo.',

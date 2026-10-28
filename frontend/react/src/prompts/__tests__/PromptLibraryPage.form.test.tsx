@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
-import { render, screen, cleanup, fireEvent, within } from '@testing-library/react';
+import { render as rtlRender, screen, cleanup, fireEvent, within } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
+import type { ReactElement } from 'react';
 
 // Mock the page's data sources so it renders without a backend.
 vi.mock('../promptsClient.js', () => ({
@@ -13,6 +15,8 @@ vi.mock('../../client/runsClient.js', () => ({
 import { PromptLibraryPage } from '../PromptLibraryPage.js';
 
 afterEach(cleanup);
+// The page binds its tab to `?tab=` (ADR 0993 D8), so it renders inside a router, as in the app.
+const render = (ui: ReactElement) => rtlRender(<MemoryRouter>{ui}</MemoryRouter>);
 beforeEach(() => localStorage.clear());
 
 /**

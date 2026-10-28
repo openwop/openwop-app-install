@@ -7,8 +7,14 @@
  *
  * Pinned through the real route: right after the host ends the stream the
  * viewer is still present, and after the grace they are gone (no leak).
+ *
+ * Tracker TST-BJD. Red when (probe-witnessed, w65): the close leaves at once (not
+ * present inside the grace) or never leaves (the wait for departure times out).
+ * Ceiling: the grace is a server-side `setTimeout` on a live HTTP server, so the
+ * departure is awaited on its real condition (no fixed sleep), and the elapsed time
+ * must be at least most of the 5 s grace so an early leave cannot pass.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
@@ -55,8 +61,11 @@ describe('ADR 0897 — presence survives a bounded close', () => {
     expect(raw).toContain('event: channel.presence');
     expect(raw.endsWith('retry: 1000\n\n')).toBe(true);
 
+    const closedAt = Date.now();
     expect(snapshotOf(channelId).present, 'still present inside the grace').toHaveLength(1);
-    await new Promise((r) => setTimeout(r, 5_400));
-    expect(snapshotOf(channelId).present, 'gone after the grace — no leaked presence').toHaveLength(0);
+    await vi.waitFor(() => {
+      expect(snapshotOf(channelId).present, 'gone after the grace — no leaked presence').toHaveLength(0);
+    }, { timeout: 9_000, interval: 100 });
+    expect(Date.now() - closedAt, 'left only after the grace').toBeGreaterThanOrEqual(4_500);
   }, 15_000);
 });

@@ -7,6 +7,13 @@
  *   Firebase Hosting /api rewrite    : <client-supplied…>, <client>, <Hosting egress>
  * The leftmost entries are attacker-chosen; a fresh one per request used to
  * mint a fresh rate-limit bucket per request.
+ *
+ * TST-BWB-10 (grade-tests w62): `fakeReq` is a real Express request (the `express.request`
+ * prototype, so `req.header()` is Express's own), not a cast. Red when the XFF walk
+ * returns the leftmost entry (unit cases AND the #4516 burst), when an untrusted socket
+ * peer is treated as a proxy, when K_SERVICE is ignored, when a Google front-end range
+ * is dropped or a GCP customer range is added, when the `private` defaults knob is
+ * ignored, when `ip:port` is not normalised, or when another module reads `req.ip`.
  */
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 import express, { type Request } from 'express';
@@ -21,10 +28,11 @@ const CLIENT = '198.51.100.23';
 const HOSTING_EGRESS = '74.125.215.197'; // a measured Firebase-door peer
 
 function fakeReq(xff: string | undefined, peer = '127.0.0.1'): Request {
-  return {
-    header: (n: string) => (n.toLowerCase() === 'x-forwarded-for' ? xff : undefined),
-    socket: { remoteAddress: peer },
-  } as unknown as Request;
+  // A real Express request object: `header()` is Express's own, reading `headers`.
+  const req: Request = Object.create(express.request);
+  Object.defineProperty(req, 'headers', { value: xff === undefined ? {} : { 'x-forwarded-for': xff } });
+  Object.defineProperty(req, 'socket', { value: { remoteAddress: peer } });
+  return req;
 }
 
 const ENV_KEYS = ['K_SERVICE', 'OPENWOP_TRUSTED_PROXY_CIDRS', 'OPENWOP_TRUSTED_PROXY_DEFAULTS'] as const;

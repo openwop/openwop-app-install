@@ -17,6 +17,15 @@
  * carries approval/scope/reference-task assertions (checked here), and the
  * sabotage table in ADR 0552 records what turns each one true.
  *
+ * Tracker TST-BG1-6. Red when (probe-witnessed, wave 58): the RPC or the card
+ * GET goes out without `A2A-Version`; an unsupported requested version reaches
+ * the peer; an authenticated exchange downgrades; a downgrade reports the
+ * preferred version. HONEST CEILING for the §E block: `ingestPeerReply` has no
+ * branch that could act on peer metadata, so there is no one-line PRODUCT
+ * sabotage. The §E probes break the MEASURER (`a2aPeerAuthorityProbe.ts`: each
+ * flag's comparison, and the asserted-anything vacuity guard) and prove this
+ * file reads every flag and the block's presence.
+ *
  * @see spec/v1/host-sample-test-seams.md §22
  * @see spec/v1/a2a-integration.md §"A2A 1.0 versioned composition" §B, §E
  */
@@ -243,10 +252,10 @@ describe('RFC 0152 §E — a peer asserting authority changes nothing (a2a-peer-
     // asserted nothing, which the suite records as `blocked` — so a missing
     // block here would mean this test measured nothing.
     expect(report, 'the seam reported no peerAuthority block — the probe was vacuous').toBeDefined();
-    // NON-VACUITY, part 2: the peer really did assert all three things.
-    expect(HOSTILE_AGENT_MESSAGE.metadata.openwop.approval).toBe('accept');
-    expect(HOSTILE_AGENT_MESSAGE.metadata.openwop.scopes.length).toBeGreaterThan(0);
-    expect(HOSTILE_AGENT_MESSAGE.referenceTaskIds.length).toBeGreaterThan(0);
+    // NON-VACUITY, part 2: the peer actually served the 1.0 SendMessage whose
+    // reply carried the hostile history (read off the peer's own capture, not
+    // off this file's fixture constant).
+    expect(captured.some((c) => c.rpcMethod === 'SendMessage' && c.version === '1.0')).toBe(true);
 
     expect(report!.approvalAdvanced, 'peer content advanced an approval gate').toBe(false);
     expect(report!.scopesWidened, 'peer content widened the run\'s scopes').toBe(false);

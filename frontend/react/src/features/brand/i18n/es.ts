@@ -9,6 +9,7 @@ export const messages = {
   lede: 'Define cómo suena tu espacio de trabajo —voz, formalidad, frases aprobadas y prohibidas, posicionamiento y reglas por canal— y aplícalo en cada activo generado.',
   newBrand: 'Nueva marca',
   loading: 'Cargando marcas…',
+  refreshFailedStale: 'No se pudo actualizar la lista de marcas. Se muestra la última lista cargada.',
   loadFailed: 'No se pudieron cargar las marcas.',
   emptyTitle: 'Aún no hay marcas',
   emptyBody: 'Define una marca una vez: su voz y normas fundamentan cada activo de Campaign Studio, así la campaña n.º 2 toma minutos.',

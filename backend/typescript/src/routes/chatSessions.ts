@@ -24,6 +24,8 @@
  * bearer-authed probes still group consistently.
  */
 
+import { chatAuthorSubject } from '../host/chatAuthorSubject.js';
+import { assertClientBindable } from '../host/runClientOrg.js';
 import { CONVERSATION_WORKFLOW_ID } from '../host/conversation.js';
 import type { Express, Request, Response } from 'express';
 import { randomUUID } from 'node:crypto';
@@ -62,7 +64,11 @@ import { listRunningConversations } from '../host/runningByConversation.js';
 import { toolEffectsFor } from '../host/toolEffects.js';
 import { requireProtocolScope } from '../host/protocolAuthorization.js';
 import { setMessageFeedback, getMessageFeedback, listMessageFeedbackForSession, isFeedbackRating } from '../host/messageFeedbackStore.js';
+import { resolveRatingAttribution } from '../host/turnAttribution.js';
+import { createLogger } from '../observability/logger.js';
 import { encodeMessageCursor, decodeMessageCursor, MAX_MESSAGE_PAGE } from '../host/messageCursor.js';
+
+const feedbackLog = createLogger('routes.chatSessions.feedback');
 
 const ID_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/;
 // A subjectRef is `<kind>:<id>` — kind is a word, id is the host's id grammar.
@@ -87,12 +93,9 @@ function actingUserOf(req: Request): string | undefined {
 }
 
 /** The caller as a subjectRef, for stamping/comparing a message's `author_subject`
- *  (ADR 0102 Phase 2). A user session → `user:<id>` (same space as `ownerUserId`);
- *  a bearer/anon principal → its `principalId`; nothing → null. */
-function callerSubject(req: Request): string | null {
-  if (req.userId) return userRef(req.userId);
-  return req.principal?.principalId ?? null;
-}
+ *  (ADR 0102 Phase 2). Shared with the importer (ADR 0992 D3) — see
+ *  `host/chatAuthorSubject.ts` for the spelling and why it is doubled. */
+const callerSubject = chatAuthorSubject;
 
 /** Owner-gate a participant mutation (ADR 0043 RBAC). When the conversation has
  *  a recorded owner, only that owner may change its membership — a non-owner
@@ -211,6 +214,7 @@ function toConversation(
     // can offer "Convene the team" for a project's group chat.
     ...(meta?.ownerSubject ? { ownerSubject: meta.ownerSubject } : {}),
     ...(meta?.branchedFrom ? { branchedFrom: meta.branchedFrom } : {}), // ADR 0117 — FE branch indicator
+    ...(meta?.client ? { client: meta.client } : {}), // ADR 0944 D2 — the "Client memory" chip
     participants,
   };
 }
@@ -246,6 +250,8 @@ interface CreateSessionRequest {
   /** Initial participant subjectRefs (`agent:<id>` / `user:<id>`). The caller is
    *  always added as the owner. */
   participants?: unknown;
+  /** ADR 0944 D2 — the client org this conversation works for (bound once). */
+  clientOrgId?: unknown;
   /** When seeding a `group` from an advisory board (ADR 0040). */
   boardId?: unknown;
 }
@@ -393,6 +399,14 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
       const convType = readConversationType(body.type);
       const participants = readParticipants(body.participants);
       const boardId = body.boardId === undefined ? undefined : (typeof body.boardId === 'string' ? body.boardId : (() => { throw new OpenwopError('validation_error', 'boardId MUST be a string when present.', 400); })());
+      // ADR 0944 D2 — bind the conversation to a client org once, at creation,
+      // after checking the creator may read that client.
+      const clientOrgId = body.clientOrgId === undefined ? undefined
+        : (typeof body.clientOrgId === 'string' && body.clientOrgId.length > 0 && body.clientOrgId.length <= 200 ? body.clientOrgId
+          : (() => { throw new OpenwopError('validation_error', 'clientOrgId MUST be a non-empty string when present.', 400); })());
+      const client = clientOrgId
+        ? { orgId: clientOrgId, ...(await assertClientBindable(tenantFromReq(req), actingUserOf(req), clientOrgId)) }
+        : undefined;
 
       const now = new Date().toISOString();
       const tenantId = tenantFromReq(req);
@@ -426,7 +440,13 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
         ...(actingUserOf(req) ? { ownerUserId: actingUserOf(req) } : {}),
         participants,
         ...(boardId ? { boardId } : {}),
+        ...(client ? { client } : {}),
       });
+      // ADR 0944 D2 — the meta row is create-or-return, so a row that already
+      // existed keeps its own binding. Never report a binding that did not land.
+      if ((meta.client?.orgId ?? undefined) !== clientOrgId && clientOrgId !== undefined) {
+        throw new OpenwopError('conflict', 'This conversation is already bound to a different client, or to none.', 409, { reason: 'client_binding_conflict' });
+      }
 
       res.status(201).json(toConversation({ sessionId, title, createdAt: now, updatedAt: now, messageCount: 0 }, meta));
     } catch (err) {
@@ -722,6 +742,9 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
         type: parentMeta?.type ?? 'agent',
         ...(actingUserOf(req) ? { ownerUserId: actingUserOf(req) } : {}),
         branchedFrom: { conversationId: parentId, fromSeq },
+        // ADR 0944 D2 — a branch carries the parent's transcript, so it keeps the
+        // parent's client: otherwise client A's history would continue unbound.
+        ...(parentMeta?.client ? { client: parentMeta.client } : {}),
       });
       res.status(201).json(toConversation({ sessionId: childId, title: childTitle, createdAt: now, updatedAt: now, messageCount: prefix.length }, meta));
     } catch (err) { next(err); }
@@ -1285,6 +1308,12 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
         subjectRef: userRef(actingUserOf(req) ?? '_anon'),
         rating: b.rating,
         ...(typeof b.reason === 'string' ? { reason: b.reason } : {}),
+        // ADR 0986 D2 — the server decides what answered the rated turn. A failed
+        // lookup must not lose the person's rating: it is stored unattributed.
+        attribution: await resolveRatingAttribution(tenantId, b.conversationId, req.params.messageId).catch((e: unknown) => {
+          feedbackLog.warn('feedback_attribution_lookup_failed', { error: e instanceof Error ? e.message : String(e) });
+          return undefined;
+        }),
       });
       res.status(200).json(record);
     } catch (err) {

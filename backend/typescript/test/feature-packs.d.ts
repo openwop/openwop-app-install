@@ -104,7 +104,6 @@ declare module '*feature.campaign-brief.nodes/index.mjs' {
 }
 declare module '*feature.campaign-channels.nodes/index.mjs' {
   export const nodes: Record<string, (ctx: unknown) => Promise<{ status: string; outputs?: Record<string, unknown>; error?: { code: string; message: string } }>>;
-  export function appendUtm(url: string, utm: unknown, briefId: string): string;
   // QA-CODE-5 — exported for the table↔schema parity test.
   export const CHANNEL_SPEC: Record<string, { system: string; schema: Record<string, unknown>; itemsKey: string | null }>;
 }
@@ -129,6 +128,13 @@ declare module '*feature.campaign-journeys.nodes/index.mjs' {
   type Out = { status: string; outputs?: Record<string, unknown>; error?: { code?: string; message?: string } };
   export function enroll(ctx: Ctx): Promise<Out>;
   export function eligibility(ctx: Ctx): Promise<Out>;
+  // ADR 0955 P0 — the one per-channel check.
+  export function channelEligibility(ctx: Ctx): Promise<Out>;
+  // ADR 0955 P2 — the send window timer and the journey SMS send.
+  export function nextSendWindow(ctx: Ctx): Promise<Out>;
+  export function sendSms(ctx: Ctx): Promise<Out>;
+  export function sendTime(ctx: Ctx): Promise<Out>;
+  export function smsSegments(text: string): number;
   export function engagement(ctx: Ctx): Promise<Out>;
   export function frequencyGate(ctx: Ctx): Promise<Out>;
   export function segmentMembers(ctx: Ctx): Promise<Out>;
@@ -211,4 +217,14 @@ declare module '*feature.evals.nodes/index.mjs' {
   type Out = { status: string; outputs?: Record<string, unknown>; error?: { code: string; message: string } };
   export function runSuite(ctx: unknown): Promise<Out>;
   export const nodes: Record<string, (ctx: unknown) => Promise<Out>>;
+}
+declare module '*feature.computer-use.nodes/index.mjs' {
+  // ADR 0894 CU2CD-1 — the decide node is driven directly by the session-authority test.
+  export const nodes: Record<string, (ctx: unknown) => Promise<{ status: string; outputs?: Record<string, unknown>; error?: { code: string; message: string } }>>;
+}
+
+/** ADR 0954: pure deadline exports at the untyped CRM pack boundary. */
+declare module '*feature.crm.nodes/index.mjs' {
+  export function addBusinessMinutes(start: number, minutes: number, timezone?: string, weeklyHours?: Array<{ day: number; start: string; end: string }>): number;
+  export function slaDeadline(context: { inputs: { sla: { firstTouchMinutes: number; assignedAt: string } | null } }): Promise<{ outputs: { hasSla: boolean; slaDeadline?: string; slaEscalateAt?: string; slaReportAt?: string } }>;
 }

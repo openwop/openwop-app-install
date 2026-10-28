@@ -10,6 +10,10 @@
  *     npx vitest run test/agent-dispatch-live-managed.test.ts
  *
  * @see test/agent-dispatch-live-real.test.ts — the in-sandbox (mock) pipeline test
+ *
+ * RFC 0002 live dispatch over the managed tier. Tracker TST-BKX-2. Honest
+ * ceiling: skipped in the gate (opt-in live credentials), so no sabotage probe
+ * can witness it there; red when the managed completion comes back empty.
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';

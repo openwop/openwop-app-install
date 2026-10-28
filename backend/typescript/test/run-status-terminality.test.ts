@@ -33,29 +33,41 @@
  * that silently changes rather than letting a stranded-run regression ship
  * green.
  *
+ * Sabotage witnessed red (8f grade-tests wave 2): `waiting-external` made
+ * terminal (`8fw2g3-term-waitext`), `cancelling` made terminal
+ * (`-term-cancelling`), an unhandled member returning `undefined`
+ * (`-term-enum-r2`). The round-1 `-term-enum-vacuous` probe was a no-op
+ * (`paused` is already false) and the old case 4 could not fail anyway.
+ *
  * The three TRUE members are also the exact set the authz comment in
  * `authorizeResolve.ts` already described ("a completed/failed/cancelled run's
  * gate is gone") — as of 1.7.0 the predicate and that prose finally agree.
  */
 import { describe, expect, it } from 'vitest';
 import type { RunStatus } from '../src/types.js';
+import { ACTIVE_RUN_STATUSES, TERMINAL_RUN_STATUSES } from '@openwop/openwop';
 import { isTerminalRunStatus } from '../src/host/runCancel.js';
 
-/** Exactly the canonical `RunStatus` enum, listed so a NEW member added by a
- *  future SDK bump shows up here as a compile error rather than as an
- *  unclassified status nothing branches on. */
-const ALL_STATUSES: RunStatus[] = [
-  'pending',
-  'running',
-  'paused',
-  'waiting-approval',
-  'waiting-input',
-  'waiting-external',
-  'cancelling',
-  'completed',
-  'failed',
-  'cancelled',
-];
+/** The expected classification of EVERY canonical `RunStatus`. A
+ *  `Record<RunStatus, boolean>` is exhaustive at compile time: a member added to
+ *  the type by a future SDK bump is a missing-key compile error here (a plain
+ *  `RunStatus[]` literal is not — it compiles with a member left out, which is
+ *  what the previous version of this file wrongly claimed). Case 4 also checks
+ *  the keys against the SDK's RUNTIME status lists, for a member the type does
+ *  not carry. */
+const EXPECTED: Record<RunStatus, boolean> = {
+  pending: false,
+  running: false,
+  paused: false,
+  'waiting-approval': false,
+  'waiting-input': false,
+  'waiting-external': false,
+  cancelling: false,
+  completed: true,
+  failed: true,
+  cancelled: true,
+};
+const ALL_STATUSES = Object.keys(EXPECTED) as RunStatus[];
 
 const TERMINAL: RunStatus[] = ['completed', 'failed', 'cancelled'];
 
@@ -81,7 +93,13 @@ describe('run-status terminality (the predicate the cancel paths key on)', () =>
   });
 
   it('classifies every member of the enum, so none is silently unhandled', () => {
-    for (const s of ALL_STATUSES) expect(typeof isTerminalRunStatus(s)).toBe('boolean');
-    expect(ALL_STATUSES).toHaveLength(10);
+    // The table covers exactly the SDK's runtime vocabulary (a member the SDK
+    // lists but the table lacks, or the reverse, reds here)…
+    const sdk: readonly RunStatus[] = [...ACTIVE_RUN_STATUSES, ...TERMINAL_RUN_STATUSES];
+    expect([...ALL_STATUSES].sort()).toEqual([...sdk].sort());
+    // …and the predicate returns the table's exact boolean for each member
+    // (an `undefined` for an unhandled member is not `false`).
+    const actual = Object.fromEntries(ALL_STATUSES.map((s) => [s, isTerminalRunStatus(s)]));
+    expect(actual).toEqual(EXPECTED);
   });
 });

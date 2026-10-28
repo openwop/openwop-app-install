@@ -155,7 +155,8 @@ describe('RFC 0215 §A — an unanswered attempt never delays another subscripti
   it('capacity is floored at 9 (8 held + 1), whatever is configured', () => {
     expect(WEBHOOK_MIN_IN_FLIGHT).toBe(HELD + 1);
     expect(webhookMaxInFlight('1')).toBe(HELD + 1);
-    expect(webhookMaxInFlight('not-a-number')).toBeGreaterThanOrEqual(HELD + 1);
+    // Unparseable → the default capacity, 32 (DEFAULT_MAX_IN_FLIGHT, unexported: a literal).
+    expect(webhookMaxInFlight('not-a-number')).toBe(32);
     expect(webhookMaxInFlight('64')).toBe(64);
   });
 
@@ -308,11 +309,17 @@ describe('RFC 0215 §A.3 — one tenant cannot take the capacity another needs (
     for (let i = 0; i < 9; i += 1) await enqueueSubscribed(forTenant(`/held/n${i}`, `tn-${i}`, `sub-n-${i}`, 'tenant-n'));
     await d.pump();
     await until(() => openHeld() === 9, 'tenant n at the floor cap');
+    // A DUE, UNCLAIMED tenant-n row: the nine above are leased, so without this an
+    // empty claim could not show exclusion (nothing claimable either way).
+    await storage.enqueueWebhookDelivery(forTenant('/held/extra', 'tn-extra', 'sub-n-extra', 'tenant-n'));
     const claimed = await storage.claimDueWebhookDeliveries('w-probe', Date.now() + 1, 60_000, 5, { excludeTenantIds: ['tenant-n'] });
     expect(claimed).toEqual([]);
     await storage.enqueueWebhookDelivery(delivery('/x', 'legacy-1', 'sub-legacy')); // tenantId absent
     const legacy = await storage.claimDueWebhookDeliveries('w-probe', Date.now() + 1, 60_000, 5, { excludeTenantIds: ['tenant-n'] });
     expect(legacy.map((r) => r.deliveryId)).toEqual(['legacy-1']);
     expect(legacy[0]!.tenantId ?? null).toBeNull();
+    // Positive control: the tenant-n row WAS due and claimable, only excluded.
+    const unexcluded = await storage.claimDueWebhookDeliveries('w-probe', Date.now() + 1, 60_000, 5);
+    expect(unexcluded.map((r) => r.deliveryId)).toEqual(['tn-extra']);
   });
 });

@@ -7,6 +7,9 @@
  * a first draft costs 64k-140k prompt tokens. The old default (50,000) was
  * smaller than one draft. Read through `describeOwnManagedUsage`, the same
  * target the dispatcher's cap check uses.
+ *
+ * Red when (wave 60 probes, tracker TST-BRB-9): the default drops below one draft;
+ * the unset fallback resolves to anything but 150,000; or an operator value is ignored.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { mkdtempSync } from 'node:fs';
@@ -38,7 +41,9 @@ afterAll(async () => {
 describe('ADR 0773 G-10e — the default managed allowance fits a first draft', () => {
   it('an unset cap resolves to the default, which fits the largest measured first draft', async () => {
     const u = await describeOwnManagedUsage('t-defcap', 'user:defcap');
-    expect(u?.dailyTokenCap).toBe(DEFAULT_MANAGED_DAILY_TOKEN_CAP);
+    // A literal, not the product constant: an expectation read from the module moves with it.
+    expect(u?.dailyTokenCap).toBe(150_000);
+    expect(DEFAULT_MANAGED_DAILY_TOKEN_CAP).toBe(150_000);
     expect(DEFAULT_MANAGED_DAILY_TOKEN_CAP).toBeGreaterThan(LARGEST_MEASURED_FIRST_DRAFT);
   });
 

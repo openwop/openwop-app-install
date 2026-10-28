@@ -13,6 +13,13 @@
  *   2. the honest-scope arms (no tenant / host-scoped) stay `known:false`;
  *   3. the TRIPWIRE — every module that persists a credentialRef registers a
  *      consumer, so the index cannot drift back into a hand-kept list.
+ *
+ * Tracker TST-BG3-5. Red when: a throwing consumer is skipped instead of failing the
+ * fan-out, the no-tenant or host-scoped arm answers `known:true`, re-registration
+ * stacks, a persisting module (e.g. voice/realtime/config.ts) stops registering, the
+ * voiceSession opt-out stops naming its registrar, or either delete route
+ * (byok.ts, adminVault.ts) stops consulting `lookupCredentialRefConsumers(`.
+ * The scan floors (6 persisting modules, 1 opt-out file) were measured on ab2aff6e8.
  */
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
@@ -55,11 +62,12 @@ describe('ADR 0499 — the registry', () => {
     await expect(findCredentialRefConsumers('t1', 'k')).rejects.toThrow(/broken/);
   });
 
-  it('a throwing consumer surfaces as known:false, not as an empty consumer set', async () => {
+  it('a throwing consumer makes the lookup REJECT — never known:true with an empty set', async () => {
     registerCredentialRefConsumer({ id: 'broken', describe: async () => { throw new Error('storage down'); } });
 
-    // The routes catch and translate; what must never happen is `known:true, []`.
-    await expect(lookupCredentialRefConsumers('t1', 'k')).rejects.toThrow();
+    // The routes catch and translate the rejection into the refusal; what must never
+    // happen is a resolved `known:true, []`.
+    await expect(lookupCredentialRefConsumers('t1', 'k')).rejects.toThrow(/consumer "broken" could not be enumerated/);
   });
 
   it('re-registration replaces rather than stacking (module singletons)', async () => {
@@ -73,16 +81,14 @@ describe('ADR 0499 — the registry', () => {
     registerCredentialRefConsumer({ id: 'a', describe: async () => ['would have matched'] });
 
     const lookup = await lookupCredentialRefConsumers(undefined, 'k');
-    expect(lookup.known).toBe(false);
-    if (!lookup.known) expect(lookup.reason).toMatch(/tenant/i);
+    expect(lookup).toEqual({ known: false, reason: expect.stringMatching(/no tenant context/i) });
   });
 
   it('is known:false for a HOST-scoped ref — it resolves for every tenant', async () => {
     // `billing:stripe-key` is exactly this class: a one-tenant answer would read
     // as "safe to delete" on a secret whose loss degrades every checkout.
     const lookup = await lookupCredentialRefConsumers('t1', 'billing:stripe-key', { hostScoped: true });
-    expect(lookup.known).toBe(false);
-    if (!lookup.known) expect(lookup.reason).toMatch(/every tenant/i);
+    expect(lookup).toEqual({ known: false, reason: expect.stringMatching(/every tenant/i) });
   });
 
   it('is known:true with an empty set only when it genuinely looked', async () => {
@@ -118,6 +124,9 @@ describe('ADR 0499 — tripwire (source scan)', () => {
   const OPT_OUT = 'ADR 0499: no persisted credentialRef';
 
   it('every module that persists a credentialRef registers a consumer', () => {
+    // Non-vacuity floor: a broken regex would make `unregistered` empty for free.
+    const persisting = files.filter((f) => persistsCredentialRef(readFileSync(f, 'utf8')));
+    expect(persisting.length).toBeGreaterThanOrEqual(6);
     const unregistered = files.filter((f) => {
       const src = readFileSync(f, 'utf8');
       if (!persistsCredentialRef(src)) return false;
@@ -129,6 +138,8 @@ describe('ADR 0499 — tripwire (source scan)', () => {
   });
 
   it('every opt-out names the module that registers on its behalf', () => {
+    // Non-vacuity floor: with zero opt-outs the loop below would assert nothing.
+    expect(files.filter((f) => readFileSync(f, 'utf8').includes(OPT_OUT)).length).toBeGreaterThanOrEqual(1);
     for (const f of files) {
       const src = readFileSync(f, 'utf8');
       if (!src.includes(OPT_OUT)) continue;
@@ -174,6 +185,7 @@ describe('ADR 0499 — the real holders register', () => {
     await import('../src/features/connections/inboundWebhooks.js');
     await import('../src/features/priority-matrix/federationService.js');
     await import('../src/features/email/bounceWebhooks.js');
+    await import('../src/features/campaign-ops/agentBindingService.js');
 
     const ids = listCredentialRefConsumerIds();
     expect(ids).toContain('voice:realtime-config'); // the production incident
@@ -187,5 +199,6 @@ describe('ADR 0499 — the real holders register', () => {
     expect(ids).toContain('connections:inbound-signing');
     expect(ids).toContain('priority-matrix:peer');
     expect(ids).toContain('email:webhook-verification');
+    expect(ids).toContain('campaign-ops:agent-binding'); // ADR 0943 D6 — a client binding can pin a key
   });
 });

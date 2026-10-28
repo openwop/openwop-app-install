@@ -13,6 +13,10 @@
  * the whole path: the edit/delete routes bump `session.updatedAt` and the engine
  * folds `updatedAt` into the freshness key, so a re-query re-indexes. Born-red on
  * the pre-fix `messageCount`-only watermark.
+ *
+ * ADR 0997: there is no index or watermark any more; search reads the message rows
+ * at request time. These cases now pin that the search reads the CURRENT row, and
+ * the same-millisecond case below, `it.fails` while the watermark existed, passes.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -105,13 +109,11 @@ describe('CSC-1 — search freshness tracks in-place edit + tombstone-delete', (
   });
 
   /**
-   * BLOCKED-ON-PRODUCT (/grade-tests wave 24, filed to grade-code): the watermark is
-   * `${messageCount}:${updatedAt}` with millisecond wall-clock `updatedAt`, so two edits
-   * stamped in the SAME millisecond leave the signature unchanged and the second edit
-   * is never re-indexed (its text unsearchable, the first edit's text still matching).
-   * `it.fails` asserts the CORRECT outcome; it flips red when the watermark is fixed.
+   * Was `it.fails` (/grade-tests wave 24): the `${messageCount}:${updatedAt}` watermark
+   * missed a second edit stamped in the same millisecond. ADR 0997 removed the
+   * watermark, so the correct outcome now holds.
    */
-  it.fails('a second edit in the SAME millisecond is still re-indexed (same-ms watermark collision)', async () => {
+  it('a second edit in the SAME millisecond is still re-indexed (same-ms watermark collision)', async () => {
     const s = await newSession('Same-ms freshness');
     const mid = await appendMsg(s, 'user', 'gecko original');
     stepClock();

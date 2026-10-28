@@ -63,6 +63,16 @@ async function draft(over: { currency?: string; unitPriceMinor?: number; maxAmou
   return p.purchaseId;
 }
 
+/** A draft authored by a DIFFERENT subject in the same tenant + org (erasure scope controls). */
+async function draftBy(createdBy: string): Promise<string> {
+  const p = await buildPurchaseDraft({
+    tenantId: T, orgId: ORG, createdBy, merchantUrl: MERCHANT,
+    intent: 'buy two widgets for the office', maxAmountMinor: 500000, currency: 'USD',
+    lines: [{ externalProductId: 'ext-1', name: 'Widget', quantity: 2, unitPriceMinor: 1200 }],
+  });
+  return p.purchaseId;
+}
+
 /** Drive the ALWAYS approval gate to approved, then place. */
 async function place(purchaseId: string): Promise<void> {
   await expect(checkoutPurchase(T, ORG, purchaseId, { actor: BY })).rejects.toThrow(/sign-off/i);
@@ -104,15 +114,18 @@ describe('UCP-P2-B1 — the sentence a human authorizes', () => {
 
   it('the approval proposal carries the formatted figure (JPY, not JPY/100)', async () => {
     process.env.OPENWOP_UCP_BUYER_ORG_CAP_CURRENCY = 'JPY'; // the cap names its currency
-    const id = await draft({ currency: 'JPY', unitPriceMinor: 617250, maxAmountMinor: 5000000 });
-    await expect(checkoutPurchase(T, ORG, id, { actor: BY })).rejects.toThrow(/sign-off/i);
-    const appr = (await listApprovals(T, 'pending')).find((a) => a.spendIdemKey === `ucp-buy:${id}`);
-    expect(appr?.proposal).toContain('1,234,500');
-    expect(appr?.proposal).not.toContain('12,345.00');
-    // …and the structured figure the inbox can render instead of parsing prose.
-    expect(appr?.amountMinor).toBe(1234500);
-    expect(appr?.amountCurrency).toBe('JPY');
-    delete process.env.OPENWOP_UCP_BUYER_ORG_CAP_CURRENCY;
+    try {
+      const id = await draft({ currency: 'JPY', unitPriceMinor: 617250, maxAmountMinor: 5000000 });
+      await expect(checkoutPurchase(T, ORG, id, { actor: BY })).rejects.toThrow(/sign-off/i);
+      const appr = (await listApprovals(T, 'pending')).find((a) => a.spendIdemKey === `ucp-buy:${id}`);
+      expect(appr?.proposal).toContain('1,234,500');
+      expect(appr?.proposal).not.toContain('12,345.00');
+      // …and the structured figure the inbox can render instead of parsing prose.
+      expect(appr?.amountMinor).toBe(1234500);
+      expect(appr?.amountCurrency).toBe('JPY');
+    } finally {
+      delete process.env.OPENWOP_UCP_BUYER_ORG_CAP_CURRENCY;
+    }
   });
 });
 
@@ -267,18 +280,26 @@ describe('UCP-P2-M3 / M4 — intake and lifecycle', () => {
     // executes is inert, and that is exactly how an erasure gap hides. Drive the HOST
     // entry point instead, which is what a real GDPR erasure runs.
     const id = await draft();
+    const other = await draftBy('user-ucpb-other');
     await eraseSubject(T, BY);
-    const after = (await listPurchases(T, ORG)).find((p) => p.purchaseId === id);
-    expect(after?.intentMandate.intent).toBe('[erased]');
+    const rows = await listPurchases(T, ORG);
+    expect(rows.find((p) => p.purchaseId === id)?.intentMandate.intent).toBe('[erased]');
+    // …and ONLY that subject: a co-member's purchase keeps their words and id.
+    const theirs = rows.find((p) => p.purchaseId === other);
+    expect(theirs?.intentMandate.intent).toBe('buy two widgets for the office');
+    expect(theirs?.createdBy).toBe('user-ucpb-other');
   });
 
   it('erasing a subject removes their words and id but keeps the spend record', async () => {
     const id = await draft();
+    const other = await draftBy('user-ucpb-other');
     await eraseSubjectUcpPurchases(T, BY);
-    const after = (await listPurchases(T, ORG)).find((p) => p.purchaseId === id);
+    const rows = await listPurchases(T, ORG);
+    const after = rows.find((p) => p.purchaseId === id);
     expect(after?.intentMandate.intent).toBe('[erased]');
     expect(after?.createdBy).toBe('erased');
     expect(after?.cartMandate.totalMinor).toBe(2400); // the org's spend record survives
+    expect(rows.find((p) => p.purchaseId === other)?.createdBy, 'another subject is untouched').toBe('user-ucpb-other');
   });
 });
 
@@ -293,10 +314,27 @@ describe('R3 B-2 — the `unknown` state finally has exits', () => {
     merchantReply = { status: 'confirmed' };
     const still = await trackPurchase(T, ORG, id, { actingUserId: BY });
     expect(still.status).toBe('unknown');
+
+    // WITH an extOrderId (a diverged total parks `unknown` but keeps the merchant's id),
+    // a merchant answer for that order PROMOTES it — the leg this title names.
+    const diverged = await draft();
+    await place(diverged);
+    merchantReply = { orderId: 'ext-track', totalMinor: 16000, currency: 'USD' };
+    await expect(checkoutPurchase(T, ORG, diverged, { actor: BY })).rejects.toThrow(/nobody approved/i);
+    const parked = await getPurchase(T, ORG, diverged);
+    expect(parked?.status).toBe('unknown');
+    expect(parked?.extOrderId).toBe('ext-track');
+    merchantReply = { status: 'confirmed' };
+    const promoted = await trackPurchase(T, ORG, diverged, { actingUserId: BY });
+    expect(promoted.status).toBe('placed');
+    expect(promoted.extStatus).toBe('confirmed');
+    expect((await getPurchase(T, ORG, diverged))?.status, 'the promotion is persisted').toBe('placed');
   });
 
   it('closeUnknownPurchase: not_placed → failed (cap releases); confirmed_placed → placed; only FROM unknown; reason required', async () => {
-    const id = await draft();
+    process.env.OPENWOP_UCP_BUYER_ORG_CAP_MINOR = '5000';
+    try {
+    const id = await draft({ unitPriceMinor: 2000 }); // 4000 of a 5000 cap
     await place(id);
     merchantReply = { ok: true };
     await expect(checkoutPurchase(T, ORG, id, { actor: BY })).rejects.toThrow(/no order id/i);
@@ -305,19 +343,32 @@ describe('R3 B-2 — the `unknown` state finally has exits', () => {
     await expect(closeUnknownPurchase(T, ORG, id, { outcome: 'not_placed', reason: '  ', actingUserId: BY }))
       .rejects.toThrow(/reason/i);
 
+    // While `unknown`, the 4000 is possibly committed: a second 4000 does not fit.
+    const blocked = await draft({ unitPriceMinor: 2000 });
+    await expect(checkoutPurchase(T, ORG, blocked, { actor: BY })).rejects.toThrow(/spend cap/i);
+
     const closed = await closeUnknownPurchase(T, ORG, id, { outcome: 'not_placed', reason: 'Merchant support confirmed no order exists.', actingUserId: BY });
     expect(closed.status).toBe('failed');
+    // …and closing it as not placed RELEASES the cap: the same second purchase now reaches sign-off.
+    await expect(checkoutPurchase(T, ORG, blocked, { actor: BY })).rejects.toThrow(/sign-off/i);
 
     // Only from unknown — a second close 400s naming the current status.
     await expect(closeUnknownPurchase(T, ORG, id, { outcome: 'confirmed_placed', reason: 'x', actingUserId: BY }))
       .rejects.toThrow(/'failed'/);
 
     // The other outcome: park a second purchase, close as confirmed_placed.
-    const id2 = await draft();
+    await __resetUcpBuyer();
+    const id2 = await draft({ unitPriceMinor: 2000 });
     await place(id2);
     merchantReply = { ok: true };
     await expect(checkoutPurchase(T, ORG, id2, { actor: BY })).rejects.toThrow(/no order id/i);
     const kept = await closeUnknownPurchase(T, ORG, id2, { outcome: 'confirmed_placed', reason: 'Order visible in the merchant dashboard.', actingUserId: BY });
-    expect(kept.status).toBe('placed'); // cap stays consumed
+    expect(kept.status).toBe('placed');
+    // …and the cap STAYS consumed: a further 4000 is refused.
+    const after = await draft({ unitPriceMinor: 2000 });
+    await expect(checkoutPurchase(T, ORG, after, { actor: BY })).rejects.toThrow(/spend cap/i);
+    } finally {
+      process.env.OPENWOP_UCP_BUYER_ORG_CAP_MINOR = '100000000';
+    }
   });
 });

@@ -6,8 +6,14 @@
  * `{{varName}}` `source:"variable"` slot) and points the node's `*PromptRef` at it —
  * so a prompt-body param defers portably, and a SENSITIVE param can reach a prompt
  * safely (redacted at compose, never frozen). This exercises the expansion-side lift
- * + the compose-layer redaction/fence primitive; the run-path binding + gated
- * end-to-end leg are the following slice.
+ * + the compose-layer redaction/fence primitive. The run-path binding and the
+ * gated end-to-end leg live in `workflow-chain-deferred-runpath.test.ts`.
+ *
+ * What breaks it: a deferred prompt that freezes `{{params.x}}` into config, a
+ * sensitive param that reaches persisted state or is minted as a plaintext
+ * `source:"variable"` (RFC 0124 §Security amendment: it must be `source:"secret"`),
+ * a sensitive param in a non-prompt key that is not refused, a non-deterministic
+ * template id, or a compose payload that leaks a sensitive value to observability.
  */
 import { describe, it, expect } from 'vitest';
 import { expandChain, type WorkflowChain } from '../src/host/workflowChainPackLoader.js';
@@ -89,7 +95,11 @@ describe('RFC 0124 G3 — inline-prompt-body lift', () => {
     const ref = (def.nodes[0].config as { systemPromptRef: { templateId: string; version: string } }).systemPromptRef;
     const tmpl = (getTemplate(ref.templateId, { version: ref.version }) as { template: PromptTemplate }).template;
     const keyVar = (def.variables ?? []).find((v) => v.name.endsWith('_apiKey'))!;
-    expect((tmpl.variables ?? []).find((v) => v.name === keyVar.name)!.sensitive).toBe(true);
+    const keyDecl = (tmpl.variables ?? []).find((v) => v.name === keyVar.name)!;
+    expect(keyDecl.sensitive).toBe(true);
+    // RFC 0124 §Security amendment — a sensitive prompt param is a BYOK reference
+    // (`source:"secret"`), never an overridable plaintext `source:"variable"`.
+    expect(keyDecl.source).toBe('secret');
     // secret value NEVER appears in the persisted definition or the minted template.
     expect(JSON.stringify(def)).not.toContain('secret-xyz');
     expect(JSON.stringify(tmpl)).not.toContain('secret-xyz');

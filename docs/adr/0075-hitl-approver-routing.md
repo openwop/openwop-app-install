@@ -141,6 +141,22 @@ The credential-bound and step-up capabilities are the genuinely regulated-workfl
 - Group/role + `audience` on the **interrupt** path: requires the optional fields on the `kind:"approval"` `InterruptPayload` (`suspend-request.schema.json`) + the `interrupt.approverRouting` capability advertisement. Wire shape agreed with the spec session (structured capability; `audience` defaults to the eligible set). Host promotion (forward refs onto the payload, advertise the capability, wire `audience`-based targeting) lands when the schema is on `origin`.
 - **D3** decision-time membership snapshot for **interrupt** replay/fork; **D4** pre-flight resolvability for interrupt-path group/role (needs run-create org context) — both couple to the same wire.
 
+> **CORRECTED 2026-10-20 (security, found by ADR 0942 P1): `approverOrgId` was
+> caller-writable.** D3/D4 say the org stamp is host-written and fail-closed.
+> `POST /runs` spread the caller's `metadata` into the run and wrote the host
+> value only when the workflow had group/role gates. On every other workflow, a
+> caller's `approverOrgId` survived. A later gate resolving role refs (an ADR 0942
+> autonomy gate, an ADR 0962 campaign gate) would then route approval to the
+> admins of an org the caller chose. The scheduler had the same hole one step
+> removed: job `metadata` is copied onto every run the job starts.
+> - **Fix:** `APPROVER_SCOPE_KEYS` (`host/runDispatch.ts`) is stripped from caller
+>   metadata on both entry points: `stripCallerAttribution` (POST /runs) and the
+>   scheduler's `RESERVED_JOB_METADATA_KEYS`. It is not added to the global reserved
+>   list, because host paths (this pre-flight, the campaign client stamps) write it
+>   on purpose.
+> - **Witness:** `test/run-attribution-not-caller-writable.test.ts`, one leg per
+>   entry point, each red with its strip removed.
+
 ## Consequences
 
 **Positive:** the accounting/finance scenario works end-to-end host-side; one resolver kills drift; the protocol is not forked; targeted delivery + open-gate-safe pre-flight remove the silent-deadlock and notify-everyone failure modes; the design leaves clean seams for the RFC-gated portability/credential/step-up work.

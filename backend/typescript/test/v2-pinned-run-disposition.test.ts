@@ -3,6 +3,8 @@ import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 
 import { createApp } from '../src/index.js';
+import type { Storage } from '../src/storage/storage.js';
+import { bareRunId } from './support/bareRunId.js';
 
 /**
  * `persistence.md` §"Runs pinned to v1" — a non-terminal run a v2 host inherits
@@ -10,6 +12,25 @@ import { createApp } from '../src/index.js';
  * or cancel it, **never follow a pin silently**. Any pinned change id no longer
  * implemented ⇒ `run.cancelled` with reason `v1_pin_unsupported` and
  * `cancelledBy: "v2-cutover"`.
+ *
+ * Witnessed (grade-tests w63): an implemented-set check that never reports a
+ * pin → the UNSUPPORTED cases red; disposing unconditionally → the SUPPORTED
+ * case red; the tenant branch of `loadByScopeAndTenant` returning the run
+ * undisposed (the original defect) → the configured-key cases red.
+ *
+ * IDEMPOTENCE IS GUARDED THREE WAYS, and a single weakening of any one stays
+ * green by design:
+ *  1. a cancelled ROW returns early on the TERMINAL status check;
+ *  2. a non-terminal row whose LOG already holds `run.cancelled` is caught by
+ *     the log check (this case resets the row to `running` — a lost row
+ *     update — so only 2 and 3 can absorb it; the fixture guards prove the
+ *     reset landed and the read still succeeds);
+ *  3. the cancel's `eventId` is DERIVED (`<runId>-v1-pin-cancelled`), so a
+ *     repeat append is the same event and the store keeps one.
+ * Round 1 (pr-idempotent) removed only 1-or-2's early return and round 2
+ * (pr-idempotent-r2) only 2: both vacuous, because 3 held. The witness is
+ * pr-idempotent-both-r3: drop the log check AND mint a fresh eventId, and the
+ * reset leg appends a second `run.cancelled`.
  */
 let server: Server;
 let base: string;
@@ -28,6 +49,7 @@ const PRINCIPALS = [
   { label: 'a configured tenant key', key: 'k-pin-tenant' },
 ] as const;
 let V2 = v2As('dev-token');
+let appStorage: Storage;
 
 beforeAll(async () => {
   savedKeys = process.env.OPENWOP_API_KEYS;
@@ -36,6 +58,7 @@ beforeAll(async () => {
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   process.env.OPENWOP_TEST_SEAM_ENABLED = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+  appStorage = app.locals.storage as Storage;
   server = await new Promise<Server>((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
@@ -102,6 +125,16 @@ describe.each(PRINCIPALS)('runs pinned to v1 — read as $label', ({ key }) => {
     await readEvents(runId); await readEvents(runId); await readEvents(runId);
     const cancelled = (await readEvents(runId)).filter((e) => e['type'] === 'run.cancelled');
     expect(cancelled.length, 'one cancellation, however many times the run is read').toBe(1);
+    // The row update was lost (another instance, a crash): the ROW reads
+    // running again while the LOG already carries the cancel. A read must not
+    // append a second run.cancelled.
+    await appStorage.updateRun(bareRunId(runId), { status: 'running' });
+    expect((await appStorage.getRun(bareRunId(runId)))?.status, 'fixture guard: the row really reads running').toBe('running');
+    const r1 = await fetch(`${base}/runs/${encodeURIComponent(runId)}/events/poll?timeout=1`, { headers: V2 });
+    expect(r1.status, 'fixture guard: the read after the reset succeeds').toBe(200);
+    await readEvents(runId);
+    const after = (await readEvents(runId)).filter((e) => e['type'] === 'run.cancelled');
+    expect(after.length, 'the log check absorbs a lost row update').toBe(1);
   });
 
   it('a SUPPORTED pin continues — the rule is not "cancel every pinned run"', async () => {
@@ -113,8 +146,10 @@ describe.each(PRINCIPALS)('runs pinned to v1 — read as $label', ({ key }) => {
     try {
       const runId = await seedPinned(changeId);
       await readEvents(runId);
-      const { body } = await readRun(runId);
-      expect(body?.status, 'every pinned change id is implemented, so the run MUST continue').not.toBe('cancelled');
+      const { status, body } = await readRun(runId);
+      expect(status).toBe(200);
+      expect(body?.status, 'every pinned change id is implemented, so the run MUST continue').toBe('running');
+      expect((await readEvents(runId)).some((e) => e['type'] === 'run.cancelled')).toBe(false);
     } finally {
       if (prev === undefined) delete process.env.OPENWOP_IMPLEMENTED_CHANGE_IDS; else process.env.OPENWOP_IMPLEMENTED_CHANGE_IDS = prev;
     }

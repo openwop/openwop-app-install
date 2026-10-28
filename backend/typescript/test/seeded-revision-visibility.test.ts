@@ -12,6 +12,9 @@
  * that matters is the NEGATIVE one**: a foreign TENANT's row must still not surface.
  * That is the property Review M5 exists for, and trading a display gap for a
  * cross-tenant leak would be a far worse bug than the one being fixed.
+ *
+ * PROTECTED (tenant isolation, Review M5). Sabotage witnesses (grade-tests 8f
+ * w2): rv-leak, rv-host, rv-sentinel.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -29,8 +32,10 @@ const rows = [
 
 describe('seeded revision visibility', () => {
   it('the sentinel is what the WRITER uses — not a re-typed literal', () => {
-    // A duplicated string on either side is exactly how a display filter silently
-    // stops matching; this pins them to one constant.
+    // A PERSISTED-DATA compatibility pin. Writer and reader both import the
+    // constant, so they cannot disagree with each other; what CAN break is the
+    // spelling against rows already stored as `'host'` (ADR 0507's migration).
+    // Renaming the constant would hide every existing host-attributed revision.
     expect(HOST_REVISION_TENANT).toBe('host');
   });
 
@@ -54,10 +59,16 @@ describe('seeded revision visibility', () => {
     expect(carol).not.toContain('user:bob');
   });
 
-  it('a tenant literally named like the sentinel cannot be conjured from input', () => {
-    // Guards the reasoning, not just the filter: real tenant ids are `user:`/`org:`
-    // shaped, so a bare `host` cannot collide with one. If tenant-id minting ever
-    // admits a bare word, this fix needs revisiting.
+  it('documented assumption (PROTECTED-LOW): real tenant ids are prefixed, so the bare sentinel cannot collide', () => {
+    // A DOCUMENTED ASSUMPTION, not a behavioural guard: it checks this file's own
+    // fixture rows, so no product change can turn it red. The claim it records —
+    // tenant-id minting never yields a bare `host` — has no product grammar to
+    // assert against (grade-tests 8f w2 searched src/ for a tenant-id validator or
+    // pattern export and found none; `isPersonalTenantId` / `isAnonTenantId` in
+    // host/requestSubject.ts classify, they do not refuse). PROTECTED-LOW: kept so
+    // the reasoning stays next to the filter; if a tenant-id grammar export lands,
+    // assert here that it refuses `'host'`. If minting ever admits a bare word,
+    // this fix needs revisiting.
     const realShaped = rows.map((r) => r.tenantId).filter((t) => t !== HOST_REVISION_TENANT);
     for (const t of realShaped) expect(t).toMatch(/^(user|org|anon):/);
   });

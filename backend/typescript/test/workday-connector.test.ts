@@ -7,6 +7,11 @@
  * calls `ctx.connectors` correctly (GET, bearer), maps the Workday `{data:[…]}` collection
  * to rows, stamps deterministic provenance (resource/baseUrl), and fails closed (no
  * connector surface, missing/invalid config, connector error).
+ *
+ * Sabotage-witnessed (wave 64, probes 8fw5g1-wd-*): read-only flag, the egress pin
+ * (wd-apihosts-r2 — now an exact list, so a widened pin is red), the resource
+ * allowlist, the rows mapping, the GET method, the connector error code and the
+ * no-connectors guard each turn their case red.
  */
 
 import { describe, expect, it, beforeAll } from 'vitest';
@@ -27,8 +32,8 @@ describe('ADR 0082 §1 — dedicated read-only workday provider', () => {
   it('registers a workday provider pinned to *.workday.com with NO write scope', () => {
     const wd = getProvider('workday');
     expect(wd).toBeTruthy();
-    expect(wd?.apiHosts).toContain('workday.com');
-    expect(wd?.apiHosts).toContain('myworkday.com');
+    // The pin IS the claim: exactly these two eTLD+1s, nothing wider.
+    expect(wd?.apiHosts).toEqual(['workday.com', 'myworkday.com']);
     expect(wd?.readOnly).toBe(true);
     // Read-only: a read scope group, and NO write group at all (HCM/succession is read).
     expect((wd?.scopes.read ?? []).length).toBeGreaterThan(0);
@@ -58,18 +63,21 @@ describe('ADR 0082 §1 — core.workday.query node', () => {
       },
     });
     const out = await getNode().execute(ctx);
-    expect(out.status).toBe('success');
-    const o = (out as { outputs: Record<string, unknown> }).outputs;
-    expect(o.rowCount).toBe(2);
-    expect((o.rows as unknown[]).length).toBe(2);
-    expect(o.resource).toBe('serviceDates');
-    expect(o.baseUrl).toBe('https://acme.workday.com/ccx/api/v1/acme_tenant');
-    // GET, bearer, to the tenant base + resource + the limit/params query.
-    expect(invoked!.method).toBe('GET');
-    expect(invoked!.authScheme).toBe('bearer');
-    expect(invoked!.url).toContain('https://acme.workday.com/ccx/api/v1/acme_tenant/serviceDates?');
-    expect(invoked!.url).toContain('limit=50');
-    expect(invoked!.url).toContain('effective=2026-06-01');
+    expect(out).toEqual({
+      status: 'success',
+      outputs: {
+        rows: [{ workerId: 'w1', anniversary: '2016-06-20' }, { workerId: 'w2', anniversary: '2014-06-20' }],
+        rowCount: 2,
+        resource: 'serviceDates',
+        baseUrl: 'https://acme.workday.com/ccx/api/v1/acme_tenant',
+      },
+    });
+    // GET, bearer, to the tenant base + resource + the limit/params query — the exact URL.
+    expect(invoked).toEqual({
+      url: 'https://acme.workday.com/ccx/api/v1/acme_tenant/serviceDates?limit=50&effective=2026-06-01',
+      method: 'GET',
+      authScheme: 'bearer',
+    });
   });
 
   it('tolerates a bare-array response body', async () => {
@@ -78,22 +86,21 @@ describe('ADR 0082 §1 — core.workday.query node', () => {
       connectors: { invoke: async () => ({ ok: true, data: [{ workerId: 'w1' }] }) },
     });
     const out = await getNode().execute(ctx);
-    expect((out as { outputs: Record<string, unknown> }).outputs.rowCount).toBe(1);
+    expect(out).toEqual({ status: 'success', outputs: { rows: [{ workerId: 'w1' }], rowCount: 1, resource: 'workers', baseUrl: 'https://acme.workday.com/x' } });
   });
 
   it('fails closed: no connector surface, missing baseUrl, invalid resource, connector error', async () => {
     // no connectors surface
-    expect((await getNode().execute(makeCtx({ config: { baseUrl: 'https://acme.workday.com/x', resource: 'workers' } }))).status).toBe('failure');
+    expect(await getNode().execute(makeCtx({ config: { baseUrl: 'https://acme.workday.com/x', resource: 'workers' } })))
+      .toEqual({ status: 'failure', error: { code: 'host_capability_missing', message: 'host.connectors surface is not available.' } });
     // missing baseUrl
     const noBase = await getNode().execute(makeCtx({ config: { resource: 'workers' }, connectors: { invoke: async () => ({ ok: true }) } }));
-    expect(noBase.status).toBe('failure');
+    expect(noBase).toMatchObject({ status: 'failure', error: { code: 'invalid_config', message: expect.stringContaining('requires config.baseUrl') } });
     // invalid resource (not in the allowlist)
     const badRes = await getNode().execute(makeCtx({ config: { baseUrl: 'https://acme.workday.com/x', resource: 'salaries' }, connectors: { invoke: async () => ({ ok: true }) } }));
-    expect(badRes.status).toBe('failure');
-    expect((badRes as { error: { code: string } }).error.code).toBe('invalid_config');
+    expect(badRes).toMatchObject({ status: 'failure', error: { code: 'invalid_config', message: expect.stringContaining('requires config.resource') } });
     // connector error propagates
     const connErr = await getNode().execute(makeCtx({ config: { baseUrl: 'https://acme.workday.com/x', resource: 'workers' }, connectors: { invoke: async () => ({ ok: false, error: 'connector_no_connection' }) } }));
-    expect(connErr.status).toBe('failure');
-    expect((connErr as { error: { code: string } }).error.code).toBe('connector_no_connection');
+    expect(connErr).toMatchObject({ status: 'failure', error: { code: 'connector_no_connection' } });
   });
 });

@@ -6,7 +6,7 @@
  * (the backend fail-closes — a viewer sees a 403 surfaced as a toast).
  */
 import { Button } from '../../ui/Button.js';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { confirm } from '../../ui/confirm.js';
@@ -19,6 +19,8 @@ import { toast } from '../../ui/toast.js';
 import { ImageIcon, PackageIcon, PlusIcon, TrashIcon } from '../../ui/icons/index.js';
 import { MediaAssetCard, MediaAssetRow } from './MediaViews.js';
 import { AltTextDialog } from './AltTextDialog.js';
+// ADR 0945 P5 — loaded on demand (most assets have no generation stamp).
+const ProvenanceDialog = lazy(() => import('./ProvenanceDialog.js'));
 import { Modal } from '../../ui/Modal.js';
 import {
   createCollection,
@@ -77,6 +79,8 @@ export function MediaLibraryPage(): JSX.Element {
   const [checkingUsageFor, setCheckingUsageFor] = useState<string | null>(null);
   const [altTextForId, setAltTextForId] = useState<string | null>(null); // ADR 0363 P1
   const altTextFor = useMemo(() => assets?.find((a) => a.assetId === altTextForId) ?? null, [assets, altTextForId]);
+  const [provenanceForId, setProvenanceForId] = useState<string | null>(null); // ADR 0945 P5
+  const provenanceFor = useMemo(() => assets?.find((a) => a.assetId === provenanceForId) ?? null, [assets, provenanceForId]);
 
   const selectedParam = searchParams.get('collection');
   const selected = useMemo(() => {
@@ -419,13 +423,13 @@ export function MediaLibraryPage(): JSX.Element {
             ) : viewMode === 'grid' ? (
               <div className="card-grid">
                 {assets.map((a) => (
-                  <MediaAssetCard key={a.assetId} asset={a} onDelete={() => void removeAsset(a.assetId, a.name)} deleting={checkingUsageFor === a.assetId} onShowUsage={() => showUsage(a.assetId)} onEditAltText={() => setAltTextForId(a.assetId)} />
+                  <MediaAssetCard key={a.assetId} asset={a} onDelete={() => void removeAsset(a.assetId, a.name)} deleting={checkingUsageFor === a.assetId} onShowUsage={() => showUsage(a.assetId)} onEditAltText={() => setAltTextForId(a.assetId)} onShowProvenance={() => setProvenanceForId(a.assetId)} />
                 ))}
               </div>
             ) : (
               <div className="surface-card list-view">
                 {assets.map((a) => (
-                  <MediaAssetRow key={a.assetId} asset={a} onDelete={() => void removeAsset(a.assetId, a.name)} deleting={checkingUsageFor === a.assetId} onShowUsage={() => showUsage(a.assetId)} onEditAltText={() => setAltTextForId(a.assetId)} />
+                  <MediaAssetRow key={a.assetId} asset={a} onDelete={() => void removeAsset(a.assetId, a.name)} deleting={checkingUsageFor === a.assetId} onShowUsage={() => showUsage(a.assetId)} onEditAltText={() => setAltTextForId(a.assetId)} onShowProvenance={() => setProvenanceForId(a.assetId)} />
                 ))}
               </div>
             )}
@@ -441,6 +445,12 @@ export function MediaLibraryPage(): JSX.Element {
           onClose={() => setAltTextForId(null)}
           onSaved={(u) => setAssets((prev) => prev?.map((x) => (x.assetId === u.assetId ? u : x)) ?? prev)}
         />
+      ) : null}
+
+      {provenanceFor && orgId ? (
+        <Suspense fallback={null}>
+          <ProvenanceDialog orgId={orgId} asset={provenanceFor} onClose={() => setProvenanceForId(null)} />
+        </Suspense>
       ) : null}
 
       {usageFor ? (

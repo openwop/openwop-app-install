@@ -7,9 +7,14 @@
  * public keyring `deploy/trusted-keys/`. If anyone re-serializes pack.json,
  * edits entry.mjs without re-signing, or breaks the keyring index, THIS test
  * goes red — the signature chain is CI-enforced, not folklore.
+ *
+ * Wave 61: the sandbox-fallback case also asserts the served body is the
+ * committed `entry.html` (its marker read from the file), not just a 200
+ * text/html.
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { dirname, resolve } from 'node:path';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
 import type http from 'node:http';
@@ -92,5 +97,11 @@ describe('ADR 0367 P3 — committed partner pack through the full path', () => {
     );
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toContain('text/html');
+    // It is THIS pack's committed sandbox document (read from the file, not
+    // copied here), not a generic page that also answers text/html.
+    const committed = readFileSync(resolve(REPO_ROOT, 'packs', PACK_NAME, 'entry.html'), 'utf8');
+    const marker = /<strong>[^<]+<\/strong>/.exec(committed)?.[0];
+    expect(marker, 'entry.html has no <strong> marker to look for').toBeDefined();
+    expect(await res.text()).toContain(marker!);
   });
 });

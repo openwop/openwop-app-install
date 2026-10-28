@@ -5,6 +5,15 @@
  *   - sanitizeDetails walks nested objects/arrays and ALSO scrubs object KEY
  *     names — but keys use the high-signal-only rule so a legitimate long field
  *     name is NOT falsely redacted (a token-shaped key still is).
+ *
+ * SECURITY invariant `secret-leakage-error-envelope`: outputs are asserted
+ * EXACTLY, so a replacement that appends the marker but keeps the secret fails.
+ *
+ * Sabotage witnessed red (8f grade-tests wave 2): the JWT rule removed
+ * (`8fw2g3-san-jwt`), the high-entropy rule removed (`-san-entropy`), the
+ * broad base64 rule applied to keys (`-san-keybroad`), the provider-key rule
+ * dropped from keys (`-san-keyprov`), keys not walked (`-san-walkkey`), and
+ * arrays not walked (`-san-walkarr`).
  */
 
 import { describe, expect, it } from 'vitest';
@@ -13,11 +22,11 @@ import { sanitizeForErrorMessage, sanitizeKeyName, sanitizeDetails } from '../sr
 describe('sanitizeForErrorMessage (values)', () => {
   it('redacts a JWT', () => {
     const jwt = 'eyAbcdefgh.eyIjklmnop.SiGnAtUrE12345678';
-    expect(sanitizeForErrorMessage(`token=${jwt}`)).toContain('<redacted:jwt>');
+    expect(sanitizeForErrorMessage(`token=${jwt}`)).toBe('token=<redacted:jwt>');
   });
   it('redacts a provider-key prefix and a long high-entropy blob', () => {
-    expect(sanitizeForErrorMessage('key sk_abcdefghijklmno')).toContain('<redacted:provider_key>');
-    expect(sanitizeForErrorMessage('blob ' + 'A'.repeat(40))).toContain('<redacted:high-entropy>');
+    expect(sanitizeForErrorMessage('key sk_abcdefghijklmno')).toBe('key <redacted:provider_key>');
+    expect(sanitizeForErrorMessage('blob ' + 'A'.repeat(40))).toBe('blob <redacted:high-entropy>');
   });
 });
 
@@ -41,12 +50,14 @@ describe('sanitizeDetails (recursive, keys + values)', () => {
       nested: { items: ['ok', 'sk_zyxwvutsrqponml'] },
     };
     const out = sanitizeDetails(input);
-    expect(out.normalField).toBe('hello');
-    // legit long key preserved
-    expect(out.a_very_long_but_legitimate_configuration_field_name).toBe('kept');
-    // token-shaped key redacted
-    expect(out['<redacted:provider_key>']).toBe('val');
-    // value inside nested array redacted
-    expect((out.nested as { items: string[] }).items[1]).toContain('<redacted:provider_key>');
+    // The whole output: legit keys preserved, the token-shaped key redacted (and
+    // gone), the value inside the nested array redacted, structure kept.
+    expect(out).toEqual({
+      normalField: 'hello',
+      a_very_long_but_legitimate_configuration_field_name: 'kept',
+      '<redacted:provider_key>': 'val',
+      nested: { items: ['ok', '<redacted:provider_key>'] },
+    });
+    expect(out).not.toHaveProperty('sk_abcdefghijklmno');
   });
 });

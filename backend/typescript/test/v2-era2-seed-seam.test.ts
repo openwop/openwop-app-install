@@ -8,6 +8,10 @@
  * way in, all four would pass while testing nothing — the translation they exist
  * to witness would have already happened before they looked. So the assertions
  * below are about what is STORED, not about the 201.
+ *
+ * Witnessed (8f W4): es-era-stamp, es-type-normalised, es-renumber,
+ * es-schema-version, es-env-gate-advert, es-env-gate-route,
+ * es-fixture-tenant-r2 (after the read-back assertion was made exact).
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -65,7 +69,16 @@ describe('era-2 event-log seed seam (RFC 0176)', () => {
     const readBack = await fetch(`${base}/runs/${encodeURIComponent(String(res.json['runId']))}`, {
       headers: { ...AUTH, 'OpenWOP-Version': '2' },
     });
-    expect(readBack.status, `the caller must be able to read the run it just seeded (tenant ${seededTenant})`).not.toBe(403);
+    // 200 exactly, and the SAME run: a foreign-tenant read answers 404, which the
+    // old `.not.toBe(403)` accepted (8f W4 probe es-fixture-tenant was vacuous).
+    expect(readBack.status, `the caller must be able to read the run it just seeded (tenant ${seededTenant})`).toBe(200);
+    const snap = (await readBack.json()) as { runId?: unknown; owner?: { tenant?: unknown } };
+    expect(snap.runId).toBe(res.json['runId']);
+    // The STORED run's tenant, read back through the snapshot's owner block. The
+    // read itself is not tenant-fenced for this single-tenant dev-token caller,
+    // so a 200 alone could not see a fixture-tenant run (8f W4 r2: es-fixture-
+    // tenant-r2 was still vacuous). `owner.tenant` is projected from run.tenantId.
+    expect(snap.owner?.tenant, 'the seeded run must belong to the caller, not a fixture tenant').toBe(seededTenant);
   });
 
   /**
@@ -109,6 +122,9 @@ describe('era-2 event-log seed seam (RFC 0176)', () => {
       // them — and without this line the seam planted era-3 runs while every
       // other assertion in the file stayed green.
       const run = await storage.getRun(rawId);
+      // Stored under the caller's tenant (this bare app has no tenant middleware,
+      // so the caller is `default`), never a fixture tenant.
+      expect(run?.tenantId).toBe('default');
       expect(run?.eventLogSchemaVersion, 'the fixture must BE era 2; this host stamps 3 on any run inserted without one').toBe(2);
     } finally { await new Promise<void>((r) => local.close(() => r())); }
   });
@@ -160,6 +176,7 @@ describe('era-2 event-log seed seam (RFC 0176)', () => {
       process.env.OPENWOP_TEST_SEAM_ENABLED = 'false';
       const res = await seed({ eventLogSchemaVersion: 2, status: 'completed', events: V1_EVENTS });
       expect(res.status).toBe(404);
+      expect(String(res.json['message'])).toBe('The conformance seam surface is not enabled on this host.');
     } finally { process.env.OPENWOP_TEST_SEAM_ENABLED = prev; }
   });
 });

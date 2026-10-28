@@ -1,4 +1,12 @@
-/** ADR 0726 — host-derived trigger subscription ids are inside the corpus opaque grammar, and a legacy colon-spelled row moves on first use. */
+/**
+ * ADR 0726 — host-derived trigger subscription ids are inside the corpus opaque
+ * grammar, and a legacy colon-spelled row moves on first use (tracker TST-BAA-7).
+ *
+ * The colon spelling (`host:kanban:<board>`) could never bind on the major-2
+ * wire. Red when (sabotage-witnessed, wave 60): the key is no longer sanitised
+ * into the grammar; `registerHostDerivedSubscription` skips the rekey; the
+ * rekey copies the row but leaves the legacy one behind.
+ */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
 import { __resetHostExtPersistence, initHostExtPersistence } from '../src/host/hostExtPersistence.js';
@@ -22,6 +30,7 @@ describe('ADR 0726 — host-derived subscription ids', () => {
     expect(got).toBe(id);
     expect(await getSubscription(legacyId), 'the legacy row is gone').toBeFalsy();
     expect((await getSubscription(id))?.tenantId).toBe('t1');
+    expect((await getSubscription(id))?.source, 'the moved row keeps what the legacy row recorded').toBe('queue');
     expect(await registerHostDerivedSubscription('kanban', 'board-legacy-0000000001', { tenantId: 't1', source: 'queue', label: 'again' })).toBe(id);
   });
 });

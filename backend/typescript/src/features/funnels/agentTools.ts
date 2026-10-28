@@ -31,13 +31,21 @@ import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
 import { resolveOne } from '../../host/featureToggles/service.js';
 import { listOrgs, resolveEffectiveAccess } from '../../host/accessControlService.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
-import { listFunnels, getFunnel, createFunnel, updateFunnel } from './funnelsService.js';
+import { listFunnels, getFunnel, createFunnel, updateFunnel, FUNNEL_STEP_KINDS } from './funnelsService.js';
+import type { StartRunDeps } from '../../host/runStarter.js';
+import { OpenwopError } from '../../types.js';
+import { runnableBlueprints, FILLED_BY_GENERATE, FUNNEL_ARCHITECT_AGENT_ID } from './blueprints.js';
+import { generateFunnelFromBlueprint } from './generateService.js';
+import { surfaceDispatchedRun } from '../../host/turnRunDispatch.js';
+
 import { getFunnelStats } from './funnelStats.js';
 
 export const FUNNELS_LIST_TOOL_ID = 'openwop:funnels.list';
 export const FUNNELS_GET_TOOL_ID = 'openwop:funnels.get';
 export const FUNNELS_STEP_STATS_TOOL_ID = 'openwop:funnels.step-stats';
 export const FUNNELS_DRAFT_TOOL_ID = 'openwop:funnels.draft';
+export const FUNNELS_BLUEPRINTS_TOOL_ID = 'openwop:funnels.blueprints';
+export const FUNNELS_GENERATE_TOOL_ID = 'openwop:funnels.generate';
 
 type ToolResult = { content: string; isError?: boolean };
 
@@ -102,7 +110,7 @@ function projectStepTotals(days: Awaited<ReturnType<typeof getFunnelStats>>): {
   return { steps, days: days.length };
 }
 
-export function registerFunnelsAgentTools(): void {
+export function registerFunnelsAgentTools(deps: StartRunDeps): void {
   // ── Reads — ground before proposing. FAIL EMPTY without an acting user. ────
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
@@ -163,7 +171,11 @@ export function registerFunnelsAgentTools(): void {
       return ok({
         funnel: {
           funnelId: funnel.funnelId, name: funnel.name, slug: funnel.slug, status: funnel.status,
-          steps: funnel.steps.map((s) => ({ stepId: s.stepId, kind: s.kind, pageId: s.pageId, ...(s.name ? { name: s.name } : {}), ...(s.routing ? { routing: s.routing } : {}) })),
+          steps: funnel.steps.map((s) => ({
+            stepId: s.stepId, kind: s.kind, pageId: s.pageId, ...(s.name ? { name: s.name } : {}), ...(s.routing ? { routing: s.routing } : {}),
+            // Read before write: the bindings a revision must keep (or deliberately clear).
+            ...(s.offer ? { offer: s.offer } : {}), ...(s.webinar ? { webinar: s.webinar } : {}), ...(s.application ? { application: s.application } : {}),
+          })),
         },
       });
     },
@@ -220,9 +232,14 @@ export function registerFunnelsAgentTools(): void {
           funnelId: { type: 'string', description: 'Omit to create a new draft; provide to revise an existing DRAFT funnel.' },
           name: { type: 'string', description: 'Funnel name (required when creating).' },
           slug: { type: 'string', description: 'Optional public slug; derived from the name when omitted.' },
+          campaignId: { type: 'string', description: 'Optional: link the funnel to a campaign of this organization (ADR 0941 canonical campaign id).' },
           steps: {
             type: 'array',
-            description: 'Ordered steps. Each: { kind: landing|optin|sales|checkout|upsell|downsell|thankyou, pageId, name?, routing? }.',
+            description: `Ordered steps. Each: { kind: ${FUNNEL_STEP_KINDS.join('|')}, pageId, name?, routing?, offer?, webinar?, application? }. `
+              + 'webinar (webinar only) = { marketingEventId } of a webinar of this organization; application (application only) = { formId } of a form of this organization. '
+              + 'A webinar or application step\'s routing outcome is decided by the server (attendance; a qualification verdict), never by the visitor. '
+              + 'offer (checkout|upsell|downsell only) = { productIds: 1-5 product ids, bumpProductIds?: 0-5 (checkout only), oneClickProductId?: (upsell|downsell only) }; '
+              + 'every product must be an active product of this organization. Omit offer to keep a step\'s stored offer; null clears it.',
             items: { type: 'object', additionalProperties: true },
           },
           orgId: { type: 'string', description: 'Organization id — only needed when the workspace has more than one organization.' },
@@ -259,6 +276,7 @@ export function registerFunnelsAgentTools(): void {
             ...(input.name !== undefined ? { name: input.name } : {}),
             ...(input.slug !== undefined ? { slug: input.slug } : {}),
             ...(input.steps !== undefined ? { steps: input.steps } : {}),
+            ...(input.campaignId !== undefined ? { campaignId: input.campaignId } : {}),
           });
           if (!updated) return toolError('not_found', 'Funnel not found in this workspace.');
           return ok({ funnelId: updated.funnelId, slug: updated.slug, status: updated.status, steps: updated.steps.length, proposed: true });
@@ -268,6 +286,7 @@ export function registerFunnelsAgentTools(): void {
         const created = await createFunnel({
           tenantId: scope.tenantId, orgId, createdBy: actingUserId,
           name: input.name, slug: input.slug, steps: input.steps,
+          ...(input.campaignId !== undefined ? { campaignId: input.campaignId } : {}),
         });
         return ok({ funnelId: created.funnelId, slug: created.slug, status: created.status, steps: created.steps.length, proposed: true });
       } catch (err) {
@@ -280,4 +299,109 @@ export function registerFunnelsAgentTools(): void {
       }
     },
   });
+
+  // ── ADR 0948 P3a (D5) — blueprints: discover, then generate a DRAFT funnel. ──
+  registerFeatureAgentTool({
+    contentTrust: 'untrusted',
+    effect: 'read',
+    // The blueprint `parameters` are a schema the model must follow: never compacted.
+    schemaCarrying: true,
+    def: {
+      name: FUNNELS_BLUEPRINTS_TOOL_ID,
+      description:
+        'List the funnel blueprints you can generate a draft funnel from (id, label, description, and each one\'s '
+        + '`parameters` JSON Schema). `orgId`, `briefId` and `campaignId` are filled by generate; pass only the other '
+        + 'parameters. An empty list means no blueprints are installed yet: draft the funnel with openwop:funnels.draft '
+        + 'instead. Read-only.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          orgId: { type: 'string', description: 'Organization id — only needed when the workspace has more than one organization.' },
+        },
+        additionalProperties: false,
+      },
+    },
+    async run(input, scope) {
+      if (!scope.actingUserId || !(await funnelsEnabled(scope.tenantId, scope.actingUserId))) return ok({ blueprints: [] });
+      const access = await assertFunnelsOrgAccess(scope, scope.actingUserId, str(input.orgId), 'workspace:read');
+      if ('content' in access) return access;
+      const blueprints = runnableBlueprints();
+      return ok({
+        blueprints,
+        filledByGenerate: FILLED_BY_GENERATE,
+        ...(blueprints.length === 0 ? { note: 'No funnel blueprints are installed yet.' } : {}),
+      });
+    },
+  });
+
+  registerFeatureAgentTool({
+    contentTrust: 'untrusted',
+    effect: 'write',
+    def: {
+      name: FUNNELS_GENERATE_TOOL_ID,
+      description:
+        'Generate a DRAFT funnel (its pages included) from a blueprint, for a CONFIRMED campaign brief: starts the '
+        + 'blueprint run and returns its `runId`. Call openwop:funnels.blueprints first and pass that blueprint\'s own '
+        + 'parameters as a JSON object in `paramsJson` (not orgId/briefId/campaignId). Read the brief with openwop:campaign-brief.get-brief '
+        + 'first. The funnel stays a draft: you never publish; a person approves publishing.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          blueprintId: { type: 'string', description: 'A blueprint id from openwop:funnels.blueprints.' },
+          briefId: { type: 'string', description: 'The confirmed campaign brief to build from.' },
+          campaignId: { type: 'string', description: 'Optional: the campaign (of this organization, made from this brief) to link.' },
+          paramsJson: { type: 'string', description: 'A JSON object of the blueprint\'s other parameters, per its `parameters` schema from openwop:funnels.blueprints (e.g. "{\\"headline\\":\\"Free guide\\"}").' },
+          orgId: { type: 'string', description: 'Organization id — only needed when the workspace has more than one organization.' },
+        },
+        required: ['blueprintId', 'briefId'],
+        additionalProperties: false,
+      },
+    },
+    async run(input, scope) {
+      const actingUserId = scope.actingUserId;
+      if (!actingUserId) return toolError('acting_user_required', 'A funnel can only be generated from a human-initiated turn.');
+      if (!(await funnelsEnabled(scope.tenantId, actingUserId))) return toolError('feature_disabled', 'The Funnels feature is not enabled for this workspace.');
+      const access = await assertFunnelsOrgAccess(scope, actingUserId, str(input.orgId), 'workspace:write');
+      if ('content' in access) return access;
+      const blueprintId = str(input.blueprintId);
+      const briefId = str(input.briefId);
+      if (!blueprintId) return toolError('validation_error', 'Field `blueprintId` is required (from openwop:funnels.blueprints).');
+      if (!briefId) return toolError('validation_error', 'Field `briefId` is required (a confirmed brief).');
+      // A JSON string, not an open object: every tool must be expressible to every
+      // provider (Gemini cannot declare a property-less object), and the real schema
+      // reaches the model through openwop:funnels.blueprints.
+      let params: Record<string, unknown> = {};
+      const rawParams = str(input.paramsJson);
+      if (rawParams) {
+        let parsed: unknown;
+        try { parsed = JSON.parse(rawParams); } catch { parsed = undefined; }
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          return toolError('invalid_params', '`paramsJson` must be a JSON object of the blueprint\'s parameters.');
+        }
+        params = parsed as Record<string, unknown>;
+      }
+      try {
+        const out = await generateFunnelFromBlueprint(deps, {
+          tenantId: scope.tenantId, actingUserId, orgId: access.orgId, blueprintId, briefId,
+          ...(str(input.campaignId) ? { campaignId: str(input.campaignId)! } : {}),
+          params,
+          ...(scope.conversationId ? { chatSessionId: scope.conversationId } : {}),
+        });
+        // Show the started run in the chat, like the other run-starting tools.
+        if (out.started) {
+          await surfaceDispatchedRun(scope, deps.storage, { runId: out.runId, agentId: scope.agentProfileId ?? FUNNEL_ARCHITECT_AGENT_ID, workflowId: blueprintId, workflowName: 'Funnel blueprint' }, 'funnels-generate');
+        }
+        return ok({ ...out, note: 'The run drafts the funnel and its pages; nothing is published.' });
+      } catch (err) {
+        // Typed refusals reach the model verbatim, so it can repair once (bad params,
+        // an unconfirmed brief) or tell the user what is missing.
+        if (err instanceof OpenwopError) {
+          const code = typeof err.details?.code === 'string' ? err.details.code : err.code;
+          return toolError(code, err.message, err.details?.errors ? { errors: err.details.errors } : err.details?.available ? { available: err.details.available } : undefined);
+        }
+        throw err;
+      }
+    },
+  });
 }
+

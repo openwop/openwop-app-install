@@ -19,11 +19,11 @@ import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, act, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
-const { listOrgs, listScheduledChats } = vi.hoisted(() => ({ listOrgs: vi.fn(), listScheduledChats: vi.fn() }));
+const { listOrgs, listScheduledChats, listMyChatSchedules } = vi.hoisted(() => ({ listOrgs: vi.fn(), listScheduledChats: vi.fn(), listMyChatSchedules: vi.fn() }));
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 vi.mock('../../../client/scheduledChatsClient.js', async (orig) => ({
   ...(await orig<typeof import('../../../client/scheduledChatsClient.js')>()),
-  listOrgs, listScheduledChats,
+  listOrgs, listScheduledChats, listMyChatSchedules,
 }));
 vi.mock('../../../featureToggles/FeatureAccessContext.js', async (orig) => ({
   ...(await orig<typeof import('../../../featureToggles/FeatureAccessContext.js')>()),
@@ -51,6 +51,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   listOrgs.mockResolvedValue([ORG]);
   listScheduledChats.mockResolvedValue([CHAT]);
+  // ADR 0985 D6 — the page's other list (schedules made in chat) reads on its own.
+  listMyChatSchedules.mockResolvedValue([]);
 });
 
 const FAILED = 'The scheduled chats could not be read. This is a failed read, not an empty organization list.';
@@ -65,7 +67,7 @@ describe('a failed ORGANIZATION read is not a loading schedule', () => {
     // The zero-org state is a different claim, and the table's "create a scheduled
     // chat" instruction is the one that mints a DUPLICATE cron job when acted on.
     expect(document.body.textContent).not.toContain('No organizations');
-    expect(document.body.textContent).not.toContain('No scheduled chats yet.');
+    expect(document.body.textContent).not.toContain('No workspace schedules.');
     expect(listScheduledChats).not.toHaveBeenCalled();
   });
 
@@ -76,8 +78,8 @@ describe('a failed ORGANIZATION read is not a loading schedule', () => {
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Try again' })); });
     expect(listOrgs).toHaveBeenCalledTimes(2);
     expect(document.body.textContent).not.toContain(FAILED);
-    // …and the schedule actually rendered (the real `cronExpr`), not a skeleton.
-    expect(document.body.textContent).toContain('0 9 * * *');
+    // …and the schedule actually rendered (its prompt), not a skeleton.
+    expect(document.body.textContent).toContain('daily standup');
   });
 
   it('read SUCCEEDS with []: the real zero-organization state, not a failure and not a skeleton', async () => {

@@ -31,6 +31,7 @@ import {
   type PendingApproval,
 } from '../../host/approvalService.js';
 import { appendAudit } from '../../host/auditChainService.js';
+import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { createLogger } from '../../observability/logger.js';
 import { adapterFor } from './adapters/registry.js';
 import { getAsset } from './assetService.js';
@@ -92,25 +93,128 @@ async function closeStale(approvalId: string, tenantId: string, orgId: string, c
   await transitionChangeSet(tenantId, orgId, changeSetId, ['in_review'], 'stale', { staleReason: reason });
 }
 
+/** Who decides: an agency member through the approvals queue, or a client
+ *  approver through the portal (P1, `portal.ts`, which has already run the
+ *  link's per-use checks). */
+type Decider =
+  | { kind: 'member'; userId?: string }
+  | { kind: 'client'; approverId: string; sentBy: string };
+
+/** The recorded decider of a client-approver decision. No email: the approval row
+ *  names the approver record, which the agency can read and erase. */
+export const clientApproverSubject = (approverId: string): string => `client-approver:${approverId}`;
+
+/**
+ * ADR 0924 D5 (security review 2026-10-19) — the agency member a client decision
+ * rests on. The member who sends the link holds it, so a client approval must
+ * never be weaker than an agency one: the sender must be able to approve for the
+ * agency (`approvals:respond` on the client org, and not the proposer while
+ * someone else could approve) and to write (`workspace:write`). Checked when the
+ * link is sent AND again when the client decides. `null` = fine.
+ */
+export async function agencyStandInRefusal(
+  tenantId: string, orgId: string, subject: string, proposedBy: string | undefined,
+): Promise<'not_an_approver' | 'cannot_write' | 'separation-of-duties' | null> {
+  const access = await resolveEffectiveAccess(tenantId, { subject, orgId });
+  if (!access.scopes.includes('approvals:respond')) return 'not_an_approver';
+  if (!access.scopes.includes('workspace:write')) return 'cannot_write';
+  const recorded = proposedBy ?? '';
+  const proposer = recorded ? await canonicalDecider(tenantId, recorded) : null;
+  const sender = await canonicalDecider(tenantId, subject);
+  if ((!proposer || !sender || proposer === sender)
+    && await hasDistinctScopeHolder(tenantId, 'approvals:respond', proposer ?? (recorded || subject), { orgId })) {
+    return 'separation-of-duties';
+  }
+  return null;
+}
+
+/** Who a client-approved change is written under, fixed at decision time so a
+ *  re-sent link, a revoked approver or a fork of the execute run cannot move it. */
+interface ClientDecision { tenantId: string; orgId: string; approvalId: string; approverId: string; writesAs: string; at: string }
+const clientDecisions = new DurableCollection<ClientDecision>(
+  'campaign-ops:client-decision',
+  (d) => `${d.tenantId}::${d.approvalId}`,
+  undefined,
+  (d) => d.tenantId,
+);
+
+/** The member an approved change is written under: the agency approver, or for a
+ *  client approval the member who sent the link (recorded at the decision). */
+export async function writerOf(approval: PendingApproval): Promise<string | null> {
+  const by = approval.decidedBy ?? '';
+  if (!by.startsWith('client-approver:')) return by || null;
+  const d = await clientDecisions.get(`${approval.tenantId}::${approval.approvalId}`);
+  return d && d.tenantId === approval.tenantId && d.approvalId === approval.approvalId ? d.writesAs : null;
+}
+
+/** ADR 0464 — re-attribute an erased member recorded as a client decision's writer. */
+export async function eraseClientDecisionWriters(tenantId: string, forms: ReadonlySet<string>, tombstone: string): Promise<number> {
+  let n = 0;
+  for (const d of await clientDecisions.listForTenantIndexed(tenantId)) {
+    if (d.tenantId === tenantId && forms.has(d.writesAs) && await clientDecisions.compareAndSwap(d, { ...d, writesAs: tombstone })) n++;
+  }
+  return n;
+}
+
 async function decideChangeSet(
   tenantId: string,
   approvalId: string,
   outcome: 'approved' | 'rejected',
   opts: { decidedByUserId?: string; note?: string; expectedChangeSetHash?: string },
 ): Promise<{ approval: PendingApproval; changed: boolean } | null> {
+  return decideAs(tenantId, approvalId, outcome, { kind: 'member', ...(opts.decidedByUserId ? { userId: opts.decidedByUserId } : {}) }, opts);
+}
+
+/** ADR 0924 D5 — the portal's decision. Checks 1–4 apply; 5–6 do not (the link
+ *  is the authority), and the approved change is written under `sentBy`. */
+export async function decideChangeSetAsClient(
+  tenantId: string,
+  approvalId: string,
+  outcome: 'approved' | 'rejected',
+  opts: { approverId: string; sentBy: string; note?: string; expectedChangeSetHash?: string },
+): Promise<{ approval: PendingApproval; changed: boolean } | null> {
+  return decideAs(tenantId, approvalId, outcome, { kind: 'client', approverId: opts.approverId, sentBy: opts.sentBy }, opts);
+}
+
+async function decideAs(
+  tenantId: string,
+  approvalId: string,
+  outcome: 'approved' | 'rejected',
+  who: Decider,
+  opts: { note?: string; expectedChangeSetHash?: string },
+): Promise<{ approval: PendingApproval; changed: boolean } | null> {
   const approval = await getApproval(approvalId);
   if (!approval || approval.tenantId !== tenantId || approval.kind !== 'campaign-change-set') return null;
   const orgId = approval.orgId ?? '';
   const changeSetId = approval.changeSetId ?? '';
-  const decidedBy = opts.decidedByUserId;
-  if (!decidedBy) throw new OpenwopError('forbidden_scope', 'A signed-in member is required to decide an approval.', 403, {});
-  // 6 — the client org's own approvers (never the tenant at large).
-  const access = await resolveEffectiveAccess(tenantId, { subject: decidedBy, orgId });
-  if (!access.scopes.includes('approvals:respond')) {
-    throw new OpenwopError('forbidden_scope', 'Missing required scope: approvals:respond', 403, { requiredScope: 'approvals:respond' });
+  let decidedBy: string;
+  // The agency member the approved change is written under (ADR 0924 as-built 4).
+  let writesAs: string;
+  if (who.kind === 'member') {
+    if (!who.userId) throw new OpenwopError('forbidden_scope', 'A signed-in member is required to decide an approval.', 403, {});
+    decidedBy = who.userId;
+    writesAs = who.userId;
+    // 6 — the client org's own approvers (never the tenant at large).
+    const access = await resolveEffectiveAccess(tenantId, { subject: decidedBy, orgId });
+    if (!access.scopes.includes('approvals:respond')) {
+      throw new OpenwopError('forbidden_scope', 'Missing required scope: approvals:respond', 403, { requiredScope: 'approvals:respond' });
+    }
+  } else {
+    decidedBy = clientApproverSubject(who.approverId);
+    writesAs = who.sentBy;
+    // The sender must still be able to stand in for the agency (see
+    // `agencyStandInRefusal`). If not, the link is dead; the agency sends a new one.
+    const refusal = await agencyStandInRefusal(tenantId, orgId, who.sentBy, approval.changeSetProposedBy);
+    if (refusal) {
+      throw new OpenwopError('conflict', 'The person who sent this link can no longer approve it. The agency will send a new link.', 409, { reason: 'sender_unavailable', detail: refusal });
+    }
   }
   const cs = await getChangeSet(tenantId, orgId, changeSetId);
   if (!cs) return null;
+  // D4 `client` policy: only the client approves. An agency member may still reject.
+  if (outcome === 'approved' && who.kind === 'member' && (await getClient(tenantId, orgId))?.approvalPolicy === 'client') {
+    throw new OpenwopError('forbidden', 'This client approves its own changes. Send them the approval link.', 403, { reason: 'client_approval_required' });
+  }
 
   if (outcome === 'approved') {
     // 1 — approve what you saw.
@@ -143,15 +247,22 @@ async function decideChangeSet(
     // 5 — separation of duties (the CMS rule, ADR 0924 D2): the person who asked
     // may not approve while someone else on the client can. A sole approver is not
     // locked out. Unresolvable identities count as the proposer (fail closed).
-    const recorded = approval.changeSetProposedBy ?? '';
-    const proposer = recorded ? await canonicalDecider(tenantId, recorded) : null;
-    const decider = await canonicalDecider(tenantId, decidedBy);
-    if ((!proposer || !decider || proposer === decider)
-      && await hasDistinctScopeHolder(tenantId, 'approvals:respond', proposer ?? recorded ?? decidedBy, { orgId })) {
-      throw new OpenwopError('forbidden', 'You asked for this change, so someone else has to approve it.', 403, { reason: 'separation-of-duties' });
+    // A client approver is never the proposer (they have no session), so this is
+    // the member lane only.
+    if (who.kind === 'member') {
+      const recorded = approval.changeSetProposedBy ?? '';
+      const proposer = recorded ? await canonicalDecider(tenantId, recorded) : null;
+      const decider = await canonicalDecider(tenantId, decidedBy);
+      if ((!proposer || !decider || proposer === decider)
+        && await hasDistinctScopeHolder(tenantId, 'approvals:respond', proposer ?? recorded ?? decidedBy, { orgId })) {
+        throw new OpenwopError('forbidden', 'You asked for this change, so someone else has to approve it.', 403, { reason: 'separation-of-duties' });
+      }
     }
   }
 
+  if (who.kind === 'client' && outcome === 'approved') {
+    await clientDecisions.put({ tenantId, orgId, approvalId, approverId: who.approverId, writesAs, at: new Date().toISOString() });
+  }
   const lock = await resolveApproval(approvalId, {
     status: outcome,
     decidedBy,
@@ -170,8 +281,8 @@ async function decideChangeSet(
       throw new OpenwopError('conflict', 'The change set changed while it was being approved. Try again.', 409, { reason: 'change_set_changed' });
     }
     if (!startExecution) throw new OpenwopError('conflict', 'Campaign operations cannot start the change on this host.', 409, { reason: 'execution_unavailable' });
-    const runId = await startExecution({ tenantId, orgId, approvalId, changeSetId, changeSetHash: cs.hash, approvedBy: decidedBy });
-    auditOps(tenantId, 'approval.approved', { orgId, changeSetId, changeSetHash: cs.hash, approvalId, by: decidedBy, runId });
+    const runId = await startExecution({ tenantId, orgId, approvalId, changeSetId, changeSetHash: cs.hash, approvedBy: writesAs });
+    auditOps(tenantId, 'approval.approved', { orgId, changeSetId, changeSetHash: cs.hash, approvalId, by: decidedBy, ...(who.kind === 'client' ? { writesAs } : {}), runId });
     return { approval: { ...lock.approval, runId }, changed: true };
   } catch (err) {
     await transitionChangeSet(tenantId, orgId, changeSetId, ['approved'], 'in_review');

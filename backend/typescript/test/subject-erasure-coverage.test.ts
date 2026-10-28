@@ -17,16 +17,19 @@
  *
  * Every enumerated namespace MUST land in EXACTLY ONE registry below:
  *  - ERASED        — fully claimed by a registered host `SubjectEraser`/redactor.
- *                    EMPTY today (see the note on the map): the only existing host
- *                    redaction is the kind-local `kicktodo-plan-proposal` path in
- *                    approvalService, which does NOT graduate the `approval`
- *                    namespace out of debt. The integrator MOVES a namespace here
- *                    once a peer lands + REPORTS a store-level eraser (ADR 0464 §6).
+ *                    (CORRECTED wave 61: this said "EMPTY today"; it is not, see
+ *                    the map.) The integrator MOVES a namespace here once a peer
+ *                    lands + REPORTS a store-level eraser (ADR 0464 §6).
  *  - RECORDED_DEBT — shrink-only: audited subject-bearing stores with no eraser yet.
  *                    A new entry is a promise to cover, never a parking spot.
  *  - REVIEWED_EXEMPT — a lawful-retention / technical / no-subject-data justification
  *                    (each carries its reason string). ADR 0464 §2.1: "there is no
  *                    third state" — debt is the acknowledged TRANSITIONAL state.
+ *
+ * NON-VACUITY: a broken scan would empty `stores`, and "every store is
+ * classified" would pass over nothing. That case now carries a measured floor
+ * (116 host namespaces at 0151a8bb2), and the "not stale" case is the second
+ * guard (with `stores` empty, every registry entry reads stale).
  */
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
@@ -37,9 +40,19 @@ const HOST_ROOT = join(__dirname, '..', 'src', 'host');
 // ── The three registries ────────────────────────────────────────────────────
 
 /** Fully covered by a registered host eraser/redactor — every entry cites the
- *  eraser that covers it. All 17 registrations are wired through the ONE explicit
- *  boot list `registerHostSubjectErasers()` (src/host/hostSubjectErasers.ts). */
+ *  eraser that covers it. CORRECTED (grade-tests wave 61): this said "All 17
+ *  registrations"; the map held 37 entries at 0151a8bb2, and the count is not
+ *  pinned here, so no number is stated. Host erasers are wired through the ONE
+ *  explicit boot list `registerHostSubjectErasers()` (src/host/hostSubjectErasers.ts),
+ *  except module-scope registrations the WF-CONS-2 manifest test polices. The
+ *  values are prose and are NOT checked against the eraser registry
+ *  (TWIN-DEBT-1, recorded gap). */
 const ERASED = new Map<string, string>([
+  ['experiments:first-exposure', 'eraseExperimentFirstExposures (host/experiments/sticky.ts, ADR 0949 P4) — the row is DELETED. Its key is sha256(experiment salt + unit key), and a unit key is a subject key (a CDP session key or a CRM contact id; erasure expands a subject to both through the key resolvers), so the eraser recomputes the key for each of the tenant\'s Optimize experiments. The row holds only the arm, the epoch and the instant, and ages out after 180 days.'],
+  ['experiments:experiment', 'erasePageExperimentSubject (features/cms/pageExperimentsService.ts, called by the cms subject eraser) — `createdBy` ANONYMIZED, the row KEPT (ADR 0949 P1a): the experiment and its results are org data, the creator attribution is the only subject-bearing field. It walks the tenant index of the WHOLE engine store, not only cms.page rows, and erases the `cms:pageexperiment` rollback mirror in the same pass. Pinned by adr0949-p1a-experiment-store.test.ts (sabotage: erasing only the mirror reds it).'],
+  ['extcollab:c', 'eraseExternalCollaboratorSubject — the collaborator row (email, name, company, boundUserId) is DELETED for a person erased in their home tenant, found through the cross-agency bound index; its grants are revoked first (ADR 0958 D7). Email-keyed erasure of a never-accepted invite is ADR 0958 P5. An erased AGENCY member\'s id in createdBy is tombstoned to `erased`; the row is kept.'],
+  ['extcollab:g', 'eraseExternalCollaboratorSubject — grants carry ids, actions and the agency actor in createdBy/revokedBy; a bound person\'s grants are REVOKED with their collaborator row (ADR 0958 D7). The grant row is kept as the audit of what was shared. An erased AGENCY member\'s id in createdBy/revokedBy is TOMBSTONED to `erased` (a tombstoned granter fails the per-use granter re-check, so the grant goes dark).'],
+  ['extcollab:bound', 'eraseExternalCollaboratorSubject — the index row (boundUserId → collaboratorId) is DELETED with the binding it points to.'],
   ['workspace-operator-activation', 'eraseSubjectOperatorActivations — the activation row is DELETED (host/operatorAccess.ts, ADR 0910). It names a person and their written justification; the audit chain keeps the activation history under ADR 0464\'s audit rules, and a deleted row grants nothing (authority is the live row).'],
   ['workspace-join:record', 'eraseSubjectWorkspaceJoins — the record is DELETED (workspaceJoinLedger, ADR 0684 §7). It is subject-keyed and says where a person has been, so a DSAR must reach it. That CONFLICTS with §7, which wants the record durable so a removed participant is never silently re-joined: erasing it lets a removed user be auto-joined again on next sign-in. Erasure still wins, because membership removal is NOT the ban control — `authRoutes.ts` refuses a non-active ACCOUNT with a 403 before auto-join runs, and no data-subject right reaches that. §7 protects the ordinary case (an operator tidying a roster); a genuine ban is enforced one layer up. An operator who bans by removing membership alone has always had a weaker control than they thought, which is worth stating rather than hiding behind an exemption.'],
   ['job-search:apply-grant', 'eraseSubjectApplyGrants — the grant is DELETED, not redacted (ADR 0541): it is standing authority to act on a named person\'s behalf, and a tombstone that still authorises anything is worse than useless. Matches on subjectId AND grantedBy, since the authoriser is also a person who must not be left named on a live authority record.'],
@@ -56,6 +69,7 @@ const ERASED = new Map<string, string>([
   // file's own TWIN-DEBT-1 note records that these values are never asserted against source and
   // that one of them once described the wrong disposal, so leaving it stale would be that exact
   // defect committed knowingly.
+  ['subject-memory:forgotten', 'the person\'s "forget" tombstones for learned facts (a sha256 of the normalized fact, keyed by their scope) DELETED with their notes for every key form (subjectMemory eraser, ADR 0982 D6)'],
   ['subject-memory:note', 'subject-authored notes DELETED for the subject, AND the whole vector recall namespace purged for every key form — including dispatch turn-summaries, which carry no durable note row and so were never reachable by id (subjectMemory eraser + purgeNamespaceVectors, ADR 0666 D2)'],
   ['kanban:card', 'createdBy/assigneeId/description/blockerNote redacted via board-scoped walk (kanbanService eraser)'],
   ['kanban:board', 'ownerUserId/ownerSubject redacted (kanbanService eraser)'],
@@ -95,6 +109,10 @@ const ERASED = new Map<string, string>([
   ['agent:eval-suite', 'createdBy → [erased]; since review H4 the subject inside task content (input / expected / fixtures, e.g. a case promoted from a captured run) is redacted in place, even on a locked version, and the row is stamped erasedAt/erasedTasks so a now-missing exact-args fixture says why (evals/suiteStore eraser, ADR 0889 D2 + EVD-10/EVD-12)'],
   ['workflow:eval-result', 'startedBy → [erased] AND assertion details (run-output excerpts) deep-scrubbed of subject-key forms (grade-data H3); result rows are tenant test-history (workflowEvalSets eraser, ADR 0477 store)'],
   ['notify:email-approval-pref', 'rows DELETED — the pref row IS the subject\'s email address (emailApprovalDelivery eraser, ADR 0478 store)'],
+  ['autonomy:policy', 'createdBy → [erased]; the policy version is the org\'s campaign autonomy configuration and its replay history (autonomyPolicy eraser, ADR 0942)'],
+  ['autonomy:binding', 'updatedBy → [erased]; the binding is the org\'s configuration (autonomyPolicy eraser, ADR 0942)'],
+  ['autonomy:digest-item', 'rows DELETED for the subject — a queued daily notice addressed to that person (recipientUserId) is theirs; deleted after delivery anyway (autonomyPolicy eraser, ADR 0942 D7)'],
+  ['autonomy:veto', 'vetoedBy → [erased]; the veto decision and its window stay (they decided whether a campaign step ran, ADR 0942 P4b; autonomyPolicy eraser)'],
   ['workflow:budget', 'updatedBy → [erased] across the tenant\'s budget rows; the budget itself is tenant config (workflowBudgets eraser, ADR 0482 store — the workflow:revision createdBy precedent)'],
   ['auth:subjectLinkDeny', 'rows DELETED — the deny row IS the subject: its key is the opaque externalId (== persistent SAML NameID, RFC 0159). A lingering row is fail-safe (only ever denies, never grants) but is still a subject identifier, so it is removed. Matched via subjectKeyForms + a saml:/scim: prefix strip so a bare-externalId or principal-scoped DSAR key both reach it (subjectLinkService eraser, ADR 0613 store)'],
 ]);
@@ -113,6 +131,26 @@ type Exemption = { reason: string; tenantTeardownClaim?: true };
  *  HONESTY assertion below requires an actual `tenantId` field to back (a purge keyed by
  *  tenantId can never reach a row that has none). */
 const REVIEWED_EXEMPT = new Map<string, Exemption>([
+  // ADR 0993 D5 — the ONE tenant layer of the RFC 0028 prompt store (moved here
+  // from features/proposals, namespace name kept). A row is `{ tenant, template,
+  // installedAt }`: an RFC 0028 PromptTemplate the tenant wrote over POST /prompts or
+  // installed from a proposal. The host stamps no subject on it, and the prompt
+  // library's published bodies (which ARE a subject's own when private) are kept
+  // OUT of this layer by design (ADR 0993 D4, `prompts:entry-version`, erased with
+  // their entry). Tenant-indexed (tenantOf), so ADR 0284 teardown reaches it.
+  ['proposal-installed-prompts', { reason: 'ADR 0993 D5 tenant prompt-template layer — RFC 0028 templates (id, version, kind, text, variables) keyed by tenant; no host-stamped subject or actor; private library bodies live in prompts:entry-version, not here; tenant-indexed for ADR 0284 teardown' }],
+  // ADR 0949 P1b — derived experiment rollup: aggregate COUNTS per (experiment,
+  // arm, cohort day). No unit key, visitor id or actor is stored; a subject's
+  // erasure removes their CDP events and the next rebuild drops them from `n`.
+  ['experiments:daily', { reason: 'ADR 0949 P1b derived rollup cells — per (experiment, arm, day) counts n/sum/sumSq only; no visitor key, subject or actor; rebuilt from the CDP events, so an erased subject leaves on the next rebuild' }],
+  ['experiments:rollup', { reason: 'ADR 0949 P1b rollup header — experiment id, coverage status, the source retention watermark and a rebuild timestamp; no subject' }],
+  // ADR 0945 P1 — the fidelity verdict on one generated creative: tenant/org,
+  // asset and product ids, content hashes, check ids with numeric scores and
+  // pass/fail, the ruleset version, a timestamp and an opaque runId. From P2 it
+  // may also carry the vision judge's closed-schema product-attribute answers
+  // with short evidence about the IMAGE. No field names or describes a person
+  // (no checkedBy / requester / reviewer — approvals live in the approval store).
+  ['creative:fidelity-verdict', { reason: 'ADR 0945 creative fidelity verdicts — ids, content hashes, check scores, ruleset version, timestamp, opaque runId and (P2+) closed-schema product-attribute judge answers about the image; no subject or actor identifier. The collection is tenant-indexed (tenantOf), so ADR 0284 teardown reaches it; no static teardown claim, because the row type is declared in creativeFidelity/types.ts, outside the store file this census reads.' }],
   // ADR 0803 — one row, `{ id: 'all', token: <random uuid>, at }`: "the job set
   // changed". No tenant, no subject, no job content.
   ['scheduler:job-generation', { reason: 'ADR 0803 scheduler job-set change token — a single row holding a random uuid and a timestamp; no tenant, subject or job content' }],
@@ -193,11 +231,15 @@ const REVIEWED_EXEMPT = new Map<string, Exemption>([
   ['access-custom-roles', { reason: 'no-subject: role definition (name/description/scopes); no subject identifier' }],
   ['cdp:audit-head', { reason: 'no-subject: audit-chain head pointer (hash-only); part of the tamper-evident log' }],
   ['codeexec:budget', { reason: 'no-subject: per-tenant execution counters' }],
+  ['autonomy:approval-waiter', { reason: 'no-subject: (tenant, approvalId, runId) ids only — which campaign run waits on which spend approval; deleted once resumed (ADR 0942 P3)' }],
+  ['approval:sla-row', { reason: 'no-subject: (tenant, approvalId) + fired rungs for an approval with its own SLA ladder; the approval row itself carries the subjects and is erased by the approvals eraser (ADR 0942 D7)' }],
+  ['autonomy:interrupt-sla', { reason: 'no-subject: (tenant, interruptId) + fired rungs for an autonomy gate with an SLA; deleted once the interrupt resolves (ADR 0942 D7)' }],
   ['collab:lease', { reason: 'no-subject: ephemeral collab lock (instanceId/expiresAt)' }],
   ['ignition', { reason: 'no-subject: 5-minute windowed workflow-ignition dedup claims (tenant-prefixed key, runId/claimedAt only — CFP Phase 1 ignitionGuard); no subject identifier' }],
   ['collab:seedclaim', { reason: 'no-subject: seed-once claim marker (instance-scoped)' }],
   ['compat:endpoint', { reason: 'no-subject: compat endpoint config; credentialRef is a BYOK ref, not subject data' }],
   ['chat:exchange-idem', { reason: 'no-subject: exchange idempotency claims (pointers/status)' }],
+  ['chat:turn-model', { reason: 'no-subject: ADR 0986 D1 per-turn attribution — tenant, turn and run ids, provider, model and a time; no actor or content. 180-day kvAgeOut, gone with the tenant' }],
   ['custom-domains:meta', { reason: 'no-subject: singleton meta/version row (__meta)' }],
   ['public-lapse:observed', { reason: 'no-subject: ADR 0820 §7 owner-lapse grace clock — one row per (owner tenant, feature id) holding only the first time a public lane saw the owner refused by their plan; no actor or visitor identifier. Purged on ADR 0284 tenant teardown.', tenantTeardownClaim: true }],
   ['egress-rules', { reason: 'no-subject: network egress policy config' }],
@@ -352,6 +394,8 @@ describe('subject-erasure coverage (ADR 0464)', () => {
   });
 
   it('every host-owned durable store is classified — a new subject-bearing store fails here', () => {
+    // Measured floor (116, wave 61), so a scan that lost files cannot pass here.
+    expect(stores.size).toBeGreaterThanOrEqual(116);
     const unclassified: string[] = [];
     for (const [ns, decl] of stores) {
       if (ERASED.has(ns) || RECORDED_DEBT.has(ns) || REVIEWED_EXEMPT.has(ns)) continue;

@@ -9,10 +9,14 @@
  * tests pin the SCOPE rather than re-asserting the service's own behaviour.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import type { BuiltinTool } from '../src/host/agentToolProvider.js';
+import type { BundleScope } from '../src/host/inMemorySurfaces.js';
+import type { TutorialView } from '../src/features/tutorials/tutorialsService.js';
+import type { TutorialProgressRecord } from '../src/features/tutorials/progressStore.js';
 
-const registered = vi.hoisted(() => new Map<string, { def: { name: string; description: string; inputSchema: unknown }; run: (i: unknown, s: unknown) => Promise<{ content: string }> }>());
+const registered = vi.hoisted(() => new Map<string, BuiltinTool>());
 vi.mock('../src/host/agentToolProvider.js', () => ({
-  registerFeatureAgentTool: (t: { def: { name: string } }) => { registered.set(t.def.name, t as never); },
+  registerFeatureAgentTool: (t: BuiltinTool) => { registered.set(t.def.name, t); },
 }));
 
 const service = vi.hoisted(() => ({ listTutorials: vi.fn(), getTutorial: vi.fn() }));
@@ -27,14 +31,19 @@ const { registerTutorialsAgentTools, TUTORIALS_CATALOG_TOOL_ID, TUTORIALS_GET_TO
 const TENANT = 'tenant-1';
 const ALICE = 'user:alice';
 
-const TUT = {
+const TUT: TutorialView = {
   id: 'connect-your-ai', title: 'Connect Your AI', description: 'd', category: 'getting-started',
-  hero: { title: 'h', subtitle: 's' }, seedVersion: '1.0.0', source: 'kernel' as const,
+  hero: { title: 'h', subtitle: 's' }, seedVersion: '1.0.0', source: 'kernel',
   surfaces: ['/keys'],
   phases: [{ number: 1, title: 'P1', chainId: 'tutorial.connect-your-ai.phase-2', steps: [
     { id: '1.1', title: 'Step one', content: [], run: { chainId: 'x' } },
     { id: '1.2', title: 'Step two', content: [] },
   ] }],
+};
+
+const PROGRESS: TutorialProgressRecord = {
+  key: 'tenant-1:user:alice:connect-your-ai', tenantId: TENANT, userId: ALICE,
+  tutorialId: TUT.id, completedStepIds: ['1.1'], updatedAt: '2026-01-15T10:00:00.000Z',
 };
 
 beforeEach(() => {
@@ -43,10 +52,10 @@ beforeEach(() => {
   registerTutorialsAgentTools();
   service.listTutorials.mockResolvedValue({ tutorials: [TUT], degraded: false });
   service.getTutorial.mockResolvedValue(TUT);
-  store.listTutorialProgress.mockResolvedValue([{ tutorialId: TUT.id, completedStepIds: ['1.1'], updatedAt: 'x' }]);
+  store.listTutorialProgress.mockResolvedValue([PROGRESS]);
 });
 
-const call = (id: string, input: unknown, scope: unknown) => registered.get(id)!.run(input, scope);
+const call = (id: string, input: Record<string, unknown>, scope: BundleScope) => registered.get(id)!.run(input, scope);
 
 describe('ADR 0488 P6 — registration + honesty of the tool contract', () => {
   it('registers exactly the two READ tools', () => {
@@ -74,6 +83,7 @@ describe('access scoping — fail EMPTY without an acting user', () => {
   it('the get tool returns null for an unattributed run', async () => {
     const out = JSON.parse((await call(TUTORIALS_GET_TOOL_ID, { tutorialId: TUT.id }, { tenantId: TENANT })).content);
     expect(out.tutorial).toBeNull();
+    expect(out.note).toMatch(/no acting user/);
     expect(service.getTutorial).not.toHaveBeenCalled();
   });
 
@@ -85,6 +95,8 @@ describe('access scoping — fail EMPTY without an acting user', () => {
   it('every read is scoped to the run tenant', async () => {
     await call(TUTORIALS_GET_TOOL_ID, { tutorialId: TUT.id }, { tenantId: TENANT, actingUserId: ALICE });
     expect(service.getTutorial).toHaveBeenCalledWith(TENANT, TUT.id);
+    await call(TUTORIALS_CATALOG_TOOL_ID, {}, { tenantId: TENANT, actingUserId: ALICE });
+    expect(service.listTutorials).toHaveBeenCalledWith(TENANT);
   });
 });
 
@@ -98,6 +110,10 @@ describe('answers', () => {
     service.listTutorials.mockResolvedValue({ tutorials: [TUT], degraded: true });
     const out = JSON.parse((await call(TUTORIALS_CATALOG_TOOL_ID, {}, { tenantId: TENANT, actingUserId: ALICE })).content);
     expect(out.note).toMatch(/shipped tutorials/);
+    // Negative control: a healthy read carries no degraded note.
+    service.listTutorials.mockResolvedValue({ tutorials: [TUT], degraded: false });
+    const ok = JSON.parse((await call(TUTORIALS_CATALOG_TOOL_ID, {}, { tenantId: TENANT, actingUserId: ALICE })).content);
+    expect(ok.note).toBeUndefined();
   });
 
   it('get marks completed steps and flags which have a runnable spine', async () => {

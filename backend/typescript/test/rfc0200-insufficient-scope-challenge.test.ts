@@ -56,8 +56,10 @@ describe('RFC 0200 §B.1 — the insufficient-scope challenge', () => {
     expect(challenge).toMatch(/error="insufficient_scope"/);
     expect(challenge).toMatch(/scope="runs:create"/);
     expect(challenge).toMatch(/resource_metadata="/);
-    const body = (await r.json()) as { error?: string };
+    const body = (await r.json()) as { error?: string; message?: string };
     expect(body.error, '§B.4: the body envelope is unchanged').toBe('forbidden');
+    // The SCOPE refusal (protocolAuthorization.ts refuseScope), not another 403.
+    expect(body.message).toBe('Missing required scope: runs:create');
   });
 
   it('a wildcard operator credential is not refused and carries no challenge', async () => {

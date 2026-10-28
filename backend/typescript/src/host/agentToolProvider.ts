@@ -31,6 +31,7 @@ import { createHash } from 'node:crypto';
 import { createCard, ensureSubjectBoard, getCard, notifyBoardChanged, todoColumnOf } from './kanbanService.js';
 import { getRosterEntry } from './rosterService.js';
 import { persistRunArtifact, runArtifactKey } from './runArtifactStore.js';
+import { chatArtifactRunId } from './chatArtifactScope.js';
 
 export interface BuiltinTool {
   def: AgentToolDef;
@@ -116,6 +117,16 @@ export interface BuiltinTool {
    * bypass may skip it (ADR 0834 D2).
    */
   safeModeApproval?: true | { reason: string };
+  /**
+   * ADR 0954 P4 — on an ANONYMOUS surface this write may only be HELD for an
+   * operator (the RFC 0132 `hitl` control), never auto-run under
+   * `rate-limit-session-cap`. Set it for a write whose input a visitor can aim
+   * at someone else's record (a typed email matching an existing contact). It is
+   * enforced twice: a widget grant pairing such a tool with an auto-run control
+   * is refused (`chat-widget/widgetService.ts`), and `authorizeAnonTool` always
+   * answers `hitl` for it, so a grant saved before the rule still holds the call.
+   */
+  anonHitlOnly?: true;
   /** `continueTurn` (ADR 0773 B.7): host-internal, never sent to the model as-is.
    *  A string = the tool's work is unfinished, and the chat loop may send it as
    *  ONE follow-up if the model then stops without a call; `null` clears one. */
@@ -409,7 +420,10 @@ const RAG_RETRIEVER_IDS = ['openwop:core.rag.retriever-basic', 'openwop:core.rag
  *  the in-process WASI runtime (default), an external Code-API, or honest-off — and ENFORCES the
  *  per-tenant daily budget. The sandbox is sound (no host fs/env/network escape) + wall-clock- and
  *  budget-bounded; the chat path executes directly (no inline HITL card — the user asked the agent
- *  to run code and the boundary holds), whereas the workflow-node path keeps the HITL gate. */
+ *  to run code and the boundary holds), whereas the workflow-node path keeps the HITL gate.
+ *  CORRECTED (ADR 0995): "executes directly" is true of THIS function only. The chat, run and voice
+ *  lanes hold the call for approval first in safe mode (`SENSITIVE_APPROVAL_TOOLS`, ADR 0150/0834),
+ *  and the held call shows its arguments, the code included. */
 /** ADR 0311 D1 — `openwop:kanban.add-todo`: the THIRD grounding path for an agent's
  *  promises (do it now / schedule it, ADR 0309 / FILE it as a todo and say so). Files a
  *  real `host.kanban` card in the agent's own board's `todo` column — the exact column
@@ -546,14 +560,20 @@ const CODE_EXEC: BuiltinTool = {
         // has no tenant guard on this path, so an empty-scope bucket that
         // collapses across tenants (`adhoc`) would let two tenants running
         // identical code share ONE artifact row (tenant B silently gets A's).
-        const runId = `chat-code:${scope.tenantId}:${scope.conversationId ?? scope.actingUserId ?? 'adhoc'}`;
+        // ADR 0996 — the ONE builder; readers gate on its bucket.
+        const runId = chatArtifactRunId('chat-code', scope);
         // CFPT-8 — hash the FULL execution input (language + stdin + code), not
         // `code` alone: same source run under a different language, or with
         // different stdin, is a DIFFERENT execution, so it must key to a distinct
         // artifact. Hashing code only collided those onto one CAS row, hiding a
         // genuinely different result behind a stale one.
+        //
+        // ADR 0995 D9 — and the RESULT. Keyed on the input alone, a second run of the same
+        // code whose output differed (random numbers, the clock) got the fresh stdout in the
+        // tool result and the FIRST run's artifact in the workbench, because the write is
+        // insert-only. An identical retry still dedupes.
         const stdin = typeof input.stdin === 'string' ? input.stdin : '';
-        const nodeId = `run:${createHash('sha256').update([language, stdin, code].join('\u0000')).digest('hex').slice(0, 12)}`;
+        const nodeId = `run:${createHash('sha256').update([language, stdin, code, JSON.stringify(result)].join('\u0000')).digest('hex').slice(0, 12)}`;
         const persisted = await persistRunArtifact({
           tenantId: scope.tenantId,
           runId,
@@ -648,6 +668,11 @@ export function builtinAgentToolIds(): readonly string[] {
  *  unregistered tool errors, and "it errored" is not evidence it opted in. */
 export function builtinAgentTool(id: string): BuiltinTool | undefined {
   return BUILTINS.get(id);
+}
+
+/** ADR 0954 P4 — may this tool only be held (never auto-run) on an anon surface? */
+export function isAnonHitlOnlyTool(id: string): boolean {
+  return BUILTINS.get(id)?.anonHitlOnly === true;
 }
 
 /** ADR 0834 D4 — every registered tool that declares `safeModeApproval`, with its

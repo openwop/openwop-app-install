@@ -63,3 +63,22 @@ budget_env_dir() {
   cp "$ex" "$d/.env.production" || { rm -rf "$d"; return 1; }
   echo "$d"
 }
+
+# skill_mirror_lane <root> <steward-lane-mode>  → prints `take` or `skip`.
+#
+# The agent-skill mirror gate (`check-agent-skill-mirror.mjs`) compares
+# `.agents/skills/` to `.claude/skills/`, both stripped by the same `zip -d` as
+# the steward lane, so in a bundle it exits 1 on ".claude/skills is missing"
+# (MEASURED: MyndHyve's v0.6.0 overlay gate, 2026-10-20). It SKIPS only when the
+# steward lane is skipped AND both skill dirs are absent. In the full repo it
+# always runs, so deleting both dirs there still fails instead of skipping. An
+# adopter that re-adds either dir (kicktodo tracks both) gets the check, so
+# `.claude/skills` without an in-sync `.agents/skills` still fails.
+skill_mirror_lane() {
+  local root="$1" mode="$2"
+  if [ "$mode" = skip ] && [ ! -e "$root/.claude/skills" ] && [ ! -e "$root/.agents/skills" ]; then
+    echo skip
+  else
+    echo take
+  fi
+}

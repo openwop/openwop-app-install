@@ -1,7 +1,8 @@
 /**
  * RFC 0028 §A — `/v1/prompts*` REST surface.
  *
- * Six operations backed by the in-memory PromptStore. Reads are gated
+ * Six operations over the prompt store: the global layers (`promptStore.ts`)
+ * and the caller's tenant layer (`tenantPromptTemplates.ts`, ADR 0993 D5). Reads are gated
  * on `capabilities.prompts.endpointsSupported: true`; writes are
  * additionally gated on `capabilities.prompts.mutableLibrary: true`.
  * Render reuses the host's `composePromptTemplate()` pipeline (the
@@ -13,17 +14,21 @@
 import type { Express, Request, Response } from 'express';
 import { advertisedPath } from '../middleware/protocolVersion.js';
 import {
-  createUserTemplate,
-  deleteUserTemplate,
-  getTemplate,
+  applyFilter,
   listTemplates,
-  updateUserTemplate,
   type ListFilter,
   type PromptKind,
   type PromptTemplate,
 } from '../host/promptStore.js';
+import {
+  createTenantTemplate,
+  deleteTenantTemplate,
+  listTenantTemplates,
+  resolveTenantTemplate,
+  updateTenantTemplate,
+} from '../host/tenantPromptTemplates.js';
 import { composePromptTemplate } from '../host/promptCompose.js';
-import { callerSubject } from '../host/requestSubject.js';
+import { callerSubject, tenantOf } from '../host/requestSubject.js';
 import { isWorkspaceMember } from '../host/accessControlService.js';
 // H27 — this file used to define its OWN `sendError`, same name and same
 // signature as the shared one, emitting the correct FLAT envelope but bypassing
@@ -168,10 +173,18 @@ export function registerPromptRoutes(app: Express, deps: { capability: PromptsCa
     if (typeof q.source === 'string' && (q.source === 'host' || q.source === 'pack' || q.source === 'user')) {
       filter.source = q.source;
     }
-    // limit + cursor — naive pagination over the current snapshot
-    // (the in-memory store doesn't grow large enough to need real
-    // cursors; we surface the shape for spec compliance).
-    let items = listTemplates(filter);
+    // limit + cursor — offset pagination over the current snapshot. CORRECTED
+    // (ADR 0993 D5): this said the in-memory store never grows large enough to
+    // need real cursors; the tenant layer is durable now, so an offset cursor can
+    // skip or repeat a row when templates are written between pages. Recorded as
+    // residue in ADR 0993.
+    // ADR 0993 D5 — the caller's TENANT templates (written by `POST /prompts` or a
+    // proposal install, ADR 0972 D4) plus the global layers. No other tenant's
+    // template is listed. A global id wins (the tenant writer refuses one).
+    const global = listTemplates(filter);
+    const globalIds = new Set(global.map((t) => t.templateId));
+    const mine = (await listTenantTemplates(tenantOf(req))).filter((t) => applyFilter(t, filter) && !globalIds.has(t.templateId));
+    const items = [...mine, ...global];
     const limit = typeof q.limit === 'string' ? Math.min(200, Math.max(1, Number(q.limit) || 50)) : 50;
     const cursorOffset = typeof q.cursor === 'string' ? Math.max(0, Number(q.cursor) || 0) : 0;
     const slice = items.slice(cursorOffset, cursorOffset + limit);
@@ -196,7 +209,8 @@ export function registerPromptRoutes(app: Express, deps: { capability: PromptsCa
       sendError(res, 400, 'validation_error', 'PromptTemplate body must include templateId, version, kind, text');
       return;
     }
-    const result = createUserTemplate(body);
+    // ADR 0993 D5 — the template belongs to the caller's tenant and is durable.
+    const result = await createTenantTemplate(tenantOf(req), body);
     if (!result.ok) {
       const status = result.code === 'conflict' ? 409 : result.code === 'forbidden' ? 403 : 400;
       sendError(res, status, `prompt_create_${result.code}`, result.message);
@@ -204,7 +218,7 @@ export function registerPromptRoutes(app: Express, deps: { capability: PromptsCa
     }
     // ADR 0812 P3b — the address follows the negotiated major and retirement (it
     // was a hard-coded `/v1`, which a retired host answers 410).
-    res.setHeader('Location', `${advertisedPath(`/prompts/${encodeURIComponent(body.templateId)}`) ?? `/prompts/${encodeURIComponent(body.templateId)}`}?version=${encodeURIComponent(result.locationVersion)}`);
+    res.setHeader('Location', `${advertisedPath(`/prompts/${encodeURIComponent(body.templateId)}`) ?? `/prompts/${encodeURIComponent(body.templateId)}`}?version=${encodeURIComponent(result.template.version)}`);
     res.setHeader('ETag', `"${result.etag.slice(0, 16)}"`);
     res.status(201).end();
   });
@@ -223,7 +237,7 @@ export function registerPromptRoutes(app: Express, deps: { capability: PromptsCa
     const opts: { version?: string; libraryId?: string } = {};
     if (version !== undefined) opts.version = version;
     if (libraryId !== undefined) opts.libraryId = libraryId;
-    const found = getTemplate(templateId, opts);
+    const found = await resolveTenantTemplate(tenantOf(req), templateId, opts);
     if (found === 'ambiguous') {
       sendError(res, 400, 'prompt_ref_ambiguous', `multiple installed packs ship '${templateId}'; supply ?libraryId to disambiguate`);
       return;
@@ -237,17 +251,25 @@ export function registerPromptRoutes(app: Express, deps: { capability: PromptsCa
     // a strict `===` missed a `W/`-weakened echo (a compressing front door
     // weakens a strong tag) and any list, so revalidation answered 200. The
     // validator rides the 304 too (RFC 9110 §15.4.5).
+    // ADR 0993 D5 (`/architect` H3) — a TENANT template is one tenant's, and the
+    // Firebase `/api` door caches `public` responses by URL, so a pinned read of
+    // tenant A's template would be served to tenant B at the same address. Only the
+    // global layers (identical for every caller) may be cached publicly. Set
+    // before the 304, which a cache stores too.
+    if (found.source === 'user') {
+      res.setHeader('Cache-Control', 'private, no-store');
+      res.vary('Cookie'); res.vary('Authorization');
+    } else if (version) {
+      // Pinned-version requests get immutable caching; latest-version
+      // requests get short max-age.
+      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    } else {
+      res.setHeader('Cache-Control', 'public, max-age=60');
+    }
     res.setHeader('ETag', tag);
     if (ifNoneMatchSatisfied(req, tag)) {
       res.status(304).end();
       return;
-    }
-    // Pinned-version requests get immutable caching; latest-version
-    // requests get short max-age.
-    if (version) {
-      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
-    } else {
-      res.setHeader('Cache-Control', 'public, max-age=60');
     }
     res.status(200).json(toWireTemplate(found.template));
   });
@@ -265,7 +287,7 @@ export function registerPromptRoutes(app: Express, deps: { capability: PromptsCa
     }
     if (await refusedNonMemberWorkspace(req, res)) return;
     const body = (req.body ?? {}) as PromptTemplate;
-    const result = updateUserTemplate(req.params.templateId, body);
+    const result = await updateTenantTemplate(tenantOf(req), req.params.templateId, body);
     if (!result.ok) {
       const status = result.code === 'not_found' ? 404 : result.code === 'forbidden' ? 403 : result.code === 'conflict' ? 409 : 400;
       sendError(res, status, `prompt_update_${result.code}`, result.message);
@@ -287,7 +309,7 @@ export function registerPromptRoutes(app: Express, deps: { capability: PromptsCa
       return;
     }
     if (await refusedNonMemberWorkspace(req, res)) return;
-    const result = deleteUserTemplate(req.params.templateId);
+    const result = await deleteTenantTemplate(tenantOf(req), req.params.templateId);
     if (!result.ok) {
       const status = result.code === 'forbidden' ? 403 : 404;
       sendError(res, status, `prompt_delete_${result.code}`, result.message);
@@ -342,7 +364,7 @@ export function registerPromptRoutes(app: Express, deps: { capability: PromptsCa
     }
     const opts: { version?: string } = {};
     if (version !== undefined) opts.version = version;
-    const found = getTemplate(templateId, opts);
+    const found = await resolveTenantTemplate(tenantOf(req), templateId, opts);
     if (found === 'ambiguous') {
       sendError(res, 400, 'prompt_ref_ambiguous', `multiple installed packs ship '${templateId}'; use object-form ref with libraryId`);
       return;
@@ -359,6 +381,9 @@ export function registerPromptRoutes(app: Express, deps: { capability: PromptsCa
     try {
       const composed = await composePromptTemplate({
         templateId,
+        // ADR 0993 D5 — compose what was RESOLVED. The fixture map holds only the
+        // host's built-ins, so a tenant's own template used to answer 404 here.
+        template: found.template,
         bindings: body.variables,
         // No explicit trust map: compose derives per-binding trust from each
         // variable's declared `source` (RFC 0143 — `variable`/`context` fail

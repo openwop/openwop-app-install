@@ -16,6 +16,8 @@ const { listProductFields, updateProduct, createProduct } = vi.hoisted(() => ({
 }));
 vi.mock('../commerceClient.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../commerceClient.js')>()),
+  // ADR 0945 P5 — the editor's lazy Product shots panel reads the product's photos.
+  getProductMedia: vi.fn(async () => []),
   listProductFields, updateProduct, createProduct,
 }));
 // Echo i18n keys (the precedent) — assertions here key off DATA (the field label/value), not copy.

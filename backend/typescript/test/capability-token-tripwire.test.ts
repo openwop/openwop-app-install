@@ -51,6 +51,10 @@ const REVIEWED_EXEMPT = new Map<string, string>([
   // never-logged tripwire (analytics-visitor-identity.test.ts) as the
   // enforcement that the salt stays server-side.
   ['analytics/visitorIdentity.ts', 'daily salt is a never-issued server secret; createHash is the anonymous visitor dimension, not token-at-rest'],
+  // ADR 0941 recovery — the hash is the tenant/brief-derived canonical record
+  // id; randomBytes chooses a retired campaign's successor record id. Neither
+  // value is a bearer secret or grants access: the normal org checks still bind.
+  ['campaign-orchestration/campaignService.ts', 'canonical campaign content-derived id plus random successor record id; no bearer capability is minted or redeemed'],
 ]);
 
 function walk(dir: string): string[] {

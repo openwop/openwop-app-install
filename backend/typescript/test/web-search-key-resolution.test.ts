@@ -16,7 +16,8 @@
  */
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 
-const resolveSecret = vi.hoisted(() => vi.fn());
+// Typed against the REAL signature, so every mockImplementation below is checked by tsc.
+const resolveSecret = vi.hoisted(() => vi.fn<typeof import('../src/byok/secretResolver.js').resolveSecret>());
 // Spread the REAL module: the surface's SSRF guard builds an undici Agent, and a
 // wholesale mock of the secret resolver's siblings would break unrelated imports.
 vi.mock('../src/byok/secretResolver.js', async (importActual) => ({
@@ -84,5 +85,10 @@ describe('web-search key resolution', () => {
     process.env.OPENWOP_WEBSEARCH_API_KEY = 'env-key';
 
     await expect(liveWebSearchConfigured(TENANT)).resolves.toBe(true);
+    // "Degrades to the NEXT lane": both vault lanes were attempted before the env key.
+    expect(calls().slice(0, 2)).toEqual([
+      { ref: 'web-search', scoped: true },
+      { ref: 'web-search', scoped: false },
+    ]);
   });
 });

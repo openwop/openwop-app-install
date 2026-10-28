@@ -2,6 +2,14 @@
  * ADR 0913 (Book AI P1 + P2 + P20) — a feature erases the workflows and runs it
  * created for one subject, and deletes its own document kind on a person's
  * erasure.
+ *
+ * Tracker TST-BJS. Red when (probe-witnessed, w65): the workflow erasure ignores the
+ * tenant legal hold, skips child runs, or drops the subject filter; the route accepts
+ * a malformed subject; the document erasure deletes under a hold or stops deleting the
+ * registered kind; the checked first save (`baseVersionId: null`) stops being checked.
+ * The first-save refusal is held twice in `addVersion` (the existing-version check and
+ * the insert-only version-1 slot): each alone refuses, so it is probed by removing the
+ * whole null branch.
  */
 
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
@@ -10,6 +18,7 @@ import type { AddressInfo } from 'node:net';
 import { createApp } from '../src/index.js';
 import { openStorage } from '../src/storage/index.js';
 import type { Storage } from '../src/storage/storage.js';
+import type { RunRecord } from '../src/types.js';
 import { registerWorkflowDurable, getRegisteredWorkflowAsync } from '../src/host/workflowsRegistry.js';
 import { recordOwnership, getOwned, listOwnedBySubject } from '../src/host/workflowOwnership.js';
 import { deleteTenantWorkflow, eraseWorkflowSubject } from '../src/host/tenantWorkflowDelete.js';
@@ -36,13 +45,13 @@ afterAll(async () => { await new Promise<void>((res) => server.close(() => res()
 let seq = 0;
 async function ownedWorkflow(tenantId: string, subject?: string): Promise<string> {
   const workflowId = `wf.copy.adr0913.${(++seq).toString(16).padStart(16, '0')}`;
-  await registerWorkflowDurable({ workflowId, nodes: [{ nodeId: 'a', typeId: 'core.noop' }], edges: [], metadata: { name: workflowId } } as never);
+  await registerWorkflowDurable({ workflowId, nodes: [{ nodeId: 'a', typeId: 'core.noop' }], edges: [], metadata: { name: workflowId } });
   await recordOwnership(tenantId, workflowId, { name: workflowId, nodeCount: 1, ...(subject ? { subject } : {}) });
   return workflowId;
 }
-async function run(tenantId: string, workflowId: string, runId: string, extra: Record<string, unknown> = {}): Promise<void> {
+async function run(tenantId: string, workflowId: string, runId: string, extra: Partial<RunRecord> = {}): Promise<void> {
   const now = new Date().toISOString();
-  await storage.insertRun({ runId, workflowId, tenantId, status: 'completed', inputs: null, metadata: {}, configurable: {}, createdAt: now, updatedAt: now, ...extra } as never);
+  await storage.insertRun({ runId, workflowId, tenantId, status: 'completed', inputs: null, metadata: {}, configurable: {}, createdAt: now, updatedAt: now, ...extra });
 }
 
 describe('ADR 0913 P1 — deleteTenantWorkflow is the route recipe', () => {
@@ -183,6 +192,9 @@ describe('ADR 0913 D5 (P11) — a checked FIRST save', () => {
     expect((await listVersions(T, ORG, d.documentId)).map((v) => v.content)).toEqual(['tab A']);
   });
 
+  // The race is not forced: when the two saves run one after the other this is the
+  // existing-version check; when they interleave it is the insert-only slot. Either
+  // way exactly one lands (both guards removed together red it).
   it('two concurrent first saves: exactly one lands', async () => {
     const d = await createDocument({ tenantId: T, orgId: ORG, title: `p11-${++seq}`, kind: 'note', format: 'markdown', provenance: { producedBy: { kind: 'user', id: ME } }, createdBy: ME });
     const results = await Promise.allSettled([

@@ -1,6 +1,13 @@
 /**
  * ADR 0797 (CE-8) — `x-openwop-act-as` may only NARROW, and only an owner
- * grants, changes or removes ownership.
+ * grants, changes or removes ownership. Tracker: TST-BAK-1.
+ *
+ * Red when: `narrowToCaller` stops intersecting scopes or filtering roles;
+ * `actingAccess` returns the named member's access un-narrowed; any one of the
+ * `requireOwner` sites (add / change / remove / group / invite) is skipped; or
+ * the CDP verify role check is skipped (wave 60 probes w60g4-*).
+ * Transfer is a DOUBLE guard: an admin lacks `host:org:manage`, so the scope
+ * check refuses before `requireOwner` is reached (the case asserts which one).
  *
  * Before: every reader of the header resolved authority for the NAMED member
  * alone, so a Viewer naming the Owner's member id held the Owner's scopes
@@ -18,12 +25,15 @@ import { createApp } from '../src/index.js';
 import { getSetCookies } from './headerCookies.js';
 import { createMember, createOrg, getMember, listMembers, type EffectiveAccess } from '../src/host/accessControlService.js';
 import { narrowToCaller } from '../src/host/actingAccess.js';
-import { saveConfig } from '../src/host/featureToggles/service.js';
+import { deleteConfig, getStoredConfig, saveConfig } from '../src/host/featureToggles/service.js';
+import type { ToggleConfig } from '../src/host/featureToggles/types.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 
 const H = '/host/openwop-app';
 let BASE = ''; let server: http.Server;
 const saved: Record<string, string | undefined> = {};
+const TOGGLES = ['users', 'orgs', 'cdp'] as const;
+const savedToggles: Array<{ id: string; cfg: ToggleConfig | null }> = [];
 
 beforeAll(async () => {
   for (const k of ['OPENWOP_STORAGE_DSN', 'OPENWOP_SESSION_SECRET', 'OPENWOP_TEST_AUTH_ENABLED', 'OPENWOP_AUTH_DISABLE_COOKIES', 'OPENWOP_DEMO_MODE']) saved[k] = process.env[k];
@@ -34,17 +44,20 @@ beforeAll(async () => {
   delete process.env.OPENWOP_DEMO_MODE;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'adr0797', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
-  for (const id of ['users', 'orgs', 'cdp']) {
+  for (const id of TOGGLES) {
+    savedToggles.push({ id, cfg: await getStoredConfig(id) });
     const d = getToggleDefault(id);
     if (d) await saveConfig({ ...d, status: 'on' }, 'test');
   }
 }, 120_000);
 afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
+  for (const { id, cfg } of savedToggles) { if (cfg) await saveConfig(cfg, 'test'); else await deleteConfig(id, 'test'); }
   for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
 });
 
-interface Res { status: number; body: any }
+interface Body { error?: string; memberId?: string; user?: { userId: string }; details?: { code?: string; actingAs?: string; requiredScope?: string } }
+interface Res { status: number; body: Body | undefined }
 function client() {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown, headers: Record<string, string> = {}): Promise<Res> => {
@@ -53,8 +66,8 @@ function client() {
       headers: { 'content-type': 'application/json', connection: 'close', ...(cookie ? { cookie } : {}), ...headers },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
-    for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]!; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    for (const ck of getSetCookies(res.headers)) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]!; }
+    return { status: res.status, body: res.status === 204 ? undefined : (await res.json().catch(() => undefined)) as Body | undefined };
   };
   return { call };
 }
@@ -70,7 +83,7 @@ async function world(tag: string): Promise<World> {
     const c = client();
     const login = await c.call('POST', `${H}/test/login`, { subject: `oidc:${tag}-${role}-${Date.now()}`, tenantId: ws, email: `${tag}-${role}@a.test` });
     expect(login.status, JSON.stringify(login.body)).toBe(201);
-    const subject = login.body.user.userId as string;
+    const subject = login.body!.user!.userId;
     const m = await createMember({ orgId: org.orgId, tenantId: ws, displayName: role, subject, roles: [role] });
     return { call: c.call, memberId: m.memberId, subject };
   };
@@ -83,9 +96,17 @@ describe('ADR 0797 — act-as narrows', () => {
   it('a Viewer naming the Owner gains nothing: it cannot add a member, change itself, or remove the owner', async () => {
     const w = await world('escalate');
     const asOwner = actAs(w.owner.memberId);
-    expect((await w.viewer.call('POST', members(w.ws), { displayName: 'Planted', roles: ['admin'] }, asOwner)).status).toBe(403);
-    expect((await w.viewer.call('PATCH', `${members(w.ws)}/${w.viewer.memberId}`, { roles: ['owner'] }, asOwner)).status).toBe(403);
-    expect((await w.viewer.call('DELETE', `${members(w.ws)}/${w.owner.memberId}`, undefined, asOwner)).status).toBe(403);
+    // Each refusal is the SCOPE gate on the narrowed access (the viewer's own
+    // scopes), naming the member it acted as — not some unrelated 403.
+    const attempts = [
+      await w.viewer.call('POST', members(w.ws), { displayName: 'Planted', roles: ['admin'] }, asOwner),
+      await w.viewer.call('PATCH', `${members(w.ws)}/${w.viewer.memberId}`, { roles: ['owner'] }, asOwner),
+      await w.viewer.call('DELETE', `${members(w.ws)}/${w.owner.memberId}`, undefined, asOwner),
+    ];
+    for (const r of attempts) {
+      expect(r.status, JSON.stringify(r.body)).toBe(403);
+      expect(r.body?.details).toMatchObject({ requiredScope: 'host:members:manage', actingAs: w.owner.memberId });
+    }
     // And nothing changed.
     expect((await getMember(w.viewer.memberId))!.roles).toEqual(['viewer']);
     expect(await getMember(w.owner.memberId)).not.toBeNull();
@@ -102,7 +123,7 @@ describe('ADR 0797 — act-as narrows', () => {
     const w = await world('lens');
     const r = await w.owner.call('POST', members(w.ws), { displayName: 'X', roles: ['viewer'] }, actAs(w.viewer.memberId));
     expect(r.status).toBe(403);
-    expect(r.body.details?.actingAs).toBe(w.viewer.memberId);
+    expect(r.body?.details?.actingAs).toBe(w.viewer.memberId);
   });
 
   it('an Admin naming the Owner keeps an Admin’s authority and no more', async () => {
@@ -113,7 +134,7 @@ describe('ADR 0797 — act-as narrows', () => {
     // …and still not an owner: the role did not come with the header.
     const grant = await w.admin.call('POST', members(w.ws), { displayName: 'Boss', roles: ['owner'] }, asOwner);
     expect(grant.status).toBe(403);
-    expect(grant.body.details?.code).toBe('owner_required');
+    expect(grant.body?.details?.code).toBe('owner_required');
   });
 });
 
@@ -131,7 +152,7 @@ describe('ADR 0797 — only an owner grants, changes or removes ownership', () =
     const w = await world('grant');
     const r = await attempt(w);
     expect(r.status, JSON.stringify(r.body)).toBe(403);
-    expect(r.body.details?.code).toBe('owner_required');
+    expect(r.body?.details?.code).toBe('owner_required');
     expect((await getMember(w.admin.memberId))!.roles).toEqual(['admin']);
     const owner = await getMember(w.owner.memberId);
     expect(owner!.roles).toEqual(['owner']);
@@ -142,6 +163,9 @@ describe('ADR 0797 — only an owner grants, changes or removes ownership', () =
     const w = await world('transfer');
     const r = await w.admin.call('POST', `${members(w.ws)}/${w.admin.memberId}/transfer-ownership`, {});
     expect(r.status).toBe(403);
+    // The scope gate refuses first (an admin holds no `host:org:manage`); the
+    // owner rule behind it is the second guard of this double guard.
+    expect(r.body?.details?.requiredScope).toBe('host:org:manage');
     expect((await getMember(w.admin.memberId))!.roles).toEqual(['admin']);
   });
 
@@ -149,7 +173,7 @@ describe('ADR 0797 — only an owner grants, changes or removes ownership', () =
     const w = await world('owner-can');
     const hired = await w.admin.call('POST', members(w.ws), { displayName: 'Hired', roles: ['editor'] });
     expect(hired.status).toBe(201);
-    expect((await w.admin.call('PATCH', `${members(w.ws)}/${hired.body.memberId}`, { roles: ['viewer'] })).status).toBe(200);
+    expect((await w.admin.call('PATCH', `${members(w.ws)}/${hired.body?.memberId}`, { roles: ['viewer'] })).status).toBe(200);
     expect((await w.owner.call('POST', members(w.ws), { displayName: 'Co-owner', roles: ['owner'] })).status).toBe(201);
     expect((await w.owner.call('POST', `${members(w.ws)}/${w.admin.memberId}/transfer-ownership`, {})).status).toBe(200);
     expect((await getMember(w.admin.memberId))!.roles).toContain('owner');

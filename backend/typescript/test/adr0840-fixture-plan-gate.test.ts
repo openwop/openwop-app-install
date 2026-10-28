@@ -10,6 +10,13 @@
  *
  * Plus the global-key guard: canvas ids are global, so `ensureCanvasForTenant` must
  * refuse an id another tenant owns instead of moving that row into the caller.
+ *
+ * TST-BWB-5 (grade-tests w62): red when the plan exemption is dropped (the fixture is
+ * paywalled) or widened to every canvas (the paid canvas reads), when
+ * `ensureCanvasForTenant` loses its own-tenant early return, or loses its foreign-owner
+ * refusal. That refusal is backed by `putIfAbsent` (which also fails on a taken id), so the
+ * refusal alone is witnessed by the half `putIfAbsent` cannot give: no index marker for
+ * the id in the caller's tenant (no phantom canvas in its list).
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';
@@ -105,6 +112,7 @@ describe('ensureCanvasForTenant — canvas ids are global keys', () => {
     await canvas.__putCanvasForTest({ canvasId: 'owned-elsewhere', tenantId: 'tenant-a', canvasTypeId: 'canvas.app-builder', state: { mine: true }, version: 3 });
     await expect(canvas.ensureCanvasForTenant('tenant-b', 'owned-elsewhere', { canvasTypeId: 'canvas.app-builder' })).rejects.toMatchObject({ code: 'conflict' });
     expect(await canvas.getCanvasForTenant('tenant-b', 'owned-elsewhere')).toBeNull();
+    expect((await canvas.listCanvasesForTenant('tenant-b')).map((c) => c.canvasId), 'no phantom canvas in the caller\'s list').not.toContain('owned-elsewhere');
     expect(await canvas.getCanvasForTenant('tenant-a', 'owned-elsewhere')).toMatchObject({ state: { mine: true }, version: 3 });
   });
 

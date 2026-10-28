@@ -53,7 +53,8 @@ const api = vi.hoisted(() => ({
 }));
 vi.mock('../kbClient.js', async (importOriginal) => {
   const orig = await importOriginal<typeof import('../kbClient.js')>();
-  return { ...orig, ...api };
+  // ADR 0904 — the page also reads the quality report; a unit test must not reach it live.
+  return { ...orig, getQuality: async () => [], ...api };
 });
 
 // The Drive-sync panel does its own gated fetch; stub it so this file stays

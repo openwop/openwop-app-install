@@ -7,6 +7,14 @@
  *
  * Service-level on purpose: these three functions are what the 100+ vendor
  * route checks call. The route-level witness is `adr0795-key-policy.test.ts`.
+ *
+ * TST-BKA-1. Red when: a delegation from another tenant is honoured; a
+ * declaration does not narrow; a declaration can exceed its issuer; a shared
+ * workspace's issuer is not resolved (the personal-tenant owner shortcut taken
+ * everywhere); a rotated-out operator key still mints owners; a key issued by a
+ * key, a revoked key, or an expired/unparseable-expiry key resolves; `report`
+ * returns the new answer; the tenant-level or scopes-union resolver skips the
+ * delegation path; the issuer's removal does not revoke the key.
  */
 import http from 'node:http';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
@@ -19,7 +27,7 @@ import {
   resolveSubjectScopesUnion,
   resolveTenantLevelScopes,
 } from '../src/host/accessControlService.js';
-import { issueApiKey, revokeApiKey } from '../src/features/developer-keys/apiKeyService.js';
+import { issueApiKey, revokeApiKey, verifyApiKey } from '../src/features/developer-keys/apiKeyService.js';
 
 const PERSONAL = 'user:adr0795personal';
 const SHARED = 'ws:adr0795-shared';
@@ -36,9 +44,9 @@ beforeAll(async () => {
 afterEach(() => { for (const k of ENV) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; } });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-async function mint(tenantId: string, createdBy: string, scopes?: string[], expiresAt?: string): Promise<{ subject: string; keyId: string }> {
-  const { key } = await issueApiKey({ tenantId, name: 'k', createdBy, ...(scopes ? { scopes } : {}), ...(expiresAt ? { expiresAt } : {}) });
-  return { subject: `apikey:${key.keyId}`, keyId: key.keyId };
+async function mint(tenantId: string, createdBy: string, scopes?: string[], expiresAt?: string): Promise<{ subject: string; keyId: string; token: string }> {
+  const { key, token } = await issueApiKey({ tenantId, name: 'k', createdBy, ...(scopes ? { scopes } : {}), ...(expiresAt ? { expiresAt } : {}) });
+  return { subject: `apikey:${key.keyId}`, keyId: key.keyId, token };
 }
 
 describe('ADR 0795 D1 — demo mode, a personal workspace (the production posture)', () => {
@@ -56,12 +64,13 @@ describe('ADR 0795 D1 — demo mode, a personal workspace (the production postur
     process.env.OPENWOP_DEMO_MODE = 'true';
     const k = await mint(PERSONAL, 'user:owner', ['runs:create', 'runs:read']);
     const access = await resolveEffectiveAccess(PERSONAL, { subject: k.subject });
+    // Exactly the declared protocol scopes the owner holds — and nothing else.
+    expect([...access.scopes].sort()).toEqual(['runs:create', 'runs:read']);
     expect(access.scopes).not.toContain('workspace:read');
-    expect(access.scopes).not.toContain('workspace:write');
-    expect(access.scopes).not.toContain('host:members:manage');
   });
 
   it('an undeclared key holds what its issuer holds (the owner of a personal workspace)', async () => {
+    process.env.OPENWOP_DEMO_MODE = 'true';
     const k = await mint(PERSONAL, 'user:owner');
     const access = await resolveEffectiveAccess(PERSONAL, { subject: k.subject });
     expect(access.scopes).toContain('workspace:write');
@@ -106,7 +115,14 @@ describe('ADR 0795 D1 / D6 — a shared workspace: the key follows its issuer', 
     expect((await resolveEffectiveAccess(SHARED, { subject: narrow.subject })).scopes).toEqual(['workspace:read']);
     expect((await resolveSubjectScopesUnion(SHARED, narrow.subject)).scopes).toEqual(['workspace:read']);
 
+    // Double guard: the removal REVOKES the key (D6 — `revokeKeysIssuedBy`,
+    // `features/developer-keys/apiKeyService.ts`, via `notifyIssuerRemoved`) AND
+    // every resolver re-reads the issuer's membership (D1 — `viaDelegation` →
+    // `direct(d.issuer)`, `host/accessControlService.ts`). They live in two files,
+    // so no single edit breaks both. Each is witnessed on its own: D6 by the
+    // revocation asserted here, D1 by the non-member case below.
     await deleteMember(m.memberId);
+    expect(await verifyApiKey(wide.token), 'the issuer’s removal revoked the key itself').toBeNull();
     expect((await resolveEffectiveAccess(SHARED, { subject: wide.subject })).scopes).toEqual([]);
     expect((await resolveSubjectScopesUnion(SHARED, wide.subject)).scopes).toEqual([]);
     expect((await resolveTenantLevelScopes(SHARED, wide.subject)).scopes).toEqual([]);

@@ -63,6 +63,8 @@ export const commerceConnectFeature: BackendFeature = {
     // person enters a card (architect L16).
     orgPolicy: { tenantMethodScopes: { createCheckout: 'workspace:write' } },
     build: (scope) => ({
+      // The TENANT's own seller. A client org's storefront settles through that
+      // org's seller instead (ADR 0948 P0b, `resolveStorefrontSettlement`).
       sellerAccount: async () => {
         const seller = await getSeller(scope.tenantId);
         return {

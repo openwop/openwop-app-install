@@ -28,13 +28,6 @@ const ROUTES = [
   '/design-system',
 ];
 
-async function setTheme(page: import('@playwright/test').Page, theme: 'light' | 'dark') {
-  await page.evaluate((t) => {
-    document.documentElement.classList.remove('theme-light', 'theme-dark');
-    document.documentElement.classList.add(`theme-${t}`);
-  }, theme);
-}
-
 for (const theme of ['light', 'dark'] as const) {
   for (const route of ROUTES) {
     test(`a11y: ${route} (${theme})`, async ({ page }) => {
@@ -42,7 +35,13 @@ for (const theme of ['light', 'dark'] as const) {
       // and axe measures real pixels — capturing mid-animation blends fg/bg and
       // reports false contrast failures. The app honors prefers-reduced-motion,
       // so reduced-motion disables the animation and axe sees true colors.
-      await page.emulateMedia({ reducedMotion: 'reduce' });
+      await page.emulateMedia({ reducedMotion: 'reduce', colorScheme: theme });
+      // Use the same saved preference as the first-paint script and
+      // ThemeToggle. Changing the class after navigation races a later shell
+      // mount, whose effect would reapply its independently read preference.
+      await page.addInitScript((value) => {
+        localStorage.setItem('openwop.theme', value);
+      }, theme);
       // Audit the faces users get, not the fallback stack: the config fails the
       // Google Fonts hosts fast (E2E-ORDER-1), so serve the vendored copies.
       await serveFontsLocally(page);
@@ -56,7 +55,8 @@ for (const theme of ['light', 'dark'] as const) {
       // a11y coverage, and the timeout read as "flaky lane" rather than "this
       // assertion is stale".
       await page.waitForSelector('main#main-content, main#public-main');
-      await setTheme(page, theme);
+      const expectedTheme = new RegExp(`(?:^|\\s)theme-${theme}(?:\\s|$)`);
+      await expect(page.locator('html')).toHaveClass(expectedTheme);
       // Let data fetches + AutoSeedDemoData re-renders settle before axe —
       // capturing mid-fetch/mid-seed measures a transient render and reports
       // false contrast failures (e.g. a board column briefly on default colors).
@@ -70,9 +70,11 @@ for (const theme of ['light', 'dark'] as const) {
       // `[data-gallery]` sections — permanently busy by design, so excluded.
       await expect(page.locator('[aria-busy="true"]:not([data-gallery] *)')).toHaveCount(0, { timeout: 15_000 });
       await page.evaluate(async () => { await document.fonts.ready; });
+      await expect(page.locator('html')).toHaveClass(expectedTheme);
       const results = await new AxeBuilder({ page })
         .withTags(['wcag2a', 'wcag2aa'])
         .analyze();
+      await expect(page.locator('html')).toHaveClass(expectedTheme);
       // The accent/semantic palette is now AA-compliant via --clay-text /
       // --clay-strong / --color-ai-text (the prior mid-tone baseline is gone).
       // Only skip axe "can't-determine" contrast nodes (e.g. gradient fills),

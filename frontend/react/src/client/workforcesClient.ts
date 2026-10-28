@@ -9,7 +9,7 @@
  */
 
 import { authedHeaders, config, fetchOpts } from './config.js';
-import { apiErrorFrom } from './errorEnvelope.js';
+import { ApiError, apiErrorFrom } from './errorEnvelope.js';
 
 const base = `${config.baseUrl}/host/openwop-app/workforces`;
 
@@ -145,6 +145,26 @@ export interface MigrationJourneyPatch {
 export async function getMigrationJourney(workforceId: string): Promise<MigrationJourney> {
   const res = await fetch(`${base}/${encodeURIComponent(workforceId)}/migration`, fetchOpts({ headers: authedHeaders() }));
   return asJson<MigrationJourney>(res, 'getMigrationJourney');
+}
+
+/** ARWF-15 — one workflow a migration journey may target. `workforce` = the
+ *  workforce's own catalog (only entries that resolve for this tenant); `owned`
+ *  = the tenant's builder list. */
+export interface MigrationTarget {
+  workflowId: string;
+  name: string;
+  source: 'workforce' | 'owned';
+}
+
+export async function getMigrationTargets(workforceId: string): Promise<MigrationTarget[]> {
+  const res = await fetch(`${base}/${encodeURIComponent(workforceId)}/migration/targets`, fetchOpts({ headers: authedHeaders() }));
+  return (await asJson<{ targets: MigrationTarget[] }>(res, 'getMigrationTargets')).targets ?? [];
+}
+
+/** ARWF-15 — the server refused a journey target that does not resolve
+ *  (`400`, `details.reason: 'target_workflow_unresolved'`). */
+export function isUnresolvedTarget(err: unknown): boolean {
+  return err instanceof ApiError && err.status === 400 && err.reason === 'target_workflow_unresolved';
 }
 
 export async function patchMigrationJourney(

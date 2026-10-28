@@ -13,6 +13,11 @@
  * honored only while the subject is STILL a member. Otherwise a preference set
  * before a revocation would resurrect access at mint time, ahead of the
  * per-request revalidation in the auth middleware.
+ *
+ * Tracker TST-BG1-25. Red when (probe-witnessed, wave 58): the membership check
+ * is skipped, or a throwing check is read as "member"; the personal tenant is
+ * sent through the membership check; the read is not keyed on the subject;
+ * `clearActiveWorkspaceIfPointingAt` clears unconditionally.
  */
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 
@@ -58,9 +63,14 @@ describe('resolveActiveWorkspace', () => {
 
   it('does not consult membership for the personal tenant itself', async () => {
     await setActiveWorkspace(SUBJECT, PERSONAL);
-    // notMember would reject it if the guard were applied indiscriminately —
-    // a caller is always the implicit owner of their own personal tenant.
-    await expect(resolveActiveWorkspace(SUBJECT, PERSONAL, notMember)).resolves.toBe(PERSONAL);
+    // A caller is always the implicit owner of their own personal tenant, so the
+    // check must not even be ASKED. The result alone cannot show that: a refused
+    // check falls back to the personal tenant too (wave 58 `aw-personal` was
+    // vacuous on the result-only form), so count the calls.
+    let calls = 0;
+    const counted = async (): Promise<boolean> => { calls += 1; return false; };
+    await expect(resolveActiveWorkspace(SUBJECT, PERSONAL, counted)).resolves.toBe(PERSONAL);
+    expect(calls).toBe(0);
   });
 
   it('is keyed on SUBJECT — one subject\'s preference never leaks to another', async () => {
@@ -103,7 +113,10 @@ describe('clearActiveWorkspaceIfPointingAt (IDN-9 — membership removal)', () =
   });
 
   it('is a no-op when no preference exists', async () => {
+    // Another subject's preference must survive a clear aimed at a subject with none.
+    await setActiveWorkspace(SUBJECT, SHARED);
     await clearActiveWorkspaceIfPointingAt('oidc:nobody', SHARED);
     await expect(resolveActiveWorkspace('oidc:nobody', PERSONAL, isMember)).resolves.toBe(PERSONAL);
+    await expect(resolveActiveWorkspace(SUBJECT, PERSONAL, isMember)).resolves.toBe(SHARED);
   });
 });

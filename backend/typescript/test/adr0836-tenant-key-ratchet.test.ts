@@ -12,6 +12,14 @@
  * - the RATCHET: every read and delete exit of the version store and the
  *   schedule-marker stores in `cmsService.ts` is tenant-scoped. A new exit that
  *   is not fails here, before it reaches a review.
+ *
+ * TST-BWB-2 (grade-tests w62): the attacker now uses the SAME org id string as the system
+ * site (`host-site`), so the history cap's TENANT clause is the only thing keeping the
+ * system row (with different org ids the org clause alone protected it, and dropping the
+ * tenant clause stayed green here — only the ratchet below caught it). Red when the cap's
+ * filter drops `tenantId` (witness AND ratchet), when marker keys lose the tenant (purge
+ * case), or when `dropMarker`'s legacy delete stops checking the row's tenant (ratchet).
+ * The `versions.list()` floor is the measured count, 6.
  */
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -38,15 +46,16 @@ describe('ADR 0836 D4 — a tenant reusing a system-site page id cannot touch th
     const before = await listVersions(SYS, SYS_ORG, ID);
     expect(before).toHaveLength(1);
 
-    await createPage({ tenantId: 'org:attacker', orgId: 'o-x', title: 'Mine', pageId: ID, sections: [{ type: 'hero', data: { heading: 'x0' } }], createdBy: 'mallory' });
+    // Same org id string as the system site: only the tenant tells the two rows apart.
+    await createPage({ tenantId: 'org:attacker', orgId: SYS_ORG, title: 'Mine', pageId: ID, sections: [{ type: 'hero', data: { heading: 'x0' } }], createdBy: 'mallory' });
     for (let i = 1; i <= 55; i += 1) {
-      await transitionPage('org:attacker', 'o-x', ID, 'publish', 'mallory');
-      await transitionPage('org:attacker', 'o-x', ID, 'unpublish', 'mallory');
-      await updatePage('org:attacker', 'o-x', ID, { sections: [{ type: 'hero', data: { heading: `x${i}` } }] }, 'mallory');
+      await transitionPage('org:attacker', SYS_ORG, ID, 'publish', 'mallory');
+      await transitionPage('org:attacker', SYS_ORG, ID, 'unpublish', 'mallory');
+      await updatePage('org:attacker', SYS_ORG, ID, { sections: [{ type: 'hero', data: { heading: `x${i}` } }] }, 'mallory');
     }
     const after = await listVersions(SYS, SYS_ORG, ID);
     expect(after.map((v) => [v.versionId, v.origin])).toEqual(before.map((v) => [v.versionId, v.origin]));
-    expect((await listVersions('org:attacker', 'o-x', ID)).length).toBe(50); // B's own cap still applies
+    expect((await listVersions('org:attacker', SYS_ORG, ID)).length).toBe(50); // B's own cap still applies
   }, 60_000);
 });
 
@@ -86,7 +95,7 @@ describe('ADR 0836 D4 — ratchet: every version/marker exit in cmsService.ts is
 
   it('every `versions.list()` is filtered on tenantId in the same statement', () => {
     const hits = lines.map((l, i) => (l.includes('versions.list()') ? i : -1)).filter((i) => i >= 0);
-    expect(hits.length).toBeGreaterThanOrEqual(5); // a ratchet that matched nothing would pass
+    expect(hits.length).toBeGreaterThanOrEqual(6); // the measured count (w62); a ratchet that matched nothing would pass
     for (const i of hits) expect(window(i, 4), `cmsService.ts:${i + 1}`).toMatch(/tenantId/);
   });
 

@@ -16,6 +16,7 @@ import { confidenceEscalationFloor, multiAgentExecutionModelVersion } from '../h
 import { MAX_FUTURE_HORIZON_ISO } from '../host/cronSchedule.js';
 import { secretRotationOverlapSeconds, SUPPORTED_SIGNATURE_ALGORITHMS } from '../host/webhookStandardWebhooks.js';
 import { advertisedHostEventTypes, hostEventsV2Enabled } from '../host/hostEventTypes.js';
+import { HOST_EVENT_REPLAY_MIN_RETENTION_SECONDS, rfc0250WireAvailable } from '../host/hostEventLog.js';
 import { createHash } from 'node:crypto';
 import type { Express, Request } from 'express';
 import { DEFAULT_SERVICE_DESCRIPTION, DEFAULT_SERVICE_VENDOR, type AppConfig } from '../index.js';
@@ -56,14 +57,14 @@ import { getPromptsHostConfig } from '../host/promptHostConfig.js';
 import { workflowChainPacksCapability } from '../host/workflowChainPackLoader.js';
 import { getEnvelopeReasoningConfig } from '../host/envelopeReasoningConfig.js';
 import { getModelCapabilityGateConfig } from '../host/modelCapabilityGateConfig.js';
-import { authorizationCapability, isAuthorizationEnforced, SCOPES_SUPPORTED } from '../host/protocolAuthorization.js';
+import { authorizationCapability, isAuthorizationEnforced, scopesSupported } from '../host/protocolAuthorization.js';
 import { subWorkflowInputMappingHonoured } from '../host/capabilityOverlay.js';
 import { listArtifactTypes } from '../host/artifactTypes.js';
 import { triggerIngestionEnabled, streamCdcIngestionEnabled, inboundSigningEnabled, MAX_INGEST_BODY_BYTES } from '../host/triggerIngestionService.js';
 import { TRIGGER_DEAD_LETTER_MAX_PAGE_SIZE, TRIGGER_DEAD_LETTER_RETENTION_DAYS } from '../host/triggerBridgeService.js';
 import { dataResidencyAdvertised, dataResidencyRegions } from '../features/cdp/dataResidency.js';
 import { anonymousActorAdvertised, anonymousActorCapability } from '../host/anonymousActor.js';
-import { installableProposalKinds } from '../features/proposals/proposalsService.js';
+import { proposalsFacet } from '../features/proposals/capability.js';
 import { evalSuiteCapability } from '../host/evals/evalCapability.js';
 import { requiresBounds as goalsRequiresBounds } from '../features/goals/goalsService.js';
 import { uiPluginsCapability, uiPluginOperationsServed } from '../host/uiPluginRpc.js';
@@ -908,19 +909,18 @@ export function agentsCapability(): Record<string, unknown> {
     // from the ONE builder (`evalSuiteCapability`), which adds the RFC 0244
     // facets only once the vendored v2 schemas seat them (D7).
     evalSuite: { supported: true, ...evalSuiteCapability() },
-    // RFC 0096 reviewable-learning proposals — host-sample seam under
-    // `/v1/host/openwop-app/proposals`. ADR 0938 D3: advertised only when
-    // `OPENWOP_PROPOSALS_ENABLED=true` AND some kind has a registered installer,
-    // with `artifactKinds` = exactly those kinds. This host registers none, so
-    // the block is absent on every deploy. Until 2026-10-19 it advertised all four
-    // kinds while `apply` installed nothing and returned a hash as if it had.
-    // `direct-rbac` is the only mode: the approval-gate branch had no release
-    // handler and is deleted (D2). Dup-detection not implemented (honest false).
+    // RFC 0096 reviewable-learning proposals, served at v2 by the RFC 0249
+    // operations (`features/proposals/v2Routes.ts`). ADR 0938 D3: advertised only
+    // when `OPENWOP_PROPOSALS_ENABLED=true` AND some kind has a registered
+    // installer, with `artifactKinds` = exactly those kinds. Until 2026-10-19 it
+    // advertised all four kinds while `apply` installed nothing and returned a
+    // hash as if it had. ADR 0972 D9: the one installer (`prompt-template`) is
+    // registered only once the vendored v2 schemas carry RFC 0249, and brings
+    // `clientDrafts` + `readback` with it. `direct-rbac` is the only mode (ADR
+    // 0938 D2). Dup-detection not implemented (honest false).
     ...((): Record<string, unknown> => {
-      const kinds = installableProposalKinds();
-      return process.env.OPENWOP_PROPOSALS_ENABLED === 'true' && kinds.length > 0
-        ? { proposals: { artifactKinds: kinds, duplicationDetection: false, activation: 'direct-rbac' } }
-        : {};
+      const facet = proposalsFacet();
+      return facet ? { proposals: facet } : {};
     })(),
     // RFC 0097 standing goals — the ADR 0412 controller under
     // `/v1/host/openwop-app/goals`. Advertised when
@@ -978,7 +978,9 @@ function v2HostEventsFamily(since: string, until: string): Record<string, unknow
   if (!hostEventsV2Enabled()) return {};
   const types = advertisedHostEventTypes();
   if (types.length === 0) return {};
-  return { hostEvents: { status: 'experimental', since, until, witness: 'witnessable-gated', types } };
+  // ADR 0973 D8 — `replay` appears only once the vendored schemas define it (RFC 0250).
+  const replay = rfc0250WireAvailable() ? { replay: { minRetentionSeconds: HOST_EVENT_REPLAY_MIN_RETENTION_SECONDS } } : {};
+  return { hostEvents: { status: 'experimental', since, until, witness: 'witnessable-gated', types, ...replay } };
 }
 
 /**
@@ -1831,7 +1833,8 @@ export function registerDiscoveryRoutes(app: Express, _deps: Deps): void {
       // parity-tested against the call sites), not the
       // thirteen-name vocabulary. (ADR 0743 omitted the field while nothing enforced
       // any: a self-service key's declared scopes were ignored on protocol routes.)
-      scopes_supported: [...SCOPES_SUPPORTED],
+      // ADR 0972 D9 — plus the proposal scopes once the RFC 0249 wire is available.
+      scopes_supported: [...scopesSupported()],
       // Deliberately no
       // `dpop_bound_access_tokens_required` / `tls_client_certificate_bound_access_tokens`:
       // the lane's minimumAssurance is `bearer`, and claiming a binding it does not

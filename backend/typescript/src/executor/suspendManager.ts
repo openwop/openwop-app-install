@@ -13,6 +13,7 @@ import type { Storage } from '../storage/storage.js';
 import { stripSecretsFromPersisted } from '../byok/ephemeralRunSecrets.js';
 import { emitInterruptNotification } from '../notifications/notify.js';
 import { recordInterruptCreated } from '../observability/metricSeams.js';
+import { assertResumeSchemaDeclaration } from '../host/resumeSchemaValidation.js';
 
 let backend: Storage | null = null;
 
@@ -67,6 +68,7 @@ export function getSuspendManager() {
        *  redelivery finds it — `getInterruptByNode` sees open rows only). */
       interruptId?: string;
     }): Promise<InterruptRecord> {
+      assertResumeSchemaDeclaration(input.resumeSchema);
       const interruptId = input.interruptId ?? randomBytes(16).toString('hex');
       // `spec/v2/core/identity.md` §4 (RFC 0170 §E.1) — `ow2.<alg>.<kid>.
       // <payload>.<mac>`. The `payload` is the same 256-bit random credential

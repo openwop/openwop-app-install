@@ -8,6 +8,12 @@
  *    to the lifecycle hooks, which disabled the SURVIVOR's widgets.
  *  - `ARWF-12`: the row was deleted FIRST, so a throw in a later sweep returned
  *    500 and the route's 404 pre-check refused every retry — orphans stranded.
+ *
+ * Breaks it (round-1 probes, all witnessed, `host/rosterCascade.ts`): the
+ * `!stillReferenced` guard forced true (8fw2g2-rcs-shared) or the registry
+ * eviction dropped (rcs-evict) or the agentId named to the hooks while the agent
+ * is still shared (rcs-hooks) — each reds case 1; deleting the roster row
+ * before the sweeps (rcs-roworder) reds case 2.
  */
 
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -24,7 +30,7 @@ vi.mock('../src/host/twinService.js', async (importOriginal) => {
   };
 });
 
-import { getAgentRegistry } from '../src/executor/agentRegistry.js';
+import { getAgentRegistry, type ResolvedAgentManifest } from '../src/executor/agentRegistry.js';
 import { createRosterEntry, getRosterEntry } from '../src/host/rosterService.js';
 import { deleteRosterMemberCascade } from '../src/host/rosterCascade.js';
 import { onRosterMemberDeleted, __resetRosterLifecycleHooks } from '../src/host/rosterLifecycle.js';
@@ -42,9 +48,10 @@ async function userAgent(agentId: string): Promise<void> {
     agentId, tenantId: T, persona: agentId, modelClass: 'general', systemPrompt: 'x', toolAllowlist: [],
     memoryShape: { scratchpad: false, conversation: false, longTerm: false }, createdAt: new Date().toISOString(),
   });
-  getAgentRegistry().register({
+  const manifest: ResolvedAgentManifest = {
     agentId, persona: agentId, modelClass: 'general', systemPrompt: 'x', packName: 'user', packVersion: '0', toolAllowlist: [], ownerTenant: T,
-  } as Parameters<ReturnType<typeof getAgentRegistry>['register']>[0]);
+  };
+  getAgentRegistry().register(manifest);
 }
 
 beforeAll(async () => {

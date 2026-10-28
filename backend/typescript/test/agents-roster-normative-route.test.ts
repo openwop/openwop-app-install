@@ -16,6 +16,10 @@ import { corpusSchema } from './support/corpusSchema.js';
  * `404 "agent 'roster' is not installed on this host"` in production. Suite
  * 2.42.3+ caught it once its leg stopped being unfailable. The first assertion is
  * therefore the status code: a shadowed route is the regression to catch.
+ *
+ * TST-BNA-2. Red when: the route is not registered at `/agents/roster`, an
+ * advisor entry is projected, or a host-ext field (e.g. `autonomyLevel`) leaks
+ * onto the normative entry (also a closed-world schema violation).
  */
 let server: Server;
 let base: string;
@@ -41,9 +45,9 @@ beforeAll(async () => {
     body: JSON.stringify({ persona: 'Ops Lead', agentRef: { agentId: 'core.openwop.agent-examples.chat' }, workflows: ['conformance-noop'], autonomyLevel: 'review' }),
   });
   if (created.status !== 201 && created.status !== 200) throw new Error(`roster create answered ${created.status}: ${await created.text()}`);
-  await createRosterEntry({ tenantId: 'roster-tenant-a', persona: 'Ada Lovelace', agentRef: { agentId: 'core.openwop.agent-examples.chat' }, roleKey: 'advisor' } as Parameters<typeof createRosterEntry>[0]);
+  await createRosterEntry({ tenantId: 'roster-tenant-a', persona: 'Ada Lovelace', agentRef: { agentId: 'core.openwop.agent-examples.chat' }, roleKey: 'advisor' });
   // Tenant B: its own member, which tenant A must never see.
-  await createRosterEntry({ tenantId: 'roster-tenant-b', persona: 'Other Tenant Agent', agentRef: { agentId: 'core.openwop.agent-examples.chat' } } as Parameters<typeof createRosterEntry>[0]);
+  await createRosterEntry({ tenantId: 'roster-tenant-b', persona: 'Other Tenant Agent', agentRef: { agentId: 'core.openwop.agent-examples.chat' } });
 });
 afterAll(async () => {
   await new Promise<void>((r) => server.close(() => r()));
@@ -94,5 +98,6 @@ describe('GET /agents/roster — the normative roster read (RFC 0086 §B)', () =
   it('/agents/:agentId still resolves real agents (the ordering fix did not break the id route)', async () => {
     const res = await fetch(`${base}/agents/core.openwop.agent-examples.chat`, { headers: hdr(KEY_A) });
     expect(res.status).toBe(200);
+    expect(((await res.json()) as { agentId?: string }).agentId).toBe('core.openwop.agent-examples.chat');
   });
 });

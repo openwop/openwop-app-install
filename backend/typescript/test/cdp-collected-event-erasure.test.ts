@@ -43,7 +43,7 @@ let events: DurableCollection<Row>;
 const put = async (eventId: string, payload: Record<string, unknown>, piiFields: string[] = [], tenantId = T): Promise<void> => {
   await events.put({ eventId, tenantId, eventType: 'pageview', payload, piiFields, at: new Date().toISOString() });
 };
-const ids = async (): Promise<string[]> => (await events.list()).map((r) => r.eventId).sort();
+const ids = async (): Promise<string[]> => (await events.list()).filter((r) => !('deleted' in r)).map((r) => r.eventId).sort();
 
 beforeEach(async () => {
   initHostExtPersistence(await openStorage('memory://'));
@@ -65,6 +65,9 @@ describe('CONS-6 — the CDP ingest store is reachable by a DSAR', () => {
     await eraseCdpCollectedEvents(T, 'JANE@EXAMPLE.COM'); // case-folded
 
     expect(await ids()).toEqual(['e-other']);
+    // The payload is gone, while the opaque primary fence prevents a delayed
+    // insert from recreating it. It contains no identity or event content.
+    expect(await events.get('e-session')).toEqual({ eventId: 'e-session', tenantId: T, deleted: true });
   });
 
   it('NON-REACH: a different subject, a different tenant, and a substring coincidence all survive', async () => {

@@ -9,10 +9,19 @@ import { WORKER_CONTRACT, runUnderWorkerContract, runUnderContract, currentContr
  * Before this ADR every daemon reached the seat by falling through
  * `currentContract()`'s `?? 1` — an ambient default no worker chose, and
  * indistinguishable from a request that forgot to negotiate. Now each worker
- * tick is wrapped in `runUnderWorkerContract`, so December's flip is one
- * constant and THIS test enumerates the readers it flips: every file under
- * src/host, src/features, src/executor that schedules a `setInterval` and
- * touches storage must enter the seat explicitly.
+ * tick is wrapped in `runUnderWorkerContract`, and THIS test enumerates the
+ * readers: every file under src/host, src/features, src/executor that schedules a
+ * `setInterval` and touches storage must enter the seat explicitly.
+ *
+ * (CORRECTED wave 64: this used to say "December's flip is one constant". Per the
+ * product's own ADR 0812 D1 correction in `storage/eventEraAdapter.ts`, the worker
+ * contract is the storage vocabulary every worker was written against and does NOT
+ * flip with v1 retirement.)
+ *
+ * Sabotage-witnessed: unwrapping a worker's tick (8fw5g1-wk-ratchet) reds case 3;
+ * making `runUnderWorkerContract` a pass-through (wk-explicit) reds case 2. Case 1's
+ * second assertion is DOUBLE-GUARDED by `currentContract()`'s `?? 1` fallback, which
+ * equals WORKER_CONTRACT today — case 2 (inside a major-2 context) carries the claim.
  */
 function* tsFiles(dir: string): Generator<string> {
   for (const e of readdirSync(dir, { withFileTypes: true })) {
@@ -46,7 +55,8 @@ describe('ADR 0650 — the worker contract is explicit', () => {
         if (!/runUnderWorkerContract\(/.test(text)) offenders.push(f);
       }
     }
-    expect(candidates).toBeGreaterThanOrEqual(10); // non-vacuous: the ten known workers are found
+    // Non-vacuous: MEASURED 16 storage-touching interval workers at 19d13e682 (wave 64).
+    expect(candidates).toBeGreaterThanOrEqual(16);
     expect(offenders, `interval workers reaching the event seat through the ambient default:\n${offenders.join('\n')}`).toEqual([]);
   });
 });

@@ -1,14 +1,14 @@
 {
   "name": "core.openwop.workflows.kicktodo-research",
-  "version": "1.0.3",
+  "version": "1.1.0",
   "kind": "workflow-chain",
-  "description": "KickTodo research spine as an RFC 0013 chain pack (migrated from the deprecated ADR 0072 builtin `openwop-app.kicktodo.research`, ADR 0472 Phase 2). Frame deterministic research questions, search the web (honestly demo or live per the host adapter), normalize to canonical source records, and build a structure-checked evidence graph. Conversion tightened the builtin's implicit ordering into EXPLICIT edge dataflow (the audit's honesty note): search's `{results,engine}` flows to normalize, normalize's sources flow to the evidence graph.",
+  "description": "KickTodo research spine as an RFC 0013 chain pack (migrated from the deprecated ADR 0072 builtin `openwop-app.kicktodo.research`, ADR 0472 Phase 2). Frame deterministic research questions, search the web (honestly demo or live per the host adapter), normalize to canonical source records, and build a structure-checked evidence graph. Conversion tightened the builtin's implicit ordering into EXPLICIT edge dataflow (the audit's honesty note): search's `{results,engine}` flows to normalize, normalize's sources flow to the evidence graph. 1.1.0 (ADR 0975 D3): search reads frame.searchQuery, not the bare topic; maxResults moved to config.",
   "keywords": ["KickTodo", "Research"],
   "engines": { "openwop": ">=1.0.0 <3.0.0" },
   "chains": [
     {
       "chainId": "kicktodo.research",
-      "version": "1.0.1",
+      "version": "1.1.0",
       "label": "Research a challenge topic",
       "description": "Frame → search → normalize sources → evidence graph.",
       "parameters": {
@@ -18,7 +18,8 @@
         "properties": {
           "topic": { "type": "string", "description": "The challenge topic to research." },
           "audience": { "type": "string", "description": "The target audience." },
-          "candidateId": { "type": "string", "description": "The challenge candidate the evidence graph binds to." }
+          "candidateId": { "type": "string", "description": "The challenge candidate the evidence graph binds to." },
+          "transformation": { "type": "string", "description": "ADR 0975 D3 — what the participant changes (the candidate's transformation). Disambiguates the research search query; optional (the audience is the fallback)." }
         }
       },
       "capabilities": [],
@@ -26,18 +27,18 @@
         "nodes": [
           {
             "id": "frame",
-            "typeId": "feature.kicktodo.nodes.research-frame@1.0.0",
+            "typeId": "feature.kicktodo.nodes.research-frame@1.1.0",
             "name": "Frame research questions",
             "position": { "x": 0, "y": 0 },
-            "inputs": { "topic": "{{params.topic}}", "audience": "{{params.audience}}" }
+            "inputs": { "topic": "{{params.topic}}", "audience": "{{params.audience}}", "transformation": "{{params.transformation}}" }
           },
           {
             "id": "search",
             "typeId": "core.web.search@1.0.0",
             "name": "Web search",
             "position": { "x": 160, "y": 0 },
-            "config": { "suitability": "durable" },
-            "inputs": { "query": "{{params.topic}}", "maxResults": 8, "suitability": "durable" }
+            "config": { "suitability": "durable", "maxResults": 8 },
+            "inputs": { "suitability": "durable" }
           },
           {
             "id": "normalize",
@@ -55,7 +56,7 @@
           }
         ],
         "edges": [
-          { "from": "frame", "to": "search", "triggerRule": "all_success" },
+          { "from": "frame.searchQuery", "to": "search.query", "triggerRule": "all_success" },
           { "from": "search", "to": "normalize", "triggerRule": "all_success" },
           { "from": "normalize", "to": "graph", "triggerRule": "all_success" }
         ]

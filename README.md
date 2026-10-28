@@ -1,4 +1,4 @@
-> **Published white-label install bundle.** Auto-synced from `openwop/openwop-app` (source `c43c91c2a`). Clone or download the release zip, then follow **[WHITE-LABEL.md](./frontend/react/WHITE-LABEL.md)** to deploy your own. Generated — PRs here are not merged; development happens upstream.
+> **Published white-label install bundle.** Auto-synced from `openwop/openwop-app` (source `391fdd37c`). Clone or download the release zip, then follow **[WHITE-LABEL.md](./frontend/react/WHITE-LABEL.md)** to deploy your own. Generated — PRs here are not merged; development happens upstream.
 
 # openwop-app — OpenWOP Application
 
@@ -16,25 +16,25 @@ A deployable reference application demonstrating the full vertical slice of an O
 
 ### Backend (`backend/typescript/`)
 
-- **All four canonical run-lifecycle endpoints** — `POST /v1/runs`, `GET /v1/runs/{id}`, `POST /v1/runs/{id}/cancel`, `POST /v1/runs/{id}:fork`
-- **All four interrupt `kind`s** — `approval`, `clarification`, `refinement`, `cancellation` — wired through `POST /v1/runs/{id}/interrupts/{nodeId}` and the signed-token callback `POST /v1/interrupts/{token}`
+- **All four canonical run-lifecycle endpoints** — `POST /runs`, `GET /runs/{id}`, `POST /runs/{id}/cancel`, `POST /runs/{id}:fork`
+- **All four interrupt `kind`s** — `approval`, `clarification`, `refinement`, `cancellation` — wired through `POST /runs/{id}/interrupts/{nodeId}` and the signed-token callback `POST /interrupts/{token}`
 - **SSE event stream** with the four canonical stream modes (`values` / `updates` / `messages` / `debug`) and `Last-Event-ID` resume
 - **Two-layer idempotency** — HTTP `Idempotency-Key` + engine `invocationId`
 - **BYOK end-to-end** — node manifest declares `requires.secrets[]`, run options carry `credentialRef`, secret resolves at execute time, secret material is stripped from persisted run-doc / events / errors
 - **Pack consumption** — fetch + verify + extract pack tarballs from `packs.openwop.dev` at boot (SHA-256 SRI + Ed25519 sig over `pack.json` bytes per `registry/scripts/verify-signatures.mjs`). Installed packs survive across restarts under `~/.openwop-packs/` and are re-verified against their trust marker on every load to catch post-install tampering.
-- **MCP server mount** (RFC 0020) — opt-in JSON-RPC endpoint at `POST /v1/host/openwop-app/mcp` that lets external MCP clients (Claude Desktop, Cursor, conformance harness) discover and invoke workflows as MCP tools/resources/prompts, with bidirectional `sampling/createMessage` + `elicitation/create` bridged into `ctx.callAI` / `ctx.suspend`. Env-gated on `OPENWOP_MCP_SERVER_ENABLED=true`. OFF by default; the boot log emits a `NEVER enable in production without auth review` warning when ON. All 6 `mcp-server-*.test.ts` conformance scenarios pass behaviorally against this mount.
+- **MCP server mount** (RFC 0020) — opt-in JSON-RPC endpoint at `POST /host/openwop-app/mcp` that lets external MCP clients (Claude Desktop, Cursor, conformance harness) discover and invoke workflows as MCP tools/resources/prompts, with bidirectional `sampling/createMessage` + `elicitation/create` bridged into `ctx.callAI` / `ctx.suspend`. Env-gated on `OPENWOP_MCP_SERVER_ENABLED=true`. OFF by default; the boot log emits a `NEVER enable in production without auth review` warning when ON. All 6 `mcp-server-*.test.ts` conformance scenarios pass behaviorally against this mount.
 - **Operator-configured outbound MCP server** (H21 / ADR 0553) — point the host's MCP *client* at a server you run: `OPENWOP_MCP_SERVER_URL=https://mcp.internal.example` (optionally `OPENWOP_MCP_SERVER_ID` — default `operator-mcp` — `OPENWOP_MCP_SERVER_LABEL`, and `OPENWOP_MCP_SERVER_TOKEN_REF` naming a BYOK credential for the bearer, never a plaintext token). The URL is registered as a curated `reach:'mcp'` Connections provider at boot, so calls travel the ordinary outbound pipeline — governance allow-list, RFC 0093 egress guard, `run.metadata.connectionUse[]` provenance, and the `<UNTRUSTED>` trust boundary on every tool result. Unset ⇒ no server, and a call with no `serverId` fails typed rather than silently doing nothing. A declared-but-unresolvable token ref is refused rather than downgraded to an unauthenticated call; the ref resolves host-global, so it needs `OPENWOP_BYOK_EPHEMERAL=false`. Non-`https` targets require `OPENWOP_WEBHOOK_ALLOW_PRIVATE=true` (test/conformance posture only).
 - **Full `core.openwop.*` + reference `vendor.myndhyve.*` palette out of the box** — every core pack in the repo (`a2a, agents, ai, crypto, data, db, examples, files, flow, hitl, http, integration, mcp, messaging, obs, rag, storage, triggers`) **plus the reference vendor packs** (`chat, canvas, kanban, knowledge-tools, launch-studio, web-research`) surfaces in the visual builder — the app now wires their `host.{chat,canvas,kanban,knowledge,launchStudio,webResearch}` surfaces (+ `host.a2a`, `host.triggers`, `host.db.nosql`) so those nodes run, not just render. Unsigned packs from the repo are mounted as dev-mode symlinks alongside signed registry installs; the catalog response marks any node whose host surface isn't advertised so the UI can dim it and the inspector can explain. See `ARCHITECTURE.md §"Pack coverage"`.
 - **In-memory host surfaces (non-durable)** — `ctx.storage.{kv,table,cache,blob,queue}`, `ctx.db.{sql,vector}`, `ctx.fs`, `ctx.queueBus`, `ctx.observability` are wired with process-local adapters so most core-pack nodes execute end-to-end. State is wiped on restart. The interface contracts match what a real-backend host (`examples/hosts/postgres`) implements, so swapping any surface is a one-file change. See `ARCHITECTURE.md §"Path to real backends"`.
 - **`aiProviders` host surface end-to-end** — packs that declare `peerDependencies: { aiProviders: "supported" }` (e.g., `core.openwop.ai`) execute via `ctx.callAI(...)` per `spec/v1/host-capabilities.md §host.aiProviders`. All four policy modes (`disabled` / `optional` / `required` / `restricted`) gated per `spec/v1/capabilities.md:246-289`; credentials resolved by convention (`secrets[provider]` then `<provider>-*` / `<provider>:*` prefixes); cleartext API keys never cross the result boundary or land in events; provider-specific error bodies are NEVER forwarded (they get mapped to the 15 canonical error codes from `host-capabilities.md:141-154` so upstream credential-shaped error payloads can't leak through). `OPENWOP_AI_POLICY_<PROVIDER>` env-vars drive the resolver.
-- **Prompt-library composition seam (RFC 0027 Phase A)** — advertises `capabilities.prompts.{supported: true, endpointsSupported: false, observability: "full"}`. The composition pipeline (`src/host/promptCompose.ts`) implements RFC 0027 §E's secret redaction (`[REDACTED:<credentialRef>]` markers) + untrusted-content wrapping (`<UNTRUSTED>...</UNTRUSTED>`) + sha256 deterministic hashing for `prompt.composed` events. Exercised end-to-end via `POST /v1/host/openwop-app/prompt/compose` (host-extension test seam) by the conformance scenarios `prompt-composed-secret-redaction.test.ts` + `prompt-composed-trust-marker.test.ts`. The spec'd Phase B `/v1/prompts*` REST surface (RFC 0028) is **not** implemented — `endpointsSupported: false` is honestly advertised so clients see the spec'd `501 capability_not_provided` instead of a 404 (route missing).
+- **Prompt-library composition seam (RFC 0027 Phase A)** — advertises `capabilities.prompts.{supported: true, endpointsSupported: false, observability: "full"}`. The composition pipeline (`src/host/promptCompose.ts`) implements RFC 0027 §E's secret redaction (`[REDACTED:<credentialRef>]` markers) + untrusted-content wrapping (`<UNTRUSTED>...</UNTRUSTED>`) + sha256 deterministic hashing for `prompt.composed` events. Exercised end-to-end via `POST /host/openwop-app/prompt/compose` (host-extension test seam) by the conformance scenarios `prompt-composed-secret-redaction.test.ts` + `prompt-composed-trust-marker.test.ts`. The spec'd Phase B `/prompts*` REST surface (RFC 0028) is **not** implemented — `endpointsSupported: false` is honestly advertised so clients see the spec'd `501 capability_not_provided` instead of a 404 (route missing).
 - **OTel under `openwop.*`** with W3C `traceparent` propagation
 - **Cloud Run shape** — single container, `$PORT`, `/health` + `/readiness`, multi-stage Dockerfile with esbuild bundle
 - **Conformance harness** — `npm run test:conformance` runs `@openwop/openwop-conformance` against the local service
-- **Multi-member B2B workspace tenancy + RBAC (ADR 0015)** — the tenant *is* the workspace. A signed-in user gets a personal workspace, can create **shared workspaces**, **invite members** with RFC 0049 roles (`owner` / `admin` / `editor` / `viewer`), and **switch** the active workspace — membership-gated and fail-closed, so one session only ever holds one active workspace (RFC 0048 §D cross-workspace isolation). A **≥1-owner invariant** is enforced atomically on member demote/remove (`updateMember` / `deleteMember`, post-write re-check) with an **ownership-transfer** escape hatch (`POST /v1/host/openwop-app/orgs/:orgId/members/:memberId/transfer-ownership`); **account deletion cascades** the user out of their shared workspaces and *refuses* — rather than orphaning — any workspace they solely own. Intra-workspace role-scoping on the *protocol* surface is gated on `OPENWOP_AUTHORIZATION_ENFORCEMENT` (advertised via `capabilities.authorization` only when honored). See [`docs/adr/0015-workspace-as-tenant-b2b.md`](docs/adr/0015-workspace-as-tenant-b2b.md).
+- **Multi-member B2B workspace tenancy + RBAC (ADR 0015)** — the tenant *is* the workspace. A signed-in user gets a personal workspace, can create **shared workspaces**, **invite members** with RFC 0049 roles (`owner` / `admin` / `editor` / `viewer`), and **switch** the active workspace — membership-gated and fail-closed, so one session only ever holds one active workspace (RFC 0048 §D cross-workspace isolation). A **≥1-owner invariant** is enforced atomically on member demote/remove (`updateMember` / `deleteMember`, post-write re-check) with an **ownership-transfer** escape hatch (`POST /host/openwop-app/orgs/:orgId/members/:memberId/transfer-ownership`); **account deletion cascades** the user out of their shared workspaces and *refuses* — rather than orphaning — any workspace they solely own. Intra-workspace role-scoping on the *protocol* surface is gated on `OPENWOP_AUTHORIZATION_ENFORCEMENT` (advertised via `capabilities.authorization` only when honored). See [`docs/adr/0015-workspace-as-tenant-b2b.md`](docs/adr/0015-workspace-as-tenant-b2b.md).
 - **Real enterprise auth — OIDC, password, MFA (TOTP), SAML 2.0 SSO + SCIM 2.0 provisioning (ADR 0002 / RFC 0050)** — sign in with a federated OIDC issuer, an email/password local account (with optional TOTP MFA), or **enterprise SSO** against a real IdP (Okta / Azure AD / Ping) via a production SAML Service Provider (real XML-DSig); **SCIM 2.0** endpoints sync joiner/mover/leaver lifecycle out-of-band (fail-closed deactivation). Both are env-gated OFF until configured and advertised honestly (`openwop-auth-saml` / `openwop-auth-scim` appear in `/.well-known/openwop` only when the host can back them). Every method resolves to one durable `User` with a stable `user:<id>` subject (ADR 0003). See [**Enterprise SSO (SAML 2.0)**](#enterprise-sso-saml-20--okta--azure-ad--ping) below to configure it.
 - **DAG executor with concurrent paths** — workflows are no longer limited to a single linear chain. The scheduler (`src/executor/scheduler.ts`) drains a topological ready-queue with bounded concurrency (`OPENWOP_MAX_CONCURRENT_NODES`, default 8) and honors the five canonical `WorkflowEdge.triggerRule` values from `spec/v1/workflow-definition.schema.json` (`all_success` / `any_success` / `all_complete` / `none_failed` / `any_failed`). Edge `condition` predicates filter per-edge input contributions. Per-node outputs land in a port-keyed map (`{ output: ... }`); downstream nodes read by `targetInput` from any incoming edge. Suspended branches keep the run alive while other branches drain; on resume, the resolved node flips to `completed` and the scheduler re-enters. Cycles reject at run-start with `cycle_detected`. Linear workflows are a degenerate case of the same scheduler — back-compat preserved bit-for-bit.
-- **Enterprise Work-Twin agent suite (ADR 0031/0032/0033)** — a seeded portfolio of **ten role-based work twins** (Chief of Staff, Executive Operations, Sales Execution, Customer Success, Finance Close, IT Service Desk, Internal Communications, Recruiting Coordinator, People Operations, Contract & Procurement) built entirely on the existing roster / workflow / scheduler / connections seams — not a parallel system. Each twin carries a rich **`agentProfile`** (`GET/PUT /v1/host/openwop-app/agents/:id/profile`: config params, permissions, HITL, escalation, channels, metrics, `requiredConnections`, autonomy + `capabilities`), binds a portfolio from a pinned **44-template workflow pack** (`tmpl.*`, approval-gated), and runs at draft/recommend autonomy with **`requiredConnections` activation gating** (fail-closed / `supported:false` until a Connection is configured). The **assistant operating-rhythm capability is core + profile-activated** — decoupled from `roleKey` so any agent (Iris, Exec-Ops) activates it over the shared tenant work-graph (ADR 0023 §Correction). See [`FEATURES.md`](FEATURES.md) § "Enterprise Work-Twin agent suite".
+- **Enterprise Work-Twin agent suite (ADR 0031/0032/0033)** — a seeded portfolio of **ten role-based work twins** (Chief of Staff, Executive Operations, Sales Execution, Customer Success, Finance Close, IT Service Desk, Internal Communications, Recruiting Coordinator, People Operations, Contract & Procurement) built entirely on the existing roster / workflow / scheduler / connections seams — not a parallel system. Each twin carries a rich **`agentProfile`** (`GET/PUT /host/openwop-app/agents/:id/profile`: config params, permissions, HITL, escalation, channels, metrics, `requiredConnections`, autonomy + `capabilities`), binds a portfolio from a pinned **44-template workflow pack** (`tmpl.*`, approval-gated), and runs at draft/recommend autonomy with **`requiredConnections` activation gating** (fail-closed / `supported:false` until a Connection is configured). The **assistant operating-rhythm capability is core + profile-activated** — decoupled from `roleKey` so any agent (Iris, Exec-Ops) activates it over the shared tenant work-graph (ADR 0023 §Correction). See [`FEATURES.md`](FEATURES.md) § "Enterprise Work-Twin agent suite".
 
 ### Frontend (`frontend/react/`)
 
@@ -107,7 +107,7 @@ The app runs on any host — pick a deploy pack under [`deploy/`](./deploy/READM
 
 ```bash
 curl http://localhost:8080/.well-known/openwop | jq
-curl -X POST http://localhost:8080/v1/runs \
+curl -X POST http://localhost:8080/runs \
   -H 'Authorization: Bearer sample-token' \
   -H 'Content-Type: application/json' \
   -d '{"workflowId":"openwop-app.uppercase","tenantId":"demo","inputs":{"text":"hello"}}'
@@ -155,10 +155,13 @@ The per-family breakdown stays qualitative:
 | `openwop-sandbox-isolation` | — | ❌ all | No pack sandbox (no process/network/env isolation gate) |
 | `openwop-durable-webhooks` | partial | partial | Demonstrates HMAC delivery; Cloud Tasks queue stubbed |
 
-## Protocol versions: v2 only (v1 is retired by default and being removed)
+## Protocol versions: v2 only (v1 is retired and removed)
 
-This host speaks **OpenWOP v2**. v1 is **retired by default** (ADR 0812 P1):
-- `/v1/*` answers `410`.
+This host speaks **OpenWOP v2**. v1 is **retired** (ADR 0812):
+- `/v1/*` answers `410`. Every route in this README is the unversioned one
+  (`POST /runs`, `POST /host/openwop-app/byok/secrets`, …); a recipe that still
+  says `/v1/…` is out of date. The one deliberate exception is the OAuth
+  callback below, which the host keeps sending until you opt out.
 - Public unauthenticated v1 reads get a bodiless `308` to the unversioned path
   (ADR 0806), so links others hold keep working.
 - Discovery advertises only `"2.0"`.
@@ -287,7 +290,7 @@ auto-mapped to host roles.
 governance) until the **first admin is seated**. Seat them once, with the
 wildcard operator key — `OPENWOP_API_KEYS=<key>:*` (the `:*` suffix must be
 written explicitly; a bare key is scoped to `default`) — against
-`POST /v1/host/openwop-app/orgs/:orgId/members` with `roles: ["admin"]` (or
+`POST /host/openwop-app/orgs/:orgId/members` with `roles: ["admin"]` (or
 `owner`) and `subject` = the SAML user's `user:<userId>`; that admin then seats
 everyone else from **Access → Members**, or through an ADR 0006 host group.
 `requireMfa` on the SAML tenant is now enforced on SAML sessions too (the
@@ -399,8 +402,9 @@ the demo host's operator runbook lives in
    once external users are involved (Gmail/Drive are restricted scopes).
 3. *Credentials → Create credentials → OAuth client ID → **Web application***.
    Authorized redirect URIs (exact) — add **both**: the host sends the first
-   until v1 is retired and the second after (ADR 0806), so registering both now
-   makes the retirement invisible to Google:
+   (the `/v1` callback, which it still forwards, ADR 0806) until you set
+   `OPENWOP_OAUTH_REDIRECT_UNVERSIONED=true`, and the second after. Register both
+   before flipping it:
    `https://<your-host>/api/v1/host/openwop-app/connections/google/callback`
    `https://<your-host>/api/host/openwop-app/connections/google/callback`.
    Tip: one client can carry several redirect URIs — add
@@ -422,9 +426,9 @@ the demo host's operator runbook lives in
 
 **1. Register an OAuth app with the provider.** Register **both** of these
 **redirect URIs** (exact — the host builds the same paths). It sends the first
-until OpenWOP v1 is retired on this host and the second after (ADR 0806);
-providers accept several, so registering both now means the retirement changes
-nothing a provider can see:
+(the `/v1` callback, which it still forwards, ADR 0806) until you set
+`OPENWOP_OAUTH_REDIRECT_UNVERSIONED=true`, and the second after; providers
+accept several, so register both before flipping it:
 
 ```
 https://<your-host>/api/v1/host/openwop-app/connections/<provider>/callback
@@ -442,6 +446,10 @@ panel. It shows each provider's exact redirect URI to copy, takes the **Client I
 and **Client Secret**, and the button goes live on save — **no env vars, no
 redeploy**. The secret is sealed server-side (the BYOK envelope) and never shown
 again. Superadmin = a tenant in `OPENWOP_SUPERADMIN_TENANTS` (or the admin bearer).
+Set `OPENWOP_SUPERADMIN_REQUIRE_MFA=true` (default off, ADR 0969) to make a person
+acting as superadmin hold a verified second factor; enable TOTP MFA on the identity
+project and enroll every listed superadmin first. A single-factor operator then loses
+the admin surfaces but keeps every feature (the plan-paywall exemption is unaffected).
 
 **2b. …or env vars (the fallback).** The host also reads
 `OPENWOP_OAUTH_<PROVIDER>_CLIENT_ID` / `…_CLIENT_SECRET` (provider upper-cased), so
@@ -459,7 +467,7 @@ gcloud run services update openwop-app-backend \
 
 The UI-managed store takes precedence over env vars when both are set.
 
-**Verify:** `curl https://<your-host>/api/v1/host/openwop-app/providers` shows
+**Verify:** `curl https://<your-host>/api/host/openwop-app/providers` shows
 `"oauthConfigured": true` for the provider, its **Connect** button enables, and the
 consent round-trip returns you to `/connections` with the app connected. The token
 is stored KMS-enveloped, scoped to the connecting user (or shared to an org for an
@@ -514,7 +522,7 @@ demo mode (`demo:` sentinels, no live money) — configure it when you're ready.
    one handler, two secrets — see ADR 0385's correction notes for why.)
 
 **On this host** (secrets go through the BYOK store — superadmin
-`POST /v1/host/openwop-app/byok/secrets` with `{ credentialRef, value }`, or
+`POST /host/openwop-app/byok/secrets` with `{ credentialRef, value }`, or
 bulk at boot via the `OPENWOP_BOOT_SECRETS='{"ref":"value"}'` env):
 
 | Credential ref | Value |
@@ -535,7 +543,7 @@ the same region; others use external payment links) and
 - Sellers onboard as **Stripe Connect Express** accounts under YOUR platform
   account (Stripe hosts KYC/payouts); buyers pay by **destination charge** — the
   platform is the merchant of record and keeps a **10–15% application fee**
-  (superadmin `PUT /v1/host/openwop-app/commerce-connect/fee-config`, clamped,
+  (superadmin `PUT /host/openwop-app/commerce-connect/fee-config`, clamped,
   default 12%).
 - **Both paid listing lanes are operator-approval-gated** (the superadmin
   approval queue on the Commerce Connect page); only free listings ship ungated.

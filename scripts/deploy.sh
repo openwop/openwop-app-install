@@ -97,7 +97,7 @@ RETIRE_PREVIOUS=0; HOLD_FOR_HOUR=1
 for arg in "$@"; do
   case "$arg" in
     --backend-only)  DO_FRONTEND=0; PREFLIGHT_ARGS+=("$arg") ;;
-    --frontend-only) DO_BACKEND=0 ;;
+    --frontend-only) DO_BACKEND=0; PREFLIGHT_ARGS+=("$arg") ;;
     # Preflight exceptions the OPERATOR states. Both are forwarded, never
     # implied: preflight owns the gate, deploy.sh only carries the word
     # through. `--allow-pin-drift` was unreachable through this wrapper until
@@ -178,6 +178,63 @@ if [ "$DO_BACKEND" -eq 1 ]; then
     echo "deploy: could not stamp the image commit — aborting before preflight." >&2
     exit 1
   fi
+fi
+
+# ADR 0974 — observe only (records what the broker would have done; waits for nothing).
+# shellcheck source=lib/broker-observe.sh
+# (Guarded: a test fixture may copy this script without the helper.)
+if [ -f "$ROOT/scripts/lib/broker-observe.sh" ]; then . "$ROOT/scripts/lib/broker-observe.sh"; broker_observe deploy 2 "deploy $(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null)"; fi
+
+FE_BUILD_PID=""; FE_BUILD_LOG=""; CERT_BUILD_PID=""
+cancel_owned_builds() {
+  local pid
+  for pid in "$FE_BUILD_PID" "$CERT_BUILD_PID"; do
+    [ -z "$pid" ] || kill -TERM "$pid" 2>/dev/null || true
+  done
+  for pid in "$FE_BUILD_PID" "$CERT_BUILD_PID"; do
+    [ -z "$pid" ] || wait "$pid" 2>/dev/null || true
+  done
+  FE_BUILD_PID=""; CERT_BUILD_PID=""
+}
+trap cancel_owned_builds EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+# ADR 0991 — the cross-machine release bus: a lease of our own and start/end
+# events. D9 (user decision 2026-10-27): the lease is per TARGET — the Cloud Run
+# service and/or the Hosting site this run will touch — and `acquire` QUEUES
+# behind a live deploy or certify on the same target, so two deploys to the
+# same server run one after the other while deploys to different servers run
+# at once. Bounded and fail-open (release-bus.mjs). It runs BEFORE preflight on
+# purpose: a deploy that waited must check the live commit AFTER the wait, when
+# the deploy it queued behind has just shipped. --preflight-only claims nothing.
+# Its EXIT hook chains onto the one above without changing this script's exit
+# status. (Guarded for fixtures.)
+BUS_HALVES=()
+[ "$DO_BACKEND" -eq 1 ] && BUS_HALVES+=(backend)
+[ "$DO_FRONTEND" -eq 1 ] && BUS_HALVES+=(frontend)
+if [ -f "$ROOT/scripts/lib/release-bus.sh" ]; then
+  # shellcheck source=lib/release-bus.sh
+  . "$ROOT/scripts/lib/release-bus.sh"
+  BUS_TARGETS="$(release_bus_targets "${BUS_HALVES[@]}")"
+  RUN_TARGET="$(release_bus_targets backend)"
+  if [ "$PREFLIGHT_ONLY" -eq 0 ]; then
+    deploy_bus_end() {
+      printf '{"kind":"deploy","phase":"end","exit":%s,"commit":"%s","revision":"%s","targets":"%s","result":"%s"}' \
+        "$1" "$SHA" "${CREATED:-}" "$BUS_TARGETS" "$([ "$1" -eq 0 ] && echo VERIFIED || echo "FAILED rc=$1")"
+    }
+    DEPLOY_BUS_ID="deploy-$(hostname -s 2>/dev/null || hostname)-$$"
+    # The certify this deploy may run (--publish-evidence) must not queue behind
+    # its own parent. Exact id, never a prefix.
+    export OPENWOP_RELEASE_BUS_PARENT="$DEPLOY_BUS_ID"
+    # The lease outlives a slow deploy (certify + the ADR 0802 hour hold + build):
+    # a STALE lease never blocks, so a short one would let a second deploy in.
+    release_bus_acquire_hold "$DEPLOY_BUS_ID" deploy deploy_bus_end --commit "$SHA" \
+      --targets "$BUS_TARGETS" --expected-min 30 --ttl-min 75
+    release_bus publish "{\"kind\":\"deploy\",\"phase\":\"start\",\"commit\":\"$SHA\",\"backend\":$DO_BACKEND,\"targets\":\"$BUS_TARGETS\"}"
+  fi
+else
+  release_bus() { return 0; }
+  RUN_TARGET=""
 fi
 
 echo "▶ preflight"
@@ -270,20 +327,6 @@ await_frontend_build() {
 #
 # OPENWOP_DEPLOY_FRONTEND_PARALLEL=0 runs the build to completion right here
 # instead, e.g. when certify is flaking on a loaded machine.
-FE_BUILD_PID=""; FE_BUILD_LOG=""; CERT_BUILD_PID=""
-cancel_owned_builds() {
-  local pid
-  for pid in "$FE_BUILD_PID" "$CERT_BUILD_PID"; do
-    [ -z "$pid" ] || kill -TERM "$pid" 2>/dev/null || true
-  done
-  for pid in "$FE_BUILD_PID" "$CERT_BUILD_PID"; do
-    [ -z "$pid" ] || wait "$pid" 2>/dev/null || true
-  done
-  FE_BUILD_PID=""; CERT_BUILD_PID=""
-}
-trap cancel_owned_builds EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
 # Bash defers signal traps while a foreground external command runs. Waiting
 # on our own background supervisor keeps the trap responsive during certify.
 run_owned_certification() {
@@ -543,6 +586,8 @@ if ! bash "$ROOT/scripts/verify-deploy.sh" "${VERIFY_ARGS[@]}"; then
   echo "deploy: DEPLOYED BUT NOT VERIFIED — see above." >&2
   exit 1
 fi
+# ADR 0991 — verified: tell the other machines what serves (advisory).
+if [ "$DO_BACKEND" -eq 1 ]; then release_bus set-production --commit "$SHA" --revision "${CREATED:-}" ${RUN_TARGET:+--target "$RUN_TARGET"}; fi
 
 # ── ADR 0802 — retire the revision this deploy superseded ───────────────────
 # A superseded revision keeps an instance for as long as a request holds it

@@ -21,13 +21,24 @@
  * sites consult one function, and a host that does not advertise does not serve.
  * It does not re-witness the pack-absent state; the container lane owns that.
  *
+ * CORRECTION (ADR 0812 P3c-0, recorded in grade-tests wave 64). The served
+ * document is now major 2, whose closed `workflowChainPacks` record has no
+ * `hostExpansionSeam` seat (`routes/discovery.ts`, the `v2SubChainsFacet` pick), so
+ * NO boot advertises the seam and the advertise half of the parity above can no
+ * longer fail (probe `8fw5g4-esap-advert`, forcing the advert on, stayed green).
+ * What this file asserts now: the v2 document claims nothing on either boot, the
+ * enabled boot serves, and the disabled boot does not MOUNT the route at all — its
+ * answer is byte-identical to a path nothing registers. The serve gate is the same
+ * `isChainExpansionSeamServable()` the dead v1 advert read (grade-code row
+ * WCES-DEAD-1). Two boots, shared by all three cases.
+ *
  * Mocking is deliberately NOT used to fake the pack-absent state. `vi.mock`
  * rebinds a module's exports for its importers, but `workflowChainPacksCapability`
  * calls the predicate intra-module — so a mock reaches the route and not the
  * advertisement, and the resulting red is an artifact of the harness rather than a
  * finding. (Observed while writing this file.)
  */
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import type http from 'node:http';
 import { createApp } from '../src/index.js';
@@ -36,18 +47,14 @@ const PATH = '/host/sample/workflow-chain:expand';
 const PACK = 'vendor.openwop.workflow-chain-sample';
 const TOKEN = 'dev-token';
 
-const servers: http.Server[] = [];
+interface Probe { advertised: unknown; status: number; body: unknown }
+interface Boot { base: string; server: http.Server }
 
-/** Boots a host with the seam env gate in the given state and reports what it
- *  ADVERTISES on the wire and what it SERVES. Both are read from real HTTP —
- *  calling the predicate twice and comparing it to itself would restate the
- *  premise instead of checking it. */
-async function bootAndProbe(seamEnabled: boolean): Promise<{ advertised: unknown; status: number }> {
+async function boot(seamEnabled: boolean): Promise<Boot> {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   if (seamEnabled) process.env.OPENWOP_TEST_SEAM_ENABLED = 'true';
   else delete process.env.OPENWOP_TEST_SEAM_ENABLED;
-
   const app = await createApp({
     port: 0,
     storageDsn: 'memory://',
@@ -56,18 +63,12 @@ async function bootAndProbe(seamEnabled: boolean): Promise<{ advertised: unknown
     enableConsoleTracer: false,
   });
   const server = app.listen(0, '127.0.0.1');
-  servers.push(server);
   await new Promise<void>((res) => server.once('listening', () => res()));
-  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  return { base: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, server };
+}
 
-  // ADR 0812 P3c-0 — the major-2 document. `hostExpansionSeam` was a v1-only
-  // facet (the closed v2 `workflowChainPacks` record declares no seat for it),
-  // so major 2 must never claim it, in either boot.
-  const disco = (await (await fetch(`${base}/.well-known/openwop`, { headers: { 'OpenWOP-Version': '2' } })).json()) as {
-    workflowChainPacks?: { hostExpansionSeam?: unknown };
-  };
-
-  const res = await fetch(`${base}${PATH}`, {
+async function post(base: string, path: string): Promise<{ status: number; body: unknown }> {
+  const res = await fetch(`${base}${path}`, {
     method: 'POST',
     headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
     body: JSON.stringify({
@@ -76,35 +77,63 @@ async function bootAndProbe(seamEnabled: boolean): Promise<{ advertised: unknown
       parameters: { sourceText: 'hi', targetLength: 'one-sentence', tone: 'casual' },
     }),
   });
-
-  return { advertised: disco.workflowChainPacks?.hostExpansionSeam, status: res.status };
+  return { status: res.status, body: await res.json().catch(() => null) };
 }
 
-afterEach(async () => {
-  await Promise.all(servers.splice(0).map((s) => new Promise<void>((res) => s.close(() => res()))));
+/** What one boot ADVERTISES on the wire and what it SERVES, both read over real
+ *  HTTP — calling the predicate twice and comparing it to itself would restate the
+ *  premise instead of checking it. */
+async function probe(b: Boot): Promise<Probe> {
+  // ADR 0812 P3c-0 — the major-2 document. `hostExpansionSeam` was a v1-only
+  // facet (the closed v2 `workflowChainPacks` record declares no seat for it).
+  const disco = (await (await fetch(`${b.base}/.well-known/openwop`, { headers: { 'OpenWOP-Version': '2' } })).json()) as {
+    workflowChainPacks?: { hostExpansionSeam?: unknown };
+  };
+  const served = await post(b.base, PATH);
+  return { advertised: disco.workflowChainPacks?.hostExpansionSeam, ...served };
+}
+
+/** The disabled boot's answer — measured (grade-tests wave 64): the host's generic
+ *  unmatched-route 404, i.e. the seam is not mounted at all. */
+const DISABLED_STATUS = 404;
+const DISABLED_BODY = { error: 'not_found', message: 'No route matches this request.' };
+
+let enabled: Boot;
+let disabled: Boot;
+beforeAll(async () => {
+  enabled = await boot(true);
+  disabled = await boot(false);
+  delete process.env.OPENWOP_TEST_SEAM_ENABLED;
+}, 120_000);
+afterAll(async () => {
+  await Promise.all([enabled, disabled].map((b) => new Promise<void>((res) => b.server.close(() => res()))));
 });
 
 describe('ADR 0550 P2 — hostExpansionSeam never advertises what it does not serve', () => {
-  // ADR 0812 P3c-0 — the "advertises true when enabled" half was the v1
-  // document's claim and was deleted with it; major 2 has no seat to claim.
+  // Twin of `workflow-chain-expand-seam.test.ts` › "1-node chain expands…" for the
+  // 200; the half that is unique here is "major 2 claims nothing" on the SAME boot.
   it('seam enabled: serves 200 (and major 2 claims nothing — it has no seat)', async () => {
-    const { advertised, status } = await bootAndProbe(true);
+    const { advertised, status } = await probe(enabled);
     expect(advertised).toBeUndefined();
     expect(status).toBe(200);
   });
 
   it('seam disabled (production): advertises NOTHING and does not serve', async () => {
-    const { advertised, status } = await bootAndProbe(false);
+    const { advertised, status, body } = await probe(disabled);
     expect(advertised).toBeUndefined();
-    expect(status).not.toBe(200);
+    expect(status).toBe(DISABLED_STATUS);
+    expect(body).toEqual(DISABLED_BODY);
   });
 
-  it('no boot advertises what it will not serve', async () => {
-    // One assertion over every state this host can boot into.
-    for (const seamEnabled of [true, false]) {
-      const { advertised, status } = await bootAndProbe(seamEnabled);
-      if (advertised === true) expect(status).toBe(200);
-      expect(status === 200).toBe(seamEnabled);
-    }
+  it('no boot advertises what it will not serve: the disabled seam is UNMOUNTED, not refused', async () => {
+    // A refusing handler and a missing route would both be "not 200". The disabled
+    // boot must answer exactly as it does for a path nothing registers, and the
+    // enabled boot must not (so the comparison is not vacuous).
+    const unmounted = await post(disabled.base, '/host/sample/workflow-chain:nothing-registers-this');
+    const seam = await post(disabled.base, PATH);
+    expect(seam).toEqual(unmounted);
+    const enabledSeam = await post(enabled.base, PATH);
+    expect(enabledSeam.status).not.toBe(unmounted.status);
+    for (const b of [enabled, disabled]) expect((await probe(b)).advertised).toBeUndefined();
   });
 });

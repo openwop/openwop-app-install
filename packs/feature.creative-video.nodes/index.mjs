@@ -55,6 +55,33 @@ export async function textToVideo(ctx) {
   return { status: 'success', outputs: out };
 }
 
+/**
+ * ADR 0945 D7 — animate a checked product shot (a composite or edit with a
+ * passing verdict) or one of the product's own photos. The host refuses any
+ * other still (`product_depiction_ungrounded`). Every product video is
+ * `needs_review`: frames cannot be sampled on this host yet, so the publish
+ * gate holds it for a person. `pending` is resolved by the status node.
+ */
+export async function imageToVideo(ctx) {
+  const v = ensureVideo(ctx);
+  if (typeof v.imageToVideo !== 'function') {
+    return { status: 'failed', error: { code: 'host_capability_missing', message: "ctx.features['creative-video'].imageToVideo unavailable." } };
+  }
+  const i = ctx.inputs ?? {};
+  const orgId = str(i.orgId);
+  const sourceAssetId = str(i.sourceAssetId);
+  const prompt = str(i.prompt);
+  if (!orgId || !sourceAssetId || !prompt) {
+    return { status: 'failed', error: { code: 'validation_error', message: 'orgId, sourceAssetId, and prompt are required.' } };
+  }
+  const durationSec = typeof i.durationSec === 'number' ? i.durationSec : undefined;
+  const out = await v.imageToVideo({ orgId, sourceAssetId, prompt, ...(str(i.productId) ? { productId: str(i.productId) } : {}), ...(str(i.model) ? { model: str(i.model) } : {}), ...(durationSec ? { durationSec } : {}) });
+  if (out && out.status === 'failed') {
+    return { status: 'failed', error: { code: 'video_generation_failed', message: `Image-to-video failed: ${out.error || 'unknown'}` }, outputs: out };
+  }
+  return { status: 'success', outputs: { ...out, ...(out && out.status === 'completed' ? { outcome: 'needs_review' } : {}) } };
+}
+
 export async function status(ctx) {
   const v = ensureVideo(ctx);
   if (typeof v.getVideoStatus !== 'function') {
@@ -71,6 +98,7 @@ export async function status(ctx) {
 export const nodes = {
   'feature.creative-video.nodes.generate': generate,
   'feature.creative-video.nodes.text-to-video': textToVideo,
+  'feature.creative-video.nodes.image-to-video': imageToVideo,
   'feature.creative-video.nodes.status': status,
 };
 

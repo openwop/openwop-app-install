@@ -15,6 +15,11 @@
  * Asserted the way the scenario does: a real run, the v1 read, the two fields.
  * Each leg has its own sabotage (re-gate the era key to major 2; skip the
  * write-time stamp).
+ *
+ * After the v1 cut (ADR 0812 P3c-0) the snapshot is read under major 2, where
+ * `spec/v2/core/persistence.md` §"The era key" says a v2 host MUST stamp 3 on
+ * every run it creates. So the era is asserted EXACTLY (3), not `>= 2`: round-1
+ * probe vs-era-stamp2 (stamp 2 at insert) stayed green under `>= 2`.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';
@@ -33,19 +38,20 @@ beforeAll(async () => {
 afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
 async function call(method: string, path: string, body?: unknown) {
   const res = await fetch(`${base}${path}`, { method, headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json', 'OpenWOP-Version': '2' }, body: body === undefined ? undefined : JSON.stringify(body) });
-  return { status: res.status, json: (await res.json().catch(() => undefined)) as any };
+  return { status: res.status, json: (await res.json().catch(() => ({}))) as Snapshot };
 }
+interface Snapshot { runId: string; eventLogSchemaVersion?: unknown; engineVersion?: unknown }
 
-describe('v1 snapshot carries both version axes (version-negotiation.md §Stamping)', () => {
+describe('the run snapshot carries both version axes (version-negotiation.md §Stamping, read under major 2)', () => {
   // ADR 0812 P3c-0 — the v1 read leg is replaced by the same assertions on the
   // major-2 read (the only snapshot this host serves after the cut).
-  it('a freshly created run reads back under major 2 with eventLogSchemaVersion >= 2 and a numeric engineVersion', async () => {
+  it('a freshly created run reads back under major 2 with eventLogSchemaVersion 3 and the writer engineVersion', async () => {
     const c = await call('POST', '/runs', { workflowId: 'conformance-noop', inputs: {} });
     expect(c.status, JSON.stringify(c.json)).toBe(201);
     const snap = await call('GET', `/runs/${encodeURIComponent(c.json.runId)}`);
     expect(snap.status).toBe(200);
     expect(typeof snap.json.eventLogSchemaVersion, 'era key present on the read').toBe('number');
-    expect(snap.json.eventLogSchemaVersion, 'a run minted now is not legacy').toBeGreaterThanOrEqual(2);
+    expect(snap.json.eventLogSchemaVersion, 'a v2 host MUST stamp 3 on every run it creates').toBe(3);
     expect(typeof snap.json.engineVersion, 'engineVersion stamped at write time').toBe('number');
     expect(snap.json.engineVersion).toBe(CURRENT_ENGINE_VERSION);
   });

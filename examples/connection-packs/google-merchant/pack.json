@@ -1,0 +1,57 @@
+{
+  "name": "core.openwop.connections.google-merchant",
+  "version": "1.0.0",
+  "kind": "connection",
+  "description": "Google Merchant Center connection pack (RFC 0095) — OAuth2 provider for the Merchant API (products). Used by the Campaign Studio product-feed push (ADR 0952 D6): the commerce catalog is sent as product inputs to the org's Merchant Center account. Carries NO secret; the operator supplies the OAuth client id/secret host-side (ADR 0024 §7). The push stays unverified until it runs against a test Merchant Center account.",
+  "license": "Apache-2.0",
+  "engines": {
+    "openwop": ">=1.0.0 <3.0.0"
+  },
+  "provider": {
+    "id": "google-merchant",
+    "displayName": "Google Merchant Center",
+    "category": "marketing",
+    "auth": {
+      "kind": "oauth2",
+      "authFlow": "pkce",
+      "scopeModel": "groups",
+      "endpoints": {
+        "authorize": "https://accounts.google.com/o/oauth2/v2/auth",
+        "token": "https://oauth2.googleapis.com/token",
+        "revoke": "https://oauth2.googleapis.com/revoke"
+      },
+      "scopes": {
+        "read": [
+          {
+            "key": "content.read",
+            "label": "Read Merchant Center products",
+            "scopes": [
+              "https://www.googleapis.com/auth/content"
+            ]
+          }
+        ],
+        "write": [
+          {
+            "key": "content.manage",
+            "label": "Manage Merchant Center products",
+            "scopes": [
+              "https://www.googleapis.com/auth/content"
+            ]
+          }
+        ]
+      }
+    },
+    "reach": {
+      "openapi": {
+        "ref": "https://developers.google.com/merchant/api/reference/rest"
+      }
+    },
+    "consumerNodes": [
+      "feature.campaign-connectors.nodes.push-catalog-feed"
+    ],
+    "docsUrl": "https://developers.google.com/merchant/api/overview",
+    "apiHosts": [
+      "googleapis.com"
+    ]
+  }
+}

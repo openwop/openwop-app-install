@@ -30,9 +30,20 @@
  *     excuse (the lesson `scripts/check-adr-refs.mjs:152` already encodes).
  *
  * Leg 2 is a spelling and says so; it is never the only leg. Leg 1 is the oracle.
+ *
+ * Leg 6 drives the REAL `dispatchManagedChat` (via `vi.importActual`, since legs
+ * 1–2 mock it), with only the upstream provider call (`providers/dispatch.ts`
+ * `dispatchChat`) stubbed, so the subject is followed through
+ * `prepareManagedDispatch` and `recordManagedUsage` into the stored bucket.
+ *
+ * Tracker TST-BGF-21. Red when: `headlessAi` or `memoryExtractor` drops the subject
+ * (leg 1), a placeholder subject is invented (leg 2), any managed dispatch site
+ * omits it without an EXEMPT row (population), or `recordManagedUsage` meters to the
+ * pooled tenant bucket (leg 6).
  */
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { readdirSync, readFileSync, statSync, existsSync } from 'node:fs';
+import { readdirSync, readFileSync, statSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -41,6 +52,16 @@ const SRC = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'sr
 vi.mock('../src/providers/managedProvider.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/providers/managedProvider.js')>();
   return { ...actual, dispatchManagedChat: vi.fn() };
+});
+vi.mock('../src/providers/dispatch.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/providers/dispatch.js')>();
+  // Leg 6's upstream provider call: no network, a fixed usage the meter must record.
+  return {
+    ...actual,
+    dispatchChat: vi.fn(async (): Promise<import('../src/providers/dispatch.js').DispatchResult> => ({
+      provider: 'minimax', model: 'MiniMax-M3', completion: 'ok', usage: { inputTokens: 100, outputTokens: 50 },
+    })),
+  };
 });
 import { dispatchManagedChat } from '../src/providers/managedProvider.js';
 import { llmExtractFacts } from '../src/features/memory-auto-extract/memoryExtractor.js';
@@ -139,10 +160,13 @@ function callSites(): { file: string; line: number; passes: boolean }[] {
 }
 
 describe('ADR 0721 — the acting subject reaches the managed meter', () => {
-  beforeEach(() => { vi.mocked(dispatchManagedChat).mockReset(); vi.mocked(dispatchManagedChat).mockResolvedValue({ completion: '[]' } as never); });
+  beforeEach(() => {
+    vi.mocked(dispatchManagedChat).mockReset();
+    vi.mocked(dispatchManagedChat).mockResolvedValue({ provider: 'openwop-free', model: 'openwop-free', completion: '{"facts":[]}' });
+  });
 
   it('BEHAVIOURAL: a real call site forwards the subject it was given', async () => {
-    await llmExtractFacts('host-kicktodo', 'some conversation', 'user:alice');
+    await llmExtractFacts('host-kicktodo', ['some conversation'], { actingSubject: 'user:alice' });
     expect(vi.mocked(dispatchManagedChat)).toHaveBeenCalledTimes(1);
     expect(
       vi.mocked(dispatchManagedChat).mock.calls[0]![0]!.actingSubject,
@@ -153,7 +177,7 @@ describe('ADR 0721 — the acting subject reaches the managed meter', () => {
   it('BEHAVIOURAL: no subject means no field — the anonymous lane must stay byte-identical', async () => {
     // A fix that invented a placeholder subject would silently create per-caller
     // rows for the anonymous widget and a DSAR surface for a person who does not exist.
-    await llmExtractFacts('host-kicktodo', 'some conversation');
+    await llmExtractFacts('host-kicktodo', ['some conversation']);
     // Guarded: without this a regression that stopped dispatching at all would red with a
     // TypeError instead of the assertion message, i.e. the right colour for the wrong reason.
     expect(vi.mocked(dispatchManagedChat)).toHaveBeenCalledTimes(1);
@@ -192,27 +216,30 @@ describe('ADR 0721 — the acting subject reaches the managed meter', () => {
   });
 
   it('leg 6: the subject reaches the METER, not just the dispatch call', async () => {
-    // THE HOLE /grade-code FOUND, and it is the one that matters: legs 1-2 mock
-    // `dispatchManagedChat` — the function that OWNS the metering — so they assert what
-    // reaches the MOCK. Deleting `req.actingSubject` from `managedProvider.ts`'s own
-    // `prepareManagedDispatch`/`recordManagedUsage` calls re-created the ADR 0693 pooled
-    // defect with every other leg green, and no other test in the repo covered it.
-    //
-    // This leg runs the REAL composer end to end: record usage for a subject and prove the
-    // tokens land in the per-subject bucket and NOT in the pooled tenant row.
+    // THE HOLE /grade-code FOUND: legs 1-2 mock `dispatchManagedChat` — the function
+    // that OWNS the metering — so they assert what reaches the MOCK. This leg runs the
+    // REAL one (only the upstream provider call is stubbed) and reads the stored rows:
+    // the tokens land in the per-subject bucket and NOT in the pooled tenant row.
+    const real = await vi.importActual<typeof import('../src/providers/managedProvider.js')>('../src/providers/managedProvider.js');
     const { openStorage } = await import('../src/storage/index.js');
-    const { configureManagedProvider } = await import('../src/providers/managedProvider.js');
     const { managedUsageBucket } = await import('../src/providers/managedUsageScope.js');
     const storage = await openStorage('memory://');
-    configureManagedProvider({ storage, dataDir: '/tmp/openwop-adr0721-meter' });
+    const dataDir = mkdtempSync(path.join(tmpdir(), 'adr0721-meter-'));
+    const prevKey = process.env.MINIMAX_API_KEY;
+    process.env.MINIMAX_API_KEY = 'sk-adr0721-meter';
+    real.configureManagedProvider({ storage, dataDir });
     try {
+      await real.bootstrapManagedProvider();
+      real._clearManagedCacheForTests();
       const WS = 'ws:11111111-2222-3333-4444-555555555555';
       const SUBJ = 'user:meter-probe';
+      await real.dispatchManagedChat({
+        userFacingProvider: 'openwop-free', tenantId: WS, actingSubject: SUBJ,
+        messages: [{ role: 'user', content: 'hi' }], maxTokens: 8,
+      });
       const date = new Date().toISOString().slice(0, 10);
       const perSubject = managedUsageBucket(WS, SUBJ);
       expect(perSubject, 'a shared workspace with a subject must NOT compose the pooled bucket').not.toBe(WS);
-
-      await storage.incrementManagedUsage(perSubject, 'openwop-free', date, 100, 50);
       const mine = await storage.getManagedUsage(perSubject, 'openwop-free', date);
       const pooled = await storage.getManagedUsage(WS, 'openwop-free', date);
       expect(mine.inputTokens + mine.outputTokens, 'the charge must land in the per-subject bucket').toBe(150);
@@ -221,7 +248,10 @@ describe('ADR 0721 — the acting subject reaches the managed meter', () => {
         'the POOLED tenant row must stay empty — a charge there is one allowance for the whole workspace, the ADR 0693 defect',
       ).toBe(0);
     } finally {
+      if (prevKey === undefined) delete process.env.MINIMAX_API_KEY; else process.env.MINIMAX_API_KEY = prevKey;
+      real._clearManagedCacheForTests();
       await storage.close();
+      rmSync(dataDir, { recursive: true, force: true });
     }
   });
 });

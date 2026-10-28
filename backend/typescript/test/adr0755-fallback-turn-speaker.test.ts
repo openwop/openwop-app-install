@@ -6,6 +6,11 @@
  * def REQUIRES `speakerId` on `role:'agent'` (RFC 0101). ADR 0746 fixed the fixture
  * node but not the real exchange: when no agent resolves, the fallback `'assistant'`
  * turn carried `parts` and no `speakerId`, so every 1:1 chat reply was v2-invalid.
+ *
+ * Red when (wave 60 probes, tracker TST-BRA-2): the fallback turn stops naming
+ * `speakerId: 'assistant'` (dropped or renamed, `conversationExchange.ts`);
+ * `makeTurn` drops `speakerId` or `parts` (`conversation.ts`); or the turn grows a
+ * field the closed v2 def does not allow.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import Ajv2020 from 'ajv/dist/2020.js';
@@ -43,14 +48,18 @@ async function waitSettled(runId: string): Promise<void> {
     const s = (await api<{ status: string }>(`/runs/${runId}`)).body.status;
     if (s.startsWith('waiting') || ['completed', 'failed', 'cancelled'].includes(s)) return;
   }
+  throw new Error(`run ${runId} did not settle (still ${(await api<{ status: string }>(`/runs/${runId}`)).body.status})`);
 }
 
 function turnValidator(): (doc: unknown) => { ok: boolean; errors: string } {
   const ajv = new Ajv2020({ strict: false, allErrors: true });
-  (addFormats as unknown as (a: unknown) => void)(ajv);
+  addFormats(ajv);
   for (const f of readdirSync(V2_DIR)) {
     if (!f.endsWith('.schema.json')) continue;
-    try { ajv.addSchema(JSON.parse(readFileSync(join(V2_DIR, f), 'utf8')) as Record<string, unknown>); } catch { /* duplicate $id */ }
+    // Only a duplicate `$id` is tolerated; any other schema error must surface.
+    try { ajv.addSchema(JSON.parse(readFileSync(join(V2_DIR, f), 'utf8')) as Record<string, unknown>); } catch (err) {
+      if (!(err instanceof Error && /already exists/.test(err.message))) throw err;
+    }
   }
   const fn = ajv.getSchema('https://openwop.dev/spec/v2/conversation-turn.schema.json')!;
   return (doc) => ({ ok: fn(doc) as boolean, errors: JSON.stringify(fn.errors ?? []) });

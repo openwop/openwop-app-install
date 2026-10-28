@@ -14,12 +14,30 @@
  *   advertised + valid + catalogVersion 0.9.1         → accepted
  *   kind ∉ supportedEnvelopes                          → gated   (degrade, N6)
  *   schema-invalid (missing surface / out-of-catalog)  → invalid
- *   catalogVersion ∉ enum                              → invalid (unknown_schema_version)
+ *   catalogVersion ∉ enum                              → invalid (payload validation: enum at /catalogVersion)
  *   untrusted + approval-gate                          → invalid (untrusted_content_blocks_approval)
+ * (Corrected in wave 58: an unknown `catalogVersion` is a payload-validation
+ * failure; `unknown_schema_version` comes only from the schemaVersion floor.)
+ * The three `invalid` payload cases share ONE reason string, so each asserts the
+ * validator detail that tells it apart.
+ *
+ * Tracker TST-BG1-15. Red when (probe-witnessed, wave 58): the
+ * supportedEnvelopes gate is removed; payload validation is skipped; the
+ * approval-gate trust refusal is removed; the envelope's own
+ * `meta.contentTrust` is ignored.
  */
 
 import { describe, it, expect } from 'vitest';
-import { acceptEnvelope } from '../src/host/envelopeAcceptor.js';
+import { acceptEnvelope, type EnvelopeOutcome, type ValidationDetail } from '../src/host/envelopeAcceptor.js';
+
+const PAYLOAD_INVALID = "payload for kind 'ui.a2ui-surface' failed validation";
+
+/** The validator details of an `invalid` outcome; throws on any other status. */
+function invalidDetails(r: EnvelopeOutcome): readonly ValidationDetail[] {
+  if (r.status !== 'invalid') throw new Error(`expected invalid, got ${JSON.stringify(r)}`);
+  expect(r.reason).toBe(PAYLOAD_INVALID);
+  return r.details;
+}
 
 const ADVERTISED = ['ui.a2ui-surface'] as const;
 
@@ -50,17 +68,23 @@ const validPayload = {
 describe('ui.a2ui-surface — host accept-seam (RFC 0102)', () => {
   it('accepts an advertised, schema-valid surface at catalog 0.9.1', () => {
     const r = acceptEnvelope(envelope(validPayload), { hostSupportedEnvelopes: ADVERTISED });
-    expect(r.status).toBe('accepted');
+    expect(r).toMatchObject({ status: 'accepted', envelopeId: 'env-a2ui-1' });
   });
 
   it('gates (degrades) when the host does not advertise the kind (N6 — run survives)', () => {
     const r = acceptEnvelope(envelope(validPayload), { hostSupportedEnvelopes: ['clarification.request'] });
-    expect(r.status).toBe('gated');
+    expect(r).toMatchObject({
+      status: 'gated',
+      reason: "envelope type 'ui.a2ui-surface' is not in host's supportedEnvelopes advertisement",
+      allowedKinds: expect.arrayContaining(['clarification.request']),
+    });
   });
 
   it('rejects a schema-invalid surface (missing `surface`) as invalid', () => {
     const r = acceptEnvelope(envelope({ catalogVersion: '0.9.1' }), { hostSupportedEnvelopes: ADVERTISED });
-    expect(r.status).toBe('invalid');
+    const details = invalidDetails(r);
+    expect(details.some((d) => d.keyword === 'required' && d.instancePath === '' && (d.message ?? '').includes('surface'))).toBe(true);
+    expect(details.some((d) => d.instancePath === '/catalogVersion')).toBe(false);
   });
 
   it('rejects an out-of-catalog component as invalid (a2ui-surface-no-code-exec, wire half)', () => {
@@ -68,7 +92,9 @@ describe('ui.a2ui-surface — host accept-seam (RFC 0102)', () => {
       envelope({ catalogVersion: '0.9.1', surface: { components: [{ component: 'iframe', src: 'x' }] } }),
       { hostSupportedEnvelopes: ADVERTISED },
     );
-    expect(r.status).toBe('invalid');
+    const details = invalidDetails(r);
+    expect(details.some((d) => d.instancePath.startsWith('/surface/components/0'))).toBe(true);
+    expect(details.some((d) => d.instancePath === '/catalogVersion')).toBe(false);
   });
 
   it('rejects an unknown catalogVersion (enum violation) as invalid', () => {
@@ -76,7 +102,9 @@ describe('ui.a2ui-surface — host accept-seam (RFC 0102)', () => {
       envelope({ ...validPayload, catalogVersion: '9.9.9' }),
       { hostSupportedEnvelopes: ADVERTISED },
     );
-    expect(r.status).toBe('invalid');
+    const details = invalidDetails(r);
+    expect(details.some((d) => d.instancePath === '/catalogVersion' && d.keyword === 'enum')).toBe(true);
+    expect(details.some((d) => d.instancePath.startsWith('/surface'))).toBe(false);
   });
 
   it('blocks an untrusted surface from advancing an approval gate', () => {
@@ -84,7 +112,6 @@ describe('ui.a2ui-surface — host accept-seam (RFC 0102)', () => {
       envelope(validPayload, { meta: { source: 'ai-generation', ts: '2026-06-15T10:00:00Z', contentTrust: 'untrusted' } }),
       { hostSupportedEnvelopes: ADVERTISED, approvalGateContext: true },
     );
-    expect(r.status).toBe('invalid');
-    if (r.status === 'invalid') expect(r.reason).toBe('untrusted_content_blocks_approval');
+    expect(r).toMatchObject({ status: 'invalid', reason: 'untrusted_content_blocks_approval' });
   });
 });

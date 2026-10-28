@@ -61,6 +61,7 @@
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import http from 'node:http';
+import { registerOrgsTransactionalTemplates } from '../src/features/orgs/inviteTemplates.js';
 import type { AddressInfo } from 'node:net';
 import { openStorage } from '../src/storage/index.js';
 import { initHostExtPersistence, __resetHostExtPersistence } from '../src/host/hostExtPersistence.js';
@@ -129,6 +130,8 @@ beforeAll(async () => {
   delete process.env.OPENWOP_DEMO_MODE;
   storage = await openStorage('memory://');
   initHostExtPersistence(storage);
+  // This service harness bypasses feature boot, which registers the invite kind.
+  registerOrgsTransactionalTemplates();
   configureSecretResolver({ storage, dataDir: mkdtempSync(join(tmpdir(), 'orgs-surface-authz-')) });
   registerSessionAuthority(usersSessionAuthority);
   await __resetConnectionsStore();

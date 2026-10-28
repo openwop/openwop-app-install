@@ -9,15 +9,18 @@ import { OpenwopError } from '../../types.js';
 import { resolveSecret } from '../../byok/secretResolver.js';
 import { STRIPE_KEY_REF } from '../billing/billingService.js';
 import { createStripeConnectAccount, createStripeAccountLink, getStripeConnectAccount } from '../billing/stripeApi.js';
-import { sellers, accountIndex, nowIso, requireStripeKey, assertFoldEligibleTenant, type SellerAccount } from './stores.js';
+import { accountIndex, nowIso, requireStripeKey, assertFoldEligibleTenant, sellerRows, type SellerAccount, type SellerRef } from './stores.js';
 import { bindSellerAccount } from './stores.js';
 
 
 // ── Seller reads ──────────────────────────────────────────────────────────────
 
-export async function getSeller(tenantId: string): Promise<SellerAccount | null> {
-  return sellers.get(tenantId);
+export async function getSeller(tenantId: string, orgId?: string): Promise<SellerAccount | null> {
+  return sellerRows({ tenantId, ...(orgId ? { orgId } : {}) }).get();
 }
+
+/** ADR 0948 P0b — the deterministic demo placeholder for a seller ref. */
+const demoAccountId = (ref: SellerRef): string => (ref.orgId ? `acct_demo_${ref.tenantId}__${ref.orgId}` : `acct_demo_${ref.tenantId}`);
 
 
 // ── Onboarding ────────────────────────────────────────────────────────────────
@@ -40,7 +43,15 @@ export async function startOnboarding(
   tenantId: string,
   urls: { refreshUrl: string; returnUrl: string },
   input: { country?: string } = {},
+  /** ADR 0948 P0b — onboard a CLIENT org's own seller (its own row, binding and
+   *  Stripe account); absent = the tenant's own seller, exactly as before. */
+  orgId?: string,
 ): Promise<OnboardingStart> {
+  // ADR 0948 P0b — the anon guard runs FIRST, before the client-org check, so an
+  // `anon:` tenant is refused as anon on both lanes (never "not a client org").
+  assertFoldEligibleTenant(tenantId, 'become a seller');
+  const ref: SellerRef = { tenantId, ...(orgId ? { orgId } : {}) };
+  const rows = sellerRows(ref);
   // GEN-CC-1 — the SHARED fold guard (`stores.assertFoldEligibleTenant`).
   //
   // CORRECTED 2026-08-19 (MPL-1 / WF-MKT-13): this comment used to claim the
@@ -52,7 +63,7 @@ export async function startOnboarding(
   // is true only now that all four lanes call the one predicate; the reasoning
   // for WHY lives with the predicate, not duplicated per call site.
   assertFoldEligibleTenant(tenantId, 'become a seller');
-  const existing = await sellers.get(tenantId);
+  const existing = await rows.get();
   const key = await resolveSecret(STRIPE_KEY_REF);
 
   // ADR 0877 D4 — a row minted on the DEMO lane (before the host had a Stripe key)
@@ -67,7 +78,7 @@ export async function startOnboarding(
   // starts each mint an Express account. Refuse, unless the claim is stale (its
   // owner died between the claim and the release).
   if (existing && existing.stripeAccountId === '' && Date.now() - Date.parse(existing.updatedAt) < CLAIM_STALE_MS) {
-    throw new OpenwopError('validation_error', 'Seller onboarding is already in progress for this workspace — retry in a moment.', 409, { feature: 'commerce-connect' });
+    throw new OpenwopError('validation_error', 'Seller onboarding is already in progress for this account — retry in a moment.', 409, { feature: 'commerce-connect' });
   }
 
   // Resume: an account already exists (any state but a released claim) — never a second one.
@@ -78,7 +89,7 @@ export async function startOnboarding(
     // Grade pass CC-1: SELF-HEAL the reverse index on resume — a crash between
     // the seller write and the index write would otherwise orphan the mapping
     // and silently drop every future webhook for this seller (incl. payouts).
-    await bindSellerAccount(tenantId, existing.stripeAccountId); // ADR 0576 CAS
+    await bindSellerAccount(tenantId, existing.stripeAccountId, orgId); // ADR 0576 CAS
     if (existing.mode === 'demo') return { seller: existing, url: 'demo:connect-onboarding', mode: 'demo' };
     const link = await createStripeAccountLink(key ?? await requireStripeKey(), { accountId: existing.stripeAccountId, ...urls });
     return { seller: existing, url: link.url, mode: 'live' };
@@ -89,25 +100,26 @@ export async function startOnboarding(
   if (!key) {
     // Demo lane — honest, deterministic, no Stripe. CAS keeps it single too.
     const demo: SellerAccount = {
-      tenantId, stripeAccountId: `acct_demo_${tenantId}`, onboardingState: 'pending',
+      tenantId, stripeAccountId: demoAccountId(ref), onboardingState: 'pending',
       chargesEnabled: false, payoutsEnabled: false, region: input.country?.toUpperCase() ?? '',
       capabilities: [], mode: 'demo', createdAt: now, updatedAt: now,
     };
-    await sellers.compareAndSwap(existing, demo);
-    const seller = (await sellers.get(tenantId)) ?? demo;
+    await rows.compareAndSwap(existing, demo);
+    const seller = (await rows.get()) ?? demo;
     // CC-1: index write is idempotent and unconditional (CAS loser included) —
     // the mapping is derived from the stored row, so a re-put self-heals.
-    await bindSellerAccount(tenantId, seller.stripeAccountId); // ADR 0576 CAS
+    await bindSellerAccount(tenantId, seller.stripeAccountId, orgId); // ADR 0576 CAS
     return { seller, url: 'demo:connect-onboarding', mode: 'demo' };
   }
 
   // Live lane — claim first (empty stripeAccountId marks the claim window).
+  // A client row carries its orgId, so the fill below CASes from exactly this claim.
   const claim: SellerAccount = {
-    tenantId, stripeAccountId: '', onboardingState: 'pending',
+    tenantId, ...(orgId ? { orgId } : {}), stripeAccountId: '', onboardingState: 'pending',
     chargesEnabled: false, payoutsEnabled: false, region: input.country?.toUpperCase() ?? '',
     capabilities: [], mode: 'live', createdAt: now, updatedAt: now,
   };
-  if (!(await sellers.compareAndSwap(existing, claim))) {
+  if (!(await rows.compareAndSwap(existing, claim))) {
     throw new OpenwopError('validation_error', 'Seller onboarding is already in progress for this workspace — retry in a moment.', 409, { feature: 'commerce-connect' });
   }
   if (upgradingDemo && existing) {
@@ -115,27 +127,28 @@ export async function startOnboarding(
     // exception, ADR 0877 M11): only the deterministic demo placeholder of THIS
     // tenant, and only while the index still names this tenant. A real account
     // id never matches the guard, so no live binding can be dropped here.
-    const demoId = `acct_demo_${tenantId}`;
+    const demoId = demoAccountId(ref);
     const idx = existing.stripeAccountId === demoId ? await accountIndex.get(demoId) : null;
-    if (idx && idx.tenantId === tenantId) await accountIndex.delete(demoId);
+    // ADR 0948 P0b — only THIS ref's placeholder: tenant AND org must match.
+    if (idx && idx.tenantId === tenantId && (idx.orgId ?? '') === (orgId ?? '')) await accountIndex.delete(demoId);
   }
   try {
     const acct = await createStripeConnectAccount(key, {
       ...(input.country ? { country: input.country } : {}),
-      metadata: { tenantId },
+      metadata: { tenantId, ...(orgId ? { orgId } : {}) },
     });
     const filled: SellerAccount = { ...claim, stripeAccountId: acct.accountId, region: acct.country || claim.region, updatedAt: nowIso() };
     // CAS from OUR claim (CC2CD-1): a blind put let a second start's row win last.
-    if (!(await sellers.compareAndSwap(claim, filled))) {
+    if (!(await rows.compareAndSwap(claim, filled))) {
       throw new OpenwopError('conflict', 'Seller onboarding changed underneath this request — retry.', 409, { feature: 'commerce-connect', stripeAccountId: acct.accountId });
     }
-    await bindSellerAccount(tenantId, acct.accountId); // ADR 0576 CAS
+    await bindSellerAccount(tenantId, acct.accountId, orgId); // ADR 0576 CAS
     const link = await createStripeAccountLink(key, { accountId: acct.accountId, ...urls });
     return { seller: filled, url: link.url, mode: 'live' };
   } catch (err) {
     // Release the claim (only if it is still the unfilled claim) so a retry restarts.
-    const current = await sellers.get(tenantId);
-    if (current && current.stripeAccountId === '') await sellers.delete(tenantId).catch(() => undefined);
+    const current = await rows.get();
+    if (current && current.stripeAccountId === '') await rows.remove().catch(() => undefined);
     throw err;
   }
 }
@@ -147,8 +160,9 @@ export async function startOnboarding(
  * so the UI reflects reality immediately). Demo mode flips straight to enabled
  * (the showcase behavior; there is no Stripe to consult).
  */
-export async function syncSellerFromStripe(tenantId: string): Promise<SellerAccount> {
-  const seller = await sellers.get(tenantId);
+export async function syncSellerFromStripe(tenantId: string, orgId?: string): Promise<SellerAccount> {
+  const rows = sellerRows({ tenantId, ...(orgId ? { orgId } : {}) });
+  const seller = await rows.get();
   if (!seller || !seller.stripeAccountId) {
     throw new OpenwopError('not_found', 'No seller account to sync — start onboarding first.', 404, { feature: 'commerce-connect' });
   }
@@ -158,7 +172,7 @@ export async function syncSellerFromStripe(tenantId: string): Promise<SellerAcco
     // ADR 0877 M11 — CAS, never a blind put: a D4 live re-onboard can land between
     // the read above and this write, and a put would restore the demo placeholder
     // over the real account (orphaning it while it stays bound).
-    return (await sellers.compareAndSwap(seller, next)) ? next : ((await sellers.get(tenantId)) ?? next);
+    return (await rows.compareAndSwap(seller, next)) ? next : ((await rows.get()) ?? next);
   }
   const key = await requireStripeKey();
   const acct = await getStripeConnectAccount(key, seller.stripeAccountId);
@@ -171,5 +185,5 @@ export async function syncSellerFromStripe(tenantId: string): Promise<SellerAcco
     onboardingState: acct.chargesEnabled ? 'enabled' : acct.requirementsDisabledReason ? 'restricted' : 'pending',
     updatedAt: nowIso(),
   };
-  return (await sellers.compareAndSwap(seller, next)) ? next : ((await sellers.get(tenantId)) ?? next);
+  return (await rows.compareAndSwap(seller, next)) ? next : ((await rows.get()) ?? next);
 }

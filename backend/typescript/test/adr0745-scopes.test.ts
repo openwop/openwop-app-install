@@ -12,6 +12,11 @@
  *      minted with `['runs:read']` could create runs.
  *   3. The challenge attaches to scope refusals only: a 404 carries none
  *      (`auth-challenge-no-oracle`), and an undeclared-scope key is not narrowed.
+ *
+ * Tracker TST-BAB-7. Red when (sabotage-witnessed, wave 60): key narrowing is
+ * disabled; the refusal loses its challenge; `*` or an empty declaration narrows;
+ * the interrupt route gates on `runs:read`; the advertised list drifts from the
+ * gates; a run 404 carries a challenge.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
@@ -20,7 +25,7 @@ import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
 import { toWireRunId } from '../src/host/v2Ids.js';
-import { SCOPES_SUPPORTED } from '../src/host/protocolAuthorization.js';
+import { PROPOSAL_KEY_SCOPES, SCOPES_SUPPORTED } from '../src/host/protocolAuthorization.js';
 import { issueApiKey } from '../src/features/developer-keys/apiKeyService.js';
 
 const SRC = resolve(import.meta.dirname, '..', 'src');
@@ -51,7 +56,9 @@ describe('scopes_supported is derived from the gates, both directions', () => {
     }
     // Floor: the scan found the gates at all (an empty scan agrees with nothing).
     expect(gated.size).toBeGreaterThanOrEqual(3);
-    expect([...gated].sort()).toEqual([...SCOPES_SUPPORTED].sort());
+    // ADR 0972 D9 — the proposal scopes are gated on in source but listed only once
+    // the RFC 0249 wire is on (`scopesSupported()`); adr0972's test pins that switch.
+    expect([...gated].sort()).toEqual([...SCOPES_SUPPORTED, ...PROPOSAL_KEY_SCOPES].sort());
   });
 
   it('SABOTAGE: the comment stripper removes a gate that exists only in a comment', () => {
@@ -93,6 +100,14 @@ async function key(scopes: string[] | undefined): Promise<string> {
   return token;
 }
 
+/** An admitted create: 201 and a run id bound to the key's own tenant. */
+async function expectCreated(res: Response): Promise<void> {
+  expect(res.status, 'admitted — the run was created').toBe(201);
+  expect(res.headers.get('www-authenticate')).toBeNull();
+  const body = (await res.json()) as { runId?: string };
+  expect(String(body.runId)).toMatch(new RegExp(`^${TENANT}/`));
+}
+
 const createRun = (token: string): Promise<Response> =>
   fetch(`${BASE}/runs`, {
     method: 'POST',
@@ -119,19 +134,16 @@ describe('a key that declares scopes is narrowed to them (default posture)', () 
   });
 
   it('CONTROL: the same key holding runs:create is not refused for scope', async () => {
-    const res = await createRun(await key(['runs:read', 'runs:create']));
-    expect(res.status, 'without this leg a host refusing every key passes the one above').not.toBe(403);
-    expect(res.headers.get('www-authenticate')).toBeNull();
+    // Without this leg a host refusing every key passes the one above.
+    await expectCreated(await createRun(await key(['runs:read', 'runs:create'])));
   });
 
   it('a key declaring `*` is not narrowed (scopes are free-form at mint)', async () => {
-    const res = await createRun(await key(['*']));
-    expect(res.status).not.toBe(403);
+    await expectCreated(await createRun(await key(['*'])));
   });
 
   it('a key with NO declared scopes carries its issuer\'s authority (undeclared ≠ none)', async () => {
-    const res = await createRun(await key(undefined));
-    expect(res.status).not.toBe(403);
+    await expectCreated(await createRun(await key(undefined)));
   });
 });
 

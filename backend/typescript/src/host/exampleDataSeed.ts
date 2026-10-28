@@ -30,6 +30,7 @@ import { createRosterEntry, getRosterEntry, listRoster, type RosterEntry } from 
 import { upsertAgentProfile, getAgentProfile, type AgentProfileInput } from './agentProfileService.js';
 import { createBoard, createCard, listBoards, type KanbanBoard, type KanbanColumn, type KanbanCardSource } from './kanbanService.js';
 import { getJob, registerJob } from './schedulingService.js';
+import { isWorkTwinMockArchive } from './workflowTemplates.js';
 import { registerSubscription } from './triggerBridgeService.js';
 import { getChart, putChart, type OrgDepartment, type OrgMember } from './orgChartService.js';
 import { deleteRosterMemberCascade } from './rosterCascade.js';
@@ -322,7 +323,12 @@ async function seedAgentBoard(
  *  accumulate into an unbounded background fleet no budget ever catches —
  *  1,054 enabled anon cron jobs (~2.9k runs/day, 47k runs total) were found
  *  firing in prod on 2026-07-14. The schedules stay VISIBLE in the demo UI;
- *  a curious visitor can toggle one on and their own budget then applies. */
+ *  a curious visitor can toggle one on and their own budget then applies.
+ *
+ *  A schedule bound to a Work-Twin MOCK ARCHIVE is seeded disabled for EVERY
+ *  tenant (ADR 0939 prod pause + 2026-10-25 correction): those chains fabricate
+ *  their output, the user paused every such schedule on 2026-10-19, and this
+ *  seed kept minting enabled ones for each new signed-in tenant. */
 async function seedAgentSchedule(
   tenantId: string,
   workflowIds: string[],
@@ -332,7 +338,7 @@ async function seedAgentSchedule(
 ): Promise<void> {
   const workflowId = workflowIds[sched.workflowIndex];
   if (!workflowId) return;
-  const enabled = !tenantId.startsWith('anon:');
+  const enabled = !tenantId.startsWith('anon:') && !isWorkTwinMockArchive(workflowId);
   // ADR 0379 P2 — the jobId carries the TENANT: deterministic rosterIds repeat
   // across tenants, so a bare `${rosterId}:${slug}` would collide in the
   // jobId-keyed store (two tenants' seeds overwriting each other's schedules).

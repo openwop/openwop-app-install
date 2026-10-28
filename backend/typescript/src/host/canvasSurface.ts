@@ -23,6 +23,7 @@ import { DurableCollection } from './hostExtPersistence.js';
 import { snapshotRunVariables } from './variablesRuntime.js';
 import type { BundleScope } from './inMemorySurfaces.js';
 import type { Storage } from '../storage/storage.js';
+import { inheritedRunMetadata } from './inheritedRunMetadata.js';
 import type { WorkflowDefinition } from '../executor/types.js';
 import type { RunRecord } from '../types.js';
 import { OpenwopError } from '../types.js';
@@ -932,7 +933,11 @@ export function createCanvasSurface(scope: BundleScope): CanvasSurface {
       let cursor = scope.runId;
       while (cursor && ancestors.length < MAX_INVOKE_DEPTH) {
         const a = await storage.getRun(cursor);
-        if (!a) break;
+        if (!a) {
+          if (cursor === scope.runId) throw new OpenwopError('not_found', 'Parent run not found in this tenant.', 404);
+          break;
+        }
+        if (a.tenantId !== tenantId) throw new OpenwopError('not_found', 'Parent run not found in this tenant.', 404);
         ancestors.push(a.workflowId);
         cursor = a.parentRunId;
       }
@@ -948,6 +953,9 @@ export function createCanvasSurface(scope: BundleScope): CanvasSurface {
         throw Object.assign(new Error(`canvas invoke: workflow '${workflowId}' not found`), { code: 'canvas_invoke_workflow_not_found' });
       }
 
+      const parentRow = scope.runId ? await storage.getRun(scope.runId) : null;
+      if (scope.runId && (!parentRow || parentRow.tenantId !== tenantId)) throw new OpenwopError('not_found', 'Parent run not found in this tenant.', 404);
+      const inherited = inheritedRunMetadata(parentRow?.metadata as Record<string, unknown> | undefined);
       const childRunId = randomUUID();
       const now = new Date().toISOString();
       const childRun: RunRecord = {
@@ -959,7 +967,7 @@ export function createCanvasSurface(scope: BundleScope): CanvasSurface {
         inputs: (args as Json) ?? {},
         // ADR 0832 D3 — the invoking run's person bounds the child's orgs (it
         // narrows; the child still acts for nobody, as before).
-        metadata: { causationCanvasId: targetCanvasId, ...(runOrgScopeSubject(scope) ? { orgScopeSubject: runOrgScopeSubject(scope) } : {}) },
+        metadata: { causationCanvasId: targetCanvasId, ...inherited, ...(runOrgScopeSubject(scope) ? { orgScopeSubject: runOrgScopeSubject(scope) } : {}) },
         configurable: {},
         ...(scope.runId ? { parentRunId: scope.runId } : {}),
         createdAt: now,

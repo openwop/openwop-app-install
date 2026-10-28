@@ -23,7 +23,8 @@ export const goalsFeature: BackendFeature = {
     // ADR 0908 D7 — a person's goals are erased with them.
     registerSubjectEraser(eraseGoalsForSubject);
     // ADR 0908 D8 — bounds stop the continuation, not only the judge.
-    registerScheduledJobFireGate('goals', { owns: ownsGoalContinuationJob, gate: goalContinuationFireGate, refusal: 'dispatch-error', reservedJobIdPrefix: GOAL_CONTINUATION_JOB_PREFIX });
+    registerScheduledJobFireGate('goals', { owns: ownsGoalContinuationJob, gate: goalContinuationFireGate, refusal: 'dispatch-error', reservedJobIdPrefix: GOAL_CONTINUATION_JOB_PREFIX,
+      managedBy: { id: 'goal', message: 'This schedule belongs to a standing goal. Pause, resume or re-arm it through the goal.' } });
   },
   // ADR 0412 P1 — the `ctx.features.goals` consumption seam (create/get/
   // bindRun/evaluate); ADR 0414's enrollment saga is the first consumer.

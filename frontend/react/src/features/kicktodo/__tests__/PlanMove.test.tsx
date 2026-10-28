@@ -10,6 +10,9 @@
  *  - PT-5: closing the panel (cancel or confirm) returns focus to the item's
  *    Move trigger, or to the page title when the item left the window (breaks
  *    if the pending-focus effect is removed);
+ *  - PT-6: the move-date input is labelled EXPLICITLY by the shared Field
+ *    primitive (`<label for>` ↔ `id`), never a wrapping `<label>` (breaks if
+ *    PlanPage hand-rolls the label again);
  *  - the three views re-project the same read (challenge view groups rows);
  *  - the calendar disclosure renders only store-backed states and a failed
  *    status read never hides the plan.
@@ -97,6 +100,21 @@ describe('PlanPage §5.5 (ADR 0496)', () => {
     const moves = screen.getAllByRole('button', { name: /^Move “/ });
     expect(moves).toHaveLength(1);
     expect(moves[0]!.getAttribute('aria-label')).toContain('Future action');
+  });
+
+  it('PT-6: the move-date input is explicitly labelled by the Field primitive', async () => {
+    renderPage();
+    await waitFor(() => screen.getByText('Future action'));
+    fireEvent.click(screen.getByRole('button', { name: /^Move “/ }));
+    const input = screen.getByLabelText(/^New date/);
+    expect(input.getAttribute('type')).toBe('date');
+    expect(input.id).not.toBe('');
+    const label = document.querySelector<HTMLLabelElement>(`label[for="${input.id}"]`);
+    expect(label).not.toBeNull();
+    expect(label?.className).toContain('field-label');
+    expect(label?.textContent).toContain(en.planMoveToLabel);
+    // Not the implicit (wrapping) association PT-6 replaced.
+    expect(input.closest('label')).toBeNull();
   });
 
   it('preview-before-confirm: the compare renders the dry-run, THEN confirm applies and the plan reloads', async () => {

@@ -29,8 +29,104 @@ import { appendAudit, AUDIT_KIND_CONSENT_CHANGE } from '../../host/auditChainSer
 import { createLogger } from '../../observability/logger.js';
 import { assertPurposesAtCapture } from '../cdp/purposeVocabService.js';
 import { regionIsRegulated, type VisitorRegion } from './visitorRegion.js';
+import { isTopicOptedOut } from './topicOptOuts.js';
+import { getClientChannelGrant, setClientChannelGrant, type ClientConsentChannel } from './clientChannelConsent.js';
 
 const log = createLogger('feature.consent');
+
+/**
+ * ADR 0951 D4 — a WITHDRAWAL hook: what a feature must undo when a subject stops
+ * permitting a category. Session recording is the first (and so far only)
+ * consumer: withdrawing `analytics.replay` deletes the recordings already made,
+ * not only future capture. Consent owns the write and the trigger; the feature
+ * that owns the data registers the action, so consent never imports it.
+ *
+ * Fires after a SUCCESSFUL write when the stored value is no longer `true` and
+ * either the prior record said `true` or the caller explicitly sent `false` (an
+ * explicit refusal re-runs the hook, which also retries a hook that failed
+ * before). Awaited; a failure is logged and never fails the consent write — the
+ * recorded refusal is what stops capture, and the hook is idempotent.
+ */
+export type ConsentWithdrawalHook = (tenantId: string, subjectKey: string) => Promise<unknown>;
+const withdrawalHooks = new Map<ConsentCategory, Map<string, ConsentWithdrawalHook>>();
+/** Register (by name — a repeated boot overwrites its own slot). */
+export function registerConsentWithdrawalHook(category: ConsentCategory, name: string, fn: ConsentWithdrawalHook): void {
+  const slot = withdrawalHooks.get(category) ?? new Map<string, ConsentWithdrawalHook>();
+  slot.set(name, fn);
+  withdrawalHooks.set(category, slot);
+}
+
+/**
+ * ADR 0951 D1 — categories only the VISITOR may grant. Session recording is consent
+ * to be recorded, given by the person in the browser; an operator, a workflow node, a
+ * form sink or a CRM merge may record a refusal but never a grant. A GRANT is a
+ * transition to `true` from anything else, and it must arrive on the public consent
+ * lane (`source` `public:<orgId>`, set server-side by that route). A write that
+ * merely carries an already-stored `true` forward (the merge fallthrough) is not a
+ * grant.
+ */
+/** One stored category's value, by the category id (the record's keys ARE the ids). */
+function categoryValue(c: ConsentCategories, category: ConsentCategory): boolean | undefined {
+  const byId: Partial<Record<ConsentCategory, boolean>> = c;
+  return byId[category];
+}
+
+function assertVisitorOnlyGrants(cur: ConsentRecord | null, sent: unknown, source: string): void {
+  if (source.startsWith('public:')) return;
+  const c = (sent ?? {}) as Record<string, unknown>;
+  for (const category of OPTIONAL_STRICT_CATEGORIES) { // today every strict optional category is visitor-granted only
+    const before = cur ? categoryValue(cur.categories, category) : undefined;
+    if (c[category] === true && before !== true) {
+      throw new OpenwopError(
+        'validation_error',
+        `\`${category}\` can only be granted by the visitor, through the public consent lane. Record a refusal (\`false\`) here, or omit it.`,
+        400,
+        { field: `categories.${category}` },
+      );
+    }
+  }
+}
+
+async function afterConsentWrite(prev: ConsentRecord | null, rec: ConsentRecord, sent: Record<string, unknown>): Promise<void> {
+  for (const [category, hooks] of withdrawalHooks) {
+    const now = categoryValue(rec.categories, category);
+    if (now === true) continue;
+    const before = prev ? categoryValue(prev.categories, category) : undefined;
+    if (before !== true && sent[category] !== false) continue;
+    for (const [name, fn] of hooks) {
+      try { await fn(rec.tenantId, rec.subjectKey); }
+      catch (err) {
+        log.error('consent_withdrawal_hook_failed', {
+          tenantId: rec.tenantId, category, hook: name,
+          subjectHash: hashSubjectKey(rec.tenantId, rec.subjectKey), // never the raw key
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  }
+}
+
+/**
+ * ADR 0951 D1 — OPTIONAL visitor choices a site offers beyond the base banner
+ * question. A feature registers whether a tenant currently offers the category
+ * (session recording: replay toggle ON and storage configured); the public
+ * posture read lists the offered ones so the banner can ask. Consent stays the
+ * owner of the question; the data owner answers "is it on here".
+ */
+export type VisitorChoiceProvider = (tenantId: string) => Promise<boolean>;
+const visitorChoiceProviders = new Map<ConsentCategory, VisitorChoiceProvider>();
+export function registerVisitorChoiceProvider(category: ConsentCategory, fn: VisitorChoiceProvider): void {
+  visitorChoiceProviders.set(category, fn);
+}
+/** The optional categories this tenant's visitors are asked about. Fail-closed:
+ *  a provider that throws is treated as not offering (the recorder never loads). */
+export async function offeredVisitorChoices(tenantId: string): Promise<ConsentCategory[]> {
+  const out: ConsentCategory[] = [];
+  for (const [category, fn] of visitorChoiceProviders) {
+    if (await fn(tenantId).catch(() => false)) out.push(category);
+  }
+  return out;
+}
 
 /** Per-channel marketing specifics (ADR 0227) — OPTIONAL keys layered over the
  *  `marketing` umbrella. Old records simply lack them (see `isAllowed`). */
@@ -38,9 +134,18 @@ export type MarketingChannel = 'email' | 'sms' | 'push' | 'whatsapp';
 export const MARKETING_CHANNELS: readonly MarketingChannel[] = ['email', 'sms', 'push', 'whatsapp'];
 export type MarketingChannelCategory = `marketing.${MarketingChannel}`;
 
-export type ConsentCategory = 'necessary' | 'analytics' | 'marketing' | MarketingChannelCategory;
+/** ADR 0951 D1 — OPTIONAL categories that are not marketing channels. Each is a
+ *  strict explicit opt-in (see `STRICT_EXPLICIT_OPT_IN`): absent means "never
+ *  granted", so no umbrella, policy default or toggle-off escape can permit it.
+ *  `normCategories` / `partialCategories` derive from this list, so a category
+ *  added here is stored and accepted without touching either. */
+export type OptionalStrictCategory = 'analytics.replay';
+export const OPTIONAL_STRICT_CATEGORIES: readonly OptionalStrictCategory[] = ['analytics.replay'];
+
+export type ConsentCategory = 'necessary' | 'analytics' | 'marketing' | MarketingChannelCategory | OptionalStrictCategory;
 export const CONSENT_CATEGORIES: readonly ConsentCategory[] = [
   'necessary', 'analytics', 'marketing', 'marketing.email', 'marketing.sms', 'marketing.push', 'marketing.whatsapp',
+  ...OPTIONAL_STRICT_CATEGORIES,
 ];
 
 function isMarketingChannelCategory(category: ConsentCategory): category is MarketingChannelCategory {
@@ -53,7 +158,10 @@ function isMarketingChannelCategory(category: ConsentCategory): category is Mark
  * mode, and the consent-toggle-off permissive escape must NEVER permit them. The
  * single `isAllowed` evaluator honors this set (no second evaluator).
  */
-export const STRICT_EXPLICIT_OPT_IN: ReadonlySet<ConsentCategory> = new Set(['marketing.whatsapp']);
+// ADR 0955 D3 (J3) — `marketing.sms` joins WhatsApp: TCPA's prior-express-written-consent
+// rule, so an umbrella `marketing: true` or an opt-out policy default never permits a
+// marketing text. (Campaign Studio decision 6 is still open with David; built strict.)
+export const STRICT_EXPLICIT_OPT_IN: ReadonlySet<ConsentCategory> = new Set<ConsentCategory>(['marketing.whatsapp', 'marketing.sms', ...OPTIONAL_STRICT_CATEGORIES]);
 
 /** Stored shape stays BACKWARD-COMPATIBLE (ADR 0227): the three base keys are
  *  always present; the per-channel specifics are optional — a record written
@@ -67,6 +175,8 @@ export interface ConsentCategories {
   'marketing.push'?: boolean;
   /** ADR 0394 — WhatsApp requires an EXPLICIT true (never umbrella-derived). */
   'marketing.whatsapp'?: boolean;
+  /** ADR 0951 D1 — session recording. Strict: only a recorded `true` permits. */
+  'analytics.replay'?: boolean;
 }
 
 /** GDPR Art. 6 lawful bases (ADR 0268 / CDP-F) — additive; recorded for audit, not
@@ -275,6 +385,11 @@ function normCategories(input: unknown): ConsentCategories {
     const v = c[key];
     if (typeof v === 'boolean') out[key] = v;
   }
+  // ADR 0951 D1 — strict optional categories: stored only when explicitly sent.
+  for (const key of OPTIONAL_STRICT_CATEGORIES) {
+    const v = c[key];
+    if (typeof v === 'boolean') out[key] = v;
+  }
   return out;
 }
 
@@ -324,6 +439,7 @@ export async function recordConsent(input: { tenantId: string; subjectKey: strin
   // seeder are its only callers), so under contention a concurrent writer's history
   // entry can be lost exactly as its record can — stated, not hidden.
   const cur = await records.get(`${input.tenantId}:${input.subjectKey}`);
+  assertVisitorOnlyGrants(cur, input.categories, input.source); // ADR 0951 D1
   const base: ConsentRecord = {
     tenantId: input.tenantId,
     subjectKey: input.subjectKey,
@@ -361,6 +477,7 @@ export async function recordConsent(input: { tenantId: string; subjectKey: strin
   } catch (err) {
     log.warn('audit_chain_append_failed', { tenantId: rec.tenantId, kind: AUDIT_KIND_CONSENT_CHANGE, error: String(err) });
   }
+  await afterConsentWrite(cur, rec, (input.categories ?? {}) as Record<string, unknown>); // ADR 0951 D4
   return rec;
 }
 
@@ -397,6 +514,10 @@ export function partialCategories(input: unknown): Partial<ConsentCategories> {
   if (typeof c.marketing === 'boolean') out.marketing = c.marketing;
   for (const ch of MARKETING_CHANNELS) {
     const key = `marketing.${ch}` as const;
+    const v = c[key];
+    if (typeof v === 'boolean') out[key] = v;
+  }
+  for (const key of OPTIONAL_STRICT_CATEGORIES) {
     const v = c[key];
     if (typeof v === 'boolean') out[key] = v;
   }
@@ -453,6 +574,7 @@ export async function mergeConsentCategories(input: {
   await assertNotErased(input.tenantId, input.subjectKey); // D10 — the barrier, at entry
   for (let attempt = 0; attempt < 5; attempt++) {
     const cur = await records.get(`${input.tenantId}:${input.subjectKey}`);
+    assertVisitorOnlyGrants(cur ?? null, input.categories, input.source); // ADR 0951 D1
     // D10 — a null read on a retry is exactly the DSAR interleaving (CONS-25): re-check
     // the barrier before a swap that would RE-INSERT the record after its erasure.
     if (cur === null && attempt > 0) await assertNotErased(input.tenantId, input.subjectKey);
@@ -480,6 +602,7 @@ export async function mergeConsentCategories(input: {
           subjectHash: hashSubjectKey(rec.tenantId, rec.subjectKey), categories: rec.categories, source: rec.source, // D11 — never the raw key
         });
       } catch { /* best-effort — audit-chain failure never breaks recording */ }
+      await afterConsentWrite(cur ?? null, rec, input.categories as Record<string, unknown>); // ADR 0951 D4
       return rec;
     }
   }
@@ -753,7 +876,7 @@ export async function readmitSubject(
 /** ADR 0657 D10 — the tombstone is the write barrier: no consent write lands on an erased
  *  subject until an administrator re-admits them (the CONS-25 race: a public write that
  *  lost its CAS to a DSAR used to retry from a null read and RE-INSERT the record). */
-async function assertNotErased(tenantId: string, subjectKey: string): Promise<void> {
+export async function assertNotErased(tenantId: string, subjectKey: string): Promise<void> {
   if (await isErasureTombstoned(tenantId, subjectKey)) {
     throw new OpenwopError(
       'subject_erased',
@@ -883,7 +1006,47 @@ export function visitorDefaultRegime(policy: ConsentPolicy | null, region: Visit
   return { mode, basis: `visitor-default:${mode}` };
 }
 
-export async function isAllowed(tenantId: string, subjectKey: string, category: ConsentCategory, opts?: { visitor?: VisitorDecisionContext }): Promise<boolean> {
+/**
+ * ADR 0905 D7 — `opts.topic` NARROWS a marketing decision by the subject's topic
+ * opt-out (`topicOptOuts.ts`). Applied AFTER the decision below, on every path —
+ * including the consent-toggle-off permissive return — and only ever turns an allow into
+ * a deny: a topic can never widen consent.
+ */
+export async function isAllowed(tenantId: string, subjectKey: string, category: ConsentCategory, opts?: { visitor?: VisitorDecisionContext; topic?: { orgId: string; topicId: string }; client?: { orgId: string } }): Promise<boolean> {
+  const base = opts?.client && category === 'marketing.sms'
+    ? await isAllowedForClient(tenantId, subjectKey, 'sms', opts.client.orgId)
+    : await isAllowedBase(tenantId, subjectKey, category, opts);
+  if (!base || !opts?.topic || category === 'necessary') return base;
+  if (await isTopicOptedOut(tenantId, opts.topic.orgId, subjectKey, opts.topic.topicId)) {
+    log.info('consent_denied', { tenantId, subjectKeyHash: hashSubjectKey(tenantId, subjectKey).slice(0, 16), category, basis: 'topic-opt-out' });
+    return false;
+  }
+  return true;
+}
+
+/**
+ * ADR 0955 Q7 — a client's marketing channel decision. Order: the erasure tombstone, a
+ * workspace-level `false` (STOPALL or an explicit no), then the client's own grant. A
+ * workspace-level `true` names no brand and NEVER permits a client on its own.
+ */
+async function isAllowedForClient(tenantId: string, subjectKey: string, channel: ClientConsentChannel, orgId: string): Promise<boolean> {
+  if (!subjectKey || !orgId) return false;
+  if (await isErasureTombstoned(tenantId, subjectKey)) return false;
+  const rec = await getConsent(tenantId, subjectKey);
+  if (rec?.categories[`marketing.${channel}`] === false) return false;
+  const grant = await getClientChannelGrant(tenantId, orgId, subjectKey, channel);
+  const allowed = grant?.granted === true;
+  if (!allowed) log.info('consent_denied', { tenantId, subjectKeyHash: hashSubjectKey(tenantId, subjectKey).slice(0, 16), category: `marketing.${channel}`, basis: grant ? 'client-withdrawn' : 'client-no-grant' });
+  return allowed;
+}
+
+/** ADR 0955 Q7 — record (or withdraw) a client's channel grant; refuses an erased subject. */
+export async function recordClientChannelConsent(input: { tenantId: string; orgId: string; subjectKey: string; channel: ClientConsentChannel; granted: boolean; source: string }): Promise<void> {
+  assertSubjectKey(input.subjectKey);
+  await setClientChannelGrant(input, assertNotErased);
+}
+
+async function isAllowedBase(tenantId: string, subjectKey: string, category: ConsentCategory, opts?: { visitor?: VisitorDecisionContext }): Promise<boolean> {
   if (category === 'necessary') return true;
   // ADR 0394 — strict explicit-opt-in categories (WhatsApp): ONLY a recorded
   // explicit `true` for the specific channel permits. No umbrella fallback, no
@@ -911,7 +1074,7 @@ export async function isAllowed(tenantId: string, subjectKey: string, category: 
     const policy = rec || strict ? null : await getPolicy(tenantId);
     basis = rec ? 'record' : (policy?.defaultMode ?? 'unset');
     if (strict) {
-      allowed = rec?.categories[category as MarketingChannelCategory] === true;
+      allowed = rec?.categories[category as MarketingChannelCategory | OptionalStrictCategory] === true;
     } else if (rec) {
       if (isMarketingChannelCategory(category)) {
         const specific = rec.categories[category];

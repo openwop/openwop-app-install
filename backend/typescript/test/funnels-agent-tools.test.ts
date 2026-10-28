@@ -17,6 +17,8 @@ import {
   FUNNELS_GET_TOOL_ID,
   FUNNELS_STEP_STATS_TOOL_ID,
   FUNNELS_DRAFT_TOOL_ID,
+  FUNNELS_BLUEPRINTS_TOOL_ID,
+  FUNNELS_GENERATE_TOOL_ID,
 } from '../src/features/funnels/agentTools.js';
 import { archiveFunnel, __resetFunnels } from '../src/features/funnels/funnelsService.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
@@ -24,7 +26,9 @@ import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { createOrg, listOrgs } from '../src/host/accessControlService.js';
 
 const TENANT = 'default';
-const ALL_IDS = [FUNNELS_LIST_TOOL_ID, FUNNELS_GET_TOOL_ID, FUNNELS_STEP_STATS_TOOL_ID, FUNNELS_DRAFT_TOOL_ID];
+const ALL_IDS = [FUNNELS_LIST_TOOL_ID, FUNNELS_GET_TOOL_ID, FUNNELS_STEP_STATS_TOOL_ID, FUNNELS_DRAFT_TOOL_ID, FUNNELS_BLUEPRINTS_TOOL_ID, FUNNELS_GENERATE_TOOL_ID];
+/** ADR 0948 D5 — the architect reads the brief and the pages before it writes. */
+const READ_BEFORE_WRITE = ['openwop:campaign-brief.get-brief', 'openwop:cms.get-page'];
 
 let server: http.Server;
 beforeAll(async () => {
@@ -55,12 +59,12 @@ describe('CFP-1 — the funnels agent tools register + the allowlist matches', (
     for (const id of ALL_IDS) expect(ids).toContain(id);
   });
 
-  it('the pack allowlist is EXACTLY the four registered ids (no dropped node typeIds)', () => {
+  it('the pack allowlist is EXACTLY the funnels tools plus the two read-before-write reads (no dropped node typeIds)', () => {
     const packDir = new URL('../../../packs/vendor.openwop-app.funnels.agents/', import.meta.url);
     const manifest = JSON.parse(readFileSync(new URL('pack.json', packDir), 'utf8')) as {
       agents: { toolAllowlist: string[] }[];
     };
-    expect([...manifest.agents[0]!.toolAllowlist].sort()).toEqual([...ALL_IDS].sort());
+    expect([...manifest.agents[0]!.toolAllowlist].sort()).toEqual([...ALL_IDS, ...READ_BEFORE_WRITE].sort());
   });
 
   it('registers NO publish / unpublish / archive / experiment agent tool (draft-only firewall)', () => {

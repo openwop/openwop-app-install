@@ -20,8 +20,16 @@
  * proxy for the property, and the proxy already failed once here in the
  * reassuring direction. A guard can be present and bypassed; a 200 cannot be
  * argued with.
+ *
+ * CORRECTED 2026-10-23 (grade-tests wave 61): the "either spelling" list used to
+ * name `/v1/host/sample/…`. Since ADR 0812 retired major 1 that path answers 410
+ * `protocol_version_unsupported` to EVERY caller (authenticated too, measured), so
+ * it asserted nothing about the guard, and case 1 accepted any non-200 (a 410 or
+ * a 500 passed). Each spelling now pins its exact refusal, and its authenticated
+ * twin must reach the handler (200), so a dead or broken path cannot pass.
+ * The app boots ONCE (it booted three times for three cases).
  */
-import { describe, expect, it, afterAll } from 'vitest';
+import { describe, expect, it, afterAll, beforeAll, beforeEach } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import { createApp } from '../src/index.js';
@@ -32,65 +40,87 @@ afterAll(async () => {
   for (const s of servers) await new Promise<void>((r) => s.close(() => r()));
 });
 
-async function bootWithSeam(): Promise<string> {
+let BASE = '';
+beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_TEST_SEAM_ENABLED = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   const server = app.listen(0, '127.0.0.1');
   servers.push(server);
   await new Promise<void>((r) => server.once('listening', () => r()));
-  return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-}
+  BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+});
 
-/** Every seam path a credential-less caller might reach, in BOTH spellings —
- *  the `/v1/host/sample` legacy alias rewrites onto the same handlers, so
- *  guarding only the product spelling would leave an open door beside a shut
- *  one. That is the failure mode this list exists to make impossible. */
-const SEAM_PATHS = [
-  '/host/openwop-app/test/mock-ai/last-dispatch-budget?nodeId=probe',
-  '/v1/host/sample/test/mock-ai/last-dispatch-budget?nodeId=probe',
+interface Refusal { error?: string; message?: string; details?: { reason?: string } }
+const SEAM_REFUSAL = {
+  error: 'unauthenticated',
+  message: 'the openwop-app test seam requires an authenticated, non-anonymous principal.',
+  details: { reason: 'anonymous_principal_refused' },
+};
+
+/** Every seam spelling a credential-less caller might reach, each with the exact
+ *  refusal MEASURED on 0151a8bb2. The `/api` spelling is what the SPA's Firebase
+ *  rewrite forwards; the `/host/sample` legacy alias rewrites onto the same
+ *  handlers, so guarding only the product spelling would leave an open door
+ *  beside a shut one. That is the failure mode this list exists to make
+ *  impossible. CEILING: the alias is refused by the AUTH layer ("No credential
+ *  presented", no anon session is minted there), before the seam guard runs, so
+ *  on that spelling this case witnesses "no 200", not the seam guard itself. */
+const SEAM_PATHS: Array<{ path: string; refusal: Refusal }> = [
+  { path: '/host/openwop-app/test/mock-ai/last-dispatch-budget?nodeId=probe', refusal: SEAM_REFUSAL },
+  { path: '/api/host/openwop-app/test/mock-ai/last-dispatch-budget?nodeId=probe', refusal: SEAM_REFUSAL },
+  {
+    path: '/host/sample/test/mock-ai/last-dispatch-budget?nodeId=probe',
+    refusal: { error: 'unauthenticated', message: 'No credential presented. Authenticate, or establish a session first.' },
+  },
 ];
 
 describe('an enabled test seam refuses anonymous callers', () => {
+  // The second describe below flips OPENWOP_TEST_SEAM_ENABLED and restores the
+  // pre-file value; shuffle can run it first, so re-enable the seam per case.
+  beforeEach(() => { process.env.OPENWOP_TEST_SEAM_ENABLED = 'true'; });
+
   it('no seam path answers 200 without credentials — in either spelling', async () => {
-    const base = await bootWithSeam();
-    const answers: Array<{ path: string; status: number }> = [];
-    for (const p of SEAM_PATHS) {
-      const res = await fetch(`${base}${p}`);
-      answers.push({ path: p, status: res.status });
+    const answers: Array<{ path: string; status: number; body: Refusal }> = [];
+    for (const { path } of SEAM_PATHS) {
+      const res = await fetch(`${BASE}${path}`);
+      answers.push({ path, status: res.status, body: (await res.json()) as Refusal });
     }
     // Non-zero-probe guard: if the list is ever emptied or the loop skipped,
     // "no 200s" would be true because nothing was asked.
     expect(answers.length).toBe(SEAM_PATHS.length);
     expect(answers.length).toBeGreaterThan(0);
-    expect(answers.filter((a) => a.status === 200)).toEqual([]);
+    // Each spelling's exact refusal: a 410/404/500 is not a refusal by the guard.
+    expect(answers).toEqual(SEAM_PATHS.map(({ path, refusal }) => ({ path, status: 401, body: refusal })));
+    // And each spelling is LIVE: with credentials it reaches the handler.
+    for (const { path } of SEAM_PATHS) {
+      const res = await fetch(`${BASE}${path}`, { headers: { authorization: 'Bearer dev-token' } });
+      expect(res.status, path).toBe(200);
+    }
   });
 
   it('the staging route — the one that can bend a replay — refuses too', async () => {
     // `POST …/mock-ai/program` stages a deliberate RFC 0041 §B divergence keyed
     // by `nodeId`, and node ids are published in the chain packs. This is the
     // call that made the open seam a determinism hole rather than an info leak.
-    const base = await bootWithSeam();
-    const res = await fetch(`${base}/host/openwop-app/test/mock-ai/program`, {
+    const res = await fetch(`${BASE}/host/openwop-app/test/mock-ai/program`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ nodeId: 'probe-node', program: [{ content: 'staged' }] }),
     });
-    expect(res.status).not.toBe(200);
     expect(res.status).toBe(401);
-    const body = (await res.json()) as { details?: { reason?: string } };
-    expect(body.details?.reason).toBe('anonymous_principal_refused');
+    expect(await res.json()).toEqual(SEAM_REFUSAL);
   });
 
   it('an authenticated caller still reaches the seam — the gate is not a wall', async () => {
     // The refusal must be about the PRINCIPAL, not about the seam being shut.
     // Without this, "no 200s" would also pass on a host that had simply broken
     // the seam, and the conformance harness would be locked out.
-    const base = await bootWithSeam();
-    const res = await fetch(`${base}/host/openwop-app/test/mock-ai/last-dispatch-budget?nodeId=probe`, {
+    const res = await fetch(`${BASE}/host/openwop-app/test/mock-ai/last-dispatch-budget?nodeId=probe`, {
       headers: { authorization: 'Bearer dev-token' },
     });
     expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ maxTokens: null }); // the handler's own answer, not an error page
   });
 });
 

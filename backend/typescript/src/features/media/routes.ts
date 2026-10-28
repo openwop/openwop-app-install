@@ -33,6 +33,7 @@ import { requireFeatureEnabled, requireString, optionalString as optString } fro
 import type { Scope } from '../../host/accessControlService.js';
 import { isAllowedUploadMime, allowedUploadMimeList, storableContentType } from '../../host/allowedUploadMime.js';
 import * as mediaStorage from './mediaStorage.js';
+import { getVerdict } from '../../host/creativeFidelity/verdictStore.js';
 import { createLogger } from '../../observability/logger.js';
 import {
   withOrgCapacity,
@@ -352,6 +353,37 @@ export function registerMediaRoutes(deps: RouteDeps): void {
 
   // "Used by" — the documents referencing this asset (ADR 0206 usage refs; the
   // reference graph supersedes the bare usageCount as the asset-detail source).
+  // ADR 0945 P5 — the provenance drawer's read: the asset's generation stamp,
+  // its fidelity verdict (from the verdict STORE, this org only), and each
+  // source resolved IN THIS ORG (a source elsewhere or deleted reads
+  // `present:false`, never its existence). Hashes and ids only; no prompt text.
+  app.get(`${BASE}/assets/:assetId/provenance`, async (req, res, next) => {
+    try {
+      const { orgId, tenantId } = await authorize(req, 'workspace:read');
+      const asset = await getAsset(tenantId, orgId, req.params.assetId);
+      if (!asset) throw new OpenwopError('not_found', 'Asset not found.', 404, { assetId: req.params.assetId });
+      const g = asset.lineage?.grounding;
+      const verdict = g?.fidelity ? await getVerdict(tenantId, orgId, g.fidelity.verdictId).catch(() => null) : null;
+      const sources = await Promise.all((g?.sources ?? []).map(async (src) => {
+        const a = await getAsset(tenantId, orgId, src.assetId);
+        return a && (!a.contentHash || a.contentHash === src.sha256) // rows predating the hash facet carry none
+          ? { assetId: src.assetId, sha256: src.sha256, present: true, name: a.name, contentType: a.contentType, serveUrl: viewAsset(a).serveUrl }
+          : { assetId: src.assetId, sha256: src.sha256, present: false };
+      }));
+      res.json({
+        assetId: asset.assetId,
+        generatedBy: asset.lineage?.generatedBy ?? null,
+        grounding: g ?? null,
+        sources,
+        verdict: verdict
+          ? { verdictId: verdict.verdictId, assetSha256: verdict.assetSha256, outcome: verdict.outcome, mode: verdict.mode, checks: verdict.checks, ...(verdict.judge ? { judge: verdict.judge } : {}), rulesetVersion: verdict.rulesetVersion, checkedAt: verdict.checkedAt }
+          : null,
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   app.get(`${BASE}/assets/:assetId/usage`, async (req, res, next) => {
     try {
       const { orgId, tenantId } = await authorize(req, 'workspace:read');

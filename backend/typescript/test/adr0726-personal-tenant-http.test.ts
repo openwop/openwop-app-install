@@ -7,6 +7,11 @@
  *
  * No conformance scenario has ever run under a tenant outside the grammar —
  * `default` fits — which is how this stayed invisible until the payload audit.
+ *
+ * Tracker TST-BAA-8. Red when (sabotage-witnessed, wave 60): `toWireRunId`
+ * stops projecting the tenant; the legacy `user~3A` escape is not unescaped;
+ * the `%`-first decode is skipped (#4382); tenant fields are not projected on
+ * the events read; `fromWireRunId` stops comparing the tenant segment.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';
@@ -39,9 +44,17 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
 
-async function req(method: string, path: string, cookie: string, body?: unknown) {
+/** The narrow view of every body this file reads. */
+interface Body {
+  runId?: string;
+  error?: string;
+  events?: Array<{ type: string; payload: { owner?: { tenant?: string; subject?: { tenant?: string } } } }>;
+}
+async function req(method: string, path: string, cookie: string, body?: unknown): Promise<{ status: number; json: Body; text: string }> {
   const res = await fetch(`${base}${path}`, { method, headers: { cookie, 'OpenWOP-Version': '2', 'Content-Type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-  const text = await res.text(); let json: any; try { json = JSON.parse(text); } catch { json = undefined; }
+  const text = await res.text();
+  let json: Body = {};
+  try { json = JSON.parse(text) as Body; } catch { json = {}; }
   return { status: res.status, json, text };
 }
 
@@ -55,7 +68,7 @@ describe('ADR 0726 — personal workspace on the major-2 wire', () => {
   });
   it('GET /runs/{~-projected} and GET /runs/{raw user:x%2Fopaque} both resolve the SAME run; a foreign personal tenant is 403', async () => {
     const created = await req('POST', '/runs', me, { workflowId: 'conformance-noop', inputs: {} });
-    const bound = created.json.runId as string; const opaque = bound.split('/')[1]!;
+    const bound = String(created.json.runId); const opaque = bound.split('/')[1]!;
     const a = await req('GET', `/runs/${projectBoundId(bound)}`, me);
     expect(a.status, a.text.slice(0, 200)).toBe(200); expect(a.json.runId).toBe(bound);
     const b = await req('GET', `/runs/${encodeURIComponent(`${PERSONAL}/${opaque}`)}`, me);
@@ -83,10 +96,10 @@ describe('ADR 0726 — personal workspace on the major-2 wire', () => {
   });
   it('the events read carries a grammar-valid owner.tenant / owner.subject.tenant', async () => {
     const created = await req('POST', '/runs', me, { workflowId: 'conformance-noop', inputs: {} });
-    const bound = created.json.runId as string;
+    const bound = String(created.json.runId);
     const ev = await req('GET', `/runs/${projectBoundId(bound)}/events/poll`, me);
     expect(ev.status, ev.text.slice(0, 200)).toBe(200);
-    const started = (ev.json.events as Array<{ type: string; payload: any }>).find((e) => e.type === 'run.started');
+    const started = (ev.json.events ?? []).find((e) => e.type === 'run.started');
     expect(started, 'run.started on the read').toBeDefined();
     expect(started!.payload.owner?.tenant).toBe(WIRE);
     expect(started!.payload.owner?.subject?.tenant).toBe(WIRE);

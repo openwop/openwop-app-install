@@ -126,7 +126,8 @@ describe('WHD-23 — production-posture opt-outs, checked against the TARGET dis
   it('the posture list is exactly the six reviewed profiles, and never an advertised artifact-type profile', () => {
     expect(optOuts.PRODUCTION_POSTURE_OPT_OUTS.map((e) => e.profile)).toEqual(POSTURE);
     for (const e of optOuts.PRODUCTION_POSTURE_OPT_OUTS) expect(e.why.length, e.profile).toBeGreaterThan(10);
-    expect(POSTURE.some((p) => p.startsWith('openwop-artifact-type'))).toBe(false);
+    // Read from the PRODUCT list, not the test's own POSTURE literal (which could never fail).
+    expect(optOuts.PRODUCTION_POSTURE_OPT_OUTS.some((e) => e.profile.startsWith('openwop-artifact-type'))).toBe(false);
   });
 
   it('major 1 with the target discovery = the ledgers + the six; major 2 and no-discovery are unchanged', () => {
@@ -194,7 +195,9 @@ describe('verifier PARITY — the deploy-side twin agrees with the host, case by
       return v.ok ? 'ok' : v.reason;
     }));
     expect(reasons.has('ok')).toBe(true);
-    expect(reasons.size).toBeGreaterThanOrEqual(10);
+    // Floor = measured, wave 64 (2026-10-24): the 14 cases span 12 distinct
+    // verdicts ('ok' + 11 reasons). It was 10, below the truth.
+    expect(reasons.size).toBeGreaterThanOrEqual(12);
   });
 });
 
@@ -322,8 +325,16 @@ describe('publish-evidence.sh — arguments and config, without touching anythin
     '# a comment',
     'export NOT_A_KEY=ignored',
   ].join('\n');
+  // The script reads BASE/COMMIT/MAJORS and many OPENWOP_* keys from its
+  // environment (an exported OPENWOP_EVIDENCE_BASE overrides `base=`, and the
+  // "missing config" check reads `${!v}`), so an operator shell that sourced
+  // deploy.env would turn these cases red, or green for the wrong reason. The
+  // child gets the parent env with every such key removed: the env FILE is the
+  // only config source under test.
+  const CLEAN_ENV = Object.fromEntries(Object.entries(process.env)
+    .filter(([k]) => !k.startsWith('OPENWOP_') && !['BASE', 'COMMIT', 'MAJORS'].includes(k)));
   const run = (args: string[], envFile: string) =>
-    spawnSync('bash', [script, ...args], { encoding: 'utf8', env: { ...process.env, PUBLISH_EVIDENCE_ENV_FILE: envFile } });
+    spawnSync('bash', [script, ...args], { encoding: 'utf8', env: { ...CLEAN_ENV, PUBLISH_EVIDENCE_ENV_FILE: envFile } });
 
   it('--print-config: defaults to majors 2 then 1, strips trailing slashes, keys each object by the serving commit', () => {
     const r = run(['--print-config'], env(GOOD));

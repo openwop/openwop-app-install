@@ -18,6 +18,11 @@
  *
  * The env is set in `vi.hoisted` because the fixture loader and the scripted-agent
  * registration run at module load (`host/index.ts`).
+ *
+ * Tracker TST-BJE. Red when (probe-witnessed, w65): the scripted agent is registered
+ * under the opt-in alone (listed by /agents, dispatchable, resolvable); the scripted
+ * manifest is handed to a TENANT suite; the opt-in stops listing/resolving the
+ * fixture suites; the eval run cannot get the scripted agent.
  */
 import { vi } from 'vitest';
 
@@ -28,13 +33,15 @@ vi.hoisted(() => {
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Server } from 'node:http';
+import { readdirSync } from 'node:fs';
+import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { createApp } from '../src/index.js';
 import { getAgentRegistry } from '../src/executor/agentRegistry.js';
 import { getNodeRegistry } from '../src/executor/nodeRegistry.js';
 import { resolveAgentForTenant } from '../src/host/agentVisibility.js';
 import { conformanceNodesEnabled } from '../src/bootstrap/conformanceMockAgent.js';
-import { CONFORMANCE_SUITE_PREFIX, SCRIPTED_AGENT_ID, listFixtureSuiteIds } from '../src/host/evals/fixtureSuites.js';
+import { CONFORMANCE_SUITE_PREFIX, SCRIPTED_AGENT_ID, UNLISTED_FIXTURE_SUITES, listFixtureSuiteIds } from '../src/host/evals/fixtureSuites.js';
 
 let server: Server;
 let base = '';
@@ -83,9 +90,18 @@ describe('ADR 0898 — eval-suite fixtures under the opt-in, conformance nodes o
   it('lists the fixture suites in discovery fixtures[]', async () => {
     expect(listFixtureSuiteIds()).toContain(SUITE);
     const doc = await send('GET', '/.well-known/openwop', {});
-    const fixtures = JSON.stringify(doc.json);
-    for (const id of listFixtureSuiteIds()) expect(fixtures, id).toContain(`"${id}"`);
-    expect(listFixtureSuiteIds().length).toBeGreaterThanOrEqual(5);
+    const fixtures = doc.json['fixtures'] as string[];
+    expect(Array.isArray(fixtures)).toBe(true);
+    for (const id of listFixtureSuiteIds()) expect(fixtures, id).toContain(id);
+    // Two-sided: the listed suites are exactly the vendored eval-suite files (6 at
+    // 87719df6f) minus the named, reasoned exclusions (ADR 0983 D6), so a dropped,
+    // an extra, or a silently skipped suite reds.
+    const vendored = readdirSync(join(import.meta.dirname, '..', '..', '..', 'conformance-fixtures', 'eval-suites'))
+      .filter((f) => f.endsWith('.json')).map((f) => f.slice(0, -'.json'.length)).sort();
+    expect(vendored.length).toBeGreaterThanOrEqual(6);
+    for (const id of UNLISTED_FIXTURE_SUITES.keys()) expect(vendored, `exclusion ${id} names no vendored file`).toContain(id);
+    expect(listFixtureSuiteIds()).toEqual(vendored.filter((id) => !UNLISTED_FIXTURE_SUITES.has(id)));
+    for (const id of UNLISTED_FIXTURE_SUITES.keys()) expect(fixtures, id).not.toContain(id);
   });
 
   it('runs a fixture suite against the scripted agent, graded task by task', async () => {

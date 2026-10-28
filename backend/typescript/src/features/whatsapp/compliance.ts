@@ -20,7 +20,7 @@
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { createLogger } from '../../observability/logger.js';
 import { emitHostEvent } from '../../host/hostEventDispatcher.js';
-import { mergeConsentCategories } from '../consent/consentService.js';
+import { applyKeywordConsent, classifyKeyword } from '../consent/keywordLadder.js';
 import { normalizeWaNumber } from './whatsappService.js';
 import { tenantMayUseFeature } from '../../host/tenantFeatureGate.js';
 
@@ -75,13 +75,6 @@ export async function whatsappDispatchAllowed(tenantId: string): Promise<{ allow
   return { allow: false, reason: 'no_train_attestation_missing' };
 }
 
-/** STOP-class keywords (Twilio's default stop words + common variants). */
-const STOP_RE = /^\s*(stop|stopall|unsubscribe|cancel|end|quit|parar|baja)\s*$/i;
-/** START-class keywords — an explicit user re-opt-in. GRADE-CODE 2026-07-17:
- *  bare `yes` removed — a "yes" answering a support question must never be
- *  captured as a marketing re-opt-in; only unambiguous subscription verbs. */
-const START_RE = /^\s*(start|unstop|subscribe)\s*$/i;
-
 /**
  * Inbound keyword ladder (Phase 2): STOP revokes the `marketing.whatsapp`
  * consent immediately (fail-closed — the send gate denies from the next
@@ -89,29 +82,18 @@ const START_RE = /^\s*(start|unstop|subscribe)\s*$/i;
  * per-number consent, captured with source+method for the Meta audit trail).
  * Non-keyword messages do nothing here. Returns what happened for the caller's
  * observability line.
+ *
+ * ADR 0955 D3 — the words and the CAS merge now live in the shared ladder
+ * (`consent/keywordLadder.ts`); WhatsApp's behaviour is unchanged.
  */
 export async function applyInboundKeyword(tenantId: string, from: string, body: string): Promise<'opt-out' | 'opt-in' | null> {
   const subject = normalizeWaNumber(from);
   if (!subject) return null;
-  const kind = STOP_RE.test(body) ? 'opt-out' : START_RE.test(body) ? 'opt-in' : null;
-  if (!kind) return null;
-  // GRADE-DATA 2026-07-17 — CAS-merge (never latest-wins): a STOP racing any
-  // concurrent consent write must not be silently overwritten (Meta's
-  // immediate-opt-out rule). Only the whatsapp channel flips; every other
-  // category is preserved by the merge itself.
-  try {
-    await mergeConsentCategories({
-      tenantId,
-      subjectKey: subject,
-      categories: { 'marketing.whatsapp': kind === 'opt-in' },
-      source: `whatsapp:keyword:${kind}`,
-    });
-  } catch (err) {
-    // ADR 0657 D10 — an erased number's keyword cannot be written (the tombstone already
-    // denies every send); log the refusal, never a webhook 500, never a re-inserted row.
-    if ((err as { code?: string }).code === 'subject_erased') { log.info('whatsapp_keyword_consent_refused_erased', { tenantId, kind }); return null; }
-    throw err;
-  }
+  const kind = classifyKeyword('whatsapp', body);
+  if (kind !== 'opt-out' && kind !== 'opt-in') return null;
+  // GRADE-DATA 2026-07-17 — CAS-merge (never latest-wins); only the whatsapp channel flips.
+  // ADR 0657 D10 — an erased number's keyword cannot be written: nothing to report.
+  if ((await applyKeywordConsent(tenantId, 'whatsapp', [subject], kind === 'opt-in', `whatsapp:keyword:${kind}`)) === 0) return null;
   log.info('whatsapp_keyword_consent', { tenantId, kind });
   await emitHostEvent({ type: `host.whatsapp.consent.${kind}`, tenantId, payload: { channel: 'whatsapp', kind } });
   return kind;

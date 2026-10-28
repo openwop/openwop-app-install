@@ -11,6 +11,9 @@
  *   3. every host agent tool (agentToolProvider.ts + features/&#42;/agentTools.ts).
  * A prompt that names a tool the model cannot call is a lie to the model; a new
  * one fails here instead of shipping.
+ *
+ * TST-BLS-2. Red when: any agent-pack prompt/README/manifest names a phantom
+ * `openwop:` id (w65 probe: `openwop:knowledge.search-phantom` in kb-researcher).
  */
 import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
@@ -77,7 +80,10 @@ function resolves(mention: string, universe: Set<string>): boolean {
 describe('every openwop:-prefixed tool id in agent packs resolves (XCH-AGT-1)', () => {
   const universe = collectUniverse();
   it('collected a plausible universe', () => {
-    expect(universe.size).toBeGreaterThan(500);
+    // MEASURED 2026-10-24: 982 (757 pack node typeIds, 37 bootstrap, the rest
+    // tool-source ids). A near-truth floor, so a universe that silently shrinks
+    // (a scan path that stops matching) reds instead of passing every mention.
+    expect(universe.size).toBeGreaterThan(951);
     expect(universe.has('core.files.read')).toBe(true);
     expect(universe.has('core.files.fs-read')).toBe(false);
   });

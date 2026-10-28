@@ -24,6 +24,7 @@
  */
 
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { GENERIC_HTTP_CONSUMER, isGovernedWriteProvider } from '../../host/governedWriteProviders.js';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Ajv2020, { type ValidateFunction } from 'ajv/dist/2020.js';
@@ -228,7 +229,11 @@ function toProviderManifest(p: ConnectionPackManifest['provider']): ProviderMani
     ...(p.auth.pkce ? { pkce: p.auth.pkce } : {}),
     refreshable: p.auth.kind === 'oauth2',
     defaultScopes,
-    consumerNodes: p.consumerNodes ?? [],
+    // ADR 0941 P4 / ADR 0292 — a governed-write provider (the ad platforms) is
+    // adapter-only on this host: its credential never reaches the generic HTTP
+    // node, so the catalog must not advertise that node as a consumer either.
+    consumerNodes: isGovernedWriteProvider(p.id) ? (p.consumerNodes ?? []).filter((n) => n !== GENERIC_HTTP_CONSUMER) : (p.consumerNodes ?? []),
+    ...(isGovernedWriteProvider(p.id) ? { adapterOnly: true } : {}),
     ...(p.docsUrl ? { docsUrl: p.docsUrl } : {}),
     // RFC 0120 — populate the egress allow-list so brokeredEgress can pin a
     // pack-delivered provider's credentialed egress to its curated apiHosts

@@ -36,22 +36,31 @@ export function resolveSection(
   baseLocale: string,
 ): Record<string, unknown> {
   const base = section.data ?? {};
-  const localizations = section.localizations;
+  const tag = matchedLocalizationTag(section.localizations, negotiatedLocale, baseLocale);
+  return tag === null ? { ...base } : { ...base, ...section.localizations![tag] };
+}
 
+/**
+ * The `localizations` key {@link resolveSection} overlays for `negotiatedLocale`,
+ * or `null` when it serves the base. Exported so a caller can say which locale
+ * it served (`Content-Language`) without re-deriving the chain (ADR 0937).
+ * Fallback: exact-locale override → script-family override (RFC 0206) →
+ * language-family override → base.
+ */
+export function matchedLocalizationTag(
+  localizations: Record<string, unknown> | undefined,
+  negotiatedLocale: string,
+  baseLocale: string,
+): string | null {
   // Base locale (or nothing authored) → the base payload verbatim.
-  if (
-    negotiatedLocale === baseLocale ||
-    !localizations ||
-    typeof localizations !== 'object'
-  ) {
-    return { ...base };
-  }
+  if (negotiatedLocale === baseLocale || !localizations || typeof localizations !== 'object') return null;
+  const usable = (tag: string): boolean => {
+    const v = localizations[tag];
+    return !!v && typeof v === 'object';
+  };
 
   // Exact-locale override.
-  const exact = localizations[negotiatedLocale];
-  if (exact && typeof exact === 'object') {
-    return { ...base, ...exact };
-  }
+  if (usable(negotiatedLocale)) return negotiatedLocale;
 
   // Script-family override (RFC 0206, `localized-content.md` §C): `zh-Hant-TW`
   // negotiated → `zh-Hant` overrides, BEFORE the language family, so a
@@ -60,22 +69,18 @@ export function resolveSection(
   // so every section valid before resolves exactly as it did.
   const parts = negotiatedLocale.split('-');
   if (parts.length >= 3 && /^[A-Za-z]{4}$/.test(parts[1] ?? '')) {
-    const script = localizations[`${parts[0]}-${parts[1]}`];
-    if (script && typeof script === 'object') {
-      return { ...base, ...script };
-    }
+    const script = `${parts[0]}-${parts[1]}`;
+    if (usable(script)) return script;
   }
 
   // Language-family override (`pt-BR` negotiated → `pt` overrides).
   if (negotiatedLocale.includes('-')) {
-    const fam = localizations[primarySubtag(negotiatedLocale)];
-    if (fam && typeof fam === 'object') {
-      return { ...base, ...fam };
-    }
+    const fam = primarySubtag(negotiatedLocale);
+    if (usable(fam)) return fam;
   }
 
   // No match → base payload.
-  return { ...base };
+  return null;
 }
 
 /**

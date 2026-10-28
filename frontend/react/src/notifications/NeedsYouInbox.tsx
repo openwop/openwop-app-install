@@ -34,6 +34,8 @@ import { scrollBehavior } from '../ui/motion.js';
 
 // ADR 0862 D3 — the fields the approver must see (lazy: only assistant-action cards).
 const AssistantActionFields = lazy(() => import('../assistantAction/AssistantActionFields.js'));
+const CreativeReviewDecision = lazy(() => import('./CreativeReviewDecision.js'));
+const FunnelPublishDecision = lazy(() => import('./FunnelPublishDecision.js'));
 
 type ViewMode = 'list' | 'grid';
 const isAssistantAction = (a: PendingApproval): boolean => a.kind === 'assistant-action' || !!a.actionId;
@@ -133,6 +135,7 @@ export function NeedsYouInbox({ onResolved, focusApprovalId, onApprovalFocused }
       // (the ApprovalsInbox ladder): published / activated / carried / ran.
       toast.success(
         isContentPublish(a) ? t('toastApprovedPublished')
+          : a.kind === 'funnel-publish' ? t('toastApprovedFunnelPublish')
           : isStrategyActivation(a) ? t('toastApprovedActivated')
           : isAssistantAction(a) ? t('toastApprovedCarry', { persona: a.persona })
           : isRunProposal(a) ? t('toastApprovedRunning', { persona: a.persona })
@@ -281,6 +284,8 @@ export function NeedsYouInbox({ onResolved, focusApprovalId, onApprovalFocused }
                   : isStrategyActivation(a) ? 'approvalsStrategyGroup'
                   : a.kind === 'campaign-spend' ? 'approvalsSpendGroup'
                   : isClaudeCodePermission(a) ? 'approvalsClaudeCodeGroup'
+                  : a.kind === 'creative-publish-review' ? 'approvalsCreativeReviewGroup'
+                  : a.kind === 'funnel-publish' ? 'approvalsFunnelPublishGroup'
                   : 'approvalsOtherGroup',
               )}</span>
             </div>
@@ -297,6 +302,15 @@ export function NeedsYouInbox({ onResolved, focusApprovalId, onApprovalFocused }
             {isContentPublish(a) && <ContentReviewContext a={a} />}
             {/* ADR 0845 D6 — both deciding surfaces show what a strategy approval binds to. */}
             {isStrategyActivation(a) && <StrategyActivationSnapshot strategyId={a.strategyId} strategyTitle={a.strategyTitle} snapshot={a.strategySnapshot} />}
+            {a.kind === 'funnel-publish' ? (
+              <Suspense fallback={<p role="status">{t('common:loading')}</p>}>
+                <FunnelPublishDecision approval={a} busy={busy === a.approvalId} onApprove={() => void approve(a)} onReject={(note) => reject(a, note)} />
+              </Suspense>
+            ) : a.kind === 'creative-publish-review' ? (
+              <Suspense fallback={<p role="status">{t('common:loading')}</p>}>
+                <CreativeReviewDecision approval={a} busy={busy === a.approvalId} onApprove={() => void approve(a)} onReject={(note) => reject(a, note)} />
+              </Suspense>
+            ) : (
             <div className={isContentPublish(a) || isClaudeCodePermission(a) || isStrategyActivation(a) ? '' : 'action-bar u-justify-end'}>
               {/* STR3UX-9 — strategy activations get the same reason-capable bar here as in the full inbox (SGU-2). */}
               {isContentPublish(a) || isClaudeCodePermission(a) || isStrategyActivation(a) ? (
@@ -314,6 +328,7 @@ export function NeedsYouInbox({ onResolved, focusApprovalId, onApprovalFocused }
                 </>
               )}
             </div>
+            )}
           </>
         )}
       </article>

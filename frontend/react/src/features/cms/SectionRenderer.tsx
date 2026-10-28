@@ -29,6 +29,8 @@ import { Skeleton } from '../../ui/Skeleton.js';
 import { Button } from '../../ui/Button.js';
 import { useFormat } from '../../i18n/useFormat.js';
 import { useDemoMode } from '../../client/useDemoMode.js';
+import { brand } from '../../brand/brand.js';
+import { isStockOpenwopBrand } from '../../brand/defaults.js';
 // ADR 0331 §D2 — the ONE public fill renderer, lazy so public pages without a
 // form section never load it (and cms/→forms/ stays a soft edge).
 // ADR 0820 §7 — the pricing section (tier grid, cadence switch, comparison,
@@ -539,7 +541,11 @@ type HeroVisual = 'workflow' | 'journey' | 'run' | 'film' | 'image' | 'plan' | '
 function resolveHeroVisual(d: Record<string, unknown>): HeroVisual {
   const authored = str(d.visual);
   if (authored === 'workflow' || authored === 'journey' || authored === 'run' || authored === 'film' || authored === 'image' || authored === 'plan' || authored === 'none') return authored;
-  return str(d.imageToken) ? 'image' : 'workflow';
+  if (str(d.imageToken)) return 'image';
+  // The schematic is OpenWOP's protocol illustration ("Open protocol · Your
+  // infrastructure"). An un-authored hero on a white-label build gets no art
+  // rather than another product's diagram (#5226, seen on legal page heroes).
+  return isStockOpenwopBrand(brand) ? 'workflow' : 'none';
 }
 
 function HeroArtwork({ d, visual }: { d: Record<string, unknown>; visual: HeroVisual }): JSX.Element | null {

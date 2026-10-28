@@ -113,3 +113,12 @@ export function validateRunInputs(
     message: e.message ?? 'invalid',
   }));
 }
+
+/** ADR 0948 P3a — does this JSON Schema compile? For a caller that must REFUSE an
+ *  input schema it cannot enforce (rather than run unvalidated, which
+ *  `validateRunInputs` deliberately does for a workflow's own `inputSchema`). */
+export function isCompilableInputSchema(schema: unknown): boolean {
+  if (typeof schema !== 'object' || schema === null) return false;
+  try { ajv.compile(schema); return true; } catch { return false; }
+}
+

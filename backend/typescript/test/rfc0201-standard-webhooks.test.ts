@@ -37,6 +37,13 @@ import { toWireRunId } from '../src/host/v2Ids.js';
 
 const mintWhsec = (bytes = 32): string => `whsec_${randomBytes(bytes).toString('base64')}`;
 
+/** Node's header map can hold `string[]` (repeated headers); flatten it, no cast. */
+function flatHeaders(h: http.IncomingHttpHeaders): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(h)) if (v !== undefined) out[k] = Array.isArray(v) ? v.join(', ') : v;
+  return out;
+}
+
 function swVerifies(secret: string, headers: Record<string, string>, body: string): number {
   const id = headers['webhook-id']!;
   const ts = headers['webhook-timestamp']!;
@@ -207,7 +214,7 @@ describe('RFC 0201 §B — registration opt-in', () => {
     expect(h.headers['openwop-event-type']).toBeUndefined();
     expect(h.headers['x-openwop-event-type']).toBeUndefined();
     expect(String(h.headers['webhook-id'])).toMatch(/^[A-Za-z0-9_-]{16,128}$/);
-    expect(swVerifies(secret, h.headers as Record<string, string>, h.body)).toBe(1);
+    expect(swVerifies(secret, flatHeaders(h.headers), h.body)).toBe(1);
     const row = await inspect.getWebhook(bareRunId(res.json.webhookId as string));
     expect(row?.signatureAlgorithms).toEqual(['v1', 'standard-webhooks-1']);
   });
@@ -283,7 +290,9 @@ describe('RFC 0201 §E — rotateWebhookSecret', () => {
     const s1 = mintWhsec();
     const s2 = mintWhsec();
     // ADR 0812 P3c-0 — an unknown id in the caller's own tenant-BOUND spelling (a bare id is a 400 on the v2 path).
-    expect((await call('POST', `/webhooks/${encodeURIComponent(toWireRunId('00000000-0000-4000-8000-000000000000', 'default'))}/rotate-secret`, { secret: s2 })).status).toBe(404);
+    const unknown = await call('POST', `/webhooks/${encodeURIComponent(toWireRunId('00000000-0000-4000-8000-000000000000', 'default'))}/rotate-secret`, { secret: s2 });
+    expect(unknown.status).toBe(404);
+    expect(unknown.json.error).toBe('openwop-app.subscription_not_found');
 
     const plain = await register({ url: `${rxBase}/no-echo`, events: ['run.completed'] });
     const notOpted = await call('POST', `/webhooks/${String(plain.json.webhookId)}/rotate-secret`, { secret: s2 });
@@ -292,7 +301,9 @@ describe('RFC 0201 §E — rotateWebhookSecret', () => {
 
     const reg = await register(optIn('echo', s1));
     const id = String(reg.json.webhookId);
-    expect((await call('POST', `/webhooks/${id}/rotate-secret`, { secret: 'nope' })).status).toBe(400);
+    const malformed = await call('POST', `/webhooks/${id}/rotate-secret`, { secret: 'nope' });
+    expect(malformed.status).toBe(400);
+    expect(malformed.json.error).toBe('validation_error');
     expect((await call('POST', `/webhooks/${id}/rotate-secret?tenantId=someone-else`, { secret: s2 })).status).toBe(403);
 
     const hitsBefore = hits.length;
@@ -376,7 +387,7 @@ describe('RFC 0201 §C / §E.20 — delivery signing from the subscription at se
   beforeAll(async () => {
     server = http.createServer((req, res) => {
       req.resume();
-      req.on('end', () => { seen.push(req.headers as Record<string, string>); res.writeHead(status); res.end(); });
+      req.on('end', () => { seen.push(flatHeaders(req.headers)); res.writeHead(status); res.end(); });
     });
     await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
     url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/hook`;

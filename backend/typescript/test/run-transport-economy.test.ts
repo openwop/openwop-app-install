@@ -6,8 +6,22 @@
  * Node's global `fetch` (undici) transparently decompresses gzip and strips
  * `Content-Encoding`, so the encoding assertions use the low-level `http`
  * client to read raw bytes + headers and gunzip manually.
+ *
+ * The 304 is a DOUBLE guard: the route's own `ifNoneMatchSatisfied`
+ * short-circuit (`routes/runs.ts`, before the snapshot projection) AND
+ * Express's `res.send` freshness check (`req.fresh`), which also answers 304
+ * once the ETag header is set. They differ on a request carrying
+ * `Cache-Control: no-cache`, which Express's `fresh` treats as never fresh — so
+ * the no-cache revalidation leg below is the one only the route's copy answers.
+ * Round 1's `8fw2g3-rte-304` was vacuous because no leg sent it.
+ *
+ * Sabotage witnessed red (8f grade-tests wave 2): a weak ETag
+ * (`8fw2g3-rte-strong`), an ETag without the sequence (`-rte-seq`), the route's
+ * 304 short-circuit removed (`-rte-304-r2`), the encoder preference reordered
+ * (`-rte-pref`), identity never chosen (`-rte-identity`), the body sent
+ * unencoded (`-rte-encode`), and the advert flag off (`-rte-advert`).
  */
-import { describe, expect, it, beforeAll, afterAll } from 'vitest';
+import { describe, expect, it, beforeAll, afterAll, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import * as zlib from 'node:zlib';
@@ -82,12 +96,12 @@ async function createCompletedRun(): Promise<string> {
     body: JSON.stringify({ workflowId: 'openwop-app.uppercase', tenantId: 'demo', inputs: { text: 'hi' } }),
   });
   const { runId } = (await res.json()) as { runId: string };
-  for (let i = 0; i < 40; i++) {
-    await new Promise((r) => setTimeout(r, 50));
+  // Fails loudly if the run never settles: a still-moving run would advance its
+  // sequence between reads and make the ETag cases pass or fail by timing.
+  await vi.waitFor(async () => {
     const snap = await rawGet(`/runs/${runId}`);
-    const status = (JSON.parse(snap.body.toString('utf8')) as { status: string }).status;
-    if (['completed', 'failed', 'cancelled'].includes(status)) break;
-  }
+    expect((JSON.parse(snap.body.toString('utf8')) as { status: string }).status).toBe('completed');
+  }, { timeout: 5000, interval: 25 });
   return runId;
 }
 
@@ -130,6 +144,13 @@ describe('RFC 0115 — conditional GET on /runs/{runId}', () => {
     const revalidate = await rawGet(`/runs/${runId}`, { 'if-none-match': etag! });
     expect(revalidate.status).toBe(304);
     expect(revalidate.body.length).toBe(0);
+
+    // A poll that also sends `Cache-Control: no-cache` (what a browser sends on
+    // a forced refresh) is still an origin conditional GET: the matching tag is
+    // 304. Only the route's own check answers this one (see header).
+    const noCache = await rawGet(`/runs/${runId}`, { 'if-none-match': etag!, 'cache-control': 'no-cache' });
+    expect(noCache.status).toBe(304);
+    expect(noCache.body.length).toBe(0);
   });
 
   it('keeps the ETag stable while the run does not advance, and changes it when it does', async () => {
@@ -153,6 +174,8 @@ describe('RFC 0115 — conditional GET on /runs/{runId}', () => {
     // (200), it does NOT spuriously 304.
     const stale = await rawGet(`/runs/${runId}`, { 'if-none-match': before });
     expect(stale.status).toBe(200);
+    expect(stale.headers['etag']).toBe(after);
+    expect((JSON.parse(stale.body.toString('utf8')) as { status: string }).status).toBe('completed');
   });
 });
 

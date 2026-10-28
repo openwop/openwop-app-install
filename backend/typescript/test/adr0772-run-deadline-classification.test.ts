@@ -15,6 +15,11 @@
  *
  * Runs through the REAL `core.delay` module (`ensureNodesRegistered`), so the
  * rejection is the production node's own, not a stand-in.
+ *
+ * Red when (wave 60 probes, tracker TST-BRB-7): a node failure under a deadline
+ * abort is classified as the node's own failure (`isDeadlineAbort` skipped);
+ * `armRunAbort` hands a resumed segment the previous, aborted controller; or the
+ * terminal listener stops dropping the run's entry.
  */
 import { describe, expect, it, vi, afterEach } from 'vitest';
 import { executeRun } from '../src/executor/executor.js';
@@ -92,14 +97,16 @@ describe('ADR 0772 D1 — a deadline breach is run_timeout, whichever timer sett
     const run = await newRun({ runTimeoutMs: 60_000 });
     const result = await executeRun(storage, run, {
       workflowId: 'wf.0772.deadline',
-      nodes: [{ nodeId: 'boom', typeId: 'core.fail', config: {} }],
+      nodes: [{ nodeId: 'boom', typeId: 'core.fail', config: { code: 'boom_0772' } }],
       edges: [],
     });
     expect(result.status).toBe('failed');
     const events = await storage.listEvents(run.runId);
-    expect(events.some((e) => e.type === 'node.failed')).toBe(true);
+    const nodeFailed = events.find((e) => e.type === 'node.failed' && e.nodeId === 'boom');
+    expect((nodeFailed?.payload as { error?: { code?: string } } | undefined)?.error?.code).toBe('boom_0772');
+    // The run fails with the node's OWN code — exactly, not merely "not run_timeout".
     const failed = events.find((e) => e.type === 'run.failed');
-    expect((failed?.payload as { error?: { code?: string } } | undefined)?.error?.code).not.toBe('run_timeout');
+    expect((failed?.payload as { error?: { code?: string } } | undefined)?.error?.code).toBe('boom_0772');
   });
 });
 

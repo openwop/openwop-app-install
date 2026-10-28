@@ -2,6 +2,9 @@
  * ADR 0877 D5 (grade-code CC2CD-8) — `ctx.features['commerce-connect'].createCheckout`
  * asks what its HTTP door asks (`workspace:write`). Before: a run acting for a
  * VIEWER started a purchase the viewer's own `POST …/purchase/checkout` is refused.
+ *
+ * Tracker TST-BHA-1. Red when (sabotage-witnessed, wave 62): the surface's
+ * `tenantMethodScopes.createCheckout` drops to `workspace:read`.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';

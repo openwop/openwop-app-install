@@ -7,7 +7,10 @@
  * does — conformance nodes off — and pin that the probe, its fixture and the five
  * families still appear; and that `OPENWOP_CONFORMANCE_STORAGE_PROBE=false` takes
  * all three away together. Each leg resets the module graph, because registration
- * is a boot snapshot.
+ * is a boot snapshot. *
+ * Tracker TST-BFA-10. Red when: `storageProbeEnabled()` ignores `=false`; the
+ * fixture's resolvability exemption for the probe is removed; the probed
+ * families stop following the probe.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 

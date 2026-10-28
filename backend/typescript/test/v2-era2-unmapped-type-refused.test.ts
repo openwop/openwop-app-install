@@ -41,25 +41,25 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
 
-/** Seed an era-2 log whose middle row carries a type no codemap row names. */
-async function seedUnmapped(): Promise<string> {
+/** Seed a completed era-2 log through the conformance seam; a failed seed THROWS
+ *  (so a broken seam can never read as a refusal or a clean read). */
+async function seedLog(events: Array<{ sequence: number; type: string; payload: Record<string, unknown> }>): Promise<string> {
   const res = await fetch(`${base}/conformance/seams/sample/event-log/seed`, {
     method: 'POST',
     headers: V2,
-    body: JSON.stringify({
-      eventLogSchemaVersion: 2,
-      status: 'completed',
-      events: [
-        { sequence: 0, type: 'run.started', payload: {} },
-        { sequence: 1, type: UNMAPPED, payload: {} },
-        { sequence: 2, type: 'run.completed', payload: {} },
-      ],
-    }),
+    body: JSON.stringify({ eventLogSchemaVersion: 2, status: 'completed', events }),
   });
   const body = await res.json() as { runId?: string };
   if (res.status !== 201 || !body.runId) throw new Error(`seed answered ${res.status}: ${JSON.stringify(body)}`);
   return body.runId;
 }
+
+/** Seed an era-2 log whose middle row carries a type no codemap row names. */
+const seedUnmapped = (): Promise<string> => seedLog([
+  { sequence: 0, type: 'run.started', payload: {} },
+  { sequence: 1, type: UNMAPPED, payload: {} },
+  { sequence: 2, type: 'run.completed', payload: {} },
+]);
 
 describe('the era-2 reader REFUSES a type it cannot translate', () => {
   // UN-SKIPPED 2026-09-13. The condition this block recorded has been MET, so
@@ -97,19 +97,10 @@ describe('the era-2 reader REFUSES a type it cannot translate', () => {
   it('a MAPPED era-2 log still reads cleanly — the refusal is not a blanket era-2 refusal', async () => {
     // Non-vacuity in the dangerous direction: a reader that refused every era-2
     // log would pass the leg above while breaking every legitimate v1 run.
-    const res = await fetch(`${base}/conformance/seams/sample/event-log/seed`, {
-      method: 'POST',
-      headers: V2,
-      body: JSON.stringify({
-        eventLogSchemaVersion: 2,
-        status: 'completed',
-        events: [
-          { sequence: 0, type: 'run.started', payload: {} },
-          { sequence: 1, type: 'run.completed', payload: {} },
-        ],
-      }),
-    });
-    const { runId } = await res.json() as { runId: string };
+    const runId = await seedLog([
+      { sequence: 0, type: 'run.started', payload: {} },
+      { sequence: 1, type: 'run.completed', payload: {} },
+    ]);
     const poll = await fetch(`${base}/runs/${encodeURIComponent(runId)}/events/poll?timeout=1`, { headers: V2 });
     expect(poll.status, 'a fully mappable era-2 log MUST still read').toBe(200);
   });
@@ -130,20 +121,11 @@ describe('the era-2 reader REFUSES a type it cannot translate', () => {
     // assert pass-through on a type the codemap now NAMES, i.e. it would have
     // measured translation and called it pass-through. A control that stops
     // being a control is worse than no control.
-    const res = await fetch(`${base}/conformance/seams/sample/event-log/seed`, {
-      method: 'POST',
-      headers: V2,
-      body: JSON.stringify({
-        eventLogSchemaVersion: 2,
-        status: 'completed',
-        events: [
-          { sequence: 0, type: 'run.started', payload: {} },
-          { sequence: 1, type: 'openwop-app.node.message', payload: {} },
-          { sequence: 2, type: 'run.completed', payload: {} },
-        ],
-      }),
-    });
-    const { runId } = await res.json() as { runId: string };
+    const runId = await seedLog([
+      { sequence: 0, type: 'run.started', payload: {} },
+      { sequence: 1, type: 'openwop-app.node.message', payload: {} },
+      { sequence: 2, type: 'run.completed', payload: {} },
+    ]);
     const poll = await fetch(`${base}/runs/${encodeURIComponent(runId)}/events/poll?timeout=1`, { headers: V2 });
     expect(poll.status, 'a registered vendor type MUST read at contract 2').toBe(200);
     const body = await poll.json() as { events?: Array<{ type?: string }> };

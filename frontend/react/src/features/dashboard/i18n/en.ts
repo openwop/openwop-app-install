@@ -177,6 +177,9 @@ export const messages = {
   adSpendEmpty: 'No ad performance data yet.',
   commissionsEmpty: 'No commission statements yet.',
   leaderboardEmpty: 'No model feedback yet.',
+  // ADR 0986 — the tile shows the score it sorts by, not the raw win rate.
+  leaderboardTileMeta_one: '{{score}} confidence · {{count}} rater',
+  leaderboardTileMeta_other: '{{score}} confidence · {{count}} raters',
   promotionsEmpty: 'No active promotions.',
   suggestionsEmpty: 'No suggestions right now.',
   campaignsEmpty: 'No campaigns in flight.',

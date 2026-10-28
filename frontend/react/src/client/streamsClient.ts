@@ -291,12 +291,34 @@ async function fetchRunStreamToken(runId: string, signal?: AbortSignal): Promise
 const V2_PROTOCOL_VERSION = '2.0';
 
 /**
+ * ADR 0975 D5 — does the stream leave the API's origin? On production the SSE
+ * base is the direct `*.run.app` URL (the CDN buffers SSE) while the API is
+ * same-origin `/api`, so the session cookie — and with it the ACTIVE workspace a
+ * person switched into — never reaches the stream.
+ */
+function streamLeavesApiOrigin(streamUrl: string): boolean {
+  try {
+    const here = typeof window !== 'undefined' ? window.location.href : undefined;
+    return new URL(streamUrl, here).origin !== new URL(config.baseUrl, here).origin;
+  } catch {
+    return true; // unparseable ⇒ assume cross-origin: a minted token never hurts
+  }
+}
+
+/**
  * The SDK builds the URL and the SSE headers; this wraps the fetch it calls so
  * the request carries THIS app's auth: the SDK's placeholder bearer is stripped,
- * `authedHeaders()` applied, the session cookie sent, and — when there is no
- * bearer at all (cookie-mode owner on the cross-origin SSE base, where the
- * cookie cannot follow) — a run-scoped `streamToken` minted same-origin is
- * appended, exactly as the credentialed path did before.
+ * `authedHeaders()` applied, the session cookie sent, and a run-scoped
+ * `streamToken` minted same-origin is appended when there is no bearer at all
+ * (cookie mode) OR the stream leaves the API's origin.
+ *
+ * ADR 0975 D5 — the second arm. A bearer alone cannot carry the active
+ * workspace: the bearer lane resolves the caller's PERSONAL tenant, so a run in
+ * a workspace they switched into was refused `403 id_tenant_mismatch` on every
+ * attempt (kicktodo.com, 2026-10-25: the Studio chat showed "No response" and
+ * no approval card ever rendered). The token is minted where the cookie IS sent,
+ * so it is scoped to the right tenant. Each (re)connect mints afresh, so a
+ * reconnect after a 403 is not the identical request again.
  */
 function credentialedFetch(runId: string, signal: AbortSignal): typeof fetch {
   return async (input, init) => {
@@ -312,7 +334,7 @@ function credentialedFetch(runId: string, signal: AbortSignal): typeof fetch {
       u.searchParams.set('resumable', 'true');
       url = u.toString();
     }
-    if (!headers.has('authorization')) {
+    if (!headers.has('authorization') || streamLeavesApiOrigin(url)) {
       const streamToken = await fetchRunStreamToken(runId, signal);
       if (streamToken) {
         const u = new URL(url);

@@ -39,7 +39,18 @@ export interface Workforce {
   /** Reserved; the Data Manifest is authored in a later slice (MG-3). */
   dataManifestId: string;
   successMetrics: string[];
+  /** Workflows this workforce runs. Every id MUST resolve (ARWF-15,
+   *  `test/arwf15-workforce-workflow-ids-resolve.test.ts`); empty is honest
+   *  where no real workflow fits yet. */
   workflowCatalog: string[];
+  /** ARWF-15 — the id the SYNTHETIC demo history is stamped with. It names a
+   *  historical demo role-workflow (ADR 0775 P2d deleted the definition), not
+   *  one the runs executed against, and it deliberately resolves nowhere: a
+   *  fork or re-run of a synthetic run answers a typed `workflow_not_found`
+   *  rather than replaying fixed history onto an unrelated graph. Kept equal to
+   *  the id existing seeded rows already carry. Required when
+   *  `historyRunCount > 0`. */
+  historyWorkflowId?: string;
   agents: AgentSpec[];
   /** Per-node auto-safe vs human-review (MG-4). */
   decisionBoundaries: { auto: string[]; review: string[] };

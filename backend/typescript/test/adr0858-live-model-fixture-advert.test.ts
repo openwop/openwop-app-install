@@ -13,6 +13,10 @@
  * (`SUPERVISOR_CALLS_LIVE_MODEL`, next to the supervisor in `bootstrap/nodes.ts`).
  * `test/rfc0111-context-budget-non-advert.test.ts` leg 2 ties it to what the
  * supervisor actually does.
+ *
+ * Tracker TST-BFA-3. Red when: the live-model withholding line in
+ * `listLoadedConformanceFixtures` is removed; the host set drifts from the
+ * corpus; `liveModelSupervisorRequirementMet` ignores the fact.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { readdirSync, readFileSync } from 'node:fs';
@@ -40,7 +44,7 @@ describe('ADR 0858 P3 — live-model fixtures follow the supervisor fact', () =>
   it('the host set is derived from the corpus: every live-model-tagged fixture with a supervisor is in it', async () => {
     const { FIXTURES_REQUIRING_LIVE_MODEL_SUPERVISOR } = await import('../src/host/index.js');
     const derived = fixtures()
-      .filter((d) => Array.isArray(d.metadata?.tags) && (d.metadata.tags as unknown[]).includes('live-model'))
+      .filter((d) => { const tags = d.metadata?.tags; return Array.isArray(tags) && tags.includes('live-model'); })
       .filter((d) => (d.nodes ?? []).some((n) => n.typeId === 'core.orchestrator.supervisor'))
       .map((d) => d.id);
     expect(derived, 'the corpus must still carry the live fixture, else this leg is vacuous').toContain(LIVE);

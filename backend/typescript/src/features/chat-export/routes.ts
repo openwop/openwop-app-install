@@ -16,11 +16,18 @@
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { OpenwopError } from '../../types.js';
 import { hostExtStorage } from '../../host/hostExtPersistence.js';
-import { getConversationMeta } from '../../host/conversationStore.js';
-import { isVisibleToAsync } from '../../host/conversationVisibility.js';
+import { chatAuthorSubject } from '../../host/chatAuthorSubject.js';
 import { transcriptToJson, transcriptToMarkdown } from './transcriptRenderer.js';
 import { parseOpenwopExport, parseChatGptExport } from './importParser.js';
-import { importConversation } from './importService.js';
+import { importConversation, IDEMPOTENCY_KEY } from './importService.js';
+import { authorizeConversationRead } from './access.js';
+
+/** An ASCII file name from a conversation title (header-safe; any title, any language). */
+export function exportFileName(title: string, ext: 'md' | 'json'): string {
+  const slug = (title || '').normalize('NFKD').replace(/[^\x20-\x7e]/g, '').toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60);
+  return `${slug || 'conversation'}.${ext}`;
+}
 
 export function registerChatExportRoutes(deps: RouteDeps): void {
   const { app } = deps;
@@ -30,14 +37,13 @@ export function registerChatExportRoutes(deps: RouteDeps): void {
       const tenantId = req.tenantId ?? '_anon';
       const actingUserId = req.userId ?? req.principal?.principalId;
       const sessionId = req.params.sessionId;
-      const session = await hostExtStorage().getChatSession(tenantId, sessionId);
-      if (!session) throw new OpenwopError('not_found', 'Conversation not found.', 404, { sessionId });
-      const meta = await getConversationMeta(tenantId, sessionId);
-      if (!(await isVisibleToAsync(meta, tenantId, actingUserId))) {
-        throw new OpenwopError('not_found', 'Conversation not found.', 404, { sessionId }); // owner/participant only
-      }
+      // ADR 0992 D8 — the one read helper the agent tool also calls (uniform 404).
+      const { session } = await authorizeConversationRead(tenantId, sessionId, actingUserId);
       const messages = await hostExtStorage().listChatSessionMessages(sessionId);
-      if (req.query.format === 'json') {
+      const json = req.query.format === 'json';
+      // ADR 0992 D9 — name the download after the conversation, not its UUID.
+      res.setHeader('Content-Disposition', `attachment; filename="${exportFileName(session.title, json ? 'json' : 'md')}"`);
+      if (json) {
         res.json(transcriptToJson(session, messages));
       } else {
         res.type('text/markdown').send(transcriptToMarkdown(session, [...messages]));
@@ -72,8 +78,17 @@ export function registerChatExportRoutes(deps: RouteDeps): void {
       if (body.format !== undefined && body.format !== 'openwop' && body.format !== 'chatgpt') {
         throw new OpenwopError('validation_error', "`format` must be 'openwop' or 'chatgpt'.", 400, { field: 'format' });
       }
+      // ADR 0992 D4 — an optional idempotency key (the SPA sends a digest of the file).
+      const key = (req.body as { idempotencyKey?: unknown }).idempotencyKey;
+      if (key !== undefined && (typeof key !== 'string' || !IDEMPOTENCY_KEY.test(key))) {
+        throw new OpenwopError('validation_error', '`idempotencyKey` MUST match /^[A-Za-z0-9_.:-]{1,128}$/.', 400, { field: 'idempotencyKey' });
+      }
       const parsed = body.format === 'chatgpt' ? parseChatGptExport(body.data) : parseOpenwopExport(body.data);
-      res.status(201).json(await importConversation(tenantId, userId, parsed));
+      // D3 — the rows carry the importer's chat-author spelling, the same stamp the
+      // chat append route writes, so DSAR erasure and author edits reach them.
+      const author = chatAuthorSubject(req) ?? userId;
+      const result = await importConversation(tenantId, userId, parsed, author, key);
+      res.status(result.replayed ? 200 : 201).json(result);
     } catch (err) { next(err); }
   });
 }

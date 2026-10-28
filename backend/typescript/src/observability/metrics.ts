@@ -197,6 +197,12 @@ export const METRIC_CATALOG: readonly MetricSpec[] = [
     buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 300],
   },
   {
+    name: 'openwop.host_event.log.append_failed',
+    description: 'Durable host events whose replay-log append failed after the ADR 0988 D2 retry, by what happened to the event (published_full, dead_lettered, lost).',
+    kind: 'counter',
+    labels: ['outcome'],
+  },
+  {
     name: 'openwop.replay.node.served',
     description: 'Side-effecting nodes served from the source run instead of re-executing (ADR 0341 fast path).',
     kind: 'counter',

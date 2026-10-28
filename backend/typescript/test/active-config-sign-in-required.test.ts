@@ -1,5 +1,5 @@
 /**
- * `GET /byok/active-config` → `signInRequired`.
+ * `GET /byok/active-config` → `signInRequired` (ADR 0517 / ADR 0711).
  *
  * Under `OPENWOP_MANAGED_ANON_SIGNIN_REQUIRED` the free tier refuses `anon:` callers
  * (`managedProvider.ts` throws `sign_in_required`), yet this route reports that same tier
@@ -11,7 +11,17 @@
  *   leg 2 — the host does not require sign-in            (posture conjunct)
  *   leg 3 — the caller is signed in                       (anon conjunct)
  *   leg 4 — the anon visitor bound their OWN key          (managed-ref conjunct)
- *   leg 5 — a stored managed binding still requires sign-in (stored/default parity)
+ *   leg 5 — a stored managed binding still requires sign-in. This is the leg
+ *           that proves GET judges the STORED binding (`config ?? managedDefault`)
+ *           and PUT judges the saved one: with a binding stored the default is
+ *           null, so a GET that judged the default would answer false here.
+ *           (Corrected in wave 58: probe `cfg-getbinding` reds leg 5, not leg 4.
+ *           Leg 4 cannot see it, because its own-key binding answers false
+ *           either way.)
+ *
+ * Tracker TST-BG1-24. Red when (probe-witnessed, wave 58): the posture, anon or
+ * managed-ref conjunct is dropped from `chatBindingSignInRequired`; GET judges the
+ * managed default instead of the stored binding; PUT stops reporting the verdict.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -94,7 +104,8 @@ describe('active-config signInRequired', () => {
   it('leg 3: a signed-in caller is never told to sign in', async () => {
     process.env[FLAG] = 'true';
     const c = client();
-    await c.post('/host/openwop-app/test/login', { email: `signin-req-${Date.now()}-${n++}@acme.test` });
+    const login = await c.post('/host/openwop-app/test/login', { email: `signin-req-${Date.now()}-${n++}@acme.test` });
+    expect(login.status).toBe(201);
     const r = await c.get(AC);
     expect(r.body.anonymous).toBe(false);
     expect(r.body.signInRequired).toBe(false);

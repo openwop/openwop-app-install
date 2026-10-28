@@ -1,6 +1,6 @@
 # ADR 0959 — Agency playbooks and governed rollout
 
-Status: Proposed
+Status: Accepted (P0–P5 implemented; owed: the ADR 0942 routing of `playbook-rollout`, the P3 eval gate, the P4 RFC 0098 kinds, and the Producer tools + chat deep link with ADR 0943 P1)
 
 Date: 2026-10-19. Program: Campaign Studio (ADRs 0941–0962), Tier 4 "agency
 scale". Source: the program brief (session 66) and David's ask: "think big, but
@@ -281,6 +281,138 @@ event (`emitHostEvent`) and lands in the audit chain (`host/auditChainService.ts
 | P4 | Content adapters: CMS (0948), email (0955), brand preset, RFC 0098 kinds | Each adapter's plan/diff is pure; apply is idempotent per (rollout, orgId, slot) |
 | P5 | Frontend tab + Producer playbook tools + node pack | `npm run build` green; 4-locale parity; chat deep link |
 
+> **Correction 2026-10-20 (P0, `/architect`): what P0 built, and three choices the plan left open.**
+> - **One instantiation path, extracted.** The from-chain route's expand → stage → disabled-pack
+>   check → commit → revision → ownership sequence moved verbatim into
+>   `host/chainInstantiation.ts` `instantiateOwnedChain`. The route and the install both call it,
+>   so neither can grow its own copy (its 14 route test files, 177 tests, stayed green).
+> - **Sub-chains are refused in P0** (`playbook_subchains_unsupported`, 422): a string ref still
+>   resolves through the global registry by id (P-G2), which would install whatever child
+>   version the host has. P1's D2 resolver lifts this.
+> - **`overridable` is a list of entry-chain parameter names in P0.** D3's JSON pointers into
+>   the 0942 policy, 0943 bindings and slots arrive with those layers in P1. Layer 1 (agency) is
+>   P1 too; P0 merges layer 0 and layer 2 and validates the result against the chain's own
+>   `parameters` schema (`playbook_params_invalid`).
+> - **The run-stamp seam.** `RunStartContext` gained `workflowId` (from `runInsert`), and the
+>   contributor reads a host-written workflow → installation index, never the definition's
+>   metadata (the builder edits that). The stamp also carries `detached` (the run's pinned
+>   `definitionRevision` is not the one the install wrote), which D8 did not list.
+> - **Toggle row 2 changed: `dependsOn: ['campaign-ops']` only.** ADR 0439's parity rule
+>   makes a dependency an import, and P0 imports nothing from campaign-orchestration, so it
+>   moved to `recommends`. It returns to `dependsOn` in the phase that calls it.
+> - **A stranded install claim is reclaimable** after 10 minutes (the put-if-absent
+>   `installing` claim; an instantiation error releases it).
+
+> **Correction 2026-10-20 (P1, `/architect`): how D2 and D3 were built.**
+> - **D2 rides hooks on the ONE resolver.** `SubChainDeps` gained `resolveSibling`,
+>   `mintChildId` and a `parent` argument on `resolveExternal` (which may now be async). With a
+>   sibling resolver supplied, resolution is exact: a sibling only from the version that owns the
+>   parent chain, an external `playbook:<id>` ref only from that tenant's playbook version, a
+>   host-pack ref only when the loaded pack name AND chain version match. With no hooks the
+>   from-chain route resolves exactly as before (its P-G2 fix stays the logged follow-up).
+>   Publish refuses a version whose refs do not resolve today; install re-resolves.
+> - **Playbook children are keyed `(tenant, playbook, version, chainId)`**, not `(tenant,
+>   chainId, version)`. Tenant-authored chain ids can repeat across playbooks with different
+>   content, and the shared-child convergence would otherwise refresh one playbook's child with
+>   another's. Two clients on one version still share the child (D4). RFC 0133 §1.3 pins only
+>   determinism and tenant scope, both kept.
+> - **D3 as built:** `overridable = {params, slots}`. A slot is a `subChainRef` of the entry chain;
+>   a layer binds it to `{playbookId, version, chainId}` (another immutable version of the same
+>   tenant). Layer 1 is one row per (tenant, playbook), written against the newest version and
+>   re-validated against the installed one. The ADR 0942 policy and ADR 0943 binding pointers
+>   are not built (neither ADR has landed). A slot binding is not checked for parameter
+>   compatibility with the default child (`J959WF-4`).
+> - **Drift:** `GET …/installs` returns `none | edited | missing` per installation, and the run
+>   stamp's `detached` became `drift: none | edited | unknown` (`J959WF-1`, `J959WF-2`).
+
+> **Correction 2026-10-20 (P2, `/architect`): how D6/D7 were built.**
+> - **The approval kind is built; its ADR 0942 routing is owed.** `playbook-rollout` joins the
+>   ONE approvals queue (kind list, redactor, audience = `host:members:manage` on the workspace
+>   root, a decision-table entry, a feature-registered handler), following `campaign-change-set`.
+>   ADR 0942's single gate (#5051) is not merged, so routing the kind through its
+>   `playbook.rollout` action class is recorded as owed, not faked.
+> - **The diff is of the authored graphs**, keyed by sub-chain ref path + original node id.
+>   Expanded node ids carry a params+version hash, so an expanded diff would report every node as
+>   replaced. The config diff is `diffEntries` (ADR 0387), over the merged values and slot
+>   bindings.
+> - **Approve-what-you-see is enforced twice:** the decide handler re-plans and closes a review
+>   whose plan no longer hashes the same (each target's head revision is in the hash), and apply
+>   re-plans the one target (`target_changed`).
+> - **Upgrade is in place:** `instantiateOwnedChain` gained `into: {workflowId, expectHead}` — the
+>   same id, the owned name kept, a new ADR 0474 revision, the parent written with a
+>   compare-and-swap against the fresh head (a live room refuses, as the builder rollback does).
+> - **Rollback restores the recorded layers.** Each installation history entry now records the
+>   layers it ran with; rollback re-expands the previous version with them, so the head returns
+>   to the exact prior revision (witnessed).
+> - **Separation of duties:** the requester cannot approve while another agency admin can.
+
+> **Correction 2026-10-20 (P3, `/architect`): rings as built, and the eval gate NOT built.**
+> - **Rings live on the installation** (`ring: canary | early | general | held`, absent =
+>   `general`), set by an agency admin. A ring-mode rollout takes every installed client not held
+>   and not already on the version, in ring order (empty rings dropped); naming a held client
+>   in a target-mode rollout is `install_held`, and so is applying to one held after the plan.
+> - **Apply is gated by the open ring** (`ring_not_open`); `apply-ring` applies the open ring's
+>   `clean` clients (conflicts and detached stay manual, D6.4).
+> - **Advance** needs every client of the ring applied (or rolled back), the soak elapsed since
+>   the ring's last apply (OQ6 defaults canary 48 h, early 72 h, general none; per-rollout
+>   overrides), and a passing health check — then a compare-and-swap on `ringIndex`
+>   (witnessed: five concurrent advances, one transition).
+> - **Health = failed runs of the NEW version since that client's apply**, read from the run
+>   store (`listRuns`, failed, bounded) through the P0 run stamp — no second outcome index. An
+>   older version's failures do not count (witnessed). A failure HALTS the rollout: no apply,
+>   apply-ring or advance; rollback stays open.
+> - **The ADR 0889 eval gate is not built.** No playbook version names an eval suite, and gating
+>   on one means starting a paid eval run inside an advance; a gate that always passes would be
+>   a false claim. Owed (`J959WF-8`), with P5's Producer tools or a P3b once a version can
+>   declare a suite.
+
+> **Correction 2026-10-20 (P4, `/architect`): content adapters as built.**
+> - **The seam is core, the adapters are the owners'.** `host/playbookContentAdapters.ts`
+>   (`registerPlaybookContentAdapter`), the `registerConfigDomain` inversion for per-client
+>   content. CMS registers `cms.page`, email `email.template`, brand `brand.preset`, each in its own
+>   feature; campaign-playbooks imports none of them.
+> - **Writes respect the owners' rules.** The CMS adapter creates drafts only and refuses to update
+>   a page that left draft (ADR 0836: a live page is an admin edit), reported `content_locked`; an
+>   email template update writes a new version, which reopens send review (ADR 0905 D3).
+> - **Idempotent per (org, playbook, slot)** through a playbook-owned mapping row (the applied hash
+>   and the resource's snapshot hash) and a put-if-absent create claim; deterministic resource ids
+>   where the owner allows them (CMS, email). A resource edited since the playbook wrote it is
+>   `content_edited` and needs `overwrite`; in a rollout plan it makes the client `detached`.
+>   A slot a newer version drops is left in place and reported, never deleted.
+> - **Content applies after the workflow** at install and at each apply/rollback; a failed item is
+>   reported and retried through `POST …/installs/:playbookId/content`.
+> - **Not built: the RFC 0098 kinds** (agent, prompt-template, schedule, roster). The portability
+>   service applies a tenant-wide bundle, not an org-scoped item per slot; doing it per client needs
+>   an org-scoped portability apply first. Owed (`J959WF-9`).
+
+> **Correction 2026-10-20 (P5, `/architect`): the tab and the node pack are built; the Producer half
+> is NOT, and the "chat deep link" exit criterion is therefore not met.**
+> - **Tab:** "Playbooks" on the Campaign Studio hub (`hubTab`, the campaign-ops precedent): the
+>   library and versions, the installation matrix (client × version, ring, drift as labelled chips),
+>   the rollout planner (per-client readiness, changes, conflicts) and rollouts (apply, apply-ring,
+>   advance, rollback; an edited client's upgrade asks for confirmation). Requesting a rollout opens
+>   ONE review in the shared Reviews inbox; the page never approves. Read-mostly by design: a version
+>   is workflow content, authored through the API (and later the Producer). 4 locales. A new route
+>   `GET …/playbooks/:id/installations` serves the matrix in one read (no per-client fan-out).
+> - **Node pack** `feature.campaign-playbooks.nodes` (`read-installation`, `effective-config`) over a
+>   read-only `ctx.features['campaign-playbooks']`, bound like campaign-ops' surface
+>   (`bindRunToClient`, reused) plus the run's own playbook stamp (`wrong_client`).
+> - **Deferred, with reason:** the Producer agent is ADR 0943 P1 (#5055, not merged). Registering
+>   agent tools no agent can hold, and a deep link to an agent the host does not have, would both be
+>   claims without behaviour. The read tools, the draft-only tool and `navigate('/?agent=producer')`
+>   land with 0943 P1 (`J959WF-10`).
+
+## Implementation record
+
+| Phase | PR / commit | Tests | Notes |
+|---|---|---|---|
+| P0 | #5119 | `adr0959-p0-playbooks.test.ts` (10 cases through the HTTP boundary: both toggles gating every route, loader-rule validation incl. unpinned and sub-chain refusals, admin-only authoring, immutable versions (republish and lower version 409), the override policy and parameter schema, not-a-client 404, the install's registration + revision + ownership subject, client A's operator 404 on client B, the run stamp and a forged one stripped, the fork rule; seven sabotage witnesses in its header) | New `features/campaign-playbooks/` (toggle OFF). Core touches: `host/chainInstantiation.ts` (extracted), `validateChainDocuments` export, `RunStartContext.workflowId`, the reserved key. campaign-ops `authorizeClient` exported (reused, not copied). |
+| P1 | #5122 | `adr0959-p1-resolution.test.ts` (6 cases through the HTTP boundary: the exit criterion — a playbook pinning `acme.child@1.0.0` installs the 1.0.0 child while the host's registry holds 2.0.0, minted per playbook version and shared by two clients; a host-pack ref at a version the host lacks or from another pack refused, at the loaded version resolved; a `playbook:` ref resolving in the same workspace and never another's; a slot binding swapping the child, an undeclared slot and a dangling binding refused; the agency layer between defaults and client; drift none → edited → missing; six sabotage witnesses). P0 test updated (sub-chains now resolve or are refused at publish; `drift`) | Stacked on #5119. Loader hooks on `SubChainDeps` (default path unchanged). |
+| P2 | #5126 | `adr0959-p2-rollout.test.ts` (6 cases through the HTTP boundary: the plan's classes and authored diff with ZERO writes (a storage write probe with a non-vacuity control); the requester refused, a plan changed after review closed; apply per client — clean, conflicts with replacement values, detached only with overwrite; idempotent repeat apply; rollback to the exact prior revision with the recorded layers; a client edited after approval refused, never clobbered; five sabotage witnesses, and the one guard it cannot witness named in its header) | Stacked on #5122. Core: the `playbook-rollout` approval kind; `instantiateOwnedChain({into})`. |
+| P3 | #5128 | `adr0959-p3-rings.test.ts` (5 cases through the HTTP boundary and the REAL executor — the health signal is real failed runs: held clients skipped by a ring rollout and refused by name; only the open ring applies, and an old version's failures do not stop the next ring; a soaking ring does not advance; five concurrent advances give one transition; a failing canary halts the rollout while rollback stays open; six sabotage witnesses) | Stacked on #5126. The eval gate is owed (`J959WF-8`). |
+| P4 | (this PR) | `adr0959-p4-content.test.ts` (7 cases through the HTTP boundary: an unknown kind and a bad payload refused at the draft; install writing a page, a template and a brand into the CLIENT org through their owners; a repeat apply writing nothing; two concurrent applies creating one resource; a rollout plan's per-item actions with zero writes; an edited template making the client detached and overwrite replacing it; a live page never changed; five sabotage witnesses) | Stacked on #5128. Core: `host/playbookContentAdapters.ts`; owner adapters in cms, email, brand. The RFC 0098 kinds are owed (`J959WF-9`). |
+| P5 | (this PR) | `adr0959-p5-surface.test.ts` (4 cases: the installation matrix with drift; the surface's effective values across layers 0→1→2; a run with no person refused; a run stamped for client A refused on client B; three sabotage witnesses); FE `npm run build` (tsc + i18n parity + token gates) | Stacked on P4. New node pack `feature.campaign-playbooks.nodes` 1.0.0. The Producer tools and chat deep link are owed (`J959WF-10`). |
+
 ## Alternatives weighed
 
 - **Snapshot copy per client (GHL model).** Simple, but upgrades must either
@@ -338,3 +470,63 @@ The lead corrects CLAUDE.md (ADR 0941 D9 and its corrections list).
 
 - **ROADMAP:** `| 0959 | Agency playbooks + governed rollout | campaign-playbooks (feature.campaign-playbooks.*) | versioned chain-bundle playbooks, layered per-client overrides, diff + ringed rollout + rollback + pinning | deps 0921, 0923, 0924, 0941, 0942, 0943, 0948, 0474, 0387, 0889 | Tier 4 | 🔵 Proposed |`
 - **FEATURES (Future features):** `| campaign-playbooks | Agency playbooks | Publish a campaign method once as a versioned playbook and roll it out to many clients with diffs, staged rings, approval, rollback and per-client overrides that survive upgrades. | OFF | tenant | ADR 0959 |`
+
+
+## Recovery corrections — 2026-10-25
+
+Track A architecture review: this is host-local state and host-extension APIs,
+with no new protocol shape or capability advertisement. The recovered original
+P0–P5 history is retained. Workflows still use the existing chain loader,
+registry, revisions, ownership and executor; approvals use the existing queue
+and root-org eligibility; content writes remain in CMS, email and brand owner
+services. No second workflow, approval, identity or credential system is added.
+
+The original multi-write sequences were not acknowledgement-safe. A first
+installation now reserves one random copy id in its durable claim before any
+workflow write and retries the same version/configuration with that id. The
+shared instantiation seam compares the fresh definition before reconciling a
+reserved copy, refuses another tenant or an edited/archived head, and heals the
+revision/ownership writes without minting another workflow. Legacy installing
+claims without a reserved id require review rather than speculative takeover.
+A pending installation blocks run-start attribution until its version is
+confirmed.
+
+An upgrade records an intent containing the exact expanded revision, original
+head, target version/configuration, actor and operation identity before the
+workflow CAS. It reconciles an identical committed head after acknowledgement
+loss; a human edit still refuses. Installation finalization uses fresh rows,
+preserves ring edits and redacted actors, and records one operation in history.
+A final rollout acknowledgement can be retried from that confirmed history.
+Rollback follows the same sequence. These are per-resource consistency checks,
+not repository or deployment holds.
+
+The approval row remains the decision authority. A retry reaches the owner’s
+reconciler even after resolution, rechecks eligibility and the same plan binding,
+and copies the original decision/actor/time into an awaiting rollout. It cannot
+reverse a decision or regress a later rollout state. All playbook-person erasers
+retry fresh rows a bounded number of times and refuse to declare success under
+continued contention.
+
+Content updates claim their mapping before writing and pass the exact read’s
+owner concurrency token to CMS, email or brand. The confirmed owner return value
+is the new snapshot; a later read cannot silently adopt an intervening human
+edit. Brand creation uses a deterministic, insert-only owner id. An unknown
+creation outcome preserves its claim and requires review, never a second preset.
+An unknown update outcome requires review and explicit replacement. Partial
+content results no longer produce all-success UI copy, and a ring cannot advance
+with unfinished content. Superseded previews cannot enable a request for another
+selection. Date rendering uses the shared locale formatter.
+
+Focused qualification: native backend types; six pack-surface cases; 22 backend
+files / 249 cases, including real-store lost acknowledgements, fresh-row erasure,
+content conflicts, original tenant/approval/fork tests, from-chain and workflow-id
+regressions. Frontend lint and canonical build pass (941 bytes of entry budget
+headroom), test types have zero errors, and eight focused files / 46 cases pass.
+Peak owned memory was 4.49 GiB backend / 4.04 GiB frontend with no swap growth or
+resource stop. The regenerated manifest census adds two read nodes only; the
+floor remains 377/334 served/43 undischarged/zero unresolved. Full composed app CI
+is still required before merge.
+
+The toggle remains OFF. The eval-health integration (`J959WF-8`), RFC 0098
+artifact kinds (`J959WF-9`), and Producer tools/chat deep link (`J959WF-10`) remain
+open as previously recorded. No production settings or public releases change.

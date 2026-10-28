@@ -23,13 +23,14 @@ import { startBackgroundAppJobs } from './host/appMigrations.js';
 import { tryDurableStorage } from './host/durable/durableStore.js';
 import { logWebhookEgressPosture } from './host/webhookEgressGuard.js';
 import { initHostExtPersistence } from './host/hostExtPersistence.js';
+import { reconcileCollectedEventReceipts } from './features/cdp/visitorEventIndex.js';
 import { loadPackTombstones } from './host/packTombstones.js';
 import { loadPackRevocations, startPackRevocationRefresh } from './host/packRevocations.js';
 import { logIsolationMemoryBudgetAtBoot } from './host/isolation/childProcessAdapter.js';
 import { isEntryModule } from './host/entryModule.js';
 import { traceContextMiddleware } from './middleware/traceContext.js';
 import { httpMetricsMiddleware } from './middleware/httpMetrics.js';
-import { authMiddleware, isPublicPath, sessionSecretConfigError } from './middleware/auth.js';
+import { authMiddleware, isPublicPath } from './middleware/auth.js';
 import { workloadIdentityMiddleware } from './middleware/workloadIdentity.js';
 import { wireAuthorityRunStamping } from './host/authorityContext.js';
 import { wireRunAiDefaultStamping } from './host/runAiDefault.js';
@@ -64,6 +65,7 @@ import { registerMembershipRootedWorkspaces } from './host/accessControlService.
 import { ensureRegistryPacksInstalled } from './bootstrap/installRegistryPacks.js';
 import { featurePackNames, featureDefaultOrgs, pinnedPackRef } from './features/index.js';
 import { ensureLocalPacksMounted } from './bootstrap/mountLocalPacks.js';
+import { registerClamavScannerFromEnv } from './host/uploadScanClamav.js';
 import { recordChainPackLoad } from './host/chainPackLoadStatus.js';
 import { loadPromptPacks, defaultPromptPackRoots } from './host/promptPackLoader.js';
 import { loadConnectionPacks, defaultConnectionPackRoots } from './features/connections/connectionPackLoader.js';
@@ -97,6 +99,7 @@ import { createHostAdapterSuite, type HostAdapterSuite } from './host/index.js';
 import { startWebhookDeliveryWorker } from './host/webhookDeliveryWorker.js';
 import { startRunDispatchSweeper } from './host/runDispatchSweeper.js';
 import { registerCardRunRecovery } from './host/cardRunRecovery.js';
+import { registerDispatchWaitAll } from './host/dispatchWaitAll.js';
 import { registerKanbanWorkItemLifecycle, startKanbanWorkItemDaemon } from './host/kanbanWorkItemDaemon.js';
 import { startScheduleDaemon } from './host/scheduleDaemon.js';
 import { backfillApprovalIndexes } from './host/approvalService.js';
@@ -123,10 +126,9 @@ import { getInstanceId } from './host/instanceId.js';
 import { configureSecretResolver, loadSecretsFromEnv } from './byok/secretResolver.js';
 import { registerOperatorMcpServer } from './host/mcpOperatorServer.js';
 import { bootstrapKmsFromEnv } from './byok/kmsEncryption.js';
-import { readDeployPosture, enterprisePostureStartupError } from './host/deployPosture.js';
-import { workspaceReadinessStartupError, workspaceReadinessWarning } from './host/workspaceReadiness.js';
-import { oidcTrustRootStartupError } from './host/oidcTrustGuard.js';
-import { testAuthSeamStartupError } from './routes/authTestSeam.js';
+import { readDeployPosture, deployProfile } from './host/deployPosture.js';
+import { serverStartupErrors } from './host/startupChecks.js';
+import { workspaceReadinessWarning } from './host/workspaceReadiness.js';
 import {
   bootstrapManagedProvider,
   configureManagedProvider,
@@ -211,7 +213,25 @@ export function loadConfigFromEnv(): AppConfig {
   };
 }
 
+/**
+ * ADR 0968 P2 — Tracegate's boot marks. `__tracegateBoot` is defined ONLY by the
+ * test recorder (scripts/lib/tracegate-recorder.mjs, loaded when
+ * OPENWOP_TRACEGATE_RECORD is set); everywhere else, production included, it is
+ * undefined and each mark is one property read that short-circuits: no
+ * allocation, no await, nothing on the request path. The recorder's hook is
+ * synchronous and returns nothing, so boot is scheduled the same with or
+ * without it. A hook that throws is swallowed: a recorder bug must never fail a
+ * boot. Shadow measurement only — no gate selection reads what these marks
+ * record (ADR 0968: still the user-approved measurement phase).
+ */
+const tracegateBoot = (phase: 'start' | 'end', app?: Express): void => {
+  try {
+    (globalThis as { __tracegateBoot?: (phase: string, app?: Express) => void }).__tracegateBoot?.(phase, app);
+  } catch { /* the recorder's own problem, never the app's */ }
+};
+
 export async function createApp(config: AppConfig): Promise<Express> {
+  tracegateBoot('start');
   // Captured at boot so the daemon-status route can report a stable
   // start time even if process.uptime() drifts under heavy load.
   const startTimeMs = Date.now();
@@ -239,6 +259,11 @@ export async function createApp(config: AppConfig): Promise<Express> {
   // Idempotent: the route-module register hook calls this again with the same
   // storage. (initHostExtPersistence only sets a module-level ref.)
   initHostExtPersistence(storage);
+  await reconcileCollectedEventReceipts();
+  // ADR 0958 Q2 — the self-hosted ClamAV behind the upload scan port, when
+  // OPENWOP_CLAMAV_HOST is set. A malformed port or timeout throws here: a scanner
+  // the operator meant to run must never be silently absent.
+  registerClamavScannerFromEnv();
   // ADR 0535 P2/P3 — a card the work loop parked in Working returns to To Do
   // when its run dies. This belongs to app CONSTRUCTION, not the process
   // lifecycle: registering it beside the daemons in `main()` meant it only ran
@@ -254,6 +279,9 @@ export async function createApp(config: AppConfig): Promise<Express> {
   // vs an upgrade-from-prior) once the schema migrations have run.
   await recordAppVersion(storage);
   const hostSuite = createHostAdapterSuite({ storage });
+  // ADR 0935 — a parallel dispatch wave that suspended on a waiting child joins
+  // when its last child finishes. App construction, like the recovery above.
+  registerDispatchWaitAll(storage, hostSuite);
 
   // Wire BYOK to sqlite + AES-256-GCM-at-rest. Master key resolution:
   // env (OPENWOP_BYOK_ENCRYPTION_KEY) → data/.byok-master-key (auto-
@@ -622,6 +650,9 @@ export async function createApp(config: AppConfig): Promise<Express> {
   }
 
   const app = express();
+  // ADR 0940 F1 — no `X-Powered-By: Express` anywhere: it is stack disclosure
+  // with no reader, and on a customer's own hostname it is a platform fingerprint.
+  app.disable('x-powered-by');
   // Paths are CASE-SENSITIVE. Express matches routes case-insensitively by
   // default while every path predicate in this host (the public-path list, the
   // credential-less `401`, the vendor gate) compares exactly — so `/V1/runs`
@@ -824,6 +855,7 @@ export async function createApp(config: AppConfig): Promise<Express> {
   // Final canonical error envelope shape; runs after every other handler.
   app.use(errorEnvelopeMiddleware());
 
+  tracegateBoot('end', app);
   return app;
 }
 
@@ -834,60 +866,29 @@ async function main(): Promise<void> {
   const config = loadConfigFromEnv();
 
   // Fail fast at startup on a production misconfiguration rather than lazily at
-  // the first cookie mint (i.e. the first user login). This mirrors the
-  // frontend's build-time guard: refuse to boot a deploy that would mint
-  // sessions with a weak / ephemeral secret. `sessionSecretConfigError()` only
-  // returns non-null when NODE_ENV=production, so local dev boots unaffected.
-  const secretError = sessionSecretConfigError();
-  if (secretError) {
-    log.error('startup_config_error', { error: secretError });
-    process.exit(1);
-  }
-
-  // Enterprise-posture startup guard (DUR-1 + DUR-5, ADR 0195). In the auth
-  // posture the deployment MUST be coherent — NODE_ENV=production (else the
-  // session-secret guard, Secure cookies, and dev-token withdrawal silently
-  // stay OFF) and a durable control-plane DSN (else runs/BYOK/approvals are
-  // lost on restart, and the 'durable' host surfaces riding this store are a
-  // lie). Fail closed with a loud, explicit escape hatch per requirement.
+  // the first cookie mint or the first customer write. ADR 0981 D3: every check
+  // runs and the whole list is logged before ONE exit, so an operator missing
+  // three controls fixes them in one boot. The checks keep their owners:
+  //   • session secret — refuse to mint sessions with a weak/ephemeral secret
+  //     (non-null only when NODE_ENV=production);
+  //   • the strict profile (ADR 0195 DUR-1/DUR-5, BYOK KMS) — under
+  //     OPENWOP_DEPLOY_POSTURE=auth, NODE_ENV=production, a durable DSN and a
+  //     KMS key, each hatch named in its message;
+  //   • ADR 0745 D4 / ADR 0833 D8 — a deployed service never trusts the
+  //     harness OIDC issuer nor serves the test-login seam (no hatch);
+  //   • ADR 0551 P2 — OPENWOP_WORKSPACE_REQUIRE_DURABLE=true on a non-durable
+  //     DSN. Without that flag the workspace capability is only withheld
+  //     (routes/discovery.ts) and the warn below says so once.
   // Server-only (main(), not createApp): tests boot in-process apps with test
   // env by design and must not pay server-deployment guards.
-  const postureError = enterprisePostureStartupError(config.storageDsn);
-  if (postureError) {
-    log.error('startup_config_error', { error: postureError });
+  const startupErrors = serverStartupErrors(config.storageDsn);
+  if (startupErrors.length > 0) {
+    for (const error of startupErrors) log.error('startup_config_error', { error });
+    log.error('startup_refused', { profile: deployProfile(), errors: startupErrors.length });
     process.exit(1);
   }
+  log.info('deploy_profile', { profile: deployProfile() });
 
-  // ADR 0551 P2 — workspace readiness. Two outcomes, and which one you get is
-  // an operator decision rather than this host's guess:
-  //   • OPENWOP_WORKSPACE_REQUIRE_DURABLE=true on a non-durable DSN is a FATAL
-  //     misconfiguration — the deployment asked for a capability its storage
-  //     cannot back.
-  //   • otherwise the capability is simply withheld from /.well-known/openwop
-  //     (routes/discovery.ts) and this warn says so once. Refusing to boot every
-  //     `memory://` dev box would be hostile, and a gate people route around is
-  //     not a gate.
-  // The workspace ENDPOINTS are unaffected either way; only the claim moves.
-  // ADR 0745 D4 — a Cloud Run service never trusts the conformance harness's
-  // OIDC issuer (an auth bypass, not a test posture). No escape hatch.
-  const trustRootError = oidcTrustRootStartupError();
-  if (trustRootError) {
-    log.error('startup_config_error', { error: trustRootError });
-    process.exit(1);
-  }
-
-  // ADR 0833 D8 — nor does it ever serve the any-subject test-login seam.
-  const testSeamError = testAuthSeamStartupError();
-  if (testSeamError) {
-    log.error('startup_config_error', { error: testSeamError });
-    process.exit(1);
-  }
-
-  const workspaceError = workspaceReadinessStartupError(config.storageDsn);
-  if (workspaceError) {
-    log.error('startup_config_error', { error: workspaceError });
-    process.exit(1);
-  }
   const workspaceWarning = workspaceReadinessWarning(config.storageDsn);
   if (workspaceWarning) log.warn('workspace_capability_withheld', { reason: workspaceWarning });
 

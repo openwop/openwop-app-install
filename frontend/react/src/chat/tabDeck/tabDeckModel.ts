@@ -47,9 +47,10 @@ export interface TabDeckState {
 
 /** Soft cap: opening beyond this evicts the LRU soft-evictable tab. Tunable per call. */
 export const MAX_TABS_DEFAULT = 8;
-/** Hard ceiling: the soft cap may be exceeded ONLY by pinned/streaming/active tabs,
+/** Hard ceiling: the soft cap may be exceeded ONLY by pinned/protected/active tabs,
  *  and only up to here. At the hard wall an LRU pinned-idle tab is sacrificed
- *  (pinned is protection, not immortality); streaming/active tabs are never evicted. */
+ *  (pinned is protection, not immortality); protected/active tabs are never evicted,
+ *  and when nothing else is left the open is refused (ADR 0978 D2) — never exceeded. */
 export const HARD_MAX_TABS = 24;
 
 export const emptyTabDeck: TabDeckState = { tabs: [], activeSessionId: null, seq: 0 };
@@ -72,11 +73,15 @@ export type TabDeckAction =
 /** What `open` would evict to make room (for the hook to `log()` — no silent
  *  truncation). `null` when nothing is evicted (room available, or soft overflow
  *  allowed). `kind` distinguishes a normal soft eviction from a hard-ceiling
- *  sacrifice of a pinned-idle tab. Pure — `open` uses this same selection. */
+ *  sacrifice of a pinned-idle tab. `refuse` (ADR 0978 D2) means the deck is at
+ *  HARD_MAX_TABS and every tab is active or protected: the open must not happen,
+ *  because the ceiling is absolute. Pure — `open` uses this same selection. */
+export type EvictionDecision = { sessionId: string; kind: 'soft' | 'hard' } | { kind: 'refuse' };
+
 export function selectEvictionVictim(
   state: TabDeckState,
   opts: { maxTabs?: number; protectedIds?: ReadonlySet<string> } = {},
-): { sessionId: string; kind: 'soft' | 'hard' } | null {
+): EvictionDecision | null {
   const maxTabs = opts.maxTabs ?? MAX_TABS_DEFAULT;
   const protectedIds = opts.protectedIds ?? NO_PROTECTED;
   if (state.tabs.length < maxTabs) return null;
@@ -89,13 +94,26 @@ export function selectEvictionVictim(
   // No soft victim: pinned/streaming/active fill the soft cap. Allow overflow up to
   // the hard ceiling rather than dropping a user-initiated open.
   if (state.tabs.length < HARD_MAX_TABS) return null;
-  // At the hard wall: sacrifice the LRU tab that is neither active nor streaming
-  // (pinned-idle is fair game here). If every tab is active/streaming it's a
-  // degenerate state — allow growth (the hook warns) rather than evict a live run.
+  // At the hard wall: sacrifice the LRU tab that is neither active nor protected
+  // (pinned-idle is fair game here). If every tab is active/protected, REFUSE the
+  // open (ADR 0978 D2): never evict a tab that is running or waiting on the user,
+  // and never grow past the ceiling (round-1 MTCC-1 let it grow unbounded).
   const hardVictim = lru(
     state.tabs.filter((t) => t.sessionId !== state.activeSessionId && !protectedIds.has(t.sessionId)),
   );
-  return hardVictim ? { sessionId: hardVictim.sessionId, kind: 'hard' } : null;
+  return hardVictim ? { sessionId: hardVictim.sessionId, kind: 'hard' } : { kind: 'refuse' };
+}
+
+/** Whether `open` of `sessionId` would take effect (ADR 0978 D2). An already-open id
+ *  always can (it focuses). Callers check this BEFORE their own side effects (a kind
+ *  seed, a deep-link scope), so a refused open leaves nothing behind. */
+export function canOpenTab(
+  state: TabDeckState,
+  sessionId: string,
+  opts: { maxTabs?: number; protectedIds?: ReadonlySet<string> } = {},
+): boolean {
+  if (state.tabs.some((t) => t.sessionId === sessionId)) return true;
+  return selectEvictionVictim(state, opts)?.kind !== 'refuse';
 }
 
 function focusTab(state: TabDeckState, sessionId: string): TabDeckState {
@@ -120,6 +138,7 @@ function openTab(
 ): TabDeckState {
   if (state.tabs.some((t) => t.sessionId === sessionId)) return focusTab(state, sessionId); // dedupe
   const victim = selectEvictionVictim(state, { maxTabs, protectedIds });
+  if (victim?.kind === 'refuse') return state; // absolute ceiling (ADR 0978 D2)
   const base = victim ? closeTab(state, victim.sessionId) : state;
   const nextSeq = base.seq + 1;
   return {

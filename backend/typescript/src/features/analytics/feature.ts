@@ -56,6 +56,28 @@ export const analyticsFeature: BackendFeature = {
     status: 'off',
     bucketUnit: 'tenant',
     salt: 'workspace-nav-telemetry',
+  }, {
+    // ADR 0951 D1 — aggregate heat maps (clicks, scroll, attention) under the
+    // `analytics` consent category. Cells carry no visitor identifier. ADR 0941 D5
+    // sub-toggle: AND-gated with `analytics` in code, no dependsOn.
+    id: 'analytics.heatmaps',
+    label: 'Heat maps',
+    description: 'Aggregate click, scroll and attention maps for public pages. Counts only, with no visitor identifier; recorded only where the visitor allowed analytics.',
+    category: 'CRM',
+    status: 'off',
+    bucketUnit: 'tenant',
+    salt: 'analytics.heatmaps',
+  }, {
+    // ADR 0951 D1 — masked session recording under the STRICT `analytics.replay`
+    // consent category (explicit opt-in in every region). Also needs durable blob
+    // storage; without it the settings say "not configured" and nothing records.
+    id: 'analytics.session-replay',
+    label: 'Session replay',
+    description: 'Masked recordings of individual visits, only for visitors who explicitly opt in to session recording. Needs blob storage. Playback needs the host:analytics:replay permission and every view is logged.',
+    category: 'CRM',
+    status: 'off',
+    bucketUnit: 'tenant',
+    salt: 'analytics.session-replay',
   }],
   toggleDefault: {
     id: 'analytics',

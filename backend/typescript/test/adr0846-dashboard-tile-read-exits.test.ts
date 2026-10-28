@@ -6,6 +6,18 @@
  *
  * The CRM half reuses the ADR 0837 territory scenario: the rep is a member of
  * West only, so West's $1000 deal is visible and East's $9000 deal is not.
+ *
+ * TST-BWC-2 (grade-tests w62): typed responses and a full agent manifest (no casts).
+ * Red when: BI skips the CRM row filter (route and run surface), `totalRows` counts the
+ * pre-filter rows, the run surface reads as nobody for a caused run, the BI surface skips
+ * its own org gate, the pipeline report serves snapshots or other deals' conversions to a
+ * scoped rep, or a scheduled chat is listed / read / managed (feature routes or the
+ * generic scheduler gate) by someone who cannot see its conversation.
+ * DOUBLE GUARD (recorded): a foreign org on the run surface is refused twice — the BI
+ * surface's own `assertRunScopeOrg` (features/bi/surface.ts) AND the seam's org floor
+ * every bundle method passes (`host/featureSurfaces.ts` `orgFloor`). The case therefore
+ * calls the BI surface BOTH through the bundle and directly (`buildBiSurface`), so the
+ * feature's own gate is witnessed without the floor.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -15,6 +27,7 @@ import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { buildFeatureSurfaces } from '../src/host/featureSurfaces.js';
+import { buildBiSurface } from '../src/features/bi/surface.js';
 import { getAgentRegistry } from '../src/executor/agentRegistry.js';
 import { upsertCrmSnapshot, crmSnapshotId } from '../src/features/crm/entities/snapshots.js';
 import { transitionModelViaReview } from './territoryReview.js';
@@ -28,26 +41,36 @@ beforeAll(async () => {
   process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const reg = getAgentRegistry();
-  reg.register({ agentId: 'a0846.agent', persona: 'Briefing Agent', modelClass: 'general' } as Parameters<ReturnType<typeof getAgentRegistry>['register']>[0]);
+  reg.register({ agentId: 'a0846.agent', persona: 'Briefing Agent', modelClass: 'general', systemPrompt: 'Brief the team.', packName: 'test.a0846', packVersion: '0.0.1' });
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   for (const id of ['users', 'crm', 'territories', 'bi', 'scheduled-agent-chats', 'channels']) { const d = getToggleDefault(id); if (d) await saveConfig({ ...d, status: 'on' }, 'test'); }
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T; text: string }
+interface Res<T = unknown> { status: number; body: T; text: string }
 function client() {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T,>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-    for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
+    for (const c of getSetCookies(res.headers)) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]!; }
     const text = res.status === 204 ? '' : await res.text();
     let parsed: unknown;
     try { parsed = text ? JSON.parse(text) : undefined; } catch { parsed = undefined; }
-    return { status: res.status, body: parsed, text };
+    return { status: res.status, body: parsed as T, text };
   };
-  return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b), patch: (p: string, b?: unknown) => call('PATCH', p, b), del: (p: string) => call('DELETE', p) };
+  return {
+    get: <T = unknown>(p: string) => call<T>('GET', p),
+    post: <T = unknown>(p: string, b?: unknown) => call<T>('POST', p, b),
+    patch: <T = unknown>(p: string, b?: unknown) => call<T>('PATCH', p, b),
+    del: <T = unknown>(p: string) => call<T>('DELETE', p),
+  };
 }
+type Login = { user: { userId: string } };
+type Stage = { stageId: string; probability: number };
+type MetricRun = { result: { points: Array<{ value: number }>; totalRows: number } };
+type PipelineReport = { snapshots: unknown[]; snapshotsWithheld?: true; conversions: Array<{ count: number }> };
+type ChatRow = { chat: { chatId: string; enabled: boolean } };
 type Client = ReturnType<typeof client>;
 
 let n = 0;
@@ -60,10 +83,10 @@ const SCHED_JOBS = '/host/openwop-app/scheduler/jobs';
 async function members(): Promise<{ owner: Client; rep: Client; repId: string; ownerId: string; tenantId: string; orgId: string }> {
   const tenantId = `org:a0846-${Date.now()}-${n++}`;
   const owner = client();
-  const ownerId = (await owner.post('/host/openwop-app/test/login', { email: `o-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId as string;
+  const ownerId = (await owner.post<Login>('/host/openwop-app/test/login', { email: `o-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId;
   const rep = client();
-  const repId = (await rep.post('/host/openwop-app/test/login', { email: `r-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId as string;
-  const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId as string;
+  const repId = (await rep.post<Login>('/host/openwop-app/test/login', { email: `r-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId;
+  const orgId = (await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
   expect((await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'Rep', subject: repId, roles: ['editor'] })).status).toBeLessThan(300);
   return { owner, rep, repId, ownerId, tenantId, orgId };
 }
@@ -71,15 +94,15 @@ async function members(): Promise<{ owner: Client; rep: Client; repId: string; o
 async function territoryScenario() {
   const m = await members();
   const { owner, orgId } = m;
-  const pipe = (await owner.get(`${crm(orgId)}/pipelines`)).body.pipelines[0];
-  const stage30 = pipe.stages.find((s: any) => s.probability === 30).stageId as string;
-  const otherStage = pipe.stages.find((s: any) => s.stageId !== stage30 && s.probability > 0 && s.probability < 100).stageId as string;
-  const modelId = (await owner.post(`${terr(orgId)}/models`, { name: 'M' })).body.modelId as string;
-  const west = (await owner.post(`${terr(orgId)}/models/${modelId}/territories`, { name: 'West', memberSubjectIds: [m.repId] })).body;
-  const east = (await owner.post(`${terr(orgId)}/models/${modelId}/territories`, { name: 'East' })).body;
+  const pipe = (await owner.get<{ pipelines: Array<{ pipelineId: string; stages: Stage[] }> }>(`${crm(orgId)}/pipelines`)).body.pipelines[0]!;
+  const stage30 = pipe.stages.find((s) => s.probability === 30)!.stageId;
+  const otherStage = pipe.stages.find((s) => s.stageId !== stage30 && s.probability > 0 && s.probability < 100)!.stageId;
+  const modelId = (await owner.post<{ modelId: string }>(`${terr(orgId)}/models`, { name: 'M' })).body.modelId;
+  const west = (await owner.post<{ territoryId: string }>(`${terr(orgId)}/models/${modelId}/territories`, { name: 'West', memberSubjectIds: [m.repId] })).body;
+  const east = (await owner.post<{ territoryId: string }>(`${terr(orgId)}/models/${modelId}/territories`, { name: 'East' })).body;
   await owner.post(`${terr(orgId)}/models/${modelId}/rules`, { target: 'deal', territoryId: east.territoryId, priority: 20, filter: { field: 'amount', op: 'gt', value: 7000 } });
   await owner.post(`${terr(orgId)}/models/${modelId}/rules`, { target: 'deal', territoryId: west.territoryId, priority: 10, filter: { field: 'amount', op: 'lte', value: 7000 } });
-  const mk = async (title: string, amount: number) => (await owner.post(`${crm(orgId)}/deals`, { title, amount, pipelineId: pipe.pipelineId, stageId: stage30 })).body.dealId as string;
+  const mk = async (title: string, amount: number) => (await owner.post<{ dealId: string }>(`${crm(orgId)}/deals`, { title, amount, pipelineId: pipe.pipelineId, stageId: stage30 })).body.dealId;
   await mk('West deal', 1000);
   const eastDeal = await mk('East deal', 9000);
   // A stage move on the HIDDEN deal — the only row `conversions` could count.
@@ -93,16 +116,16 @@ async function territoryScenario() {
   return { ...m, pipelineId: pipe.pipelineId };
 }
 
-const total = (r: Res): number => (r.body.result.points as Array<{ value: number }>).reduce((a, p) => a + p.value, 0);
+const total = (r: Res<MetricRun>): number => r.body.result.points.reduce((a, p) => a + p.value, 0);
 
 describe('ADR 0846 D2/D3 — BI metrics honour CRM record visibility', () => {
   it('the route: a territory-scoped rep sums only the deals they can see; the owner sums all', async () => {
     const s = await territoryScenario();
-    const repRun = await s.rep.post(`${bi(s.orgId)}/metrics/sys-pipeline-value/run`, {});
+    const repRun = await s.rep.post<MetricRun>(`${bi(s.orgId)}/metrics/sys-pipeline-value/run`, {});
     expect(repRun.status, repRun.text).toBe(200);
     expect(total(repRun)).toBe(1000); // RED on main: 10000
-    expect(total(await s.owner.post(`${bi(s.orgId)}/metrics/sys-pipeline-value/run`, {}))).toBe(10000);
-    const count = await s.rep.post(`${bi(s.orgId)}/metrics/sys-deal-count/run`, {});
+    expect(total(await s.owner.post<MetricRun>(`${bi(s.orgId)}/metrics/sys-pipeline-value/run`, {}))).toBe(10000);
+    const count = await s.rep.post<MetricRun>(`${bi(s.orgId)}/metrics/sys-deal-count/run`, {});
     expect(total(count)).toBe(1);
     // grade-code H1 — the row count is the caller's too, not the tenant's.
     expect(repRun.body.result.totalRows).toBe(1);
@@ -115,7 +138,10 @@ describe('ADR 0846 D2/D3 — BI metrics honour CRM record visibility', () => {
     expect(viaRun.result.points.reduce((a, p) => a + p.value, 0)).toBe(1000);
     await expect(surface.runMetric!({ metricId: 'sys-pipeline-value', orgId: '' })).rejects.toMatchObject({ code: 'validation_error' });
     const other = await members(); // a different tenant's org, unknown here
-    await expect(surface.runMetric!({ metricId: 'sys-pipeline-value', orgId: other.orgId })).rejects.toMatchObject({ code: expect.stringMatching(/not_found|forbidden/) });
+    await expect(surface.runMetric!({ metricId: 'sys-pipeline-value', orgId: other.orgId })).rejects.toMatchObject({ code: 'not_found' });
+    // The BI surface's OWN gate, without the seam floor in front of it (the double guard).
+    const direct = buildBiSurface({ tenantId: s.tenantId, runId: 'r-0846d', actingUserId: s.repId });
+    await expect(direct.runMetric!({ metricId: 'sys-pipeline-value', orgId: other.orgId })).rejects.toMatchObject({ code: 'not_found' });
     // grade-code M1 — a run CAUSED by the rep but acting for nobody reads as the rep.
     const caused = buildFeatureSurfaces({ tenantId: s.tenantId, runId: 'r-0846c', orgScopeSubject: s.repId }).bi!;
     const viaCause = (await caused.runMetric!({ metricId: 'sys-pipeline-value', orgId: s.orgId })) as { result: { points: Array<{ value: number }> } };
@@ -126,15 +152,15 @@ describe('ADR 0846 D2/D3 — BI metrics honour CRM record visibility', () => {
 describe('ADR 0846 D4 — the pipeline report withholds org-wide history from a scoped viewer', () => {
   it('scoped rep: no snapshots (flagged), conversions only over visible deals; owner unchanged', async () => {
     const s = await territoryScenario();
-    const rep = await s.rep.get(`${crm(s.orgId)}/reports/pipeline`);
+    const rep = await s.rep.get<PipelineReport>(`${crm(s.orgId)}/reports/pipeline`);
     expect(rep.status, rep.text).toBe(200);
     expect(rep.body.snapshots).toEqual([]); // RED on main: the org-wide row
     expect(rep.body.snapshotsWithheld).toBe(true);
     expect(rep.body.conversions).toEqual([]); // the only move was on the East deal
-    const own = await s.owner.get(`${crm(s.orgId)}/reports/pipeline`);
+    const own = await s.owner.get<PipelineReport>(`${crm(s.orgId)}/reports/pipeline`);
     expect(own.body.snapshots).toHaveLength(1);
     expect(own.body.snapshotsWithheld).toBeUndefined();
-    expect(own.body.conversions.reduce((a: number, c: any) => a + c.count, 0)).toBe(1);
+    expect(own.body.conversions.reduce((a, c) => a + c.count, 0)).toBe(1);
   });
 });
 
@@ -144,14 +170,14 @@ describe('ADR 0846 D1 — a scheduled chat is managed only by someone who can se
     // ADR 0879 D7 — an ORG schedule can no longer target a channel (channel posts are
     // scheduled from the channel's own owner-gated lane), so the private/visible pair is
     // now the owner's own conversation (hidden from the rep) and a DM WITH the rep.
-    const priv = (await m.owner.post('/host/openwop-app/chat/sessions', { title: `a0846p-${n++}` })).body.sessionId as string;
-    const pub = (await m.owner.post('/host/openwop-app/chat/conversations/open', { type: 'person', subjectRef: `user:${m.repId}` })).body.sessionId as string;
+    const priv = (await m.owner.post<{ sessionId: string }>('/host/openwop-app/chat/sessions', { title: `a0846p-${n++}` })).body.sessionId;
+    const pub = (await m.owner.post<{ sessionId: string }>('/host/openwop-app/chat/conversations/open', { type: 'person', subjectRef: `user:${m.repId}` })).body.sessionId;
     expect(priv && pub).toBeTruthy();
-    const hidden = await m.owner.post(sched(m.orgId), { agentId: 'a0846.agent', prompt: 'secret-standing-instruction', conversationId: priv, cronExpr: '0 9 * * *' });
+    const hidden = await m.owner.post<ChatRow>(sched(m.orgId), { agentId: 'a0846.agent', prompt: 'secret-standing-instruction', conversationId: priv, cronExpr: '0 9 * * *' });
     expect(hidden.status, hidden.text).toBe(201);
     const open = await m.owner.post(sched(m.orgId), { agentId: 'a0846.agent', prompt: 'public digest', conversationId: pub, cronExpr: '0 9 * * *' });
     expect(open.status, open.text).toBe(201);
-    const chatId = hidden.body.chat.chatId as string;
+    const chatId = hidden.body.chat.chatId;
 
     const list = await m.rep.get(sched(m.orgId));
     expect(list.status).toBe(200);
@@ -161,7 +187,7 @@ describe('ADR 0846 D1 — a scheduled chat is managed only by someone who can se
     expect((await m.rep.post(sched(m.orgId, `/${chatId}/pause`), { enabled: false })).status).toBe(404);
     expect((await m.rep.del(sched(m.orgId, `/${chatId}`))).status).toBe(404);
 
-    const ownerView = await m.owner.get(sched(m.orgId, `/${chatId}`));
+    const ownerView = await m.owner.get<ChatRow>(sched(m.orgId, `/${chatId}`));
     expect(ownerView.status).toBe(200);
     expect(ownerView.body.chat.enabled).toBe(true); // the refused pause changed nothing
     expect((await m.owner.get(sched(m.orgId))).text).toContain('secret-standing-instruction');
@@ -177,6 +203,6 @@ describe('ADR 0846 D1 — a scheduled chat is managed only by someone who can se
     expect((await m.rep.post(`${SCHED_JOBS}/${jobId}/trigger`, {})).status).toBe(404);
     expect((await m.rep.del(`${SCHED_JOBS}/${jobId}`)).status).toBe(404);
     expect((await m.owner.get(SCHED_JOBS)).text).toContain('secret-standing-instruction'); // CONTROL: the owner still sees it
-    expect((await m.owner.get(sched(m.orgId, `/${chatId}`))).body.chat.enabled).toBe(true);
+    expect((await m.owner.get<ChatRow>(sched(m.orgId, `/${chatId}`))).body.chat.enabled).toBe(true);
   });
 });

@@ -437,6 +437,9 @@ export interface InstantiateResult {
   /** Nodes installed at a version other than the template pinned (ADR 0766 D3). */
   pinMismatches?: PinMismatch[];
   incompleteNodes?: Array<{ nodeId: string; typeId: string; missing: string[] }>;
+  /** XCH-UP-3 — template params that never froze (ADR 0504): a value the copy
+   *  left blank, so a run will fail at the node that reads it. */
+  unfilledParams?: string[];
 }
 
 /** Instantiate a chain template into a fresh owned workflow ("Use template").

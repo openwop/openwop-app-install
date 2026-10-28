@@ -62,7 +62,9 @@ const log = createLogger('connections.inbound');
  *  Discord (Ed25519), and Telegram (secret-token) — the Messaging Gateway trio
  *  (ADR 0175). Each is a signature-verified webhook source; the platform is
  *  host-private metadata, NOT a wire `TriggerEvent.source` (which stays `webhook`). */
-export type InboundProvider = 'slack' | 'discord' | 'telegram' | 'whatsapp-twilio' | 'whatsapp-cloud' | 'zoom-webinar';
+export type InboundProvider = 'slack' | 'discord' | 'telegram' | 'whatsapp-twilio' | 'whatsapp-cloud' | 'zoom-webinar'
+  /** ADR 0955 D3 — inbound SMS on a Twilio connection (the connection's own provider id). */
+  | 'twilio';
 
 /** RFC 0127 / ADR 0286 — the streaming/CDC INGRESS provider. A broker (Kafka/Kinesis/
  *  Pub-Sub/EventBridge) or a warehouse CDC feed PUSHES a signed message/row here; the
@@ -120,7 +122,7 @@ const subscriptionIdFor = (connectionId: string): string => hostDerivedSubscript
 /** Slack / Discord / Telegram (ADR 0175) + WhatsApp via Twilio BSP (ADR 0394);
  *  keep the check in one place. */
 export function inboundSupported(provider: string): provider is InboundProvider {
-  return provider === 'slack' || provider === 'discord' || provider === 'telegram' || provider === 'whatsapp-twilio' || provider === 'whatsapp-cloud' || provider === 'zoom-webinar';
+  return provider === 'slack' || provider === 'discord' || provider === 'telegram' || provider === 'whatsapp-twilio' || provider === 'whatsapp-cloud' || provider === 'zoom-webinar' || provider === 'twilio';
 }
 
 /** ADR 0404 — providers whose inbound is OBSERVER-ONLY: a verified event is
@@ -128,7 +130,9 @@ export function inboundSupported(provider: string): provider is InboundProvider 
  *  NOT dispatched to a configured workflow. So their config carries no
  *  `workflowId` and no trigger-bridge subscription. */
 export function inboundObserverOnly(provider: string): boolean {
-  return provider === 'zoom-webinar';
+  // ADR 0955 D3 — inbound SMS feeds the keyword ladder (and, with ADR 0954 D7, the
+  // conversation lane); it never fires a configured workflow.
+  return provider === 'zoom-webinar' || provider === 'twilio';
 }
 
 // ADR 0499 — `connection-inbound:<id>` is the webhook SIGNING secret. Deleting it
@@ -324,6 +328,14 @@ export function registerInboundObserver(provider: InboundProvider, fn: (event: V
   const list = inboundObservers.get(provider) ?? [];
   if (!list.includes(fn)) list.push(fn);
   inboundObservers.set(provider, list);
+}
+/**
+ * ADR 0955 D3 — the BLOCKING variant, for a provider whose observer records a legal opt-out
+ * (inbound SMS). A failed write must not be acked as delivered: it throws, the route answers
+ * 5xx, and the observer releases its dedup claim so a redelivery can land it.
+ */
+async function notifyInboundObserverStrict(provider: string, event: VerifiedInboundEvent): Promise<void> {
+  for (const fn of inboundObservers.get(provider) ?? []) await fn(event);
 }
 async function notifyInboundObserver(provider: string, event: VerifiedInboundEvent): Promise<void> {
   const list = inboundObservers.get(provider) ?? [];
@@ -625,6 +637,20 @@ export async function handleInboundEvent(
       log.info('inbound dispatch gated', { connectionId: input.connectionId, provider: config.provider, reason: gate.reason });
       return { status: 'ignored' };
     }
+  } else if (config.provider === 'twilio') {
+    // ADR 0955 D3 — inbound SMS. Same Twilio scheme as WhatsApp-via-Twilio (URL + sorted
+    // form params, the auth token as the secret, fail closed without the URL). Tenant is the
+    // stored config's; the client comes from the stored number binding inside that tenant.
+    if (!input.requestUrl) { log.warn('inbound signature rejected', { connectionId: input.connectionId, provider: 'twilio', reason: 'missing_request_url' }); return { status: 'unauthorized' }; }
+    const verdict = verifyTwilioSignature({ authToken: signingSecret, url: input.requestUrl, params: input.body, signatureHeader: input.headers.twilioSignature });
+    if (!verdict.ok) { log.warn('inbound signature rejected', { connectionId: input.connectionId, provider: 'twilio', reason: verdict.reason }); return { status: 'unauthorized' }; }
+    // Status callbacks (no Body) are acked; only messages reach the observers.
+    if (typeof input.body.Body !== 'string') return { status: 'ignored' };
+    // OBSERVER-ONLY, UNGATED (an opt-out applies with the feature off or the plan lapsed).
+    // Twilio sends no timestamp, so the observer dedups on MessageSid itself. STRICT: a STOP
+    // that could not be written is a 5xx, never an ack.
+    await notifyInboundObserverStrict(config.provider, { tenantId: config.tenantId, connectionId: input.connectionId, body: input.body, now: input.now });
+    return { status: 'accepted', runId: null, deduped: false };
   } else if (config.provider === 'whatsapp-cloud') {
     // ADR 0394 Phase 4 — Meta Cloud API direct: sha256 HMAC over the raw body
     // (the signing secret is the Meta APP SECRET). JSON deliveries, so the

@@ -32,6 +32,7 @@ import type { FirebaseApp } from '@firebase/app';
 import type { AuthCredential, User, Auth, TotpSecret, MultiFactorResolver } from '@firebase/auth';
 import { setCurrentIdToken, registerIdTokenRefresher } from '../client/config.js';
 import i18n from '../i18n/index.js';
+import { brand } from '../brand/brand.js';
 import { purgeOfflineCaches } from '../sw/offlineCaches.js';
 import { clearLastKnownEntitlements } from '../featureToggles/lastKnownEntitlement.js';
 
@@ -352,6 +353,7 @@ export function describeAuthError(err: unknown): string {
     case 'auth/operation-not-allowed': return i18n.t('auth:errOperationNotAllowed');
     // ADR 0389 P1 — TOTP enrollment / challenge
     case 'auth/invalid-verification-code': return i18n.t('auth:errInvalidMfaCode');
+    case 'auth/maximum-second-factor-count-exceeded': return i18n.t('auth:errMfaFactorLimit');
     case 'auth/requires-recent-login': return i18n.t('auth:errRequiresRecentLogin');
     case 'auth/network-request-failed': return i18n.t('auth:errNetworkRequestFailed');
     default: return err instanceof Error && err.message ? err.message : i18n.t('auth:errGeneric');
@@ -487,6 +489,11 @@ export interface MfaFactor {
   uid: string;
   displayName: string | null;
   enrolledAt: string | null;
+  /** `'totp'` or `'phone'`. Identity Platform holds at most ONE TOTP factor per
+   *  account (measured 2026-10-23: a second enrollment fails with
+   *  `auth/maximum-second-factor-count-exceeded`), so the Security page keys
+   *  "can this account add an authenticator?" off it. */
+  factorId: string;
 }
 
 /** Enrolled second factors of the signed-in user ([] when none / signed out). */
@@ -497,6 +504,7 @@ export async function listMfaFactors(): Promise<MfaFactor[]> {
     uid: f.uid,
     displayName: f.displayName ?? null,
     enrolledAt: f.enrollmentTime ?? null,
+    factorId: f.factorId,
   }));
 }
 
@@ -517,8 +525,38 @@ export async function startTotpEnrollment(): Promise<{ secretKey: string; otpaut
   const accountName = a.currentUser.email ?? a.currentUser.uid;
   return {
     secretKey: secret.secretKey,
-    otpauthUrl: secret.generateQrCodeUrl(accountName, 'OpenWOP'),
+    // The issuer is the label an authenticator app files this account under, so
+    // it must be the product the person signed up to (a white-label brand), not
+    // the upstream project name.
+    otpauthUrl: buildOtpauthUrl(secret, accountName, brand.productName),
   };
+}
+
+/**
+ * The `otpauth://totp/` Key URI for an authenticator app, percent-encoded.
+ *
+ * Firebase's `TotpSecret.generateQrCodeUrl` concatenates the issuer and account
+ * RAW, so a brand like "Acme & Co" or an account like `owner+tag@x.com` broke the
+ * label or the query (a `+` reads as a space, `&` starts a new parameter, `:`
+ * moves the issuer/account split). Built here per the Key URI Format: each label
+ * part and the `issuer` parameter are `encodeURIComponent`-encoded (never
+ * form-encoded, which would turn spaces into `+`), the issuer parameter equals
+ * the label prefix, and the base32 secret passes through byte for byte.
+ */
+export function buildOtpauthUrl(
+  secret: Pick<TotpSecret, 'secretKey' | 'hashingAlgorithm' | 'codeLength' | 'codeIntervalSeconds'>,
+  accountName: string,
+  issuer: string,
+): string {
+  const label = `${encodeURIComponent(issuer)}:${encodeURIComponent(accountName)}`;
+  const query = [
+    `secret=${secret.secretKey}`,
+    `issuer=${encodeURIComponent(issuer)}`,
+    `algorithm=${encodeURIComponent(secret.hashingAlgorithm)}`,
+    `digits=${secret.codeLength}`,
+    `period=${secret.codeIntervalSeconds}`,
+  ].join('&');
+  return `otpauth://totp/${label}?${query}`;
 }
 
 /** Step 2: verify the user's first authenticator code and finalize enrollment. */

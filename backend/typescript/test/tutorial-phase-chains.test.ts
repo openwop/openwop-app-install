@@ -19,6 +19,7 @@
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { join } from 'node:path';
+import { readFileSync, readdirSync } from 'node:fs';
 import {
   loadWorkflowChainPacks,
   getChain,
@@ -30,6 +31,26 @@ import {
 } from '../src/host/workflowChainPackLoader.js';
 
 const PACK_ROOT = join(import.meta.dirname, '../../../examples/workflow-chain-packs');
+const FE_SRC = join(import.meta.dirname, '../../../frontend/react/src');
+
+/**
+ * The action ids the FRONTEND registers — read from its `walkthroughActions.ts`
+ * modules (the SSoT), never copied here: a renamed registration must fail this
+ * file (wave 51: a parity list copied as literals cannot see the other side move).
+ */
+function frontendActionIds(): Set<string> {
+  const out = new Set<string>();
+  const walk = (dir: string): void => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, e.name);
+      if (e.isDirectory()) { if (e.name !== 'node_modules') walk(p); continue; }
+      if (e.name !== 'walkthroughActions.ts') continue;
+      for (const m of readFileSync(p, 'utf8').matchAll(/register(?:WalkthroughAction|PageSpotlight)\(\s*'([^']+)'/g)) out.add(m[1]!);
+    }
+  };
+  walk(FE_SRC);
+  return out;
+}
 
 const PARENT = 'tutorial.connect-your-ai';
 const PHASES = [
@@ -78,6 +99,9 @@ describe('ADR 0488 D2 — tutorial phase sub-chains load through the REAL loader
     expect(def.nodes[0]!.typeId).toBe('ui.walkthrough.step');
     expect(def.nodes[1]!.typeId).toBe('ui.walkthrough.checkpoint');
     expect(def.edges).toHaveLength(1);
+    // The order claim covers the EDGE too: the step feeds its checkpoint.
+    const [step, check] = def.nodes;
+    expect(def.edges?.[0]).toMatchObject({ sourceNodeId: step!.nodeId, targetNodeId: check!.nodeId });
   });
 
   it('the PARENT composes the phases as sub-chains, and pins no workflowId (RFC 0133 §1.2)', () => {
@@ -106,10 +130,11 @@ describe('ADR 0488 D2 — tutorial phase sub-chains load through the REAL loader
   });
 
   it('every phase step points at an action the FRONTEND registers (no dead-end phase)', () => {
-    // The frontend owns the action registry, so the ids are pinned here against
-    // the same registrations the walkthrough packs already rely on. A typo'd
-    // actionId would leave the player in `needs-update` mid-tutorial.
-    const KNOWN = new Set(['keys.page.view', 'models.page.view', 'chat.composer.send-message']);
+    // The frontend owns the action registry, so the ids are READ from its
+    // registrations. A typo'd actionId would leave the player in `needs-update`
+    // mid-tutorial. Floor: MEASURED 12 registrations on 6a852d799.
+    const KNOWN = frontendActionIds();
+    expect(KNOWN.size, 'the registration scan found nothing (moved path?)').toBeGreaterThanOrEqual(12);
     const seen: string[] = [];
     for (const id of PHASES) {
       for (const n of expandChain(getChain(id)!.chain).nodes) {

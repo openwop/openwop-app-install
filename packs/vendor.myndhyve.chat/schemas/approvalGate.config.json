@@ -2,16 +2,75 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "properties": {
-    "title": { "type": "string" },
-    "artifactType": { "type": "string" },
+    "title": {
+      "type": "string"
+    },
+    "artifactType": {
+      "type": "string"
+    },
     "actions": {
       "type": "array",
       "minItems": 1,
-      "items": { "type": "string", "minLength": 1 },
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
       "description": "WF-EM-5 — the verb allowlist for THIS gate. Forwarded into the suspend payload, so it becomes `interrupt.data.actions`: `validateResumeValue` refuses any other verb with a 400 (the run stays interrupted rather than recording a decision the approver did not make) and both approval cards render only these buttons. Omit to keep the full default set (approve | reject | request-changes | defer | escalate). Declare it whenever the gate's `falsy approved` branch leads to a TERMINAL node, or `defer`/`escalate` — which have no member in the decision union — fall through to `refine` and are written down as a decline."
     },
-    "maxRequestChangesIterations": { "type": "integer", "minimum": 0, "default": 0 },
-    "timeoutMs": { "type": "integer", "minimum": 0 }
+    "maxRequestChangesIterations": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 0
+    },
+    "timeoutMs": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "approverRefs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "WF-UP-2 — subjects who may decide this gate (the ACL the host enforces, ADR 0677). Blank entries are dropped, so an empty list or \"\" keeps an OPEN gate (any member)."
+    },
+    "approverGroupRefs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "Groups whose members may decide this gate."
+    },
+    "approverRoleRefs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "Roles whose holders may decide this gate."
+    },
+    "overrideScopes": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "Scopes that may override a quorum gate (only consulted when requiredApprovals > 1)."
+    },
+    "requiredApprovals": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "WF-UP-2 — N-of-M quorum: how many distinct eligible approvers must accept before the gate passes (the host's openwop-interrupt-quorum resolver). 1 (or absent) is a single-approver gate."
+    },
+    "rejectionPolicy": {
+      "type": "string",
+      "enum": [
+        "any",
+        "majority"
+      ],
+      "description": "With requiredApprovals > 1: 'any' (default) — one reject vetoes; 'majority' — more than half must reject."
+    }
   },
   "additionalProperties": true
 }

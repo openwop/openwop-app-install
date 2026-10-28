@@ -12,9 +12,13 @@ import { createRequire } from 'node:module';
 const require_ = createRequire(import.meta.url);
 const PACK = require_.resolve('../../../packs/feature.work-selection.nodes/index.mjs');
 
-const load = async (): Promise<Record<string, (ctx: unknown) => Promise<{ status: string; outputs?: Record<string, unknown> }>>> => {
-  const mod = (await import(PACK)) as { nodes: Record<string, never> };
-  return mod.nodes as never;
+type NodeFn = (ctx: unknown) => Promise<{ status: string; outputs?: Record<string, unknown> }>;
+
+const load = async (): Promise<Record<string, NodeFn>> => {
+  // The pack is untyped `.mjs`; an import of a resolved path is `any`, so the
+  // annotation types it without a laundering cast.
+  const mod: { nodes: Record<string, NodeFn> } = await import(PACK);
+  return mod.nodes;
 };
 
 const ranked = [

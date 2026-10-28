@@ -7,6 +7,7 @@ import { getManagedProviderStatuses } from '../providers/managedProvider.js';
 import { sessionSecretConfigError, apiKeyConfigError } from '../middleware/auth.js';
 import { APP_VERSION } from '../version.js';
 import { buildInfo } from '../host/buildInfo.js';
+import { deployProfile } from '../host/deployPosture.js';
 import type { Storage } from '../storage/storage.js';
 
 const log = createLogger('routes.health');
@@ -127,6 +128,10 @@ export function registerHealthRoutes(app: Express, deps: { storage?: Storage } =
       // what I merged?" a single curl. `stamped:false` means the deploy omitted
       // the stamp — reported honestly rather than guessed.
       build: buildInfo(),
+      // ADR 0981 D5 — which profile this deploy runs: `strict` (the auth posture)
+      // or `evaluation`. Only the label: hatch names tell an outsider which risks
+      // the operator accepted, so they are operator-only (ADR 0981 Q5).
+      profile: deployProfile(),
       checks: {
         managedProviders,
         config: configError ? { ok: false, error: configError } : { ok: true },

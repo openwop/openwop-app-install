@@ -103,6 +103,7 @@ describe('D7 — the readmit door', () => {
     // Self-seeded (wave 9): erase this case's own subject through the admin door.
     await recordConsent({ tenantId: ws, subjectKey: 'victim-readmit', categories: { marketing: true }, source: 'test' });
     expect((await call('DELETE', `${ORG()}/subjects/victim-readmit`, adminCookie)).status).toBe(200);
+    expect(await isErasureTombstoned(ws, 'user:victim-readmit')).toBe(true);
     const short = await call('POST', `${ORG()}/subjects/victim-readmit/readmit`, adminCookie, { attestation: 'too short' });
     expect(short.status).toBe(400);
     expect(short.body.error).toBe('validation_error');
@@ -114,8 +115,13 @@ describe('D7 — the readmit door', () => {
 
     const ok = await call('POST', `${ORG()}/subjects/victim-readmit/readmit`, adminCookie, { attestation: 'The subject emailed support asking to hear from us again.' });
     expect(ok.status).toBe(200);
-    expect(ok.body).toMatchObject({ ok: true, readmitted: true, tombstonesCleared: 1, subjectKey: 'victim-readmit' });
+    // ADR 0954 also fences the canonical user-subject form for lead attribution.
+    // Readmission clears every form in this DSAR group without granting consent; since
+    // the ADR 0464 DSAR-DBL correction that includes the doubled `user:user:` spelling.
+    expect(ok.body).toMatchObject({ ok: true, readmitted: true, tombstonesCleared: 3, subjectKey: 'victim-readmit' });
     expect(await isErasureTombstoned(ws, 'victim-readmit')).toBe(false);
+    expect(await isErasureTombstoned(ws, 'user:victim-readmit')).toBe(false);
+    expect(await isErasureTombstoned(ws, 'user:user:victim-readmit')).toBe(false);
     expect(await getConsent(ws, 'victim-readmit'), 'readmit granted nothing').toBeNull();
     // …and the title's last clause: the subject's next affirmative opt-in now LANDS
     // (before the readmit the D10 barrier refused it).

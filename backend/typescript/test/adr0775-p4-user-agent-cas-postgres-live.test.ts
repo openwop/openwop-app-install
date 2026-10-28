@@ -9,6 +9,15 @@
  * Runs against `OPENWOP_PG_TEST_DSN` when set (any Postgres, e.g. a PGlite socket
  * server), else a `postgres:15-alpine` testcontainer when Docker is reachable,
  * else skips with a notice.
+ *
+ * Tracker: TST-BSW-3 (docs/steward/TEST-ASSESSMENT.md). CEILING: the default
+ * gate (`npm run ci`, `OPENWOP_SKIP_TESTCONTAINERS=1`, no DSN) SKIPS both
+ * cases, so the wave-60 sabotage probes on this SQL (`system_prompt`, the
+ * null-safe `description`, the `jsonb` allowlist compare) were not witnessed
+ * there. Case 1 targets the `system_prompt` predicate; case 2 targets the
+ * null-safe compare (its first swap misses under a plain `=` on the NULL
+ * description) and the `jsonb` allowlist compare (its stale swap matches if
+ * the allowlist is not compared).
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { execSync } from 'node:child_process';

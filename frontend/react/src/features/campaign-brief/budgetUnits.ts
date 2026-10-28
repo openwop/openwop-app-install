@@ -3,31 +3,22 @@
  *
  * The editor used a hard-coded ×100/÷100, which assumes every currency has two
  * decimals: a JPY user entering 5000 stored ¥500,000 (100× the intent), and a
- * stored ¥5000 rendered as "50". The exponent belongs to the CURRENCY — derive
- * it from Intl (JPY→0, KWD/BHD→3), defaulting to 2 when the currency is absent
- * or unknown. The backend stores integers and is exponent-agnostic; this
- * boundary is the only place the assumption lived.
+ * stored ¥5000 rendered as "50". The exponent belongs to the CURRENCY — read
+ * from the ISO 4217 table (JPY→0, KWD/BHD→3), defaulting to 2 when the currency
+ * is absent or unknown. Not from `Intl`: its display precision drifts by ICU
+ * release (ICU 78.3 says HUF has 0 decimals; ISO says 2), and the backend reads
+ * these minor units with the ISO table, so the writer must too.
  */
 
+import { isoMinorUnits } from '../../i18n/currencyCodes.js';
+
 export function currencyExponent(currency: string | undefined): number {
-  if (!currency || !isIsoCurrency(currency)) return 2;
-  try {
-    return new Intl.NumberFormat('en', { style: 'currency', currency: currency.toUpperCase() })
-      .resolvedOptions().maximumFractionDigits ?? 2;
-  } catch {
-    return 2;
-  }
+  return isoMinorUnits(currency) ?? 2;
 }
 
-/** Three ASCII letters that Intl accepts as a currency code. */
+/** Three ASCII letters naming a currency in the ISO 4217 table (any case). */
 export function isIsoCurrency(code: string): boolean {
-  if (!/^[A-Za-z]{3}$/.test(code)) return false;
-  try {
-    new Intl.NumberFormat('en', { style: 'currency', currency: code.toUpperCase() });
-    return true;
-  } catch {
-    return false;
-  }
+  return isoMinorUnits(code) !== undefined;
 }
 
 /** Stored minor units → the major-unit string the editor field shows. */

@@ -5,7 +5,13 @@
  * store, the adaptive-card message shape, and the fail-closed no-op paths —
  * with the transport faked (the real one is brokeredFetch, the credential
  * authority; its own guarantees are covered by the brokered-egress suite).
- * HTTP: the self-service pref routes (signed-in only; per-user; tenant-scoped).
+ * The HTTP self-service pref routes are teams-approval-delivery.test.ts.
+ *
+ * The broadcast leg has TWO guards: `!recipient` in deliverTeamsApprovalCard
+ * and the pref lookup, whose key for a missing recipient is
+ * `${tenantId}:undefined` and normally misses. A pref is seeded under the
+ * literal userId 'undefined' so only `!recipient` refuses the broadcast (probe
+ * 8fw3g3-tm-unit-bcast was vacuous without it).
  */
 
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
@@ -20,7 +26,6 @@ import {
   type TeamsDeliveryTransport,
 } from '../src/host/teamsApprovalDelivery.js';
 import type { NotificationRecord } from '../src/types.js';
-import type { Storage } from '../src/storage/storage.js';
 
 const T = 'tenant-teams';
 
@@ -36,7 +41,7 @@ function record(overrides: Partial<NotificationRecord> = {}): NotificationRecord
     createdAt: new Date().toISOString(),
     recipientUserId: 'usr-alice',
     ...overrides,
-  } as NotificationRecord;
+  };
 }
 
 describe('teams approval delivery — service (faked transport)', () => {
@@ -46,6 +51,7 @@ describe('teams approval delivery — service (faked transport)', () => {
   afterEach(async () => {
     setTeamsDeliveryTransportForTest(null);
     await clearTeamsDeliveryPref(T, 'usr-alice');
+    await clearTeamsDeliveryPref(T, 'undefined');
   });
 
   function captureTransport(): { calls: Parameters<TeamsDeliveryTransport>[0][] } {
@@ -57,7 +63,7 @@ describe('teams approval delivery — service (faked transport)', () => {
   it('delivers an addressed action-needed notification to the recipient pref, via THEIR identity', async () => {
     await setTeamsDeliveryPref({ tenantId: T, userId: 'usr-alice', connectionId: 'conn-1', chatId: '19:chat' });
     const { calls } = captureTransport();
-    const sent = await deliverTeamsApprovalCard(storage as unknown as Storage, record());
+    const sent = await deliverTeamsApprovalCard(storage, record());
     expect(sent).toBe(true);
     expect(calls).toHaveLength(1);
     expect(calls[0]!.actingUserId).toBe('usr-alice');
@@ -67,19 +73,21 @@ describe('teams approval delivery — service (faked transport)', () => {
 
   it('no-ops (silently) without a pref, for broadcasts, and for non-action-needed types', async () => {
     const { calls } = captureTransport();
-    expect(await deliverTeamsApprovalCard(storage as unknown as Storage, record())).toBe(false); // no pref
+    expect(await deliverTeamsApprovalCard(storage, record())).toBe(false); // no pref
     await setTeamsDeliveryPref({ tenantId: T, userId: 'usr-alice', connectionId: 'conn-1', chatId: '19:chat' });
-    const broadcast = record();
-    delete (broadcast as { recipientUserId?: string }).recipientUserId;
-    expect(await deliverTeamsApprovalCard(storage as unknown as Storage, broadcast)).toBe(false); // broadcast
-    expect(await deliverTeamsApprovalCard(storage as unknown as Storage, record({ type: 'workflow.completed' }))).toBe(false); // wrong type
+    // The second guard's bait: what a missing recipient would key the lookup on.
+    await setTeamsDeliveryPref({ tenantId: T, userId: 'undefined', connectionId: 'conn-x', chatId: '19:spray' });
+    const { recipientUserId: _addressed, ...broadcast } = record();
+    expect(_addressed).toBe('usr-alice');
+    expect(await deliverTeamsApprovalCard(storage, broadcast)).toBe(false); // broadcast
+    expect(await deliverTeamsApprovalCard(storage, record({ type: 'workflow.completed' }))).toBe(false); // wrong type
     expect(calls).toHaveLength(0);
   });
 
   it('a cross-tenant pref never matches', async () => {
     await setTeamsDeliveryPref({ tenantId: 'other-tenant', userId: 'usr-alice', connectionId: 'conn-1', chatId: '19:chat' });
     const { calls } = captureTransport();
-    expect(await deliverTeamsApprovalCard(storage as unknown as Storage, record())).toBe(false);
+    expect(await deliverTeamsApprovalCard(storage, record())).toBe(false);
     expect(calls).toHaveLength(0);
     await clearTeamsDeliveryPref('other-tenant', 'usr-alice');
   });
@@ -91,7 +99,7 @@ describe('teams approval delivery — service (faked transport)', () => {
     expect(attachments[0]!.contentType).toBe('application/vnd.microsoft.card.adaptive');
     const card = JSON.parse(attachments[0]!.content) as { body: Array<{ text: string }>; actions: Array<{ type: string; url: string }> };
     expect(card.body[0]!.text).toBe('Approve release v2');
-    expect(card.body[1]!.text).toContain('Q3 release');
+    expect(card.body[1]!.text).toBe('Sign-off requested for the Q3 release.');
     expect(card.actions).toHaveLength(1);
     expect(card.actions[0]!.type).toBe('Action.OpenUrl');
     expect(card.actions[0]!.url).toBe('https://app.example/inbox');

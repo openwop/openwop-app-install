@@ -500,6 +500,32 @@ describe('kanban routes (sqlite memory app)', () => {
     expect((await getCard(card.body.id))?.title).toBe('Original title');
   });
 
+  // ADR 0963 (grade-code) — releasing a held card is a conditional write: a tab
+  // holding a stale copy must not clear a hold the work loop wrote since.
+  it('a conditional note write lands only on the note the caller saw', async () => {
+    const created = await jsonFetch<{ id: string }>('/host/openwop-app/kanban/boards', {
+      method: 'POST', body: JSON.stringify({ name: 'Held release' }),
+    });
+    const held1 = 'waiting on legal\n[auto:run-restore] Held — its run failed (r1).';
+    const card = await jsonFetch<{ id: string }>(
+      `/host/openwop-app/kanban/boards/${created.body.id}/cards`,
+      { method: 'POST', body: JSON.stringify({ title: 'Held card', columnId: 'todo', blockerNote: held1 }) },
+    );
+    // The loop re-held the card after a second failure; this tab still shows R1.
+    const held2 = 'waiting on legal\n[auto:run-restore] Held — its run failed (r2).';
+    await updateCardFields(card.body.id, { blockerNote: held2 });
+    const stale = await jsonFetch<{ error?: string }>(`/host/openwop-app/kanban/cards/${card.body.id}`, {
+      method: 'PATCH', body: JSON.stringify({ blockerNote: 'waiting on legal', ifBlockerNote: held1 }),
+    });
+    expect(stale.status).toBe(409);
+    expect((await getCard(card.body.id))?.blockerNote).toBe(held2);
+    const fresh = await jsonFetch(`/host/openwop-app/kanban/cards/${card.body.id}`, {
+      method: 'PATCH', body: JSON.stringify({ blockerNote: 'waiting on legal', ifBlockerNote: held2 }),
+    });
+    expect(fresh.status).toBe(200);
+    expect((await getCard(card.body.id))?.blockerNote).toBe('waiting on legal');
+  });
+
   it('validates required fields', async () => {
     const bad = await jsonFetch<{ error?: string; details?: { field?: string } }>('/host/openwop-app/kanban/boards', {
       method: 'POST',

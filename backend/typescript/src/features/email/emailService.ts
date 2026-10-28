@@ -12,14 +12,17 @@ import { declarePiiFields } from '../../host/dataClassification.js';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { insertOwnedOrConflict } from '../../host/ownedInsert.js';
 import { OpenwopError } from '../../types.js';
+import { assertCampaignRef } from '../../host/campaignRefs.js';
+import { smsBodyProblem } from '../../host/smsText.js';
 import { listContacts, type Contact, type ContactStage } from '../crm/contactsService.js';
-import { isAllowed } from '../consent/consentService.js';
 import { registerSubjectEraser } from '../../host/subjectErasure.js';
 import { onCrmRecordMerged, onCrmRecordUnmerged } from '../../host/crmRecordLifecycle.js';
 import { resolveToggle } from '../../host/featureToggles/service.js';
 import { createActivity, getActivity } from '../crm/crmEntitiesService.js';
 import { getSegment, resolveSegmentMembers } from '../crm/segmentsService.js';
-import { suppressionBlocksSend } from '../crm/suppressionService.js';
+import { checkChannelEligibility } from '../crm/channelEligibility.js';
+import { noteFirstSend, recordSends, senderPaused, warmupRemaining } from '../crm/senderHealth.js';
+import { assertSenderAuthenticated } from './senderAuth.js';
 import { instrumentBodyWithUnsubscribe, mintToken, renderHtmlBody, deleteSubjectEngagement } from './engagementService.js';
 import { deleteSubjectBounceCounts } from './bounceWebhooks.js';
 import { renderMarkdownBody } from './safeMarkdown.js';
@@ -32,7 +35,17 @@ const svcLog = createLogger('email.service');
 
 /** ADR 0256 — how the body authors its HTML part. `text` (default) is the ADR
  *  0242 escape-first plain-text render; `markdown` renders a safe Markdown subset. */
-export type EmailBodyFormat = 'text' | 'markdown';
+/** ADR 0955 D8 — `'sms'` bodies share the versioned store (versions, hash, approval pin) and
+ *  are fixed at creation: an email campaign refuses one, and a template never switches
+ *  between SMS and email (`format_locked`). */
+export type EmailBodyFormat = 'text' | 'markdown' | 'sms';
+const formatField = (f: EmailBodyFormat | undefined): { format?: 'markdown' | 'sms' } =>
+  f === 'markdown' ? { format: 'markdown' } : f === 'sms' ? { format: 'sms' } : {};
+function assertSmsBody(format: EmailBodyFormat | undefined, body: string): void {
+  if (format !== 'sms') return;
+  const problem = smsBodyProblem(body);
+  if (problem) throw new OpenwopError('validation_error', problem, 400, { field: 'body', reason: 'sms_body_invalid' });
+}
 export interface EmailTemplate {
   templateId: string; tenantId: string; orgId: string;
   name: string; subject: string; body: string; // body/subject: {{contact.name|email|company}}
@@ -43,6 +56,11 @@ export interface EmailTemplate {
   version?: number;
   /** ADR 0905 D1 — `templateContentHash` of the current subject/body/format. */
   contentHash?: string;
+  /** ADR 0905 follow-up (ADR 0922) — set, by CAS on THIS row, before any campaign pins
+   *  the template for a send. `updateTemplate(…, {refuseIfSent})` checks it inside its
+   *  own CAS on this row, so an edit and a send start serialise here: exactly one wins.
+   *  Never cleared (a sent template stays "sent"); 0905's own edits ignore it and version. */
+  sendHold?: { since: string };
   createdBy: string; createdAt: string; updatedAt: string;
 }
 
@@ -112,6 +130,10 @@ export interface Campaign {
    *  (one per brief, `getCampaignByBrief`) — the email campaign stays its own
    *  honest per-email-engagement row; this just enables a future intel join. */
   sourceBriefId?: string;
+  /** ADR 0941 D1 / P2 — the MarketingCampaign this send belongs to (the child
+   *  points up). Validated against the campaign owner at create, in this send's
+   *  org; a dangling or cross-org id is refused. */
+  marketingCampaignId?: string;
   /** ADR 0905 D2 — what this send generation delivers, frozen at send start. Every
    *  batch renders from it, never from the live template, so an edit made while a
    *  campaign is `sending` cannot change the rest of the send. Re-pinned when a resend
@@ -119,6 +141,9 @@ export interface Campaign {
   sendPin?: CampaignSendPin;
   /** ADR 0905 D3 — the send-review cycle (absent until first submitted). */
   review?: CampaignReview;
+  /** ADR 0905 D7 — the org topic this campaign is about (absent ⇒ the org's general
+   *  list). Recipients who opted out of the topic are skipped at send. */
+  topicId?: string;
   createdBy: string; createdAt: string; updatedAt: string;
 }
 
@@ -206,6 +231,57 @@ export interface EmailSettings {
   updatedBy: string; updatedAt: string;
 }
 const settings = new DurableCollection<EmailSettings>('email:settings', (s) => `${s.tenantId}::${s.orgId}`);
+
+// ── ADR 0905 D7 — subscription topics (definitions; opt-outs are consent's) ──
+export interface EmailTopic {
+  topicId: string; tenantId: string; orgId: string;
+  name: string; description?: string;
+  createdBy: string; createdAt: string; updatedAt: string;
+}
+export const MAX_TOPICS_PER_ORG = 20;
+const topics = new DurableCollection<EmailTopic>('email:topic', (t) => t.topicId, undefined, (t) => t.tenantId);
+
+export async function listTopics(tenantId: string, orgId: string): Promise<EmailTopic[]> {
+  return (await topics.listForTenantIndexed(tenantId)).filter((t) => t.tenantId === tenantId && t.orgId === orgId).sort((a, b) => a.name.localeCompare(b.name));
+}
+export async function getTopic(tenantId: string, orgId: string, topicId: string): Promise<EmailTopic | null> {
+  const t = await topics.get(topicId);
+  return t && t.tenantId === tenantId && t.orgId === orgId ? t : null;
+}
+const topicName = (v: string): string => {
+  const n = v.trim();
+  if (!n || n.length > 80) throw new OpenwopError('validation_error', 'A topic name is required (at most 80 characters).', 400, { field: 'name' });
+  return n;
+};
+export async function createTopic(input: { tenantId: string; orgId: string; name: string; description?: string; createdBy: string }): Promise<EmailTopic> {
+  if ((await listTopics(input.tenantId, input.orgId)).length >= MAX_TOPICS_PER_ORG) {
+    throw new OpenwopError('conflict', `An organization can have at most ${MAX_TOPICS_PER_ORG} email topics.`, 409, { reason: 'topic_limit', max: MAX_TOPICS_PER_ORG });
+  }
+  const now = new Date().toISOString();
+  const row: EmailTopic = {
+    topicId: `etopic:${randomUUID()}`, tenantId: input.tenantId, orgId: input.orgId, name: topicName(input.name),
+    ...(input.description?.trim() ? { description: input.description.trim().slice(0, 280) } : {}),
+    createdBy: input.createdBy, createdAt: now, updatedAt: now,
+  };
+  await topics.put(row);
+  return row;
+}
+export async function updateTopic(tenantId: string, orgId: string, topicId: string, patch: { name?: string; description?: string }): Promise<EmailTopic | null> {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const cur = await getTopic(tenantId, orgId, topicId);
+    if (!cur) return null;
+    const next: EmailTopic = { ...cur, ...(patch.name !== undefined ? { name: topicName(patch.name) } : {}), ...(patch.description !== undefined ? { description: patch.description.trim().slice(0, 280) } : {}), updatedAt: new Date().toISOString() };
+    if (await topics.compareAndSwap(cur, next)) return next;
+  }
+  throw new OpenwopError('conflict', 'Could not update the topic (too many concurrent writes).', 409, { topicId });
+}
+/** Refused (409 `topic_in_use`) while a campaign that is not `sent` targets the topic. */
+export async function deleteTopic(tenantId: string, orgId: string, topicId: string): Promise<boolean> {
+  if (!(await getTopic(tenantId, orgId, topicId))) return false;
+  const holders = (await listCampaigns(tenantId, orgId)).filter((c) => c.topicId === topicId && c.status !== 'sent');
+  if (holders.length > 0) throw new OpenwopError('conflict', 'This topic is used by a campaign that has not finished sending.', 409, { reason: 'topic_in_use', topicId, campaignIds: holders.slice(0, 20).map((c) => c.campaignId) });
+  return topics.delete(topicId);
+}
 
 export async function getEmailSettings(tenantId: string, orgId: string): Promise<EmailSettings | null> {
   const row = await settings.get(`${tenantId}::${orgId}`);
@@ -364,6 +440,7 @@ export async function createTemplate(input: { tenantId: string; orgId: string; n
   // never duplicates a template — but ONLY onto a row this (tenant, org) owns. #4485:
   // the old short-circuit read through the FILTERED getter, so another workspace's row
   // read as absent and the blind put below took it. ADR 0848 D1.
+  assertSmsBody(input.format, input.body);
   const templateId = input.templateId ?? `tpl:${randomUUID()}`;
   const { row } = await insertOwnedOrConflict(templates, templateId, ownedBy(input.tenantId, input.orgId), () => {
     const now = new Date().toISOString();
@@ -371,8 +448,8 @@ export async function createTemplate(input: { tenantId: string; orgId: string; n
       templateId,
       tenantId: input.tenantId, orgId: input.orgId,
       name: input.name, subject: input.subject, body: input.body,
-      ...(input.format === 'markdown' ? { format: 'markdown' as const } : {}),
-      version: 1, contentHash: templateContentHash({ subject: input.subject, body: input.body, ...(input.format === 'markdown' ? { format: 'markdown' as const } : {}) }),
+      ...formatField(input.format),
+      version: 1, contentHash: templateContentHash({ subject: input.subject, body: input.body, ...formatField(input.format) }),
       createdBy: input.createdBy, createdAt: now, updatedAt: now,
     };
   });
@@ -381,7 +458,7 @@ export async function createTemplate(input: { tenantId: string; orgId: string; n
 }
 
 const contentOf = (t: { subject: string; body: string; format?: EmailBodyFormat }): { subject: string; body: string; format?: EmailBodyFormat } =>
-  ({ subject: t.subject, body: t.body, ...(t.format === 'markdown' ? { format: 'markdown' as const } : {}) });
+  ({ subject: t.subject, body: t.body, ...formatField(t.format) });
 
 /**
  * ADR 0905 D1 — make sure the template's CURRENT version has its immutable row.
@@ -440,7 +517,7 @@ export async function listTemplateVersions(tenantId: string, orgId: string, temp
 export async function updateTemplate(
   tenantId: string, orgId: string, templateId: string,
   patch: { name?: string; subject?: string; body?: string; format?: EmailBodyFormat },
-  opts: { expectedVersion?: number; actor?: string; restoredFrom?: number } = {},
+  opts: { expectedVersion?: number; actor?: string; restoredFrom?: number; refuseIfSent?: boolean } = {},
 ): Promise<EmailTemplate | null> {
   // ADR 0848 M6 — a CAS, not a read-then-put: a blind put after a concurrent delete
   // resurrected the row, and an id freed by that delete could be written over.
@@ -448,12 +525,28 @@ export async function updateTemplate(
     const existing = await getTemplate(tenantId, orgId, templateId);
     if (!existing) return null;
     const current = templateVersionOf(existing);
+    if (opts.refuseIfSent) {
+      // ADR 0905 follow-up (ADR 0922) — "a sent email is never altered" for the caller
+      // that asks. The hold is on THIS row, so the check and the write are one CAS.
+      if (existing.sendHold) throw templateSentError(templateId);
+      // A template sent before holds existed: add the hold (it only ever ADDS one, so
+      // this one-time read can only refuse, never allow), then refuse.
+      if ((await campaignsUsingTemplate(tenantId, orgId, templateId)).some((c) => c.status === 'sending' || c.status === 'sent')) {
+        await templates.compareAndSwap(existing, { ...existing, sendHold: { since: new Date().toISOString() } });
+        throw templateSentError(templateId);
+      }
+    }
     if (opts.expectedVersion !== undefined && opts.expectedVersion !== current) {
       throw new OpenwopError('conflict', 'This template was changed by someone else. Reload it to see the latest version.', 409, {
         reason: 'version_conflict', templateId, expectedVersion: opts.expectedVersion, currentVersion: current,
       });
     }
+    // ADR 0955 D8 — SMS and email never trade places (a campaign or journey pinned one kind).
+    if (patch.format !== undefined && (patch.format === 'sms') !== (existing.format === 'sms')) {
+      throw new OpenwopError('validation_error', 'A template cannot switch between SMS and email. Create a new template instead.', 400, { field: 'format', reason: 'format_locked' });
+    }
     const merged: EmailTemplate = { ...existing, ...patch, updatedAt: new Date().toISOString() };
+    assertSmsBody(merged.format, merged.body);
     const hash = templateContentHash(merged);
     const contentChanged = hash !== (existing.contentHash ?? templateContentHash(existing));
     // Superseding the current version: its row must exist first (backfill), or a crash
@@ -493,10 +586,46 @@ export async function restoreTemplateVersion(
  * (`Campaign template not found`); it can never send the wrong bytes, and a `sending`
  * campaign is unaffected because it renders from its pin.
  */
+function templateSentError(templateId: string): OpenwopError {
+  return new OpenwopError('conflict', 'Sending has started for this template; create a new draft to edit it.', 409, { reason: 'template_sent', templateId });
+}
+
+/** Test-only: run `fn` between the send-time approval check and the pin (the window
+ *  an edit must not slip through). Never set in production. */
+let beforePinHook: ((campaignId: string) => Promise<void>) | null = null;
+export function __setBeforePinHookForTests(fn: ((campaignId: string) => Promise<void>) | null): void { beforePinHook = fn; }
+
+/** ADR 0905 follow-up (ADR 0922) — the ONE in-use lookup: the campaigns in this
+ *  (tenant, org) that reference the template, with their status. */
+export async function campaignsUsingTemplate(tenantId: string, orgId: string, templateId: string): Promise<Array<{ campaignId: string; status: CampaignStatus }>> {
+  return (await listCampaigns(tenantId, orgId)).filter((c) => c.templateId === templateId).map((c) => ({ campaignId: c.campaignId, status: c.status }));
+}
+
+/** Set the send hold on the template row (CAS); returns the row as held. A row that
+ *  vanished returns null. Content-independent: whatever the row holds is what a
+ *  non-approved send then pins. */
+async function holdTemplateForSend(tenantId: string, orgId: string, templateId: string, approved?: CampaignApprovalPin): Promise<EmailTemplate | null> {
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const cur = await getTemplate(tenantId, orgId, templateId);
+    if (!cur) return null;
+    // ADR 0905 follow-up (ADR 0922/0924) — an APPROVED send checks the approval's
+    // binding against the row it is about to hold, in the same CAS: an edit that landed
+    // after the send-time check (assertSendAllowed) but before this hold makes the CAS
+    // below lose or this compare fail — either way it never goes out unapproved.
+    if (approved && (templateVersionOf(cur) !== approved.templateVersion || (cur.contentHash ?? templateContentHash(cur)) !== approved.contentHash)) {
+      throw new OpenwopError('conflict', 'The template changed after this campaign was approved. Submit it for review again.', 409, { reason: 'approval_stale', templateId });
+    }
+    if (cur.sendHold) return cur;
+    const held: EmailTemplate = { ...cur, sendHold: { since: new Date().toISOString() } };
+    if (await templates.compareAndSwap(cur, held)) return held;
+  }
+  throw new OpenwopError('conflict', 'Could not start the send (the template is being edited); try again.', 409, { templateId });
+}
+
 export async function deleteTemplate(tenantId: string, orgId: string, templateId: string): Promise<boolean> {
   const existing = await getTemplate(tenantId, orgId, templateId);
   if (!existing) return false;
-  const holders = (await listCampaigns(tenantId, orgId)).filter((c) => c.templateId === templateId && c.status !== 'sent');
+  const holders = (await campaignsUsingTemplate(tenantId, orgId, templateId)).filter((c) => c.status !== 'sent');
   if (holders.length > 0) {
     throw new OpenwopError('conflict', 'This template is used by a campaign that has not finished sending. Delete or finish those campaigns first.', 409, {
       reason: 'template_in_use', templateId, campaignIds: holders.slice(0, 20).map((c) => c.campaignId),
@@ -506,7 +635,7 @@ export async function deleteTemplate(tenantId: string, orgId: string, templateId
   // ADR 0905 D1 — versions go with the template unless a (sent) campaign still
   // references it: what was sent stays auditable. Residual, stated: if that last
   // campaign is deleted later, its template's version rows are left behind.
-  if (deleted && !(await listCampaigns(tenantId, orgId)).some((c) => c.templateId === templateId)) {
+  if (deleted && (await campaignsUsingTemplate(tenantId, orgId, templateId)).length === 0) {
     for (let v = templateVersionOf(existing); v >= 1; v--) await templateVersions.delete(`${templateId}@${v}`);
   }
   return deleted;
@@ -537,11 +666,17 @@ export async function draftRowId(kind: 'template' | 'campaign', tenantId: string
 export async function listCampaigns(tenantId: string, orgId: string): Promise<Campaign[]> {
   return (await campaigns.listForTenantIndexed(tenantId)).filter((c) => c.tenantId === tenantId && c.orgId === orgId).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
+/** ADR 0941 P2 — the email sends of one MarketingCampaign. Legacy rows (before
+ *  the back-link) are matched by the campaign's brief (`sourceBriefId`). */
+export async function listSendsForMarketingCampaign(tenantId: string, orgId: string, marketingCampaignId: string, briefId?: string): Promise<Campaign[]> {
+  return (await listCampaigns(tenantId, orgId)).filter((c) => c.marketingCampaignId === marketingCampaignId
+    || (!c.marketingCampaignId && briefId !== undefined && c.sourceBriefId === briefId));
+}
 export async function getCampaign(tenantId: string, orgId: string, campaignId: string): Promise<Campaign | null> {
   const c = await campaigns.get(campaignId);
   return c && c.tenantId === tenantId && c.orgId === orgId ? c : null;
 }
-export async function createCampaign(input: { tenantId: string; orgId: string; templateId: string; stage?: ContactStage; segmentId?: string; createdBy: string; campaignId?: string; sourceBriefId?: string }): Promise<Campaign> {
+export async function createCampaign(input: { tenantId: string; orgId: string; templateId: string; stage?: ContactStage; segmentId?: string; topicId?: string; createdBy: string; campaignId?: string; sourceBriefId?: string; marketingCampaignId?: string }): Promise<Campaign> {
   // Idempotent on a caller-supplied deterministic id — a re-run/fork of a publish node
   // returns the existing campaign instead of minting a duplicate (replay-safe) — onto a
   // row this (tenant, org) OWNS only (ADR 0848 D1, #4485). The validation below runs on
@@ -558,14 +693,25 @@ export async function createCampaign(input: { tenantId: string; orgId: string; t
     }
     // ADR 0848 D1 — the template must be this (tenant, org)'s. The HTTP route checked
     // it; the service — the exit every caller shares — did not.
-    if (!(await getTemplate(input.tenantId, input.orgId, input.templateId))) {
+    const tpl = await getTemplate(input.tenantId, input.orgId, input.templateId);
+    if (!tpl) {
       throw new OpenwopError('validation_error', 'Unknown templateId for this workspace.', 400, { field: 'templateId', templateId: input.templateId });
+    }
+    // ADR 0941 P2 — the back-link is checked here, the exit every caller shares.
+    if (input.marketingCampaignId) await assertCampaignRef(input.tenantId, input.orgId, input.marketingCampaignId);
+    // ADR 0955 D8 — an SMS template is never sent as an email.
+    if (tpl.format === 'sms') {
+      throw new OpenwopError('validation_error', 'This is an SMS template; an email campaign needs an email template.', 400, { field: 'templateId', reason: 'template_format' });
+    }
+    // ADR 0905 D7 — the topic must be this (tenant, org)'s.
+    if (input.topicId && !(await getTopic(input.tenantId, input.orgId, input.topicId))) {
+      throw new OpenwopError('validation_error', 'Unknown topicId for this workspace.', 400, { field: 'topicId', topicId: input.topicId });
     }
     const now = new Date().toISOString();
     return {
       campaignId, tenantId: input.tenantId, orgId: input.orgId, templateId: input.templateId,
       audience: { ...(input.stage ? { stage: input.stage } : {}), ...(input.segmentId ? { segmentId: input.segmentId } : {}) },
-      status: 'draft' as const, ...(input.sourceBriefId ? { sourceBriefId: input.sourceBriefId } : {}), createdBy: input.createdBy, createdAt: now, updatedAt: now,
+      status: 'draft' as const, ...(input.topicId ? { topicId: input.topicId } : {}), ...(input.sourceBriefId ? { sourceBriefId: input.sourceBriefId } : {}), ...(input.marketingCampaignId ? { marketingCampaignId: input.marketingCampaignId } : {}), createdBy: input.createdBy, createdAt: now, updatedAt: now,
     };
   });
   return row;
@@ -589,7 +735,10 @@ export async function updateCampaignRow(tenantId: string, orgId: string, campaig
     if (!cur) return null;
     const next = mutate(cur);
     if (!next) return { before: cur, after: cur };
-    if (await campaigns.compareAndSwap(cur, { ...next, updatedAt: new Date().toISOString() })) return { before: cur, after: (await getCampaign(tenantId, orgId, campaignId)) ?? next };
+    const written = { ...next, updatedAt: new Date().toISOString() };
+    // Return the acknowledged CAS result. A later read can fail or observe a
+    // legitimate send/withdraw, neither of which undoes this transition.
+    if (await campaigns.compareAndSwap(cur, written)) return { before: cur, after: written };
   }
   throw new OpenwopError('conflict', 'Could not update the campaign (too many concurrent writes).', 409, { campaignId });
 }
@@ -616,9 +765,10 @@ export async function invalidateSendReviews(tenantId: string, orgId: string, mat
 }
 
 /** Move one reviewed campaign back to `draft` (outcome `closed`) and close its row. */
-export async function returnToDraft(tenantId: string, orgId: string, campaignId: string, approvalId: string, note: string): Promise<boolean> {
+export async function returnToDraft(tenantId: string, orgId: string, campaignId: string, approvalId: string, note: string, expectedReview?: CampaignReview): Promise<boolean> {
   const moved = await updateCampaignRow(tenantId, orgId, campaignId, (cur) =>
     (cur.status === 'in_review' || cur.status === 'approved') && cur.review?.approvalId === approvalId
+      && (!expectedReview || JSON.stringify(cur.review) === JSON.stringify(expectedReview))
       ? { ...cur, status: 'draft', review: { ...cur.review, outcome: 'closed', note, decidedAt: new Date().toISOString() } }
       : null);
   const changed = !!moved && moved.before !== moved.after;
@@ -631,6 +781,14 @@ export async function returnToDraft(tenantId: string, orgId: string, campaignId:
  *  toggle read (`resolveToggle`, not the `resolveOne` access resolver) is deliberate
  *  and allowlisted in `feature-toggle-access-ratchet.test.ts`: OFF loosens a
  *  restriction, so a paywalled read would fail OPEN on a lapsed plan (ADR 0819 §1). */
+/** ADR 0955 D7 (P4b) — the `email.warmup` RESTRICTION (on caps a new sender's daily volume).
+ *  Read with `resolveToggle` (ADR 0819 §1: a paywalled read would fail OPEN on a lapsed plan);
+ *  an unreadable toggle enforces. */
+export async function emailWarmupOn(tenantId: string): Promise<boolean> {
+  try { return (await resolveToggle('email.warmup', { tenantId }))?.enabled === true; }
+  catch (e) { svcLog.warn('email_warmup_toggle_unreadable', { tenantId, error: e instanceof Error ? e.message : String(e) }); return true; }
+}
+
 export async function emailApprovalGateOn(tenantId: string): Promise<boolean> {
   try { return (await resolveToggle('email-approval-gate', { tenantId }))?.enabled === true; }
   catch (e) { svcLog.warn('email_approval_gate_unreadable', { tenantId, error: e instanceof Error ? e.message : String(e) }); return true; }
@@ -638,11 +796,13 @@ export async function emailApprovalGateOn(tenantId: string): Promise<boolean> {
 
 /** ADR 0905 D3 — the audience DEFINITION's hash (never its membership). */
 async function audienceHashOf(tenantId: string, campaign: Campaign): Promise<string> {
-  let def: unknown = { stage: campaign.audience.stage ?? null };
+  let def: Record<string, unknown> = { stage: campaign.audience.stage ?? null };
   if (campaign.audience.segmentId) {
     const seg = await getSegment(tenantId, campaign.audience.segmentId);
     def = { segmentId: campaign.audience.segmentId, segmentUpdatedAt: seg?.updatedAt ?? 'missing' };
   }
+  // ADR 0905 D7 — a different topic is a different audience (absent ⇒ unchanged hash).
+  if (campaign.topicId) def = { ...def, topicId: campaign.topicId };
   return createHash('sha256').update(JSON.stringify(def)).digest('hex');
 }
 
@@ -911,6 +1071,23 @@ async function sendCampaignSerialized(
       { campaignId, field: 'linkBase' },
     );
   }
+  // ADR 0955 D7 — a sender paused by the deliverability breaker sends no marketing email; the
+  // whole pass is refused up front (no per-recipient rows: nobody chose to be skipped).
+  const paused = await senderPaused(tenantId, campaign.orgId);
+  if (paused) {
+    throw new OpenwopError('conflict', paused === 'unreadable'
+      ? 'Could not read this sender\'s sending health; nothing was sent. Try again shortly.'
+      : 'Marketing email from this sender is paused because of bounces or spam complaints. A manager must review and resume it on the Email page.',
+    409, { campaignId, reason: paused === 'unreadable' ? 'sending_health_unreadable' : 'sending_paused' });
+  }
+  // ADR 0955 D7 — the sender-domain authentication precondition (SPF + DMARC), when on.
+  await assertSenderAuthenticated(tenantId, from);
+  // ADR 0955 D7 (P4b) — a new sender's warm-up ceiling, when on: over it the send DEFERS to the
+  // next UTC day (the campaign keeps its state; nothing is dropped or skipped).
+  const warmup = (await emailWarmupOn(tenantId)) ? await warmupRemaining(tenantId, campaign.orgId) : null;
+  if (warmup && warmup.remaining <= 0) {
+    throw new OpenwopError('conflict', `This sender is warming up (day ${warmup.day + 1}: ${warmup.cap} emails a day) and has reached today's ceiling. Sending continues tomorrow; nothing was dropped.`, 409, { campaignId, reason: 'warmup_deferred', resumeAt: warmup.resumeAt, cap: warmup.cap });
+  }
 
   let audience: Contact[];
   if (campaign.audience.segmentId) {
@@ -957,9 +1134,10 @@ async function sendCampaignSerialized(
   // refused send leaves the campaign a `draft` rather than a `sending` that sent nothing.
   // A CAS onto the row read at pass start: two instances starting the same draft agree
   // on ONE pin (the loser adopts the winner's), and a pin is never overwritten.
-  const pin = existingPin ?? await pinSend(tenantId, orgId, campaign, generation, liveTemplate!);
+  if (!existingPin && beforePinHook) await beforePinHook(campaign.campaignId);
+  const pin = await pinSend(tenantId, orgId, campaign, generation, liveTemplate, approvedPin);
   const template = { name: pin.templateName, subject: pin.subject, body: pin.body, format: pin.format };
-  const limit = Math.max(1, Math.floor(opts.limit ?? SEND_BATCH_DEFAULT));
+  const limit = Math.min(Math.max(1, Math.floor(opts.limit ?? SEND_BATCH_DEFAULT)), warmup ? warmup.remaining : Number.POSITIVE_INFINITY);
   const batch = pending.slice(0, limit);
 
   // R2 EM-SP-1 — stats are DERIVED from the ledger at pass end (per-contact
@@ -977,34 +1155,31 @@ async function sendCampaignSerialized(
   for (const contact of batch) {
     const log = (status: SendStatus, error?: string): SendLog => ({ sendId: `snd:${randomUUID()}`, tenantId, campaignId, contactId: contact.contactId, status, ts: new Date().toISOString(), ...(generation ? { generation } : {}), ...(error ? { error } : {}) });
     if (!contact.email) { stats.skipped += 1; await sendLogs.put(log('skipped', 'no_email')); continue; }
-    // ADR 0227: a campaign send is an EMAIL-channel send — the per-channel
-    // specific governs when the contact's record carries one; otherwise the
-    // `marketing` umbrella falls through inside `isAllowed` (old records are
-    // untouched and keep behaving exactly as before).
-    // ADR 0655 D9 (EM-7) — a consent READ error is per-recipient `passFailed` (the same
-    // posture as an unreadable suppression store below), never a batch abort that
-    // leaves the campaign half-written.
-    let allowed: boolean;
-    try { allowed = await isAllowed(tenantId, contact.contactId, 'marketing.email'); }
-    catch (e) { passFailed += 1; svcLog.warn('consent read failed; recipient retried next pass', { campaignId, error: e instanceof Error ? e.message : String(e) }); continue; }
-    if (!allowed) { stats.skipped += 1; await sendLogs.put(log('skipped', 'consent')); continue; }
-    // C3 (ADR 0217): the suppression overlay — bounces/complaints/unsubscribes/
-    // manual holds — is subtracted from EVERY marketing send, independent of the
-    // consent toggle (fail-closed for known-bad addresses).
-    // FOLD-IN B5 — three outcomes, not two. `suppressed` is a TERMINAL, durable,
-    // person-attributed claim: it enters `priorTerminal`, so no continuation pass
-    // ever retries the recipient, and the stored `reason` says the person asked us
-    // to stop. An UNREADABLE store justifies neither. Writing that row turned a
-    // transient KV blip into a permanent exclusion from this campaign generation
-    // AND a false consent record. So the refusal now writes NO ledger row at all:
-    // the recipient stays out of `priorTerminal`, `pending` still contains them,
-    // and the next pass retries. `passFailed` is bumped so the campaign stays
-    // `sending` rather than declaring itself exhaustively `sent` over recipients it
-    // never decided about.
+    // ADR 0955 D2 — the ONE per-channel check the journeys use too (`crm/channelEligibility`),
+    // so a broadcast and a journey refuse the same recipient for the same reason. It composes,
+    // in order: the address, `marketing.email` through the one consent evaluator (ADR 0227 per
+    // channel; ADR 0905 D7 topic narrowing inside it), then the suppression overlay (ADR 0217 /
+    // C3), from this campaign's org as the sender. The skip reasons are the ones this loop
+    // always wrote: a topic opt-out is a `consent` skip.
+    // ADR 0655 D9 (EM-7) / FOLD-IN B5 — an UNREADABLE consent or suppression store is not a
+    // decision about the recipient: no ledger row, `passFailed` bumped, the next pass retries
+    // (a `suppressed` row is terminal and person-attributed; an outage must never write one).
     {
-      const check = await suppressionBlocksSend(tenantId, contact.email);
-      if (check === 'suppressed') { stats.skipped += 1; await sendLogs.put(log('skipped', 'suppressed')); continue; }
-      if (check === 'unreadable') { passFailed += 1; continue; }
+      const verdict = await checkChannelEligibility(tenantId, campaign.orgId, contact.contactId, 'email', {
+        ...(campaign.topicId ? { topicId: campaign.topicId } : {}),
+        contact,
+      });
+      if (!verdict.eligible) {
+        if (verdict.reason === 'consent_unreadable' || verdict.reason === 'suppression_unreadable' || verdict.reason === 'deliverability_paused') {
+          passFailed += 1;
+          if (verdict.reason === 'consent_unreadable') svcLog.warn('consent read failed; recipient retried next pass', { campaignId });
+          continue;
+        }
+        const skip = verdict.reason === 'suppressed' ? 'suppressed'
+          : verdict.reason === 'no_address' || verdict.reason === 'contact_not_found' ? 'no_email'
+            : 'consent';
+        stats.skipped += 1; await sendLogs.put(log('skipped', skip)); continue;
+      }
     }
     // ADR 0267 / CDP-E — frequency governor: an automatic per-recipient send cap
     // over a rolling window. Opt-in (env; default off ⇒ behavior unchanged, no
@@ -1017,7 +1192,7 @@ async function sendCampaignSerialized(
     try {
       // ADR 0848 D7a — `linkBase` is guaranteed above, so every message is instrumented
       // and carries its unsubscribe link (or the send is refused inside, EM-19).
-      const instrumented = await instrumentBodyWithUnsubscribe(interpolate(template.body, vars, { markdown: template.format === 'markdown' }), linkBase, { tenantId, campaignId, contactId: contact.contactId, email: contact.email });
+      const instrumented = await instrumentBodyWithUnsubscribe(interpolate(template.body, vars, { markdown: template.format === 'markdown' }), linkBase, { tenantId, campaignId, orgId: campaign.orgId, contactId: contact.contactId, email: contact.email });
       const body = instrumented.body;
       let html: string | undefined;
       {
@@ -1073,6 +1248,10 @@ async function sendCampaignSerialized(
   // the ledger) — never a terminal state that forces a full `resend` (which
   // would double-deliver the already-sent). Skips (no email / consent) are
   // terminal by design and do not block completion.
+  // ADR 0955 D7 — this pass's sends feed the sender's breaker (once per pass; a lost write
+  // under-counts sends, which raises the rates — the safe direction).
+  if (stats.sent > 0) await noteFirstSend(tenantId, campaign.orgId).catch(() => undefined);
+  if (stats.sent > 0) await recordSends(tenantId, campaign.orgId, stats.sent).catch((e) => svcLog.warn('sender_health_send_count_failed', { campaignId, error: e instanceof Error ? e.message : String(e) }));
   const exhausted = batch.length === pending.length && passFailed === 0;
   // Derive honest stats: each contact counts ONCE, by its latest ledger row
   // (a retried failure that eventually sends is 'sent', not 'failed'+'sent').
@@ -1100,8 +1279,17 @@ async function sendCampaignSerialized(
   // start of the pass: a campaign deleted mid-send was resurrected by that put. A lost
   // race re-reads and re-applies only what this pass owns (status, stats, generation);
   // a row that is gone stays gone.
-  let current: Campaign | null = campaign;
+  let current = await getCampaign(tenantId, orgId, campaignId);
   for (let attempt = 0; attempt < 4 && current; attempt++) {
+    // Completion owns only the exact generation/pin/review admitted above. Keep
+    // already-dispatched ledger rows, but never overwrite a newer send or review.
+    if ((current.sendGeneration ?? 0) !== generation
+        || JSON.stringify(current.sendPin) !== JSON.stringify(pin)
+        || JSON.stringify(current.review) !== JSON.stringify(campaign.review)
+        || (current.status !== 'sending' && current.status !== 'sent')) {
+      throw new OpenwopError('conflict', 'The campaign changed while this send was running; dispatched emails remain recorded.', 409, { campaignId, reason: 'send_changed' });
+    }
+    if (current.status === 'sent') return current;
     const next: Campaign = { ...current, status: exhausted ? 'sent' : 'sending', stats: derived, ...(generation ? { sendGeneration: generation } : {}), updatedAt: new Date().toISOString() };
     if (await campaigns.compareAndSwap(current, next)) return next;
     current = await getCampaign(tenantId, orgId, campaignId);
@@ -1149,15 +1337,78 @@ async function approvedTemplateAt(tenantId: string, orgId: string, campaign: Cam
   return { ...tpl, subject: v.subject, body: v.body, ...(v.format ? { format: v.format } : {}), version: v.version, contentHash: v.contentHash };
 }
 
-async function pinSend(tenantId: string, orgId: string, campaign: Campaign, generation: number, live: EmailTemplate): Promise<CampaignSendPin> {
-  const fresh: CampaignSendPin = {
+async function pinSend(tenantId: string, orgId: string, campaign: Campaign, generation: number, liveIn: EmailTemplate | null, approvedPin?: CampaignApprovalPin): Promise<CampaignSendPin> {
+  // Take the template hold before creating a new campaign pin. Continuations
+  // already own frozen bytes, but still pass the fresh campaign fence below.
+  let live = liveIn;
+  if (liveIn) {
+    let held: EmailTemplate | null;
+    try { held = await holdTemplateForSend(tenantId, orgId, liveIn.templateId, approvedPin); }
+    catch (error) {
+      if (error instanceof OpenwopError && error.details?.reason === 'approval_stale' && campaign.review) {
+        await returnToDraft(tenantId, orgId, campaign.campaignId, campaign.review.approvalId, 'Closed automatically — the template changed after the campaign was approved.', campaign.review);
+      }
+      throw error;
+    }
+    if (!held) throw new OpenwopError('validation_error', 'Campaign template not found.', 400, { templateId: liveIn.templateId });
+    live = approvedPin ? liveIn : held;
+  }
+  const fresh: CampaignSendPin | null = live ? {
     generation, templateId: live.templateId, templateVersion: templateVersionOf(live), templateName: live.name,
     subject: live.subject, body: live.body, ...(live.format ? { format: live.format } : {}),
     contentHash: templateContentHash(live), pinnedAt: new Date().toISOString(),
-  };
-  let current: Campaign | null = campaign;
+  } : null;
+  let current = await getCampaign(tenantId, orgId, campaign.campaignId);
   for (let attempt = 0; attempt < 4 && current; attempt++) {
-    if (current.sendPin && current.sendPin.generation === generation) return current.sendPin;
+    if (campaign.status === 'sending' && campaign.sendPin?.generation === generation) {
+      if (current.status !== 'sending' || (current.sendGeneration ?? 0) !== generation
+          || JSON.stringify(current.sendPin) !== JSON.stringify(campaign.sendPin)
+          || JSON.stringify(current.review) !== JSON.stringify(campaign.review)
+          || current.templateId !== campaign.templateId
+          || JSON.stringify(current.audience) !== JSON.stringify(campaign.audience)) {
+        throw new OpenwopError('conflict', 'This send generation changed before continuation. Reload the campaign.', 409, { reason: 'send_changed', campaignId: campaign.campaignId });
+      }
+      return current.sendPin!;
+    }
+    // A lost CAS is a new authorization boundary, not permission to resurrect the
+    // original approval. Check its identity BEFORE adopting a concurrent send pin:
+    // a newer review can start the same generation with different audience bytes.
+    if (approvedPin) {
+      const sameReview = current.review?.outcome === 'approved'
+        && JSON.stringify(current.review) === JSON.stringify(campaign.review);
+      const sameAudience = current.templateId === campaign.templateId
+        && JSON.stringify(current.audience) === JSON.stringify(campaign.audience);
+      const started = current.status === 'sending'
+        && current.sendPin?.generation === generation && (current.sendGeneration ?? 0) === generation
+        && current.sendPin.templateId === approvedPin.templateId
+        && current.sendPin.templateVersion === approvedPin.templateVersion
+        && current.sendPin.contentHash === approvedPin.contentHash
+        && templateContentHash(current.sendPin) === approvedPin.contentHash;
+      const mayStart = current.status === 'approved'
+        && (current.sendGeneration ?? 0) === (campaign.sendGeneration ?? 0);
+      if (!sameReview || !sameAudience || (!started && !mayStart)
+          || (!started && !samePin(await liveApprovalPin(tenantId, orgId, current), approvedPin))) {
+        // Do not close or rewrite a newer review while refusing this stale attempt.
+        throw new OpenwopError('conflict', 'The send approval changed before dispatch. Reload the campaign and submit it for review again.', 409, { reason: 'approval_stale', campaignId: campaign.campaignId });
+      }
+      if (started) return current.sendPin!;
+    } else if (current.sendPin && current.sendPin.generation === generation) {
+      if (current.status !== 'sending' || (current.sendGeneration ?? 0) !== generation
+          || JSON.stringify(current.review) !== JSON.stringify(campaign.review)
+          || current.templateId !== campaign.templateId
+          || JSON.stringify(current.audience) !== JSON.stringify(campaign.audience)) {
+        throw new OpenwopError('conflict', 'This send changed before dispatch. Reload the campaign.', 409, { reason: 'send_changed', campaignId: campaign.campaignId });
+      }
+      return current.sendPin;
+    }
+    if (!approvedPin && ((current.sendGeneration ?? 0) !== (campaign.sendGeneration ?? 0)
+        || current.status !== campaign.status
+        || JSON.stringify(current.review) !== JSON.stringify(campaign.review)
+        || current.templateId !== campaign.templateId
+        || JSON.stringify(current.audience) !== JSON.stringify(campaign.audience))) {
+      throw new OpenwopError('conflict', 'The campaign changed before this send started. Reload the campaign.', 409, { reason: 'send_changed', campaignId: campaign.campaignId });
+    }
+    if (!fresh) throw new OpenwopError('conflict', 'The send pin is no longer available. Reload the campaign.', 409, { campaignId: campaign.campaignId });
     const next: Campaign = { ...current, status: 'sending', sendPin: fresh, ...(generation ? { sendGeneration: generation } : {}), updatedAt: new Date().toISOString() };
     if (await campaigns.compareAndSwap(current, next)) {
       // ADR 0905 D3 — a direct send (gate OFF) of a campaign under review overtakes the
@@ -1325,4 +1576,11 @@ onCrmRecordUnmerged('email-sendlog-relink', async ({ tenantId, entity, sourceId,
 });
 
 /** Test-only: clear all email stores. */
-export async function __resetEmailStore(): Promise<void> { await templateVersions.__clear(); await templates.__clear(); await campaigns.__clear(); await sendLogs.__clear(); await settings.__clear(); }
+/** ADR 0905 D7 — a campaign by id within a tenant (the public preference centre knows
+ *  only the token's tenant + campaign). Tenant-filtered; null when absent. */
+export async function getCampaignInTenant(tenantId: string, campaignId: string): Promise<Campaign | null> {
+  const c = await campaigns.get(campaignId);
+  return c && c.tenantId === tenantId ? c : null;
+}
+
+export async function __resetEmailStore(): Promise<void> { await topics.__clear(); await templateVersions.__clear(); await templates.__clear(); await campaigns.__clear(); await sendLogs.__clear(); await settings.__clear(); }

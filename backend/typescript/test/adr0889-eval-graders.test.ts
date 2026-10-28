@@ -4,6 +4,11 @@
  * The §B formulas are normative on the wire, so they are pinned against a hand-
  * computed table rather than against themselves. The match-mode cases are the
  * RFC's own table, one row per mode, each with a control that flips it.
+ *
+ * Tracker TST-BHG-2. Red when (sabotage-witnessed, wave 62): pass@k / pass^k drift
+ * from the hand table, a match mode loses its rule (exact length, in-order, subset,
+ * argsMatch subset), the sign test's alpha moves, or the eval workflowId leaves the
+ * v2 grammar.
  */
 import { describe, expect, it } from 'vitest';
 import { binomial, passAtK, passHatK, summarizeTrials, suiteTrialStats, taskPassed } from '../src/host/evals/trialStats.js';

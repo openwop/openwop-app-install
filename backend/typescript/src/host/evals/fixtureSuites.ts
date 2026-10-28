@@ -56,6 +56,18 @@ export function listFixtureSuiteIds(): string[] {
   return [...fixtures.keys()].map((k) => k.slice(CONFORMANCE_SUITE_PREFIX.length)).sort();
 }
 
+/**
+ * Vendored fixtures this host deliberately does NOT list. Listing a fixture in
+ * discovery opts the host into its conformance legs, so a fixture whose contract
+ * this host does not implement stays unlisted (honest `inapplicable`) rather
+ * than listed and failing. Each entry names what is missing (ADR 0983 D6).
+ */
+export const UNLISTED_FIXTURE_SUITES: ReadonlyMap<string, string> = new Map([
+  // RFC 0082 §E: listing it declares an eval-gated promotion policy, and this host
+  // has no agents.deployment facet, so it would be a claim with nothing behind it.
+  ['conformance-eval-gate-failing', 'declares an eval-gated promotion policy (RFC 0082 §E); this host advertises no agents.deployment'],
+]);
+
 /** Load `<fixturesDir>/eval-suites/*.json`. A fixture that fails validation is skipped, never half-loaded. */
 export function loadConformanceEvalSuites(fixturesDir: string): number {
   let n = 0;
@@ -63,6 +75,7 @@ export function loadConformanceEvalSuites(fixturesDir: string): number {
   try { files = readdirSync(join(fixturesDir, 'eval-suites')); } catch { return 0; }
   for (const file of files) {
     if (!file.endsWith('.json')) continue;
+    if (UNLISTED_FIXTURE_SUITES.has(file.slice(0, -'.json'.length))) continue;
     try {
       const suite = validateEvalSuite(JSON.parse(readFileSync(join(fixturesDir, 'eval-suites', file), 'utf8')));
       registerFixtureSuite(file.slice(0, -'.json'.length), suite);

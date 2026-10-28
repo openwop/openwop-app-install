@@ -10,6 +10,10 @@
  * Both directions are witnessed per route: a viewer/editor is REFUSED (403
  * forbidden_scope), an admin PASSES (200). The `arena/match` WRITE stays
  * `workspace:write` and is not part of this class.
+ *
+ * TST-BQA-2. Red when any of the three routes gates on `workspace:read` (the
+ * viewer leg) or `workspace:write` (the editor leg) instead of
+ * `host:members:manage`.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -71,25 +75,33 @@ describe('UAC-1/EVC-1 — admin-tier reads gate on host:members:manage, not work
     const v = await get(usage(), viewerCookie);
     expect(v.status).toBe(403);
     expect(v.text).toContain('forbidden_scope');
-    expect((await get(usage(), editorCookie)).status).toBe(403); // editor has workspace:read+write, not manage
+    const e = await get(usage(), editorCookie); // editor has workspace:read+write, not manage
+    expect(e.status).toBe(403);
+    expect(e.text).toContain('forbidden_scope');
     const a = await get(usage(), adminCookie);
     expect(a.status).toBe(200);
     expect(a.text).toContain('rollup');
   });
 
-  it('Evals leaderboard: viewer REFUSED (403), admin passes (200)', async () => {
+  it('Evals leaderboard: viewer + editor REFUSED (403), admin passes (200)', async () => {
     const v = await get(leaderboard(), viewerCookie);
     expect(v.status).toBe(403);
     expect(v.text).toContain('forbidden_scope');
+    const e = await get(leaderboard(), editorCookie);
+    expect(e.status).toBe(403);
+    expect(e.text).toContain('forbidden_scope');
     const a = await get(leaderboard(), adminCookie);
     expect(a.status).toBe(200);
     expect(a.text).toContain('leaderboard');
   });
 
-  it('Evals arena/rating: viewer REFUSED (403), admin passes (200)', async () => {
+  it('Evals arena/rating: viewer + editor REFUSED (403), admin passes (200)', async () => {
     const v = await get(rating(), viewerCookie);
     expect(v.status).toBe(403);
     expect(v.text).toContain('forbidden_scope');
+    const e = await get(rating(), editorCookie);
+    expect(e.status).toBe(403);
+    expect(e.text).toContain('forbidden_scope');
     const a = await get(rating(), adminCookie);
     expect(a.status).toBe(200);
     expect(a.text).toContain('elo');

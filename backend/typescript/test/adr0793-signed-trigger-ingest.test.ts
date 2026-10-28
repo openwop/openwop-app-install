@@ -8,6 +8,22 @@
  * the same run; under `required` a bad signature or a stale timestamp answers
  * 401 `signature_invalid` and — §C.1 — leaves the subscription `active` (a signed
  * post then still delivers); the delivered run's `run.started.causationId` is set.
+ *
+ * TST-BTI-1. Red when: discovery advertises `inboundSigning` with the flag off,
+ * or the ingest route answers with the flag off; registration mints a non-`whsec_`
+ * secret, or a re-read carries it; the ingest root is not public; a duplicate
+ * `webhook-id` is not 200 duplicate; the 202 carries an unbound run id; the run
+ * loses its `causationId`; the route's `required` refusal is dropped; the
+ * timestamp skew bound widens; a refused post is not recorded.
+ *
+ * Double guard (bad signature under `required`): the route refuses
+ * (`routes/triggerBridge.ts`, `mode === 'required' && !verified`) and, behind
+ * it, `ingestExternalEvent` refuses again (`host/triggerIngestionService.ts`,
+ * `preVerified:false` → `signature-invalid` → the same 401). The inner one is a
+ * backstop that a single edit cannot reach while the outer stands. The OUTER
+ * guard is witnessed by a post with a malformed `webhook-id`: the route refuses
+ * it as `signature_invalid` (401), and without that guard it would reach the
+ * `webhook-id` shape check (400) instead.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';
@@ -18,6 +34,13 @@ import { bareRunId } from './support/bareRunId.js';
 import { projectBoundId } from '../src/host/boundIdProjection.js';
 
 const TOKEN = 'dev-token';
+
+/** The ingest route's answers (202 / 200 / the error envelope). */
+interface IngestBody { outcome?: string; runId?: string; error?: string; message?: string }
+interface Registration { subscription: { subscriptionId: string }; binding: { ingestUrl: string; signingSecret: string } }
+interface SubscriptionRead { subscription?: { state?: string }; deliveries?: Array<{ outcome: string }>; error?: string }
+interface Discovery { triggerBridge?: { status?: string; witness?: string; supported?: unknown; ingestion?: { inboundSigning?: string[] }; deadLetter?: unknown } }
+interface PollBody { events?: Array<{ type: string; causationId?: string }> }
 let server: http.Server; let base = '';
 const saved = { signing: process.env.OPENWOP_TRIGGER_INBOUND_SIGNING };
 
@@ -28,19 +51,23 @@ function sign(secret: string, id: string, ts: string, body: string): string {
 const now = (): string => String(Math.floor(Date.now() / 1000));
 const freshId = (): string => `msg_${randomBytes(12).toString('hex')}`;
 
-async function authed(method: string, path: string, body?: unknown) {
+async function authed<T>(method: string, path: string, body?: unknown): Promise<{ status: number; body: T }> {
   const r = await fetch(`${base}${path}`, { method, headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}`, 'OpenWOP-Version': '2' }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-  return { status: r.status, body: (await r.json().catch(() => ({}))) as Record<string, any> };
+  return { status: r.status, body: (await r.json().catch(() => ({}))) as T };
 }
 /** A post with NO OpenWOP credential — only the Standard Webhooks headers. */
-async function ingest(url: string, body: string, headers: Record<string, string>) {
+async function ingest(url: string, body: string, headers: Record<string, string>): Promise<{ status: number; body: IngestBody }> {
   const r = await fetch(`${base}${url}`, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body });
-  return { status: r.status, body: (await r.json().catch(() => ({}))) as Record<string, any> };
+  return { status: r.status, body: (await r.json().catch(() => ({}))) as IngestBody };
 }
-async function register(mode: 'none' | 'required') {
-  const r = await authed('POST', '/trigger-subscriptions', { source: 'webhook', workflowId: 'openwop-app.uppercase', verification: { mode } });
+async function register(mode: 'none' | 'required'): Promise<Registration> {
+  const r = await authed<Registration>('POST', '/trigger-subscriptions', { source: 'webhook', workflowId: 'openwop-app.uppercase', verification: { mode } });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  return r.body as { subscription: { subscriptionId: string }; binding: { ingestUrl: string; signingSecret: string } };
+  return r.body;
+}
+function signedHeaders(secret: string, body: string): Record<string, string> {
+  const id = freshId(); const ts = now();
+  return { 'webhook-id': id, 'webhook-timestamp': ts, 'webhook-signature': sign(secret, id, ts, body) };
 }
 
 beforeAll(async () => {
@@ -61,42 +88,55 @@ describe('ADR 0793 / RFC 0230 — signed inbound-webhook ingest', () => {
   // "the two majors are one claim") was deleted with the v1 discovery document;
   // the v2 record, gated by the same flag, is what remains.
   it('v2 discovery advertises triggerBridge.ingestion.inboundSigning only while the flag is on (ADR 0810)', async () => {
-    const disco = async () => (await (await fetch(`${base}/.well-known/openwop`, { headers: { 'OpenWOP-Version': '2' } })).json()) as Record<string, any>;
+    const disco = async (): Promise<Discovery> => (await (await fetch(`${base}/.well-known/openwop`, { headers: { 'OpenWOP-Version': '2' } })).json()) as Discovery;
     // ADR 0810 supersedes ADR 0793's "no v2 triggerBridge": the v2 record is the
     // same facets under {status, since, until, witness}, with no `supported`.
     const v2 = (await disco()).triggerBridge;
     expect(v2).toMatchObject({ status: 'experimental', witness: 'witnessable-gated' });
-    expect(v2.supported, 'presence is the advert at v2').toBeUndefined();
-    expect(v2.ingestion?.inboundSigning).toEqual(['standard-webhooks-1']);
-    expect(v2.deadLetter).toEqual({ retentionDays: 7, maxPageSize: 100 });
+    expect(v2?.supported, 'presence is the advert at v2').toBeUndefined();
+    expect(v2?.ingestion?.inboundSigning).toEqual(['standard-webhooks-1']);
+    expect(v2?.deadLetter).toEqual({ retentionDays: 7, maxPageSize: 100 });
+    // A REAL subscription, registered while the flag is on: an unknown id 404s
+    // with the flag on too, so only a live one shows the route is off.
+    const { binding } = await register('none');
     process.env.OPENWOP_TRIGGER_INBOUND_SIGNING = 'false';
     try {
       const off = await disco();
       expect(off.triggerBridge?.ingestion, 'the ingestion block itself is still advertised').toBeDefined();
       expect(off.triggerBridge?.ingestion?.inboundSigning, 'v2 drops it with the flag').toBeUndefined();
-      const r = await ingest('/host/openwop-app/trigger-ingest/tgsub-nope', '{}', {});
+      const r = await ingest(binding.ingestUrl, '{}', signedHeaders(binding.signingSecret, '{}'));
       expect(r.status, 'the route is off with the flag').toBe(404);
+      expect(r.body.error).toBe('not_found');
+      expect(r.body.runId).toBeUndefined();
     } finally { process.env.OPENWOP_TRIGGER_INBOUND_SIGNING = 'true'; }
+    // Positive control: the same subscription delivers once the flag is back.
+    const on = await ingest(binding.ingestUrl, '{}', signedHeaders(binding.signingSecret, '{}'));
+    expect(on.status, JSON.stringify(on.body)).toBe(202);
   });
 
   it('registration returns a whsec_ secret once and the signed ingest URL; a re-read never carries it', async () => {
     const { subscription, binding } = await register('none');
     expect(binding.signingSecret).toMatch(/^whsec_[A-Za-z0-9+/]+={0,2}$/);
     expect(binding.ingestUrl).toBe(`/host/openwop-app/trigger-ingest/${bareRunId(subscription.subscriptionId)}`);
-    const reread = await authed('GET', `/trigger-subscriptions/${projectBoundId(subscription.subscriptionId)}`);
+    const reread = await authed<SubscriptionRead>('GET', `/trigger-subscriptions/${projectBoundId(subscription.subscriptionId)}`);
     expect(reread.status, 'a 404 would make the no-secret check below vacuous').toBe(200);
     expect(JSON.stringify(reread.body)).not.toContain(binding.signingSecret);
     expect(JSON.stringify(reread.body)).not.toContain('whsec_');
   });
 
   it('a signed post needs no OpenWOP credential: 202 + tenant-bound runId; the same webhook-id is 200 duplicate, same run', async () => {
-    const { binding } = await register('none');
+    const { subscription, binding } = await register('none');
     const body = JSON.stringify({ hello: 'world' }); const id = freshId(); const ts = now();
     const h = { 'webhook-id': id, 'webhook-timestamp': ts, 'webhook-signature': sign(binding.signingSecret, id, ts, body) };
     const first = await ingest(binding.ingestUrl, body, h);
     expect(first.status, JSON.stringify(first.body)).toBe(202);
     expect(first.body.outcome).toBe('delivered');
-    expect(first.body.runId).toMatch(/\//); // tenant-bound (identity.md §5)
+    // Tenant-bound (identity.md §5): `<tenant>/<opaque>`, the tenant segment the
+    // subscription's own bound id carries.
+    const tenantSegment = subscription.subscriptionId.split('/')[0];
+    expect(subscription.subscriptionId, 'the subscription id is itself tenant-bound').toContain('/');
+    expect(first.body.runId?.split('/')[0]).toBe(tenantSegment);
+    expect(first.body.runId?.split('/')).toHaveLength(2);
     const again = await ingest(binding.ingestUrl, body, h);
     expect(again.status).toBe(200);
     expect(again.body).toEqual({ outcome: 'duplicate', runId: first.body.runId });
@@ -108,8 +148,8 @@ describe('ADR 0793 / RFC 0230 — signed inbound-webhook ingest', () => {
     const r = await ingest(binding.ingestUrl, body, { 'webhook-id': id, 'webhook-timestamp': ts, 'webhook-signature': sign(binding.signingSecret, id, ts, body) });
     expect(r.status).toBe(202);
     // The 202 carries the tenant-bound run id; the major-2 read takes it as returned.
-    const poll = await authed('GET', `/runs/${encodeURIComponent(String(r.body.runId))}/events/poll`);
-    const events = (poll.body.events ?? []) as Array<{ type: string; causationId?: string }>;
+    const poll = await authed<PollBody>('GET', `/runs/${encodeURIComponent(String(r.body.runId))}/events/poll`);
+    const events = poll.body.events ?? [];
     const started = events.find((e) => e.type === 'run.started');
     expect(started, `events: ${events.map((e) => e.type).join(',')}`).toBeDefined();
     expect(typeof started?.causationId === 'string' && started.causationId.length > 0).toBe(true);
@@ -125,10 +165,16 @@ describe('ADR 0793 / RFC 0230 — signed inbound-webhook ingest', () => {
     const staleTs = String(Math.floor(Date.now() / 1000) - 600); const sid = freshId();
     const stale = await ingest(binding.ingestUrl, body, { 'webhook-id': sid, 'webhook-timestamp': staleTs, 'webhook-signature': sign(binding.signingSecret, sid, staleTs, body) });
     expect(stale.status, 'a correctly signed but >300 s stale post is refused').toBe(401);
+    expect(stale.body.error).toBe('signature_invalid');
+    // The OUTER (route) guard: a malformed webhook-id never verifies, so the
+    // route refuses it as a bad signature before the id-shape check (400).
+    const malformed = await ingest(binding.ingestUrl, body, { 'webhook-id': 'short', 'webhook-timestamp': now(), 'webhook-signature': 'v1,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' });
+    expect(malformed.status, JSON.stringify(malformed.body)).toBe(401);
+    expect(malformed.body.error).toBe('signature_invalid');
 
-    const sub = await authed('GET', `/trigger-subscriptions/${projectBoundId(subscription.subscriptionId)}`);
-    expect(sub.body.subscription.state, '§C.1: a refused post MUST NOT change the subscription state').toBe('active');
-    expect((sub.body.deliveries as Array<{ outcome: string }>).some((d) => d.outcome === 'dead-lettered'), 'the refused post is recorded as a dead-lettered delivery').toBe(true);
+    const sub = await authed<SubscriptionRead>('GET', `/trigger-subscriptions/${projectBoundId(subscription.subscriptionId)}`);
+    expect(sub.body.subscription?.state, '§C.1: a refused post MUST NOT change the subscription state').toBe('active');
+    expect((sub.body.deliveries ?? []).some((d) => d.outcome === 'dead-lettered'), 'the refused post is recorded as a dead-lettered delivery').toBe(true);
 
     const id = freshId(); const ts = now();
     const ok = await ingest(binding.ingestUrl, body, { 'webhook-id': id, 'webhook-timestamp': ts, 'webhook-signature': sign(binding.signingSecret, id, ts, body) });
@@ -138,7 +184,9 @@ describe('ADR 0793 / RFC 0230 — signed inbound-webhook ingest', () => {
   it('an unknown subscription and the management surface: 404 for the former, credential still required for the latter', async () => {
     const r = await ingest('/host/openwop-app/trigger-ingest/tgsub-0000000000000000', '{}', { 'webhook-id': freshId(), 'webhook-timestamp': now(), 'webhook-signature': 'v1,x' });
     expect(r.status).toBe(404);
+    expect(r.body.error, 'one indistinguishable not-found').toBe('not_found');
     const mgmt = await fetch(`${base}/trigger-subscriptions`);
     expect(mgmt.status, 'only the ingest root is public').toBe(401);
+    expect(((await mgmt.json().catch(() => ({}))) as IngestBody).error).toBe('unauthenticated');
   });
 });

@@ -5,6 +5,10 @@
  * (`DEMO_FEATURE_TOGGLE_IDS`) or explicitly acknowledged as demo-data-free
  * (`ACKNOWLEDGED_UNSEEDED`). A new toggled feature with no seeder trips this test
  * until someone makes the call — the whole point of the projection.
+ *
+ * PROTECTED (coverage gate). Sabotage witnesses (grade-tests 8f w2):
+ * cv-ack-drop, cv-both. Not claimed: a ghost check (an ACKNOWLEDGED_UNSEEDED key
+ * whose feature is gone stays forever) — grade-code lead SEEDCOV-GHOST-1.
  */
 import { describe, expect, it } from 'vitest';
 import { buildSeedCoverage, uncoveredFeatureToggles } from '../src/host/seedCoverage.js';
@@ -20,7 +24,10 @@ describe('DG-SEED-5 — demo-seed coverage', () => {
 
   it('the projection classifies every toggled feature exactly once', () => {
     const rows = buildSeedCoverage();
-    expect(rows.length).toBeGreaterThan(0);
+    // Floor = the MEASURED toggled-feature count, 91 on 2404797bf (2026-10-22:
+    // 30 seeded + 61 acknowledged). A floor far below the truth would let the
+    // projection silently lose most of its rows.
+    expect(rows.length).toBeGreaterThanOrEqual(91);
     for (const r of rows) {
       // seeded and acknowledged are mutually exclusive intents; never both.
       expect(r.seeded && r.acknowledged).toBe(false);

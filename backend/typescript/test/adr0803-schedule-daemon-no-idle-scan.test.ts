@@ -6,6 +6,17 @@
  * token per tick and re-lists only when the token moved, a job is due, or the
  * cached list is older than DAEMON_LIST_MAX_STALE_MS. Firing stays fenced by
  * claimDueSlot, so these tests also pin that a change is never missed.
+ * Tracker: TST-BTR-1.
+ *
+ * The "something changed" signal is a DOUBLE guard: a write through THIS
+ * instance's store nulls the local cache (`bumpJobsGeneration`), and a write
+ * from ANOTHER instance moves the shared token. Case 2 drives both: a local
+ * write, and a remote one planted through raw kv (no local invalidation), so
+ * only the token check can notice it.
+ *
+ * Red when (wave 60 probes w60g4-daemon-*): the cache is never reused; a due
+ * time does not force a re-list; the backstop never re-lists; the token is not
+ * compared.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -36,7 +47,7 @@ beforeEach(async () => {
 afterEach(() => { __resetHostExtPersistence(); });
 
 const runsFor = async (jobId: string) => (await storage.listRuns({ limit: 100 }))
-  .filter((r) => ((r.metadata as Record<string, unknown>)?.schedule as Record<string, unknown> | undefined)?.jobId === jobId);
+  .filter((r) => (r.metadata?.schedule as { jobId?: string } | undefined)?.jobId === jobId);
 /** Full lists made by the passes inside `fn`. */
 async function listsDuring(fn: () => Promise<unknown>): Promise<number> {
   const before = __daemonFullListCount();
@@ -57,8 +68,19 @@ describe('ADR 0803 — no full scan while nothing changed and nothing is due', (
     await processDueSchedules(deps, T0); // cache an EMPTY job set
     await registerJob({ jobId: 'late', tenantId: 't1', cronExpr: '0 * * * *', workflowId: 'wf-1', timezone: 'UTC' }, T0);
     expect(await listsDuring(() => processDueSchedules(deps, T0 + 30_000))).toBe(1);
-    expect(await processDueSchedules(deps, SLOT)).toBe(1);
+
+    // ANOTHER instance's write: the row and the token land in the shared store
+    // with no local cache invalidation, so only the token comparison sees it.
+    const local = await getJob('late');
+    if (!local) throw new Error('setup: the registered job must exist');
+    expect(await listsDuring(() => processDueSchedules(deps, T0 + 60_000)), 'cached again').toBe(0);
+    await storage.kvSet('hostext:scheduler:job:remote', JSON.stringify({ ...local, jobId: 'remote' }));
+    await storage.kvSet('hostext:scheduler:job-generation:all', JSON.stringify({ id: 'all', token: 'another-instance-1', at: new Date(T0).toISOString() }));
+    expect(await listsDuring(() => processDueSchedules(deps, T0 + 90_000)), 'the moved token forces one list').toBe(1);
+
+    expect(await processDueSchedules(deps, SLOT)).toBe(2);
     expect(await runsFor('late')).toHaveLength(1);
+    expect(await runsFor('remote')).toHaveLength(1);
   });
 
   it('a due time re-lists by itself and fires; a disable or delete after the list is honoured', async () => {

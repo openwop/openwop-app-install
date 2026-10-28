@@ -45,6 +45,18 @@ record of what the model wrote.
     back to `json_object`, then to none.
   - **Anthropic, MiniMax, compat, Copilot:** unchanged (prompt hint). Anthropic's
     tool-use form needs a different response parse; it is a follow-up.
+    > **IMPLEMENTED 2026-10-19 (Anthropic arm, user decision "proceed with your
+    > recommendations").** A structured call to Claude forces ONE tool call,
+    > `respond`, whose `input_schema` is the response schema
+    > (`tool_choice: {type:'tool', name:'respond'}`). The streamed
+    > `input_json_delta` chunks are the reply, so `structuredMode` reports `tool`.
+    > Anthropic refuses a forced `tool_choice` while thinking is on. Adaptive-only
+    > models (Opus 5.5, Fable 5.1) always think, so those calls, and any call with
+    > thinking enabled, keep the prompt hint. A 400 that names
+    > `tool_choice`/`tools`/`input_schema` falls back to the prompt hint once. A
+    > forced-tool `tool_use` stop is reported as `end_turn`, the expected clean
+    > end. A `max_tokens` stop still routes to truncation. Tests:
+    > `test/adr0912-anthropic-native-structured-output.test.ts`.
   - `DispatchResult.structuredMode` records which mode answered (logged at
     debug). It is not added to the `ctx.callAI` result: that is spec surface (P7
     items 2–3 need an RFC, see below).
@@ -111,6 +123,13 @@ from that today.
 ## Checklist
 
 - [x] D1–D4 with tests
-- [ ] Anthropic native structured output (tool-use or output format)
+- [x] Anthropic native structured output: a forced single tool call (2026-10-19)
 - [ ] RFC for P7 items 2–3 (attempts and tokens on the call result; per-call retry opt-out)
 - [ ] Tell Book AI the PR number
+
+Recovery correction (2026-10-21): forced `respond` calls disable parallel tool
+use explicitly. The stream parser also binds input deltas to the one declared
+`respond` block and refuses multiple or unmatched tool blocks, so a provider
+contract violation cannot concatenate separate valid objects into one reply.
+Deterministic stream witnesses cover both violations; execution and the canonical
+gate are pending the serialized release slot.

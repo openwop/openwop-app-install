@@ -25,6 +25,8 @@ beforeAll(async () => {
 afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
 async function create(path: string, headers: Record<string, string>) {
   const res = await fetch(`${base}${path}`, { method: 'POST', headers: { Authorization: 'Bearer dev-token', 'Content-Type': 'application/json', ...headers }, body: JSON.stringify({ workflowId: 'conformance-noop', inputs: {} }) });
+  // The create must succeed: a refused create reads as `undefined` links otherwise.
+  expect(res.status, 'the create is accepted').toBe(201);
   return (await res.json()) as { runId: string; eventsUrl?: string; statusUrl?: string };
 }
 const FWD = { 'X-Forwarded-Proto': 'https', 'X-Forwarded-Host': 'app.example.test' };
@@ -46,5 +48,6 @@ describe('create-response links are same-origin and keep the scheme', () => {
   it('3. with no proxy, the request\'s own origin (never some other host)', async () => {
     const r = await create('/runs', { 'OpenWOP-Version': '2' });
     expect(r.eventsUrl).toBe(`${base}/runs/${projectBoundId(r.runId)}/events`);
+    expect(r.statusUrl).toBe(`${base}/runs/${projectBoundId(r.runId)}`);
   });
 });

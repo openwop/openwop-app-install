@@ -24,7 +24,7 @@ import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { __hostExtStorage } from '../src/host/hostExtPersistence.js';
 import { listApprovals, resolveApproval } from '../src/host/approvalService.js';
 import { resolveShared } from '../src/features/sharing/sharingService.js';
-import { setTransactionalEmailTransport, __resetTransactionalEmail, type TransactionalEmail } from '../src/features/commerce/transactionalEmail.js';
+import { setTransactionalEmailTransport, __resetTransactionalEmail, type TransactionalEmail } from '../src/host/transactionalEmail.js';
 
 /** The bound TCP port, narrowed without a cast (`address()` is `string | AddressInfo | null`). */
 function portOf(s: { address(): string | AddressInfo | null }): number {

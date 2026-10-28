@@ -9,11 +9,20 @@
  * rule), the 24h session window vs template discipline, fork-stable
  * idempotency (duplicate send → recorded result, ONE broker call), and the
  * SMS-adapter hardening (a `whatsapp:` recipient cannot bypass the gates).
+ *
+ * Sabotage-witnessed (wave 64, probes 8fw5g1-wa-*): the Twilio param sort, the
+ * MessageSid dedup key (wa-dedupe-r2 — the redelivery now differs in one benign param,
+ * so the body-hash fallback key cannot answer for it), the dispatch gate + attestation,
+ * the strict per-number opt-in, the consent / window / idempotency / binding / toggle
+ * gates, the cross-tenant connection fence, STOP, the SMS bypass, the attestation RBAC
+ * scope, the hub verify token and the Cloud batch loop each turn their case red.
+ * Every case restores the shared tenant's attestation in `finally` and the broker
+ * responder resets per case, so the file passes in any order.
  */
 import http from 'node:http';
 import { createHmac } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 interface BrokerCall { provider: string; url: string; body?: string }
 const brokerCalls: BrokerCall[] = [];
@@ -81,6 +90,10 @@ beforeAll(async () => {
   // reset + restore this themselves.
   await recordNoTrainAttestation(TENANT, 'admin-0');
 });
+beforeEach(() => {
+  // A per-case default: a case that never sets one must not inherit the last case's.
+  brokerResponder = () => ({ status: 201, json: { sid: 'SM-default', status: 'queued' } });
+});
 afterAll(async () => {
   delete process.env.OPENWOP_PUBLIC_BASE_URL;
   await new Promise<void>((res) => server.close(() => res()));
@@ -112,17 +125,19 @@ describe('inbound leg — form-encoded HTTP delivery + window ledger + dedup', (
     const path = `/host/openwop-app/connections-inbound/${encodeURIComponent(connectionId)}`;
     const url = `https://app.example.test${path}`;
     const params: Record<string, string> = { MessageSid: `SM-${Date.now()}`, From: `whatsapp:${RECIPIENT}`, To: 'whatsapp:+15550001111', Body: 'hello there' };
-    const form = new URLSearchParams(params).toString();
-    const send = () => fetch(`${BASE}${path}`, {
+    const send = (p: Record<string, string>) => fetch(`${BASE}${path}`, {
       method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded', 'x-twilio-signature': twilioSign(url, params) },
-      body: form,
+      headers: { 'content-type': 'application/x-www-form-urlencoded', 'x-twilio-signature': twilioSign(url, p) },
+      body: new URLSearchParams(p).toString(),
     });
-    const first = await send();
+    const first = await send(params);
     expect(first.status, await first.clone().text()).toBe(202);
     const conv = await getConversation(TENANT, connectionId, RECIPIENT);
     expect(conv).not.toBeNull(); // the 24h window opened
-    const again = await send();
+    // The redelivery carries the SAME MessageSid but one more (benign) param, so its raw
+    // body — and the body-hash fallback dedup key — differs: only the MessageSid key can
+    // recognise it (an identical body would be deduped by the hash fallback alone).
+    const again = await send({ ...params, NumMedia: '0' });
     expect(again.status).toBe(202);
     const body = (await again.json()) as { deduped?: boolean };
     expect(body.deduped).toBe(true); // MessageSid redelivery is a no-op
@@ -211,38 +226,45 @@ describe('sendWhatsApp — the compliance gate ladder', () => {
 describe('Phase 2 — compliance layer', () => {
   it('the dispatch gate fails CLOSED without the no-training attestation, opens with it', async () => {
     await __resetWhatsAppCompliance();
-    expect(await whatsappDispatchAllowed(TENANT)).toEqual({ allow: false, reason: 'no_train_attestation_missing' });
-    await recordNoTrainAttestation(TENANT, 'admin-1');
-    expect(await whatsappDispatchAllowed(TENANT)).toEqual({ allow: true });
-    await revokeAttestation(TENANT);
-    expect((await whatsappDispatchAllowed(TENANT)).allow).toBe(false);
+    try {
+      expect(await whatsappDispatchAllowed(TENANT)).toEqual({ allow: false, reason: 'no_train_attestation_missing' });
+      await recordNoTrainAttestation(TENANT, 'admin-1');
+      expect(await whatsappDispatchAllowed(TENANT)).toEqual({ allow: true });
+      await revokeAttestation(TENANT);
+      expect(await whatsappDispatchAllowed(TENANT)).toEqual({ allow: false, reason: 'no_train_attestation_missing' });
+    } finally {
+      await recordNoTrainAttestation(TENANT, 'admin-0'); // the suite's default posture
+    }
   });
 
   it('an unattested tenant ACKS a signed inbound but does NOT dispatch (ignored outcome)', async () => {
     await __resetWhatsAppCompliance();
+    try {
     const outcome = await handleInboundEvent({ storage, hostSuite }, {
-      connectionId,
-      rawBody: '',
-      body: { MessageSid: `SM-gate-${Date.now()}`, From: `whatsapp:${RECIPIENT}`, Body: 'hello' },
-      headers: { twilioSignature: 'computed-below' },
-      now: Date.now(),
-      requestUrl: 'https://app.example.test/hook',
-    });
-    // Signature is wrong here so this asserts the ladder ORDER indirectly; do the
-    // real assertion through the verified path:
-    expect(outcome.status).toBe('unauthorized');
-    const url = 'https://app.example.test/hook2';
-    const params: Record<string, string> = { MessageSid: `SM-gate2-${Date.now()}`, From: `whatsapp:${RECIPIENT}`, Body: 'hello' };
-    const signed = await handleInboundEvent({ storage, hostSuite }, {
-      connectionId,
-      rawBody: '',
-      body: params,
-      headers: { twilioSignature: twilioSign(url, params) },
-      now: Date.now(),
-      requestUrl: url,
-    });
-    expect(signed.status).toBe('ignored'); // verified, acked, NOT dispatched
-    await recordNoTrainAttestation(TENANT, 'admin-1'); // restore for later tests
+        connectionId,
+        rawBody: '',
+        body: { MessageSid: `SM-gate-${Date.now()}`, From: `whatsapp:${RECIPIENT}`, Body: 'hello' },
+        headers: { twilioSignature: 'computed-below' },
+        now: Date.now(),
+        requestUrl: 'https://app.example.test/hook',
+      });
+      // Signature is wrong here so this asserts the ladder ORDER indirectly; do the
+      // real assertion through the verified path:
+      expect(outcome.status).toBe('unauthorized');
+      const url = 'https://app.example.test/hook2';
+      const params: Record<string, string> = { MessageSid: `SM-gate2-${Date.now()}`, From: `whatsapp:${RECIPIENT}`, Body: 'hello' };
+      const signed = await handleInboundEvent({ storage, hostSuite }, {
+        connectionId,
+        rawBody: '',
+        body: params,
+        headers: { twilioSignature: twilioSign(url, params) },
+        now: Date.now(),
+        requestUrl: url,
+      });
+      expect(signed.status).toBe('ignored'); // verified, acked, NOT dispatched
+    } finally {
+      await recordNoTrainAttestation(TENANT, 'admin-1'); // restore for later tests, in any order
+    }
   });
 
   it('STOP revokes the WhatsApp consent immediately; START re-opts-in explicitly', async () => {
@@ -287,8 +309,14 @@ describe('attestation routes — RBAC (host:whatsapp:manage)', () => {
     expect((await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'Ed', subject: editorUser.userId, roles: ['editor'] })).status).toBe(201);
 
     const path = `/host/openwop-app/whatsapp/orgs/${encodeURIComponent(orgId)}/attestation`;
-    expect((await editor.put(path, { confirmNoTraining: true })).status).toBe(403);
-    expect((await owner.put(path, {})).status).toBe(400); // explicit confirm required
+    const denied = await editor.put(path, { confirmNoTraining: true });
+    expect(denied.status).toBe(403);
+    expect((denied.body as { error?: string }).error).toBe('forbidden_scope');
+    // The refusal wrote nothing: the workspace is still unattested.
+    expect(((await owner.get(path)).body as { attested: boolean }).attested).toBe(false);
+    const unconfirmed = await owner.put(path, {}); // explicit confirm required
+    expect(unconfirmed.status).toBe(400);
+    expect(unconfirmed.body).toMatchObject({ error: 'validation_error', details: { field: 'confirmNoTraining' } });
     expect((await owner.put(path, { confirmNoTraining: true })).status).toBe(201);
     const read = await editor.get(path);
     expect(read.status).toBe(200);
@@ -299,6 +327,13 @@ describe('attestation routes — RBAC (host:whatsapp:manage)', () => {
 describe('Phase 4 — Meta Cloud API direct adapter', () => {
   const APP_SECRET = 'meta-app-secret';
   let cloudConnectionId: string;
+  // The Cloud connection is shared setup for every case below (it used to be created
+  // inside the handshake case, so the later cases passed only when run after it).
+  beforeAll(async () => {
+    const conn = await upsertOAuthConnection({ tenantId: TENANT, provider: 'whatsapp-cloud', userId: 'u1', tokens: { accessToken: 'WABA-TOKEN', tokenType: 'Bearer', scopes: ['whatsapp.send'] } });
+    cloudConnectionId = conn.connectionId;
+    await setInboundConfig({ tenantId: TENANT, connectionId: cloudConnectionId, provider: 'whatsapp-cloud', workflowId: 'wf-not-in-catalog', signingSecret: APP_SECRET });
+  });
 
   it('verifyMetaCloudSignature: sha256 over the raw body, constant-time', () => {
     const raw = JSON.stringify({ object: 'whatsapp_business_account' });
@@ -310,9 +345,6 @@ describe('Phase 4 — Meta Cloud API direct adapter', () => {
   });
 
   it('answers the GET hub.challenge subscription handshake (token = the stored secret)', async () => {
-    const conn = await upsertOAuthConnection({ tenantId: TENANT, provider: 'whatsapp-cloud', userId: 'u1', tokens: { accessToken: 'WABA-TOKEN', tokenType: 'Bearer', scopes: ['whatsapp.send'] } });
-    cloudConnectionId = conn.connectionId;
-    await setInboundConfig({ tenantId: TENANT, connectionId: cloudConnectionId, provider: 'whatsapp-cloud', workflowId: 'wf-not-in-catalog', signingSecret: APP_SECRET });
     const ok = await fetch(`${BASE}/host/openwop-app/connections-inbound/${encodeURIComponent(cloudConnectionId)}?hub.mode=subscribe&hub.verify_token=${encodeURIComponent(APP_SECRET)}&hub.challenge=CHALLENGE-42`);
     expect(ok.status).toBe(200);
     expect(await ok.text()).toBe('CHALLENGE-42');
@@ -330,17 +362,20 @@ describe('Phase 4 — Meta Cloud API direct adapter', () => {
       object: 'whatsapp_business_account',
       entry: [{ id: 'waba-1', changes: [{ field: 'messages', value: { metadata: { phone_number_id: '111222333444' }, messages: [{ from: cloudSender.slice(1), id: `wamid.${Date.now()}`, text: { body: 'hola' } }] } }] }],
     };
-    const raw = JSON.stringify(payload);
-    const send = () => fetch(`${BASE}${path}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-hub-signature-256': `sha256=${createHmac('sha256', APP_SECRET).update(raw, 'utf8').digest('hex')}` },
-      body: raw,
-    });
-    const first = await send();
+    const send = (body: unknown) => {
+      const raw = JSON.stringify(body);
+      return fetch(`${BASE}${path}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-hub-signature-256': `sha256=${createHmac('sha256', APP_SECRET).update(raw, 'utf8').digest('hex')}` },
+        body: raw,
+      });
+    };
+    const first = await send(payload);
     expect(first.status, await first.clone().text()).toBe(202);
     const conv = await getConversation(TENANT, cloudConnectionId, cloudSender);
     expect(conv).not.toBeNull(); // window opened from the Cloud envelope
-    const again = await send();
+    // Same message id, different raw bytes: only the message-id key can dedup it.
+    const again = await send({ ...payload, redelivery: 1 });
     expect(((await again.json()) as { deduped?: boolean }).deduped).toBe(true);
   });
 
@@ -384,10 +419,9 @@ describe('tenant isolation — the pairing store is not a cross-tenant reach', (
       { storage, tenantId: 'org:some-other-tenant', runId: 'wa:intruder', actingUserId: 'intruder' },
       { connectionId, to: RECIPIENT, templateId: 'HX1' },
     );
-    // The feature toggle resolves per-tenant first; either gate is fail-closed —
-    // the intruder must never reach the pairing or the broker.
-    expect(res.sent).toBe(false);
-    expect(['feature_disabled', 'no_binding']).toContain((res as { error: string }).error);
+    // The toggle is on host-wide in this file (`saveConfig` is not tenant-scoped), so the
+    // intruder passes it and is refused by the connection-ownership fence itself.
+    expect(res).toEqual({ sent: false, error: 'no_binding', message: 'This connection does not exist in this workspace.' });
     expect(brokerCalls.length).toBe(0);
   });
 });

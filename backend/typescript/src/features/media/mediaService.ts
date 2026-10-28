@@ -8,7 +8,7 @@
  * @see docs/adr/0007-media-library.md
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { fireMediaAssetDeleted } from '../../host/mediaAssetLifecycle.js';
 import { OpenwopError } from '../../types.js';
@@ -48,7 +48,54 @@ export interface MediaAssetLineage {
   op?: 'generate' | 'edit' | 'inpaint' | 'background-remove' | 'upscale';
   /** Usage-rights note, e.g. license/approval context (bounded 400 chars). */
   rightsNote?: string;
+  /** ADR 0945 D4 — the write-once AI provenance facet. NEVER accepted from a
+   *  caller's `lineage` (cleanLineage drops it): only a generating path writes
+   *  it, through `createAsset({grounding})` or {@link stampGroundingIfAbsent}. */
+  grounding?: MediaGrounding;
+  /** ADR 0958 D5 — who SUPPLIED the bytes (a vendor's accepted intake). Server
+   *  only, like `grounding`: written once by the intake accept
+   *  (`createAsset({suppliedBy})`), never from a caller's `lineage`, and a
+   *  patch cannot set, change or clear it. Ids only; the rights record stays on
+   *  the intake, and `rightsNote` carries its accepted summary. */
+  suppliedBy?: MediaSupplier;
 }
+
+/** ADR 0958 D5 — the supplier facet of an asset's lineage. */
+export interface MediaSupplier {
+  kind: 'vendor';
+  collaboratorId: string;
+  grantId: string;
+  intakeId: string;
+}
+
+/** ADR 0945 D2 — how a generated asset depicts the product. */
+export const GROUNDING_MODES = ['none', 'composite', 'edit', 'animate'] as const;
+export type GroundingMode = (typeof GROUNDING_MODES)[number];
+
+/** ADR 0945 D4 — the provenance stamp. Every field is host-derived. */
+export interface MediaGrounding {
+  mode: GroundingMode;
+  productId?: string;
+  variantId?: string;
+  /** The source pixels, by id AND hash, so an audit survives source deletion. */
+  sources: Array<{ assetId: string; sha256: string }>;
+  /** sha256 of the FULL prompt. Absent only on a path with no prompt (the
+   *  deterministic ADR 0399 renderer) — an ADR 0945 D4 correction. */
+  promptHash?: string;
+  provider: string;
+  model: string;
+  op: string;
+  runId?: string;
+  nodeId?: string;
+  agentId?: string;
+  composedFrom?: { renderId: string; templateId: string; briefId?: string };
+  /** Written only by the fidelity service (ADR 0945 D3, P1+). */
+  fidelity?: { verdictId: string; outcome: 'pass' | 'fail' | 'needs_review'; rulesetVersion: string };
+}
+
+/** ADR 0945 D1 — the closed shot-role vocabulary of a product photo. */
+export const SHOT_ROLES = ['hero', 'angle', 'detail', 'packaging', 'label', 'lifestyle'] as const;
+export type ShotRole = (typeof SHOT_ROLES)[number];
 
 /** ADR 0352 Phase 1 — the typed marketing-metadata facet (CS-002). All fields
  *  optional + bounded; `personaIds` reference campaign-brief personas by id;
@@ -58,7 +105,12 @@ export interface MediaAssetLineage {
 export interface MediaCropBox { x: number; y: number; w: number; h: number }
 
 export interface MediaMarketing {
+  /** Free-text product tag (untyped; never a link — ADR 0945 D1). */
   product?: string;
+  /** ADR 0945 D1 — the commerce product this asset depicts (the only link). */
+  productId?: string;
+  /** ADR 0945 D1 — which shot of the product this is. */
+  shotRole?: ShotRole;
   sku?: string;
   angle?: string;
   background?: string;
@@ -136,6 +188,17 @@ const isLibraryAsset = (parsed: unknown): MediaAsset | null => {
 };
 const collections = new DurableCollection<MediaCollection>('media:collection', (c) => c.collectionId, undefined, (c) => c.tenantId);
 const assets = new DurableCollection<MediaAsset>('media:asset', (a) => a.assetId, isLibraryAsset, (a) => a.tenantId);
+
+/** ADR 0945 D1 — the serve-token → asset index, so a product's
+ *  `imageAssetTokens` resolve by point lookup, not a scan. Keyed by the SHA-256
+ *  of the token (a serve token is a bearer credential to the bytes; an index
+ *  must not hold a second plaintext copy of it). Deliberately NOT under the
+ *  `media:asset` name: that prefix is shared with the legacy byte store. The
+ *  index is a cache — every read re-checks the asset row, and a miss heals from
+ *  the bounded tenant slice (rows created before the index existed). */
+interface MediaTokenIndexRow { key: string; tenantId: string; assetId: string }
+const tokenIndex = new DurableCollection<MediaTokenIndexRow>('media:token-idx', (r) => r.key, undefined, (r) => r.tenantId);
+const tokenKey = (tenantId: string, token: string): string => `${tenantId}::${createHash('sha256').update(token).digest('hex')}`;
 
 /** Bounded (tenant, org) asset slice via the tenant index (DEBT-2). The
  *  `tenantId` re-check is belt-and-braces: marker keys are `:`-joined, so a
@@ -276,6 +339,8 @@ export function cleanMarketing(raw: unknown): MediaMarketing | undefined {
     : undefined;
   const m: MediaMarketing = {
     ...(str(o.product) ? { product: str(o.product)! } : {}),
+    ...(cleanProductId(o.productId) ? { productId: cleanProductId(o.productId)! } : {}),
+    ...((SHOT_ROLES as readonly unknown[]).includes(o.shotRole) ? { shotRole: o.shotRole as ShotRole } : {}),
     ...(str(o.sku) ? { sku: str(o.sku)! } : {}),
     ...(str(o.angle) ? { angle: str(o.angle)! } : {}),
     ...(str(o.background) ? { background: str(o.background)! } : {}),
@@ -285,6 +350,13 @@ export function cleanMarketing(raw: unknown): MediaMarketing | undefined {
     ...(list(o.palette)?.length ? { palette: list(o.palette)! } : {}),
   };
   return Object.keys(m).length > 0 ? m : undefined;
+}
+
+/** ADR 0945 D1 — a product id is an opaque id, never prose: a closed charset
+ *  and length, else dropped (an invalid id must not become a link). */
+const PRODUCT_ID_RE = /^[A-Za-z0-9:_.-]{1,128}$/;
+function cleanProductId(v: unknown): string | undefined {
+  return typeof v === 'string' && PRODUCT_ID_RE.test(v) ? v : undefined;
 }
 
 /** Sanitize renditions — each box normalized + clamped; junk dropped. */
@@ -339,6 +411,75 @@ export function cleanLineage(raw: unknown): MediaAssetLineage | undefined {
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
+/** ADR 0958 D5 — the supplier facet, ids only (bounded). Undefined when unusable. */
+function cleanSupplier(raw: MediaSupplier): MediaSupplier | undefined {
+  const id = (v: unknown): string => (typeof v === 'string' && /^[A-Za-z0-9_:.-]{1,128}$/.test(v) ? v : '');
+  const collaboratorId = id(raw.collaboratorId);
+  const grantId = id(raw.grantId);
+  const intakeId = id(raw.intakeId);
+  return raw.kind === 'vendor' && collaboratorId && grantId && intakeId ? { kind: 'vendor', collaboratorId, grantId, intakeId } : undefined;
+}
+
+const SHA256_RE = /^[a-f0-9]{64}$/;
+const GROUNDING_MAX_SOURCES = 16;
+
+/** ADR 0945 D4 — sanitize a SERVER-built grounding facet (closed vocabulary,
+ *  bounded strings, hex hashes). Only generating paths call this; a caller's
+ *  `lineage` never reaches it. Returns undefined when the facet is unusable —
+ *  a generating path then records no grounding rather than a malformed one. */
+export function cleanGrounding(raw: unknown): MediaGrounding | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const r = raw as Record<string, unknown>;
+  if (!(GROUNDING_MODES as readonly unknown[]).includes(r.mode)) return undefined;
+  const provider = optionalCleanString(r.provider, 60);
+  const model = optionalCleanString(r.model, MAX.lineageModel);
+  const op = optionalCleanString(r.op, 40);
+  if (!provider || !model || !op) return undefined;
+  const sources = Array.isArray(r.sources)
+    ? r.sources
+      .filter((x): x is { assetId: string; sha256: string } => !!x && typeof x === 'object' && typeof (x as { assetId?: unknown }).assetId === 'string' && typeof (x as { sha256?: unknown }).sha256 === 'string' && SHA256_RE.test((x as { sha256: string }).sha256))
+      .map((x) => ({ assetId: x.assetId.slice(0, MAX.lineageRef), sha256: x.sha256 }))
+      .slice(0, GROUNDING_MAX_SOURCES)
+    : [];
+  const ref = (v: unknown): string | undefined => optionalCleanString(v, MAX.lineageRef);
+  const productId = cleanProductId(r.productId);
+  const promptHash = typeof r.promptHash === 'string' && SHA256_RE.test(r.promptHash) ? r.promptHash : undefined;
+  const cf = r.composedFrom && typeof r.composedFrom === 'object' ? r.composedFrom as Record<string, unknown> : undefined;
+  const composedFrom = cf && ref(cf.renderId) && ref(cf.templateId)
+    ? { renderId: ref(cf.renderId)!, templateId: ref(cf.templateId)!, ...(ref(cf.briefId) ? { briefId: ref(cf.briefId)! } : {}) }
+    : undefined;
+  const fd = r.fidelity && typeof r.fidelity === 'object' ? r.fidelity as Record<string, unknown> : undefined;
+  const fidelity = fd && ref(fd.verdictId) && ref(fd.rulesetVersion) && (fd.outcome === 'pass' || fd.outcome === 'fail' || fd.outcome === 'needs_review')
+    ? { verdictId: ref(fd.verdictId)!, outcome: fd.outcome as 'pass' | 'fail' | 'needs_review', rulesetVersion: ref(fd.rulesetVersion)! }
+    : undefined;
+  return {
+    mode: r.mode as GroundingMode,
+    ...(productId ? { productId } : {}),
+    ...(ref(r.variantId) ? { variantId: ref(r.variantId)! } : {}),
+    sources,
+    ...(promptHash ? { promptHash } : {}),
+    provider, model, op,
+    ...(ref(r.runId) ? { runId: ref(r.runId)! } : {}),
+    ...(ref(r.nodeId) ? { nodeId: ref(r.nodeId)! } : {}),
+    ...(ref(r.agentId) ? { agentId: ref(r.agentId)! } : {}),
+    ...(composedFrom ? { composedFrom } : {}),
+    ...(fidelity ? { fidelity } : {}),
+  };
+}
+
+/** ADR 0945 D4 — the prompt hash: SHA-256 of the FULL prompt (the text itself
+ *  stays in the run log / the bounded `lineage.prompt`). */
+export function promptHashOf(prompt: string): string {
+  return createHash('sha256').update(prompt).digest('hex');
+}
+
+/** ADR 0945 D1 — a serve URL (`…/assets/<token>`) or a bare token → the token. */
+export function parseServeToken(raw: string): string | null {
+  const m = raw.match(/\/assets\/([A-Za-z0-9_-]{1,512})\/?$/);
+  if (m) return m[1];
+  return /^[A-Za-z0-9_-]{1,512}$/.test(raw) ? raw : null;
+}
+
 export function viewAsset(a: MediaAsset): MediaAssetView {
   return { ...a, serveUrl: mediaStorage.serveUrl(a.serveToken) };
 }
@@ -381,15 +522,18 @@ export async function deleteCollection(tenantId: string, orgId: string, collecti
   // lost") would strand an asset pointing at a deleted collection forever.
   // Collection deletion is rare; completeness wins over speed here.
   const orphans = (await assets.list()).filter((a) => a.tenantId === tenantId && a.orgId === orgId && a.collectionId === collectionId);
-  await Promise.all(
-    orphans.map((a) => {
-      const next: MediaAsset = { ...a, updatedAt: nowIso() };
+  let rehomed = 0;
+  for (const listed of orphans) {
+    const result = await mutateAsset(tenantId, orgId, listed.assetId, (current) => {
+      if (current.collectionId !== collectionId) return null;
+      const next = { ...current, updatedAt: nowIso() };
       delete next.collectionId;
-      return assets.put(next);
-    }),
-  );
+      return next;
+    });
+    if (result?.updated) rehomed += 1;
+  }
   await collections.delete(collectionId);
-  return { rehomed: orphans.length };
+  return { rehomed };
 }
 
 // ── Assets ──────────────────────────────────────────────────────────────────
@@ -411,6 +555,11 @@ export async function createAsset(input: {
   marketing?: unknown;
   /** ADR 0352 P2 — sha256 hex of the stored bytes (computed in the route). */
   contentHash?: string;
+  /** ADR 0945 D4 — SERVER-ONLY provenance from a generating path (sanitized by
+   *  `cleanGrounding`). Never wire a request body or node arg to this. */
+  grounding?: unknown;
+  /** ADR 0958 D5 — SERVER-ONLY: the vendor intake accept. Never from a request body. */
+  suppliedBy?: MediaSupplier;
 }): Promise<MediaAsset> {
   // Capacity (count + bytes) is asserted in the route BEFORE bytes are stored —
   // see assertOrgCapacity — so no over-cap upload reaches here with orphaned bytes.
@@ -422,7 +571,13 @@ export async function createAsset(input: {
     collectionId = c.collectionId;
   }
   const ts = nowIso();
-  const lineage = cleanLineage(input.lineage);
+  const grounding = cleanGrounding(input.grounding);
+  const cleaned = cleanLineage(input.lineage);
+  // Grounding is provenance, not an AI claim: a deterministic composite of real
+  // photos carries it too. `generatedBy` stays whatever the path stated.
+  const supplied = input.suppliedBy ? cleanSupplier(input.suppliedBy) : undefined;
+  const base = grounding ? { ...(cleaned ?? {}), grounding } : cleaned;
+  const lineage = supplied ? { ...(base ?? {}), suppliedBy: supplied } : base;
   const marketing = cleanMarketing(input.marketing);
   const a: MediaAsset = {
     assetId: `masset:${randomUUID()}`,
@@ -444,7 +599,165 @@ export async function createAsset(input: {
     updatedAt: ts,
   };
   await assets.put(a);
+  // The index is a cache: a failed write must not fail a create whose row
+  // already landed (getAssetByServeToken heals the miss).
+  await tokenIndex.put({ key: tokenKey(a.tenantId, a.serveToken), tenantId: a.tenantId, assetId: a.assetId })
+    .catch((err: unknown) => log.warn('media_token_index_write_failed', { assetId: a.assetId, error: err instanceof Error ? err.message : String(err) }));
   return a;
+}
+
+/** ADR 0945 D4 — the write-once rule for a dedup hit. A generating path whose
+ *  bytes matched an existing row must not lose its provenance: the FIRST
+ *  grounding write lands; an existing grounding is never replaced (only the
+ *  fidelity service may later set `grounding.fidelity`). Returns the row as
+ *  stored. */
+export async function stampGroundingIfAbsent(existing: MediaAsset, grounding: unknown, opts: { ai: boolean } = { ai: true }): Promise<MediaAsset> {
+  const g = cleanGrounding(grounding);
+  const result = await mutateAsset(existing.tenantId, existing.orgId, existing.assetId, (current) => {
+    const kept = current.lineage?.grounding ?? g;
+    if (!kept || (current.lineage?.grounding && (!opts.ai || current.lineage.generatedBy === 'ai'))) return null;
+    return { ...current, lineage: { ...(current.lineage ?? {}), ...(opts.ai ? { generatedBy: 'ai' as const } : {}), grounding: kept }, updatedAt: nowIso() };
+  });
+  if (!result) throw new OpenwopError('not_found', 'Asset not found in this org.', 404, { assetId: existing.assetId });
+  return result.asset;
+}
+
+/** ADR 0958 P5 — the supplier of an accepted vendor file was erased. The asset
+ *  stays in the library (the agency accepted it, with its rights); what goes is
+ *  the person in it: the accepted `rightsNote` (it can carry their credit line)
+ *  is replaced, and the asset's name is replaced while it is still the vendor's
+ *  own file name. `suppliedBy` keeps its opaque ids, which resolve to nothing
+ *  once the collaborator row is gone. Only an asset whose `suppliedBy.intakeId`
+ *  is `intakeId` is touched. Returns whether the row changed. */
+export async function eraseSupplierDetails(
+  tenantId: string, orgId: string, assetId: string,
+  input: { intakeId: string; rightsNote: string; vendorFileName: string; replacementName: string },
+): Promise<boolean> {
+  const result = await mutateAsset(tenantId, orgId, assetId, (current) => {
+    if (current.lineage?.suppliedBy?.intakeId !== input.intakeId) return null;
+    const rename = current.name === input.vendorFileName;
+    if (!rename && current.lineage.rightsNote === input.rightsNote) return null;
+    return {
+      ...current,
+      ...(rename ? { name: input.replacementName } : {}),
+      lineage: { ...current.lineage, rightsNote: input.rightsNote },
+      updatedAt: nowIso(),
+    };
+  });
+  return result?.updated ?? false;
+}
+
+/** ADR 0945 D3/D4 — the ONLY writer of `grounding.fidelity`: the fidelity
+ *  service stamps the latest verdict summary on the asset by CAS. Refuses an
+ *  asset with no grounding (a verdict on it is still stored; nothing is
+ *  stamped). Returns the updated row, or null when the asset is absent or
+ *  ungrounded. */
+export async function setGroundingFidelity(
+  tenantId: string,
+  orgId: string,
+  assetId: string,
+  fidelity: { verdictId: string; outcome: 'pass' | 'fail' | 'needs_review'; rulesetVersion: string },
+): Promise<MediaAsset | null> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const a = await getAsset(tenantId, orgId, assetId);
+    const g = a?.lineage?.grounding;
+    if (!a || !g) return null;
+    const next: MediaAsset = { ...a, lineage: { ...a.lineage, grounding: { ...g, fidelity } }, updatedAt: nowIso() };
+    if (await assets.compareAndSwap(a, next)) return next;
+  }
+  throw new OpenwopError('internal_error', 'The asset changed while its fidelity verdict was being recorded — retry.', 409, { assetId });
+}
+
+/** The edit-family ops: the output's pixels derive from an input image. */
+const EDIT_OPS = new Set(['edit', 'inpaint', 'background-remove', 'upscale']);
+/** Recorded when a provider ran its own default model (the request named none). */
+export const PROVIDER_DEFAULT_MODEL = 'provider-default';
+
+/**
+ * ADR 0945 D4 — build the grounding facet for bytes being promoted into the
+ * library. The HOST record (`aiOrigin`, stamped by the AI providers adapter when
+ * it minted the bytes) wins; a caller's `lineage.generatedBy:'ai'` claim with no
+ * host record still gets a `none` facet, with whatever it named. Bytes that are
+ * neither yield undefined (a plain upload has no provenance to stamp).
+ *
+ * `source` pins the input asset when the caller KNOWS it (the derive routes);
+ * otherwise an edit op's input hash is matched against this org's library.
+ * `runId`/`nodeId` are stamped only when the origin's run IS the caller's run
+ * (a route's synthetic adapter run id is not a run anyone can open).
+ */
+/** ADR 0945 P2 — "are these bytes one of this product's photos?", answered by
+ *  the catalog's owner (commerce registers it; media cannot import commerce,
+ *  which imports media). Absent ⇒ a product hint is never honoured. */
+export type ProductSourceVerifier = (tenantId: string, orgId: string, productId: string, sourceSha256: string) => Promise<boolean>;
+let productSourceVerifier: ProductSourceVerifier | null = null;
+export function registerProductSourceVerifier(fn: ProductSourceVerifier): void { productSourceVerifier = fn; }
+/** The registered catalog check (false when none is registered or it fails). */
+export async function isVerifiedProductSource(tenantId: string, orgId: string, productId: string, sourceSha256: string): Promise<boolean> {
+  return productSourceVerifier ? productSourceVerifier(tenantId, orgId, productId, sourceSha256).catch(() => false) : false;
+}
+
+export async function groundingForGenerated(
+  tenantId: string,
+  orgId: string,
+  origin: { provider: string; model?: string; op: string; runId?: string; nodeId?: string; promptHash?: string; inputSha256?: string } | undefined,
+  opts: { claimedLineage?: unknown; runId?: string; source?: { asset: MediaAsset; sha256: string }; productHint?: string } = {},
+): Promise<MediaGrounding | undefined> {
+  const claimed = cleanLineage(opts.claimedLineage);
+  if (!origin && claimed?.generatedBy !== 'ai') return undefined;
+  const op = origin?.op ?? claimed?.op ?? 'generate';
+  let source = opts.source;
+  if (!source && origin?.inputSha256) {
+    const hit = (await assetsForOrg(tenantId, orgId)).find((a) => a.contentHash === origin.inputSha256);
+    if (hit) source = { asset: hit, sha256: origin.inputSha256 };
+  }
+  // A caller's product hint binds only when the catalog confirms the source
+  // bytes are that product's photo (a write-once stamp must not carry a claim).
+  const hint = cleanProductId(opts.productHint);
+  const hinted = hint && source && productSourceVerifier
+    ? await productSourceVerifier(tenantId, orgId, hint, source.sha256).catch(() => false)
+    : false;
+  const productId = hinted ? hint : source?.asset.marketing?.productId;
+  const runStamp = origin
+    ? (origin.runId && origin.runId === opts.runId ? { runId: origin.runId, ...(origin.nodeId ? { nodeId: origin.nodeId } : {}) } : {})
+    : (opts.runId ? { runId: opts.runId } : {});
+  return cleanGrounding({
+    mode: EDIT_OPS.has(op) ? 'edit' : 'none',
+    ...(productId ? { productId } : {}),
+    sources: source ? [{ assetId: source.asset.assetId, sha256: source.sha256 }] : [],
+    ...(origin?.promptHash ? { promptHash: origin.promptHash } : claimed?.prompt && !origin ? { promptHash: promptHashOf(claimed.prompt) } : {}),
+    provider: origin?.provider ?? claimed?.provider ?? 'unknown',
+    model: origin?.model ?? claimed?.model ?? PROVIDER_DEFAULT_MODEL,
+    op,
+    ...runStamp,
+  });
+}
+
+/** ADR 0945 D1 — resolve a serve token to its library asset IN this org.
+ *  Point lookup through the token index; a miss heals from the bounded tenant
+ *  slice. A token of another org or tenant, an unknown token and a stale index
+ *  row all read as null (no existence leak). */
+export async function getAssetByServeToken(tenantId: string, orgId: string, token: string): Promise<MediaAsset | null> {
+  const a = await getAssetByServeTokenForTenant(tenantId, token);
+  return a && a.orgId === orgId ? a : null;
+}
+
+/** ADR 0945 P3 — the tenant-scoped form (no org argument), for the publish
+ *  edge: an ad's media reference may be a bare serve token, and the gate must
+ *  find the asset (and then read the verdict in the asset's OWN org) or it can
+ *  be bypassed. Tenant-isolated; never returns another tenant's asset. */
+export async function getAssetByServeTokenForTenant(tenantId: string, token: string): Promise<MediaAsset | null> {
+  if (!token) return null;
+  const key = tokenKey(tenantId, token);
+  const idx = await tokenIndex.get(key);
+  if (idx && idx.tenantId === tenantId) {
+    const a = await assets.get(idx.assetId);
+    if (a && a.tenantId === tenantId && a.serveToken === token) return a;
+    await tokenIndex.delete(key).catch(() => undefined); // stale row — heal below
+  }
+  const hit = (await assets.listForTenantIndexed(tenantId)).find((a) => a.tenantId === tenantId && a.serveToken === token);
+  if (!hit) return null;
+  await tokenIndex.put({ key, tenantId, assetId: hit.assetId }).catch(() => undefined);
+  return hit;
 }
 
 /** ADR 0352 P2 — deterministic filename→tags: strip the extension, split on
@@ -477,24 +790,27 @@ export async function mergeAssetMetadataOnDedup(
   existing: MediaAsset,
   incoming: { tags?: unknown; marketing?: unknown },
 ): Promise<MediaAsset> {
-  const mergedTags = [...existing.tags];
-  for (const t of cleanTags(incoming.tags)) {
-    if (!mergedTags.includes(t) && mergedTags.length < MAX.tags) mergedTags.push(t);
-  }
-  const incomingMkt = cleanMarketing(incoming.marketing);
-  const mergedMkt: MediaMarketing = { ...(incomingMkt ?? {}), ...(existing.marketing ?? {}) };
-  const tagsChanged = mergedTags.length !== existing.tags.length;
-  // Existing facet values always win, so a change is exactly "a key was added".
-  const mktChanged = Object.keys(mergedMkt).length !== Object.keys(existing.marketing ?? {}).length;
-  if (!tagsChanged && !mktChanged) return existing;
-  const next: MediaAsset = {
-    ...existing,
-    tags: mergedTags,
-    ...(Object.keys(mergedMkt).length > 0 ? { marketing: mergedMkt } : {}),
-    updatedAt: nowIso(),
-  };
-  await assets.put(next);
-  return next;
+  const result = await mutateAsset(existing.tenantId, existing.orgId, existing.assetId, (current) => {
+    const mergedTags = [...current.tags];
+    for (const t of cleanTags(incoming.tags)) {
+      if (!mergedTags.includes(t) && mergedTags.length < MAX.tags) mergedTags.push(t);
+    }
+    const incomingMkt = cleanMarketing(incoming.marketing);
+    const mergedMkt: MediaMarketing = { ...(incomingMkt ?? {}), ...(current.marketing ?? {}) };
+    const tagsChanged = mergedTags.length !== current.tags.length;
+    // Existing facet values always win, so a change is exactly "a key was added".
+    const mktChanged = Object.keys(mergedMkt).length !== Object.keys(current.marketing ?? {}).length;
+    if (!tagsChanged && !mktChanged) return null;
+    const next: MediaAsset = {
+      ...current,
+      tags: mergedTags,
+      ...(Object.keys(mergedMkt).length > 0 ? { marketing: mergedMkt } : {}),
+      updatedAt: nowIso(),
+    };
+    return next;
+  });
+  if (!result) throw new OpenwopError('not_found', 'Asset not found in this org.', 404, { assetId: existing.assetId });
+  return result.asset;
 }
 
 /** All assets in a tenant, ACROSS orgs — for the cross-source artifact Library (ADR 0083).
@@ -534,6 +850,23 @@ export async function getAsset(tenantId: string, orgId: string, assetId: string)
   return a && a.tenantId === tenantId && a.orgId === orgId ? a : null;
 }
 
+/** Existing-row mutations share one cross-instance CAS boundary (ADR 0945).
+ * Recompute from each fresh row, preserving concurrent provenance and edits.
+ * A disappeared row stays absent; exhaustion is never reported as success. */
+async function mutateAsset(
+  tenantId: string, orgId: string, assetId: string,
+  change: (current: MediaAsset) => MediaAsset | null | Promise<MediaAsset | null>,
+): Promise<{ asset: MediaAsset; updated: boolean } | null> {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const current = await getAsset(tenantId, orgId, assetId);
+    if (!current) return null;
+    const next = await change(current);
+    if (!next) return { asset: current, updated: false };
+    if (await assets.compareAndSwap(current, next)) return { asset: next, updated: true };
+  }
+  throw new OpenwopError('conflict', 'The asset changed concurrently; retry the operation.', 409, { assetId });
+}
+
 /** Tenant-scoped point lookup (ADR 0069) — resolves an asset by id without the
  *  caller knowing its org; the artifact workbench derives org FROM the record
  *  then authorizes against it. Tenant-isolated; never returns a foreign tenant's
@@ -549,74 +882,83 @@ export async function updateAsset(
   assetId: string,
   patch: { name?: string; tags?: unknown; collectionId?: string | null; lineage?: unknown; marketing?: unknown; renditions?: unknown; altText?: string | null; altTextSource?: unknown },
 ): Promise<MediaAsset | null> {
-  const a = await getAsset(tenantId, orgId, assetId);
-  if (!a) return null;
-  const next: MediaAsset = { ...a, updatedAt: nowIso() };
-  if (patch.name !== undefined) next.name = cleanName(patch.name, a.name);
-  if (patch.tags !== undefined) next.tags = cleanTags(patch.tags);
-  if (patch.lineage !== undefined) {
-    // ADR 0229: same sanitizer as create; `lineage: null` (or an all-invalid
-    // object) clears the record — additive + reversible, never partial-merged.
-    const lineage = cleanLineage(patch.lineage);
-    if (lineage) next.lineage = lineage;
-    else delete next.lineage;
-  }
-  if (patch.marketing !== undefined) {
-    // ADR 0352 P1 — same replace-or-clear semantics as lineage.
-    const marketing = cleanMarketing(patch.marketing);
-    if (marketing) next.marketing = marketing;
-    else delete next.marketing;
-  }
-  if (patch.renditions !== undefined) {
-    // ADR 0352 P5 — replace-or-clear.
-    const renditions = cleanRenditions(patch.renditions);
-    if (renditions) next.renditions = renditions;
-    else delete next.renditions;
-  }
-  if (patch.altText !== undefined || patch.altTextSource !== undefined) {
-    // ADR 0363 P1 — alt text + provenance. `altText: null` clears both fields.
-    // Otherwise the source drives validation: `decorative` ⇒ empty alt is valid
-    // (renders alt=""); `human`/`ai` ⇒ a non-empty ≤250-char description.
-    if (patch.altText === null) {
-      delete next.altText;
-      delete next.altTextSource;
-    } else {
-      if (!a.contentType.startsWith('image/')) {
-        throw new OpenwopError('validation_error', 'Alt text applies only to image assets.', 422, { contentType: a.contentType });
-      }
-      // Provenance: an explicit source wins; otherwise supplying `altText` marks a
-      // human edit (never inherit a stale `ai` provenance), and a bare source-only
-      // change keeps the current source.
-      const source: MediaAltTextSource =
-        patch.altTextSource !== undefined
-          ? coerceAltTextSource(patch.altTextSource)
-          : patch.altText !== undefined
-            ? 'human'
-            : (next.altTextSource ?? 'human');
-      if (source === 'decorative') {
-        next.altText = '';
-        next.altTextSource = 'decorative';
+  const result = await mutateAsset(tenantId, orgId, assetId, async (a) => {
+    const next: MediaAsset = { ...a, updatedAt: nowIso() };
+    if (patch.name !== undefined) next.name = cleanName(patch.name, a.name);
+    if (patch.tags !== undefined) next.tags = cleanTags(patch.tags);
+    if (patch.lineage !== undefined) {
+      // ADR 0229: same sanitizer as create; `lineage: null` (or an all-invalid
+      // object) clears the record — additive + reversible, never partial-merged.
+      // ADR 0945 D4 — WRITE-ONCE: a patch (even `lineage: null`) can neither
+      // set, change nor clear `grounding`, and cannot strip `generatedBy:'ai'`
+      // from a grounded AI asset (that would launder it past the publish gate).
+      // ADR 0958 D5 — `suppliedBy` is write-once the same way: the supplier of
+      // accepted vendor bytes survives every patch.
+      const lineage = cleanLineage(patch.lineage);
+      const kept = a.lineage?.grounding;
+      const supplier = a.lineage?.suppliedBy;
+      const wasAi = a.lineage?.generatedBy === 'ai';
+      if (kept || wasAi || supplier || lineage) {
+        next.lineage = { ...(lineage ?? {}), ...(wasAi ? { generatedBy: 'ai' as const } : {}), ...(kept ? { grounding: kept } : {}), ...(supplier ? { suppliedBy: supplier } : {}) };
+      } else delete next.lineage;
+    }
+    if (patch.marketing !== undefined) {
+      // ADR 0352 P1 — same replace-or-clear semantics as lineage.
+      const marketing = cleanMarketing(patch.marketing);
+      if (marketing) next.marketing = marketing;
+      else delete next.marketing;
+    }
+    if (patch.renditions !== undefined) {
+      // ADR 0352 P5 — replace-or-clear.
+      const renditions = cleanRenditions(patch.renditions);
+      if (renditions) next.renditions = renditions;
+      else delete next.renditions;
+    }
+    if (patch.altText !== undefined || patch.altTextSource !== undefined) {
+      // ADR 0363 P1 — alt text + provenance. `altText: null` clears both fields.
+      // Otherwise the source drives validation: `decorative` ⇒ empty alt is valid
+      // (renders alt=""); `human`/`ai` ⇒ a non-empty ≤250-char description.
+      if (patch.altText === null) {
+        delete next.altText;
+        delete next.altTextSource;
       } else {
-        const text = cleanAltText(patch.altText ?? next.altText ?? '');
-        if (!text) {
-          throw new OpenwopError('validation_error', 'Alt text is required for a non-decorative image. Use `altTextSource: "decorative"` to mark the image decorative instead.', 400, { assetId });
+        if (!a.contentType.startsWith('image/')) {
+          throw new OpenwopError('validation_error', 'Alt text applies only to image assets.', 422, { contentType: a.contentType });
         }
-        next.altText = text;
-        next.altTextSource = source;
+        // Provenance: an explicit source wins; otherwise supplying `altText` marks a
+        // human edit (never inherit a stale `ai` provenance), and a bare source-only
+        // change keeps the current source.
+        const source: MediaAltTextSource =
+          patch.altTextSource !== undefined
+            ? coerceAltTextSource(patch.altTextSource)
+            : patch.altText !== undefined
+              ? 'human'
+              : (next.altTextSource ?? 'human');
+        if (source === 'decorative') {
+          next.altText = '';
+          next.altTextSource = 'decorative';
+        } else {
+          const text = cleanAltText(patch.altText ?? next.altText ?? '');
+          if (!text) {
+            throw new OpenwopError('validation_error', 'Alt text is required for a non-decorative image. Use `altTextSource: "decorative"` to mark the image decorative instead.', 400, { assetId });
+          }
+          next.altText = text;
+          next.altTextSource = source;
+        }
       }
     }
-  }
-  if (patch.collectionId !== undefined) {
-    if (patch.collectionId === null) {
-      delete next.collectionId;
-    } else {
-      const c = await getCollection(tenantId, orgId, patch.collectionId);
-      if (!c) throw new OpenwopError('not_found', 'Collection not found in this org.', 404, { collectionId: patch.collectionId });
-      next.collectionId = c.collectionId;
+    if (patch.collectionId !== undefined) {
+      if (patch.collectionId === null) {
+        delete next.collectionId;
+      } else {
+        const c = await getCollection(tenantId, orgId, patch.collectionId);
+        if (!c) throw new OpenwopError('not_found', 'Collection not found in this org.', 404, { collectionId: patch.collectionId });
+        next.collectionId = c.collectionId;
+      }
     }
-  }
-  await assets.put(next);
-  return next;
+    return next;
+  });
+  return result?.asset ?? null;
 }
 
 /**
@@ -649,6 +991,7 @@ export async function deleteAsset(tenantId: string, orgId: string, assetId: stri
     );
   }
   await assets.delete(assetId);
+  await tokenIndex.delete(tokenKey(tenantId, a.serveToken)).catch(() => undefined); // ADR 0945 — a stale row reads null anyway
   // MEDIA-CODE-1 / CS-DATA-3 — the asset's usage rows die with it (no orphaned
   // "used by" edges pointing at a deleted asset).
   await sweepUsageRefsForAsset(tenantId, orgId, assetId);
@@ -660,11 +1003,10 @@ export async function deleteAsset(tenantId: string, orgId: string, assetId: stri
 
 /** Usage tracking (Phase 2): a consumer marks an asset used. */
 export async function markUsed(tenantId: string, orgId: string, assetId: string): Promise<MediaAsset | null> {
-  const a = await getAsset(tenantId, orgId, assetId);
-  if (!a) return null;
-  const next: MediaAsset = { ...a, usageCount: a.usageCount + 1, lastUsedAt: nowIso() };
-  await assets.put(next);
-  return next;
+  const result = await mutateAsset(tenantId, orgId, assetId, (current) => ({
+    ...current, usageCount: current.usageCount + 1, lastUsedAt: nowIso(),
+  }));
+  return result?.asset ?? null;
 }
 
 // ── Usage references (ADR 0206 / gap-analysis B4) ────────────────────────────
@@ -802,6 +1144,7 @@ export async function listUsageForAsset(tenantId: string, orgId: string, assetId
 export async function __resetMedia(): Promise<void> {
   await collections.__clear();
   await assets.__clear();
+  await tokenIndex.__clear();
   await usageRefs.__clear();
 }
 

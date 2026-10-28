@@ -7,6 +7,10 @@
  * name and the ADR 0792 three-segment projection, so the binding was stored and
  * then silently never started its workflow. Bindings are host-extension state,
  * not wire, so the match does not depend on OPENWOP_HOST_EVENTS_V2.
+ *
+ * Tracker TST-BHE-1. Sabotage-witnessed (w62): red when the dispatcher drops the
+ * advertised two-segment spelling, drops the older spellings, or matches a
+ * binding without comparing its event type.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';

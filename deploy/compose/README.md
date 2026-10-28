@@ -49,7 +49,7 @@ buffer** `/api`, or run output will arrive only after a run completes. Verify
 with:
 
 ```bash
-curl -N http://localhost:8080/api/v1/...   # -N = no buffering; tokens stream in
+curl -N http://localhost:8080/api/runs/<runId>/events   # -N = no buffering; events stream in
 ```
 
 ## Object storage (optional)

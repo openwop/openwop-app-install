@@ -8,11 +8,19 @@
  * phase, and the failure only surfaced in prod. So this loads the pack exactly
  * as bootstrap does and asserts the agent reaches the live inventory.
  *
+ * It loads through the REAL loader (`loadAgentsFromManifest`) and reads the
+ * agent back through the live HTTP inventory. It does not prove that bootstrap
+ * mounts this pack directory; that is the pack-mount suite's claim.
+ *
  * It also pins the two things that silently break the chat lane:
  *  - the agentId, which any deep-link (`/?agent=<id>`) must match;
  *  - the tool ALLOWLIST, which must name tools that actually register — an
  *    allowlist entry for a phantom tool leaves the Tutor unable to read anything
  *    while still looking configured.
+ *
+ * Sabotage witnesses (grade-tests w63): relabel the agent in pack.json → case 1
+ * red; a phantom allowlist id → cases 3–4 red; add a write tool → case 4 red;
+ * drop "cannot start a walkthrough" from tutor.md → case 5 red.
  */
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -29,6 +37,14 @@ const H = { authorization: 'Bearer dev-token', 'content-type': 'application/json
 // backend/typescript/test → repo root is three levels up.
 const PACK_DIR = join(import.meta.dirname, '..', '..', '..', 'packs', 'vendor.openwop-app.tutorials.agents');
 const TUTOR = 'vendor.openwop-app.tutorials.agents.tutor';
+const PACK_NAME = 'vendor.openwop-app.tutorials.agents';
+interface ManifestAgent { agentId: string; toolAllowlist: string[] }
+const tutorAllowlist = (): string[] => {
+  const manifest = JSON.parse(readFileSync(join(PACK_DIR, 'pack.json'), 'utf8')) as { agents: ManifestAgent[] };
+  const tutor = manifest.agents.find((a) => a.agentId === TUTOR);
+  if (!tutor) throw new Error(`fixture: ${TUTOR} is not in pack.json`);
+  return tutor.toolAllowlist;
+};
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -50,27 +66,26 @@ describe('ADR 0488 P6 — the Tutor agent pack', () => {
     expect(tutor?.label).toBe('Tutor');
   });
 
-  it('resolves with its system prompt at GET /v1/agents/{agentId}', async () => {
+  it('resolves at GET /v1/agents/{agentId} as THIS pack\'s agent, carrying the manifest allowlist', async () => {
+    // The by-id projection (`toEntry`) carries no system prompt, so the prompt
+    // claim lives in the last case (read from the pack file the loader reads).
     const res = await fetch(`${BASE}/agents/${encodeURIComponent(TUTOR)}`, { headers: H });
     expect(res.status).toBe(200);
-    expect(((await res.json()) as { agentId?: string }).agentId).toBe(TUTOR);
+    const body = (await res.json()) as { agentId?: string; packName?: string; toolAllowlist?: string[] };
+    expect(body.agentId).toBe(TUTOR);
+    expect(body.packName).toBe(PACK_NAME);
+    expect(body.toolAllowlist).toEqual(tutorAllowlist());
   });
 
   it('every allowlisted tool REGISTERS — an allowlist of phantoms reads as configured but cannot see anything', () => {
-    const manifest = JSON.parse(readFileSync(join(PACK_DIR, 'pack.json'), 'utf8')) as {
-      agents: Array<{ agentId: string; toolAllowlist: string[] }>;
-    };
-    const allowlist = manifest.agents.find((a) => a.agentId === TUTOR)!.toolAllowlist;
+    const allowlist = tutorAllowlist();
     expect(allowlist.length, 'non-vacuous — an empty allowlist would pass trivially').toBeGreaterThan(0);
     const known = new Set(builtinAgentToolIds());
     for (const id of allowlist) expect(known, `allowlisted tool ${id} does not register`).toContain(id);
   });
 
   it('the Tutor is allowlisted to READ tools only — no write tool sneaks in', () => {
-    const manifest = JSON.parse(readFileSync(join(PACK_DIR, 'pack.json'), 'utf8')) as {
-      agents: Array<{ agentId: string; toolAllowlist: string[] }>;
-    };
-    const allowlist = manifest.agents.find((a) => a.agentId === TUTOR)!.toolAllowlist;
+    const allowlist = tutorAllowlist();
     // The delegate projection is a GUIDE. A write tool here would let it mutate
     // a workspace on a learner's behalf with no gate, which is not what was
     // reviewed or what the ADR describes.

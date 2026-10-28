@@ -19,6 +19,7 @@ import {
   PencilIcon,
   TrashIcon,
   AlertIcon,
+  UsersIcon,
 } from '../ui/icons/index.js';
 import type { PromptKind, PromptTemplate } from './types.js';
 import { refToString } from './types.js';
@@ -81,6 +82,13 @@ interface PromptViewProps {
   onEdit: (p: PromptTemplate) => void;
   /** Open the delete-confirm (user-authored prompts only). */
   onDelete: (p: PromptTemplate) => void;
+  /** ADR 0993 D8 — publish this prompt to the Team library. */
+  onPublish?: (p: PromptTemplate) => void;
+}
+
+function ShareWithTeam({ p, t, onPublish }: { p: PromptTemplate; t: TFunction; onPublish?: (p: PromptTemplate) => void }): JSX.Element | null {
+  if (!onPublish) return null;
+  return <IconButton label={t('shareWithTeamLabel', { name: p.name ?? p.templateId })} icon={<UsersIcon size={15} />} onClick={() => onPublish(p)} />;
 }
 
 function PromptActions({
@@ -111,7 +119,7 @@ function PromptActions({
   );
 }
 
-export function PromptCard({ prompt: p, tierOneActive, onSelect, onEdit, onDelete }: PromptViewProps): JSX.Element {
+export function PromptCard({ prompt: p, tierOneActive, onSelect, onEdit, onDelete, onPublish }: PromptViewProps): JSX.Element {
   const { t } = useTranslation('prompts');
   const isUser = isUserPromptId(p.templateId);
   return (
@@ -139,16 +147,15 @@ export function PromptCard({ prompt: p, tierOneActive, onSelect, onEdit, onDelet
           </div>
         )}
       </Button>
-      {isUser && (
-        <div className="action-bar u-gap-2 u-justify-end">
-          <PromptActions p={p} t={t} onEdit={onEdit} onDelete={onDelete} />
-        </div>
-      )}
+      <div className="action-bar u-gap-2 u-justify-end">
+        <ShareWithTeam p={p} t={t} {...(onPublish ? { onPublish } : {})} />
+        {isUser && <PromptActions p={p} t={t} onEdit={onEdit} onDelete={onDelete} />}
+      </div>
     </div>
   );
 }
 
-export function PromptRow({ prompt: p, tierOneActive, onSelect, onEdit, onDelete }: PromptViewProps): JSX.Element {
+export function PromptRow({ prompt: p, tierOneActive, onSelect, onEdit, onDelete, onPublish }: PromptViewProps): JSX.Element {
   const { t } = useTranslation('prompts');
   const isUser = isUserPromptId(p.templateId);
   return (
@@ -176,6 +183,7 @@ export function PromptRow({ prompt: p, tierOneActive, onSelect, onEdit, onDelete
         <Button variant="secondary" size="sm" onClick={() => onSelect(p)}>
           {t('usePromptAction')}
         </Button>
+        <ShareWithTeam p={p} t={t} {...(onPublish ? { onPublish } : {})} />
         {isUser && <PromptActions p={p} t={t} onEdit={onEdit} onDelete={onDelete} />}
       </div>
     </div>

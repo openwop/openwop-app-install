@@ -84,7 +84,7 @@ import { lazy, Suspense, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '../../ui/Button.js';
 import { Notice } from '../../ui/index.js';
-import { FileTextIcon, GlobeIcon, MailCheckIcon, SearchIcon } from '../../ui/icons/index.js';
+import { CodeIcon, FileTextIcon, GlobeIcon, MailCheckIcon, SearchIcon } from '../../ui/icons/index.js';
 import { getArtifact, getArtifactRevision } from '../artifacts/artifactClient.js';
 import type { ReviewAsset } from './reviewClient.js';
 
@@ -116,6 +116,15 @@ export interface GateBrowserAction {
   note?: string;
 }
 
+/** ADR 0995 D2 — the program a code-exec node is asking to run: the exact source
+ *  the sandbox receives. Node-authored, rendered as text only. */
+export interface GateCodeExec {
+  language: string;
+  code: string;
+  stdinPreview?: string;
+  stdinLength?: number;
+}
+
 /** The evidence fields an approval interrupt's `data` may carry. */
 export interface GateEvidenceData {
   options?: readonly GateOption[];
@@ -123,6 +132,7 @@ export interface GateEvidenceData {
   revisionId?: string;
   sendMessage?: GateSendMessage;
   browserAction?: GateBrowserAction;
+  codeExec?: GateCodeExec;
 }
 
 /**
@@ -148,6 +158,8 @@ const RECOGNIZED_GATE_KEYS: ReadonlySet<string> = new Set([
   'question', 'schema', 'resumeSchema',
   // ADR 0894 — the computer-use decide gate (rendered below)
   'computerUse', 'providerNote',
+  // ADR 0995 D2 — the code-exec gate (rendered below)
+  'codeExec',
 ]);
 
 /** Narrow an interrupt's opaque `data` to the evidence fields, without casting. */
@@ -187,8 +199,20 @@ export function gateEvidenceOf(data: unknown): GateEvidenceData {
         ...(typeof d.providerNote === 'string' && d.providerNote ? { note: d.providerNote } : {}),
       }
     : undefined;
+  const ce = d.codeExec && typeof d.codeExec === 'object' && !Array.isArray(d.codeExec)
+    ? (d.codeExec as Record<string, unknown>)
+    : undefined;
+  const codeExec: GateCodeExec | undefined = ce && typeof ce.code === 'string' && typeof ce.language === 'string'
+    ? {
+        language: ce.language,
+        code: ce.code,
+        ...(typeof ce.stdinPreview === 'string' && ce.stdinPreview ? { stdinPreview: ce.stdinPreview } : {}),
+        ...(typeof ce.stdinLength === 'number' ? { stdinLength: ce.stdinLength } : {}),
+      }
+    : undefined;
   return {
     ...(browserAction ? { browserAction } : {}),
+    ...(codeExec ? { codeExec } : {}),
     ...(options && options.length > 0 ? { options } : {}),
     ...(typeof d.artifactId === 'string' ? { artifactId: d.artifactId } : {}),
     ...(typeof d.revisionId === 'string' ? { revisionId: d.revisionId } : {}),
@@ -200,7 +224,7 @@ export function gateEvidenceOf(data: unknown): GateEvidenceData {
  *  entirely rather than render a box that says nothing. */
 export function hasGateEvidence(data: unknown): boolean {
   const e = gateEvidenceOf(data);
-  return (e.options?.length ?? 0) > 0 || !!e.artifactId || !!e.sendMessage || !!e.browserAction;
+  return (e.options?.length ?? 0) > 0 || !!e.artifactId || !!e.sendMessage || !!e.browserAction || !!e.codeExec;
 }
 
 /** ADR 0894 — is this the computer-use decide gate? Its reject ends a browser
@@ -252,6 +276,35 @@ function BrowserActionEvidence({ action }: { action: GateBrowserAction }): JSX.E
   );
 }
 
+/** ADR 0995 D2 — the code block: what will run, in which language, with which
+ *  input. Everything is a text child; the code is never interpreted here. */
+function CodeExecEvidence({ codeExec }: { codeExec: GateCodeExec }): JSX.Element {
+  const { t } = useTranslation('chat');
+  const truncated = codeExec.stdinPreview !== undefined && typeof codeExec.stdinLength === 'number' && codeExec.stdinLength > codeExec.stdinPreview.length;
+  return (
+    <div className="approval-preview u-mbox-b2" data-testid="gate-evidence-code">
+      <div className="approval-preview-head">
+        <span className="approval-preview-label u-iflex u-items-center u-gap-1-5">
+          <CodeIcon size={13} aria-hidden /> {t('codeExecGateHeading')}
+        </span>
+        <span className="chip u-fs-11">{codeExec.language}</span>
+      </div>
+      {/* The body scrolls (max-height), so it takes focus for keyboard scrolling, as the
+          default evidence body does. */}
+      <div className="approval-preview-body u-flex u-flex-col u-gap-1-5" tabIndex={0} role="region" aria-label={t('codeExecGateCodeLabel', { language: codeExec.language })}>
+        <pre className="msgrender-code-pre u-fs-12 u-m-0"><code>{codeExec.code}</code></pre>
+        {codeExec.stdinPreview !== undefined ? (
+          <>
+            <p className="muted u-fs-12 u-m-0">{truncated ? t('codeExecGateStdinTruncated', { shown: codeExec.stdinPreview.length, total: codeExec.stdinLength }) : t('codeExecGateStdin')}</p>
+            <pre className="msgrender-code-pre u-fs-12 u-m-0"><code>{codeExec.stdinPreview}</code></pre>
+          </>
+        ) : null}
+        <p className="muted u-fs-12 u-m-0">{t('codeExecGateNote')}</p>
+      </div>
+    </div>
+  );
+}
+
 /**
  * True when `data` carries a key this component has never heard of — so there is
  * SOMETHING here and we cannot show it. Distinct from "nothing was captured",
@@ -287,7 +340,7 @@ export function GateEvidence({
     let cancelled = false;
     // A send gate renders its envelope, so the gate-preview artifact (the node's
     // upstream PORT INPUTS, not the message) is never fetched or shown for it.
-    if (browserAction || sendMessage || inlineAssets.length > 0 || !artifactId || !revisionId) return;
+    if (browserAction || evidence.codeExec || sendMessage || inlineAssets.length > 0 || !artifactId || !revisionId) return;
     setLoading(true);
     setFailed(false);
     (async () => {
@@ -343,6 +396,9 @@ export function GateEvidence({
     : '';
 
   if (browserAction) return <BrowserActionEvidence action={browserAction} />;
+  // ADR 0995 D2 — a code-exec gate's evidence is the program itself; the gate-preview
+  // artifact (the node's upstream port inputs) is never fetched or shown for it.
+  if (evidence.codeExec) return <CodeExecEvidence codeExec={evidence.codeExec} />;
 
   return (
     <div className="approval-preview u-mbox-b2" data-testid="gate-evidence">

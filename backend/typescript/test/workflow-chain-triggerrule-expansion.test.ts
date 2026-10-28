@@ -8,8 +8,9 @@
  * MUST, on the same edge-map seam as `condition` (`workflowChainPackLoader.ts`).
  *
  * These are pure-expansion unit assertions: they build a `WorkflowChain` in memory and
- * call `expandChain` directly, so they do NOT depend on the vendored manifest schema
- * carrying `triggerRule` yet (that lands when the upstream RFC 0125 schema PR syncs). The
+ * call `expandChain` directly, independent of any pack manifest. (The vendored manifest
+ * schema has since gained `FragmentEdge.triggerRule` —
+ * `schemas/workflow-chain-pack-manifest.schema.json` — so a pack can author it too.) The
  * expanded graph is still validated by the shared `validateWorkflowDefinition`, whose
  * `WorkflowEdge.triggerRule` support predates this RFC.
  */
@@ -19,7 +20,9 @@ import { expandChain, type WorkflowChain } from '../src/host/workflowChainPackLo
 
 /** A minimal two-node chain: a trigger → a terminal, joined by one edge whose
  *  `triggerRule` we vary. typeIds only need to match the id pattern to validate. */
-function chainWithEdge(edge: { from: string; to: string; triggerRule?: string }): WorkflowChain {
+type ChainEdge = NonNullable<WorkflowChain['dag']['edges']>[number];
+
+function chainWithEdge(edge: ChainEdge): WorkflowChain {
   return {
     chainId: 'test.triggerrule',
     version: '1.0.0',
@@ -33,15 +36,20 @@ function chainWithEdge(edge: { from: string; to: string; triggerRule?: string })
       ],
       edges: [edge],
     },
-  } as unknown as WorkflowChain;
+  };
 }
 
 describe('RFC 0125 — FragmentEdge.triggerRule expansion carry-through', () => {
   it('carries an explicit triggerRule verbatim onto the expanded WorkflowEdge', () => {
     const def = expandChain(chainWithEdge({ from: 'start', to: 'done', triggerRule: 'all_complete' }));
     expect(def.edges!).toHaveLength(1);
-    // The MUST: the value survives expansion unchanged.
-    expect(def.edges![0]!.triggerRule).toBe('all_complete');
+    // The MUST: the value survives expansion unchanged — and NOTHING else is
+    // stamped onto the edge (case 2 sweeps the values; this pins the shape).
+    const edge = def.edges![0]!;
+    expect(edge.triggerRule).toBe('all_complete');
+    expect(Object.keys(edge).sort()).toEqual(['edgeId', 'sourceNodeId', 'targetNodeId', 'triggerRule']);
+    expect(edge.sourceNodeId.endsWith('_start')).toBe(true);
+    expect(edge.targetNodeId.endsWith('_done')).toBe(true);
   });
 
   it('preserves each of the five fan-in rules', () => {

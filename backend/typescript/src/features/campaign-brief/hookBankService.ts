@@ -21,7 +21,7 @@
 import { createHash } from 'node:crypto';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { OpenwopError } from '../../types.js';
-import { cleanString, optionalCleanString } from '../../host/boundedStrings.js';
+import { cleanContent, cleanString, optionalCleanString } from '../../host/boundedStrings.js';
 import { declarePiiFields } from '../../host/dataClassification.js';
 import type { HookVariant } from './angleService.js';
 
@@ -94,7 +94,15 @@ export async function emitCandidateHooks(
   const out: HookEmissionResult = { emitted: [], skippedExisting: [], errors: [] };
   const now = new Date().toISOString();
   for (const v of variants) {
-    const text = cleanString(v.text, TEXT_MAX);
+    let text: string;
+    try {
+      text = cleanContent(v.text, TEXT_MAX, 'text');
+    } catch (err) {
+      // A credential-shaped hook is refused per variant (never rewritten), and the
+      // rest of the batch still lands. The message never echoes the token.
+      out.errors.push({ text: '(refused)', message: err instanceof Error ? err.message : 'refused' });
+      continue;
+    }
     if (!text) continue;
     const id = deterministicHookId(tenantId, orgId, text);
     try {

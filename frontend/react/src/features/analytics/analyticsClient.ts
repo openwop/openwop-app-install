@@ -117,3 +117,40 @@ export async function getNavReport(): Promise<NavReport> {
   const res = await fetch(`${root}/analytics/nav/report`, fetchOpts({ headers: authedHeaders() }));
   return asJson<NavReport>(res, 'getNavReport');
 }
+
+/** ADR 0951 P0 — behavior-capture status (heat maps, session replay). Replay is
+ *  `available` only with its toggle ON, durable blob storage configured, and the
+ *  consent regime ON; `storageConfigured:false` is the "not configured" state. */
+export interface BehaviorSettings {
+  heatmaps: { enabled: boolean };
+  replay: { enabled: boolean; storageConfigured: boolean; consentEnabled: boolean; available: boolean; retentionDays: number };
+}
+export async function getBehaviorSettings(orgId: string): Promise<BehaviorSettings> {
+  const res = await fetch(`${base(orgId)}/behavior/settings`, fetchOpts({ headers: authedHeaders() }));
+  return asJson<BehaviorSettings>(res, 'getBehaviorSettings');
+}
+
+/** ADR 0951 P1 — heat maps (aggregate, identifier-free). */
+export type HeatDevice = 'all' | 'mobile' | 'tablet' | 'desktop';
+export interface HeatPageRef { pageKey: string; firstSeen: string; lastSeen: string }
+export interface HeatmapView {
+  pageKey: string;
+  device: HeatDevice;
+  days: number;
+  views: number;
+  bots: number;
+  clicks: Array<{ cell: string; count: number }>;
+  totalClicks: number;
+  scrollReach: number[];
+  attention: Array<{ section: string; avgMs: number; views: number }>;
+  arms: Array<{ arm: string; views: number; suppressed: boolean }>;
+}
+export async function getHeatPages(orgId: string): Promise<HeatPageRef[]> {
+  const res = await fetch(`${base(orgId)}/heatmap/pages`, fetchOpts({ headers: authedHeaders() }));
+  return (await asJson<{ pages: HeatPageRef[] }>(res, 'getHeatPages')).pages;
+}
+export async function getHeatmap(orgId: string, q: { page: string; device: HeatDevice; days: 7 | 30 | 90; arm?: string }): Promise<HeatmapView> {
+  const params = new URLSearchParams({ page: q.page, device: q.device, days: String(q.days), ...(q.arm ? { arm: q.arm } : {}) });
+  const res = await fetch(`${base(orgId)}/heatmap?${params.toString()}`, fetchOpts({ headers: authedHeaders() }));
+  return asJson<HeatmapView>(res, 'getHeatmap');
+}

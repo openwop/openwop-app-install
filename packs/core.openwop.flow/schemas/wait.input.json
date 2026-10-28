@@ -1,8 +1,15 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/core.openwop.flow/1.1.3/wait.input.json",
+  "$id": "https://packs.openwop.dev/core.openwop.flow/1.2.0/wait.input.json",
   "title": "WaitInput",
   "type": "object",
-  "properties": {},
+  "properties": {
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "minLength": 1,
+      "description": "Until mode: a recorded input timestamp overrides the config fallback."
+    }
+  },
   "additionalProperties": false
 }

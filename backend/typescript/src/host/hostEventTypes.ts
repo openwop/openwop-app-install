@@ -15,7 +15,7 @@
  * every `emitHostEvent` call site in `src/` (the dispatcher is the only
  * caller of `deliverHostExtEvent`), including the template-built families whose verbs are
  * `string` typed (territories, sales-commissions, priority-matrix, strategy,
- * dealers, service-desk, whatsapp consent, app-builder sync, webinars), read off
+ * dealers, service-desk, whatsapp + sms consent, app-builder sync, webinars), read off
  * their call sites. `test/adr0825-rfc0236-host-events.test.ts` re-scans the emit sites and
  * pins this list against them, and against the closed-world CRM and KB verb
  * tables, so a new literal emitter that is not listed here is red.
@@ -113,10 +113,13 @@ const EMITTED: readonly string[] = [
   'crm.segment.entered',
   // host/adsAdapter.ts
   'host.campaign.ads.dispatched', 'host.campaign.ads.budget-updated', 'host.campaign.ads.audience-synced',
+  'host.campaign.ads.paused', 'host.campaign.ads.activated', // ADR 0952 D1
   // features/campaign-brief/briefService.ts
   'host.campaign.brief.created', 'host.campaign.brief.validated', 'host.campaign.brief.confirmed', 'host.campaign.brief.deleted',
   // features/campaign-orchestration/campaignService.ts
   'host.campaign.campaign.finalized', 'host.campaign.campaign.status-changed', 'host.campaign.campaign.deleted',
+  // features/campaign-ops/collaboration/intake.ts — ADR 0958 D5 (a vendor intake accepted into the DAM).
+  'host.campaign.asset.accepted',
   // features/cms/cmsService.ts
   'host.cms.page.submitted', 'host.cms.page.published', 'host.cms.page.rejected', 'host.cms.page.archived',
   'host.cms.page.unpublished', 'host.cms.page.restored',
@@ -150,6 +153,8 @@ const EMITTED: readonly string[] = [
   ...family('host.servicedesk', { ticket: ['created', 'message-appended', 'status-changed', 'priority-changed', 'assigned'] }),
   // features/whatsapp/compliance.ts — `kind` is 'opt-in' | 'opt-out'.
   ...family('host.whatsapp', { consent: ['opt-in', 'opt-out'] }),
+  // features/crm/smsInbound.ts (ADR 0955 P1) — `KeywordKind`; HELP writes nothing but is still emitted.
+  ...family('host.sms', { consent: ['opt-out', 'opt-out-all', 'opt-in', 'help'] }),
   // features/app-builder/syncWebhook.ts — every outcome `conclude()` is called with, `_` → `-`.
   ...family('host.app-builder', { sync: ['applied', 'ignored', 'skipped-self', 'fallback-invalid', 'fallback-basis', 'fallback-cas'] }),
   // features/webinars/webinarProcessor.ts — `WebinarPhase`.

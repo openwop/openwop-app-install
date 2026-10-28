@@ -24,6 +24,7 @@ import { nodes as nodePack } from '../../../packs/feature.campaign-channels.node
 import { openStorage } from '../src/storage/index.js';
 import type { Storage } from '../src/storage/storage.js';
 import { __resetHostExtPersistence, initHostExtPersistence } from '../src/host/hostExtPersistence.js';
+import { buildTrackedUrl } from '../src/host/trackedUrl.js';
 import { buildDocumentsSurface } from '../src/features/documents/surface.js';
 import { listDocuments, getDocument, listVersions, __resetDocumentsStore } from '../src/features/documents/documentsService.js';
 
@@ -45,6 +46,7 @@ const outObj = (out: { outputs?: Record<string, unknown> }, key: string): Record
 const published = { outcome: 'published', platform: 'meta', platformCampaignId: 'c1', platformAdSetId: 's1', platformAdId: 'a1', reviewStatus: 'pending_review', paused: true, reused: false };
 
 const briefSurface = (orgId = 'o1') => ({
+  trackedUrl: async (args: { url: string; briefId: string }) => ({ url: buildTrackedUrl(args.url, undefined, { fallbackCampaign: args.briefId }), linted: false, violations: [] }),
   assembleContext: async () => ({ found: true, brief: { id: 'b1', orgId }, kernel: { headline: 'H' } }),
 });
 
@@ -217,6 +219,37 @@ describe('publish-ad-variants — real dispatch branch (ADR 0167) vs document fa
     expect(bad.status).toBe('failed');
     expect(bad.error?.code).toBe('unknown_platform');
     expect(seen).toHaveLength(6); // the typo never reached the adapter
+  });
+
+  // ADR 0907 P0 — Google's EU political-advertising declaration is the operator's
+  // attestation: passed through as given, refused if malformed, never invented.
+  it('passes euPoliticalAdvertising through to ctx.ads; never invents one when absent', async () => {
+    let captured: Captured = {};
+    const ads = { publishAd: async (a: Captured) => { captured = a; return { ...published, platform: 'google' }; } };
+    const run = (extra: Record<string, unknown>) => publishAd({ features: { documents: { createDraftDocument: async () => ({}) }, 'campaign-brief': briefSurface('o1') }, ads, inputs: { draft: adWithMeta, adAccountId: '12345', platform: 'google', landingUrl: 'https://x.test', ...extra }, runId: 'r1', nodeId: 'n1' });
+    expect((await run({ euPoliticalAdvertising: 'does_not_contain' })).status).toBe('success');
+    expect(captured.euPoliticalAdvertising).toBe('does_not_contain');
+    await run({});
+    expect(captured).not.toHaveProperty('euPoliticalAdvertising');
+  });
+
+  it('refuses a malformed declaration before any dispatch', async () => {
+    let called = 0;
+    const ads = { publishAd: async () => { called++; return published; } };
+    const out = await publishAd({ features: { documents: { createDraftDocument: async () => ({}) }, 'campaign-brief': briefSurface('o1') }, ads, inputs: { draft: adWithMeta, adAccountId: '12345', platform: 'google', euPoliticalAdvertising: 'no' }, runId: 'r1', nodeId: 'n1' });
+    expect(out.status).toBe('failed');
+    expect(out.error?.code).toBe('validation_error');
+    expect(called).toBe(0);
+  });
+
+  it('a missing declaration is a typed, actionable failure — never the document fallback', async () => {
+    let docCalled = false;
+    const ads = { publishAd: async () => ({ outcome: 'failed', error: 'missing_eu_political_declaration' }) };
+    const out = await publishAd({ features: { documents: { createDraftDocument: async () => { docCalled = true; return {}; } }, 'campaign-brief': briefSurface('o1') }, ads, inputs: { draft: adWithMeta, adAccountId: '12345', platform: 'google', landingUrl: 'https://x.test' }, runId: 'r1', nodeId: 'n1' });
+    expect(out.status).toBe('failed');
+    expect(out.error?.code).toBe('eu_political_declaration_required');
+    expect(out.error?.message).toMatch(/euPoliticalAdvertising/);
+    expect(docCalled).toBe(false);
   });
 
   it('falls back to the document handoff when ctx.ads reports no_connection (honest degradation)', async () => {

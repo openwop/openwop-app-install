@@ -4,6 +4,12 @@
  *
  * Provider requests are observed at `fetch` (stubbed), so these pin the real
  * request bodies `providers/dispatch.ts` sends, not a test double's view.
+ *
+ * Tracker TST-BJR. Red when (probe-witnessed, w65): a web-search turn asks for JSON
+ * mode; an inexpressible schema is still sent; a schema INVALID_ARGUMENT walks the
+ * thinking ladder instead of dropping the schema; OpenAI does not fall back to
+ * json_object; jsonrepair stops escaping an inner quote; the corrective fragment or
+ * the missing-key names leave the retry; the reply excerpt is uncapped/unscrubbed.
  */
 
 import { describe, expect, it, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';

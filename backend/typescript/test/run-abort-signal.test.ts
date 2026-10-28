@@ -12,6 +12,28 @@
  * `executeRun`, cancels it through the real cancel recipe, and reads the node's
  * outcome — the only arrangement in which a broken wiring can go red.
  *
+ * Breaks it (round-1 probes, witnessed): the terminal listener aborting only one
+ * segment (8fw2g2-ras-all), the controller not released (ras-release), a re-arm
+ * reusing the old controller (ras-fresh), the past-deadline/future-deadline
+ * timers (ras-past / ras-future), the MCP deps `signal` dropped (ras-wire) and
+ * the executor never arming (ras-arm).
+ *
+ * The seam cases run on FAKE timers (`vi.useFakeTimers()` fakes `Date.now` and
+ * `setTimeout`, both of which `armRunAbort` reads), so each deadline is checked
+ * 1 ms either side of the boundary with no real-clock sleep. The e2e cancel is
+ * fired by the PEER when the `tools/call` request arrives, so it lands in flight
+ * by construction rather than by a 250 ms guess.
+ *
+ * DOUBLE GUARD on "a run cancelled mid-flight STAYS cancelled": the finalize
+ * re-read in `executor.ts` (`recordedStatus` … `isTerminalRunStatus`) AND the
+ * RFC 0194 closed run log (`cancelRunAndCascade` appends `run.cancelled`, so the
+ * node's own `node.completed` append throws `RunLogClosedError` and
+ * `executeRun` returns the recorded status). Removing the finalize guard alone
+ * stays green on the real cancel recipe (round-1 8fw2g2-ras-finalize VACUOUS).
+ * The case 'the finalize re-read alone keeps a terminal row…' flips the row
+ * WITHOUT closing the log, so only the finalize guard stands
+ * (8fw2g2-ras-finalize-r2).
+ *
  * @see spec/v1/mcp-integration.md §C.1; src/executor/runLifecycle.ts
  */
 import { createServer, type Server } from 'node:http';
@@ -19,7 +41,7 @@ import type { AddressInfo } from 'node:net';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { armRunAbort, notifyRunTerminal, runAbortSignal, _resetRunLifecycle } from '../src/executor/runLifecycle.js';
 import { executeRun } from '../src/executor/executor.js';
 import { setEventLogBackend } from '../src/executor/eventLog.js';
@@ -35,10 +57,14 @@ import { initInMemorySurfaces } from '../src/host/inMemorySurfaces.js';
 import { openStorage } from '../src/storage/index.js';
 import type { Storage } from '../src/storage/storage.js';
 import type { RunRecord } from '../src/types.js';
-import type { WorkflowDefinition } from '../src/executor/types.js';
+import type { NodeModule, WorkflowDefinition } from '../src/executor/types.js';
 
 describe('armRunAbort / runAbortSignal — the seam', () => {
-  beforeEach(() => { _resetRunLifecycle(); });
+  beforeEach(() => {
+    _resetRunLifecycle();
+    vi.useFakeTimers({ now: Date.UTC(2026, 0, 15, 12, 0, 0) });
+  });
+  afterEach(() => { vi.useRealTimers(); });
 
   it('a run reaching terminal aborts its signal', () => {
     const signal = armRunAbort('run-1');
@@ -53,7 +79,7 @@ describe('armRunAbort / runAbortSignal — the seam', () => {
     expect(runAbortSignal('run-2')).toBe(runAbortSignal('run-2'));
   });
 
-  it('ADR 0772 D1.4 — a re-arm (a resumed segment) gets a FRESH signal; the old segment keeps its own deadline', async () => {
+  it('ADR 0772 D1.4 — a re-arm (a resumed segment) gets a FRESH signal; the old segment keeps its own deadline', () => {
     // This test used to pin `armRunAbort` as idempotent. That was the defect
     // (`RRWF-2`): the first segment's deadline survived a suspend and every
     // resumed node was handed an already-aborted signal.
@@ -61,7 +87,9 @@ describe('armRunAbort / runAbortSignal — the seam', () => {
     const second = armRunAbort('run-2b', Date.now() + 60_000);
     expect(second).not.toBe(first);
     expect(runAbortSignal('run-2b')).toBe(second);
-    await new Promise((r) => setTimeout(r, 60));
+    vi.advanceTimersByTime(29);
+    expect(first.aborted, '1 ms before its deadline').toBe(false);
+    vi.advanceTimersByTime(2);
     // The old segment's own deadline still cuts ITS nodes (the unfenced resume
     // path can leave some in flight) — and never reaches the new segment.
     expect(first.aborted).toBe(true);
@@ -93,10 +121,12 @@ describe('armRunAbort / runAbortSignal — the seam', () => {
     expect(signal.aborted).toBe(true);
   });
 
-  it('a future deadline aborts when it passes', async () => {
+  it('a future deadline aborts when it passes', () => {
     const signal = armRunAbort('run-5', Date.now() + 40);
     expect(signal.aborted).toBe(false);
-    await new Promise((r) => setTimeout(r, 90));
+    vi.advanceTimersByTime(39);
+    expect(signal.aborted, '1 ms before the deadline').toBe(false);
+    vi.advanceTimersByTime(2);
     expect(signal.aborted).toBe(true);
   });
 
@@ -122,6 +152,8 @@ let storage: Storage;
 let peer: Server;
 let peerUrl: string;
 let sawCancelNotification = false;
+/** Fired by the peer when a `tools/call` arrives — the in-flight window. */
+let onToolCall: (() => void) | undefined;
 
 beforeAll(async () => {
   process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE = 'true';
@@ -134,6 +166,11 @@ beforeAll(async () => {
         sawCancelNotification = true;
         res.writeHead(202).end();
         return;
+      }
+      if (rpc.method === 'tools/call' && onToolCall) {
+        const fire = onToolCall;
+        onToolCall = undefined;
+        fire();
       }
       // A tool that never answers within the run's lifetime — the in-flight
       // window a cancel has to be able to reach into.
@@ -170,6 +207,7 @@ describe('ADR 0553 P3 — cancelling a REAL run cancels its in-flight MCP call',
   beforeEach(async () => {
     _resetRunLifecycle();
     sawCancelNotification = false;
+    onToolCall = undefined;
     storage = await openStorage('memory://');
     initHostExtPersistence(storage);
     initInMemorySurfaces({ dataDir: mkdtempSync(join(tmpdir(), 'p3-surfaces-')) });
@@ -183,14 +221,15 @@ describe('ADR 0553 P3 — cancelling a REAL run cancels its in-flight MCP call',
 
   it('the node fails typed `mcp_cancelled` and the peer is told — end to end, no hand-built signal', async () => {
     let observedError: { code?: string } | undefined;
-    getNodeRegistry().register({
+    const stall: NodeModule = {
       typeId: 'test.p3.mcp-stall',
       version: '1.0.0',
-      async execute(ctx: { mcp: { invokeTool: (s: string, t: string, a: unknown) => Promise<unknown> } }) {
+      async execute(ctx) {
+        if (!ctx.mcp?.invokeTool) throw new Error('the executor wired no MCP surface');
         try {
           await ctx.mcp.invokeTool(SERVER_ID, 'stalls', {});
         } catch (err) {
-          observedError = err as { code?: string };
+          observedError = typeof err === 'object' && err !== null && 'code' in err ? { code: String(err.code) } : {};
           throw err;
         }
         // A REAL `NodeOutcome`. The first draft returned a bare `{}` and the
@@ -200,22 +239,25 @@ describe('ADR 0553 P3 — cancelling a REAL run cancels its in-flight MCP call',
         // fixture that can only be trusted on the happy path.
         return { status: 'success' as const, outputs: {} };
       },
-    } as unknown as Parameters<ReturnType<typeof getNodeRegistry>['register']>[0]);
+    };
+    getNodeRegistry().register(stall);
 
     const now = new Date().toISOString();
     const run: RunRecord = {
       runId: 'run-p3-e2e', workflowId: 'wf.p3', tenantId: 'e2e', status: 'pending',
       inputs: null, metadata: { actingUserId: 'u1' }, configurable: {}, createdAt: now, updatedAt: now,
-    } as RunRecord;
+    };
     await storage.insertRun(run);
     const definition: WorkflowDefinition = { workflowId: 'wf.p3', nodes: [{ nodeId: 'n1', typeId: 'test.p3.mcp-stall' }] };
 
     // Cancel through the REAL recipe (`POST /v1/runs/:id/cancel` calls this),
-    // while the node is inside its outbound request. 250 ms is comfortably
-    // after the request leaves and far before the peer's 10 s answer.
-    const cancelAt = setTimeout(() => {
+    // fired by the peer the moment the `tools/call` request ARRIVES — so the
+    // cancel lands while the node is inside its outbound request, by construction.
+    let cancelFired = false;
+    onToolCall = () => {
+      cancelFired = true;
       void storage.getRun(run.runId).then((r) => (r ? cancelRunAndCascade(storage, r, 'test') : undefined));
-    }, 250);
+    };
 
     // The run's own terminal bookkeeping is NOT the gate here, and wrapping it
     // is what makes this test able to fail for the right reason. With the
@@ -226,7 +268,7 @@ describe('ADR 0553 P3 — cancelling a REAL run cancels its in-flight MCP call',
     // NODE's outcome, so that is what is asserted, and it is captured inside the
     // node where no later executor behaviour can mask it.
     const outcome = await executeRun(storage, run, definition).catch((err: unknown) => ({ status: 'threw', err }));
-    clearTimeout(cancelAt);
+    expect(cancelFired, 'the tools/call reached the peer, so the cancel landed in flight').toBe(true);
 
     // The node did NOT hang out to the 15 s MCP request timeout, and the failure
     // is attributed to the cancellation rather than misreported as a slow peer.
@@ -258,13 +300,13 @@ describe('ADR 0553 P3 — cancelling a REAL run cancels its in-flight MCP call',
         if (row) await cancelRunAndCascade(storage, row, 'test');
         return { status: 'success' as const, outputs: {} };
       },
-    } as unknown as Parameters<ReturnType<typeof getNodeRegistry>['register']>[0]);
+    });
 
     const now = new Date().toISOString();
     const run: RunRecord = {
       runId: 'run-p3-flip', workflowId: 'wf.p3.flip', tenantId: 'e2e', status: 'pending',
       inputs: null, metadata: {}, configurable: {}, createdAt: now, updatedAt: now,
-    } as RunRecord;
+    };
     await storage.insertRun(run);
 
     const result = await executeRun(storage, run, {
@@ -285,5 +327,39 @@ describe('ADR 0553 P3 — cancelling a REAL run cancels its in-flight MCP call',
     const types = (await storage.listEvents('run-p3-flip')).map((e) => e.type);
     expect(types, 'a cancelled run must not emit run.completed').not.toContain('run.completed');
     expect(types).toContain('run.cancelled');
+  }, 20_000);
+
+  it('the finalize re-read alone keeps a terminal row: a status written UNDER the executor without closing the log is not overwritten', async () => {
+    // The case above has two guards (header): the RFC 0194 closed log stops it
+    // before finalize is reached. Here another writer flips the ROW only (no
+    // `run.cancelled` append, so the log stays open), which leaves the finalize
+    // re-read as the one thing between this run and a `completed` overwrite.
+    getNodeRegistry().register({
+      typeId: 'test.p3.row-flip-then-finish',
+      version: '1.0.0',
+      async execute() {
+        await storage.updateRun('run-p3-rowonly', { status: 'cancelled' });
+        return { status: 'success' as const, outputs: {} };
+      },
+    });
+    const now = new Date().toISOString();
+    const run: RunRecord = {
+      runId: 'run-p3-rowonly', workflowId: 'wf.p3.rowonly', tenantId: 'e2e', status: 'pending',
+      inputs: null, metadata: {}, configurable: {}, createdAt: now, updatedAt: now,
+    };
+    await storage.insertRun(run);
+
+    const result = await executeRun(storage, run, {
+      workflowId: 'wf.p3.rowonly',
+      nodes: [{ nodeId: 'n1', typeId: 'test.p3.row-flip-then-finish' }],
+    });
+
+    const types = (await storage.listEvents('run-p3-rowonly')).map((e) => e.type);
+    // Non-vacuity: the log really was left open (the node's completion landed).
+    expect(types).toContain('node.completed');
+    expect(types).not.toContain('run.cancelled');
+    expect(result.status).toBe('cancelled');
+    expect((await storage.getRun('run-p3-rowonly'))?.status).toBe('cancelled');
+    expect(types, 'finalize must not append a completion for a run whose row is terminal').not.toContain('run.completed');
   }, 20_000);
 });

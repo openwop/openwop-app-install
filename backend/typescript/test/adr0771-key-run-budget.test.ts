@@ -8,8 +8,17 @@
  * What must NOT widen is pinned here too: a session caller, a user-minted
  * developer key and the public dev-token of an unconfigured deployment all keep
  * the session cap, and the key's runs take nothing from its tenant's budget.
+ *
+ * Red when (wave 60 probes, tracker TST-BRB-3): the key day cap is off by one; the
+ * keyed bucket admits an unconfigured dev-token or an `owk_` key; a refused run is
+ * charged; KEY_RUNS_PER_DAY=0 falls back to the session day cap; a keyed run is also
+ * charged to the session day; the key's slots share the tenant's; the key gets the
+ * session concurrency cap, or a session caller gets none.
+ *
+ * Date is faked to midday: the day bucket is `floor(now / 86 400 000)`, so a burst
+ * that straddled UTC midnight would reset it mid-case.
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -17,7 +26,14 @@ import { runQuotaMiddleware, reserveConcurrentSlot, _resetRateLimitState } from 
 
 const ENV_KEYS = ['OPENWOP_API_KEYS', 'OPENWOP_API_KEY', 'OPENWOP_RATELIMIT_SESSION_RUNS_PER_DAY', 'OPENWOP_RATELIMIT_SESSION_RUNS_PER_MIN', 'OPENWOP_RATELIMIT_SESSION_CONCURRENT', 'OPENWOP_RATELIMIT_KEY_RUNS_PER_DAY', 'OPENWOP_RATELIMIT_KEY_CONCURRENT', 'OPENWOP_FORCE_RATE_LIMIT', 'OPENWOP_RATELIMIT_DISABLED'] as const;
 const saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
-afterEach(() => { for (const k of ENV_KEYS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; } });
+afterEach(() => {
+  vi.useRealTimers();
+  for (const k of ENV_KEYS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
+});
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date('2026-06-01T12:00:00.000Z'));
+});
 
 /** A principal + tenant as authMiddleware would stamp them, driven by test headers.
  *  `x-fail` makes the route refuse, to prove a refused run is never charged. */
@@ -96,7 +112,9 @@ describe('ADR 0771 addendum — the keyed run budget', () => {
 
   it('KEY_RUNS_PER_DAY=0 means unlimited for the key, never a fallback to the session cap', async () => {
     process.env.OPENWOP_RATELIMIT_KEY_RUNS_PER_DAY = '0';
-    expect((await burst(6, KEY)).every((s) => s === 201)).toBe(true);
+    // Positive control: the tenant's session day cap (2) is spent, so a fallback to it would 429.
+    expect(await burst(3, { 'x-kind': 'subject' })).toEqual([201, 201, 429]);
+    expect(await burst(6, KEY)).toEqual(Array(6).fill(201));
   });
 });
 

@@ -62,6 +62,10 @@ export interface AdLayoutTemplate {
   templateId: string;
   version: number;
   platform: 'meta' | 'tiktok' | 'linkedin' | 'google-display';
+  /** ADR 0946 D3 — the channel spec row (host/contentRules/channelSpecs.json)
+   *  this layout satisfies; its size is pinned against that row by test.
+   *  Layout geometry stays here; the platform's limits live in the table. */
+  channelSpecId: string;
   format: string;
   width: number;
   height: number;
@@ -92,6 +96,7 @@ function storyLayers(): TemplateLayer[] {
 const GOOGLE_DISPLAY_TEMPLATES: AdLayoutTemplate[] = [
   {
     templateId: 'google.display.300x250',
+    channelSpecId: 'google.display-banner',
     version: 1,
     platform: 'google-display',
     format: 'medium rectangle 300×250',
@@ -108,6 +113,7 @@ const GOOGLE_DISPLAY_TEMPLATES: AdLayoutTemplate[] = [
   },
   {
     templateId: 'google.display.728x90',
+    channelSpecId: 'google.display-banner',
     version: 1,
     platform: 'google-display',
     format: 'leaderboard 728×90',
@@ -124,6 +130,7 @@ const GOOGLE_DISPLAY_TEMPLATES: AdLayoutTemplate[] = [
   },
   {
     templateId: 'google.display.160x600',
+    channelSpecId: 'google.display-banner',
     version: 1,
     platform: 'google-display',
     format: 'wide skyscraper 160×600',
@@ -140,6 +147,7 @@ const GOOGLE_DISPLAY_TEMPLATES: AdLayoutTemplate[] = [
   },
   {
     templateId: 'google.display.300x600',
+    channelSpecId: 'google.display-banner',
     version: 1,
     platform: 'google-display',
     format: 'half page 300×600',
@@ -159,6 +167,7 @@ const GOOGLE_DISPLAY_TEMPLATES: AdLayoutTemplate[] = [
   // ── Long-tail IAB sizes (ADR 0399 OQ-3 follow-through) ────────────────────
   {
     templateId: 'google.display.336x280',
+    channelSpecId: 'google.display-banner',
     version: 1,
     platform: 'google-display',
     format: 'large rectangle 336×280',
@@ -177,6 +186,7 @@ const GOOGLE_DISPLAY_TEMPLATES: AdLayoutTemplate[] = [
   },
   {
     templateId: 'google.display.250x250',
+    channelSpecId: 'google.display-banner',
     version: 1,
     platform: 'google-display',
     format: 'square 250×250',
@@ -193,6 +203,7 @@ const GOOGLE_DISPLAY_TEMPLATES: AdLayoutTemplate[] = [
   },
   {
     templateId: 'google.display.970x250',
+    channelSpecId: 'google.display-banner',
     version: 1,
     platform: 'google-display',
     format: 'billboard 970×250',
@@ -211,6 +222,7 @@ const GOOGLE_DISPLAY_TEMPLATES: AdLayoutTemplate[] = [
   },
   {
     templateId: 'google.display.468x60',
+    channelSpecId: 'google.display-banner',
     version: 1,
     platform: 'google-display',
     format: 'banner 468×60',
@@ -227,6 +239,7 @@ const GOOGLE_DISPLAY_TEMPLATES: AdLayoutTemplate[] = [
   },
   {
     templateId: 'google.display.320x100',
+    channelSpecId: 'google.display-banner',
     version: 1,
     platform: 'google-display',
     format: 'large mobile banner 320×100',
@@ -243,6 +256,7 @@ const GOOGLE_DISPLAY_TEMPLATES: AdLayoutTemplate[] = [
   },
   {
     templateId: 'google.display.320x50',
+    channelSpecId: 'google.display-banner',
     version: 1,
     platform: 'google-display',
     format: 'mobile leaderboard 320×50',
@@ -262,6 +276,7 @@ const GOOGLE_DISPLAY_TEMPLATES: AdLayoutTemplate[] = [
 export const AD_LAYOUT_TEMPLATES: readonly AdLayoutTemplate[] = [
   {
     templateId: 'meta.feed.1x1',
+    channelSpecId: 'meta.feed',
     version: 1,
     platform: 'meta',
     format: 'feed 1:1',
@@ -280,6 +295,7 @@ export const AD_LAYOUT_TEMPLATES: readonly AdLayoutTemplate[] = [
   },
   {
     templateId: 'meta.story.9x16',
+    channelSpecId: 'meta.stories',
     version: 1,
     platform: 'meta',
     format: 'story/reel 9:16',
@@ -295,6 +311,7 @@ export const AD_LAYOUT_TEMPLATES: readonly AdLayoutTemplate[] = [
   },
   {
     templateId: 'tiktok.9x16',
+    channelSpecId: 'tiktok.feed',
     version: 1,
     platform: 'tiktok',
     format: 'in-feed 9:16',
@@ -311,6 +328,7 @@ export const AD_LAYOUT_TEMPLATES: readonly AdLayoutTemplate[] = [
   },
   {
     templateId: 'linkedin.landscape.191x1',
+    channelSpecId: 'linkedin.feed',
     version: 1,
     platform: 'linkedin',
     format: 'single image 1.91:1',

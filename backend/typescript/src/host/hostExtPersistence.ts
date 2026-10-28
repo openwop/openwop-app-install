@@ -132,6 +132,15 @@ export function hostExtCollectionForPrefix(
  */
 const TENANT_PURGE_HOOKS: Array<{ id: string; run: (tenantId: string) => Promise<number> }> = [];
 
+/**
+ * A tenant id that can lead a `${tenant}::…` composite key. `::` is the
+ * delimiter, so a tenant id containing it could make one tenant's key prefix
+ * match another's (ADR 0973 architect finding 6; shared with ADR 0977).
+ */
+export function keyableTenant(tenantId: string): boolean {
+  return tenantId.length > 0 && !tenantId.includes('::');
+}
+
 export function registerTenantPurgeHook(id: string, run: (tenantId: string) => Promise<number>): void {
   const existing = TENANT_PURGE_HOOKS.findIndex((h) => h.id === id);
   if (existing >= 0) TENANT_PURGE_HOOKS[existing] = { id, run }; // idempotent re-registration (test re-boots)
@@ -555,6 +564,20 @@ export class DurableCollection<T> {
       if (cascade) await cascade(id);
     }
     return removed;
+  }
+
+  /** Remove only the exact entity previously read. A concurrent replacement is
+   * never deleted. Indexed markers are deliberately left for existing read-side
+   * self-healing: removing a marker after removal could hide a new row inserted
+   * in that interval. Namespace deletion hooks run only after actual deletion.
+   */
+  async compareAndDelete(expected: T): Promise<boolean> {
+    const id = this.idOf(expected);
+    const removed = await requireStorage().kvCompareAndDelete(this.key(id), JSON.stringify(expected));
+    if (!removed) return false;
+    const cascade = HOSTEXT_DELETE_HOOKS.get(this.prefix());
+    if (cascade) await cascade(id);
+    return true;
   }
 
   private async deleteRow(id: string): Promise<boolean> {

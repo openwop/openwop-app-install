@@ -158,29 +158,54 @@ fi
 fi
 
 # ── frontend ───────────────────────────────────────────────────────────────
-if [ "$CHECK_FRONTEND" -eq 1 ]; then
-fe_body=$(curl -fsS --connect-timeout 5 --max-time 15 "$BASE/build-info.json?$cb" 2>/dev/null)
-if [ -z "$fe_body" ]; then
-  echo "  frontend  UNREACHABLE (/build-info.json) — pre-ADR-0518 build, or hosting not deployed"
-  fail=1
-else
-  fe_commit=$(field "$fe_body" commit)
-  fe_dirty=$(grep -oE '"dirty"[[:space:]]*:[[:space:]]*(true|false)' <<<"$fe_body" | grep -oE '(true|false)')
-  if [ -z "$fe_commit" ] || [ "$fe_commit" = "unknown" ]; then
-    echo "  frontend  UNSTAMPED — built without git or OPENWOP_BUILD_COMMIT"
-    fail=1
-  elif [ "${EXPECTED#"$fe_commit"}" != "$EXPECTED" ] || [ "${fe_commit#"$EXPECTED"}" != "$fe_commit" ]; then
-    if [ "$fe_dirty" = "true" ]; then
-      echo "  frontend  DIRTY    $(short "$fe_commit")  ← built from a modified tree; the SHA does not describe it"
-      fail=1
+# WHY THIS POLLS (#5228). Right after `firebase deploy` releases, the CDN can
+# still serve the PREVIOUS /build-info.json for a few seconds. MEASURED
+# 2026-10-25 (MyndHyve cutover): verify read "frontend UNSTAMPED" straight
+# after the release and the stamped commit a few seconds later — a healthy
+# deploy reported as broken. Only the states that propagation can explain are
+# re-read (unreachable, unstamped, another commit); DIRTY is a property of the
+# build and never retried. The budget is bounded, so a real mismatch still
+# reds, just FRONTEND_CONVERGE_S later.
+FRONTEND_CONVERGE_S="${FRONTEND_CONVERGE_S:-45}"
+FRONTEND_POLL_S="${FRONTEND_POLL_S:-5}"
+probe_frontend() {
+  fe_state=""; fe_line=""
+  local body commit dirty
+  body=$(curl -fsS --connect-timeout 5 --max-time 15 "$BASE/build-info.json?cb=$(date +%s%N)" 2>/dev/null)
+  if [ -z "$body" ]; then
+    fe_state=retry; fe_line="  frontend  UNREACHABLE (/build-info.json) — pre-ADR-0518 build, or hosting not deployed"
+    return
+  fi
+  commit=$(field "$body" commit)
+  dirty=$(grep -oE '"dirty"[[:space:]]*:[[:space:]]*(true|false)' <<<"$body" | grep -oE '(true|false)')
+  if [ -z "$commit" ] || [ "$commit" = "unknown" ]; then
+    fe_state=retry; fe_line="  frontend  UNSTAMPED — built without git or OPENWOP_BUILD_COMMIT"
+  elif [ "${EXPECTED#"$commit"}" != "$EXPECTED" ] || [ "${commit#"$EXPECTED"}" != "$commit" ]; then
+    if [ "$dirty" = "true" ]; then
+      fe_state=fail; fe_line="  frontend  DIRTY    $(short "$commit")  ← built from a modified tree; the SHA does not describe it"
     else
-      echo "  frontend  OK       $(short "$fe_commit")"
+      fe_state=ok; fe_line="  frontend  OK       $(short "$commit")"
     fi
   else
-    echo "  frontend  MISMATCH $(short "$fe_commit")  ← someone else's deploy is live"
-    fail=1
+    fe_state=retry; fe_line="  frontend  MISMATCH $(short "$commit")  ← someone else's deploy is live"
   fi
-fi
+}
+if [ "$CHECK_FRONTEND" -eq 1 ]; then
+  fe_waited=0
+  while :; do
+    probe_frontend
+    [ "$fe_state" != retry ] && break
+    [ "$fe_waited" -ge "$FRONTEND_CONVERGE_S" ] && break
+    sleep "$FRONTEND_POLL_S"; fe_waited=$((fe_waited+FRONTEND_POLL_S))
+  done
+  if [ "$fe_state" = ok ] && [ "$fe_waited" -gt 0 ]; then
+    echo "$fe_line (converged after ${fe_waited}s — CDN propagation)"
+  elif [ "$fe_state" = retry ] && [ "$fe_waited" -gt 0 ]; then
+    echo "$fe_line (still after ${fe_waited}s)"
+  else
+    echo "$fe_line"
+  fi
+  [ "$fe_state" = ok ] || fail=1
 fi
 
 # ── which evidence mode the LIVE service is in (WHD-18 / ADR 0735) ─────────
@@ -481,9 +506,10 @@ fi
 # found each time by hand, by grouping `schedule fired` logs by revision.
 #
 # Right after a deploy the previous revision is still alive by construction, so
-# a stale fire inside the window is EXPECTED there: it prints the exact delete
-# commands as an ACTION rather than failing every deploy. Run standalone, any
-# non-serving revision that fired in the window FAILS.
+# a fire inside the lookback window may predate the traffic switch. After a
+# deploy it is an ACTION; standalone, an unresolved non-serving fire still FAILS.
+# Neither branch can infer current activity from historical logs. Measure drain
+# separately and preserve the rollback revision (ADR 0802's D1 correction).
 #
 # Never an inert green: a failed log query is UNMEASURED and an empty one is NOT
 # CORROBORATED — neither says OK. STALE_REV_WINDOW_MIN=0 skips it, explicitly.
@@ -538,10 +564,13 @@ if [ "$CHECK_BACKEND" -eq 1 ]; then
             done
           else
             echo "  stale revs  FAILED — a NON-serving revision fired scheduled jobs in the last ${STALE_REV_WINDOW_MIN}m,"
-            echo "              i.e. old code is running scheduled work (WHD-28). Delete it:"
+            echo "              This is historical evidence, not proof of current activity: compare log timestamps"
+            echo "              with the traffic switch and measure container/instance_count for each revision."
+            echo "              Keep the rollback target. Deleting a revision does not stop its open instances"
+            echo "              (ADR 0802); investigate continued firing and re-check the measured drain."
             fail=1
             printf '%s\n' "$sr_stale" | while read -r n rev; do
-              echo "                $rev fired $n job(s):  gcloud run revisions delete $rev --region $OPENWOP_DEPLOY_REGION --project $OPENWOP_DEPLOY_PROJECT --quiet"
+              echo "                $rev fired $n job(s) in the lookback window (keep it as the rollback target)"
             done
           fi
         fi
@@ -589,9 +618,11 @@ fi
 
 if [ "$fail" -ne 0 ]; then
   echo
-  echo "DEPLOY NOT VERIFIED. A mismatch usually means a parallel session deployed"
-  echo "after you. Re-deploy the affected half from a clean origin/main worktree,"
-  echo "then re-run this. Do NOT rely on asset-hash equality — it does not catch this."
+  echo "DEPLOY NOT VERIFIED. Inspect the failed check above before choosing a remedy."
+  echo "For a commit mismatch, re-read main and both deployed halves: a newer descendant"
+  echo "may have superseded this candidate. Verify that release before considering a redeploy."
+  echo "For old-revision job logs, compare timestamps and measure drain; keep rollback revisions."
+  echo "Asset-hash equality alone does not establish the deployed source."
   exit 1
 fi
 

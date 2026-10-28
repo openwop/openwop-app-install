@@ -6,7 +6,7 @@ export const messages = {
   eyebrow: 'Marketing',
   title: 'Domínios personalizados',
   lede: 'Sirva suas páginas publicadas, funis e loja no seu próprio hostname.',
-  howItWorks: 'Adicione um hostname, publique o registro TXT mostrado abaixo em _openwop-verify.<hostname> e clique em Verificar. O TLS e o roteamento do hostname são configurados pelo seu operador (veja o guia de deploy) — um domínio ativo aqui é a metade de propriedade.',
+  howItWorks: 'Adicione um hostname, publique o registro TXT exibido em Registros DNS em _openwop-verify.<hostname> e clique em Verificar. Depois que a propriedade for verificada, a equipe da plataforma emite o certificado HTTPS do hostname e o direciona para o seu site; a lista de registros DNS mostra qualquer outro registro a adicionar.',
   notEnabledTitle: 'Domínios personalizados não estão habilitados',
   notEnabledBody: 'Peça a um administrador para ativar o recurso em Admin → Alternâncias de recursos.',
   emptyTitle: 'Nenhum domínio ainda',

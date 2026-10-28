@@ -69,6 +69,17 @@ describe('dnsRecordsFor', () => {
     expect(out.records.map((r) => r.type)).toEqual(['TXT']);
   });
 
+  it('ADR 0940: with only an edge hostname set, a subdomain routes by CNAME to it (no IP ⇒ no A alternative)', () => {
+    const out = dnsRecordsFor(base('shop.example.com'), { provider: 'gcp-certificate-manager', ready: true, edgeHostname: 'pages.example.net' });
+    expect(out.records.find((r) => r.purpose === 'routing')).toEqual({ type: 'CNAME', name: 'shop.example.com', value: 'pages.example.net', purpose: 'routing' });
+    expect(out.alternative).toBeUndefined();
+  });
+
+  it('ADR 0940: an apex never gets a CNAME, even with an edge hostname set', () => {
+    const out = dnsRecordsFor(base('example.com'), GCP);
+    expect(out.records.filter((r) => r.purpose === 'routing')).toEqual([{ type: 'A', name: 'example.com', value: '203.0.113.7', purpose: 'routing' }]);
+  });
+
   it('manual, or nothing configured: ownership only', () => {
     expect(dnsRecordsFor(base('shop.example.com'), { provider: 'manual', ready: true }).records.map((r) => r.purpose)).toEqual(['ownership']);
     expect(dnsRecordsFor(base('shop.example.com'), null).records.map((r) => r.purpose)).toEqual(['ownership']);
@@ -96,7 +107,8 @@ describe('DomainsPage — HTTPS axis', () => {
     await mount([base('shop.example.com')], { provider: 'manual', ready: true });
     expect(screen.getByText('Operator-managed')).toBeTruthy();
     expect(screen.queryByRole('button', { name: /Check HTTPS again/ })).toBeNull();
-    expect(screen.getByText(/configured by your operator/)).toBeTruthy();
+    expect(screen.getByText(/platform team issues the HTTPS certificate/)).toBeTruthy();
+    expect(screen.queryByText(/configured by your operator/)).toBeNull(); // ADR 0940 P1: the stale copy is gone
   });
 
   it('gcp: the TLS chip, a plain-language issue, and Check again calls retry', async () => {
@@ -104,7 +116,8 @@ describe('DomainsPage — HTTPS axis', () => {
     await mount([base('shop.example.com', { edge: { provider: 'gcp-certificate-manager', tls: 'failed', checkedAt: '', issue: { reason: 'dns_not_configured', detail: 'x' } } })], GCP);
     expect(screen.getByText('Failed')).toBeTruthy();
     expect(screen.getByText(/CNAME was not found after 24 hours/)).toBeTruthy();
-    expect(screen.queryByText(/configured by your operator/)).toBeNull();
+    expect(screen.queryByText(/platform team issues/)).toBeNull();
+    expect(screen.getByText(/HTTPS turns Active before you move traffic/)).toBeTruthy();
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Check HTTPS again for shop.example.com' })); });
     expect(retryDomain).toHaveBeenCalledWith('o1', 'shop.example.com');
   });

@@ -181,6 +181,20 @@
         }
       },
       {
+        "source": "/proposals",
+        "run": {
+          "serviceId": "openwop-app-backend",
+          "region": "us-central1"
+        }
+      },
+      {
+        "source": "/proposals/**",
+        "run": {
+          "serviceId": "openwop-app-backend",
+          "region": "us-central1"
+        }
+      },
+      {
         "source": "/connection-providers",
         "run": {
           "serviceId": "openwop-app-backend",

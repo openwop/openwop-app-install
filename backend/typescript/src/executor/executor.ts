@@ -39,6 +39,7 @@ import { declaredRunCredentialRefs, runAiCredentialRef } from '../host/runCreden
 import { trace, context as otelContext, SpanStatusCode } from '@opentelemetry/api';
 import { normaliseEmitArgs } from './normaliseEmitArgs.js';
 import { runOwner } from '../host/runOwner.js';
+import { runOutputWasFabricated } from '../host/workflowDemoAvailability.js';
 import { getNodeRegistry } from './nodeRegistry.js';
 import { readCompactionDecision } from './compaction.js';
 import { getEventLog, RunLogClosedError } from './eventLog.js';
@@ -57,6 +58,7 @@ import {
   clearRunSecrets,
   stripSecretsFromPersisted,
   stripKnownRunSecrets,
+  stripSecretsKeepingData,
   nonEnumerableSecretsView,
 } from '../byok/ephemeralRunSecrets.js';
 import { resolveSecret } from '../byok/secretResolver.js';
@@ -94,6 +96,7 @@ import { recordForwardObligation, unwindTerminatedRun } from '../host/compensati
 import { compensationTriggerFor, type TerminalCause, type CompensationTrigger } from '../host/compensationUnwind.js';
 import { createLogger } from '../observability/logger.js';
 import { buildHostSurfaceBundle, writeMemoryEntryRedacted, MEMORY_DEMO_REF } from '../host/inMemorySurfaces.js';
+import { runNamespacedBundle } from '../host/runSurfaceNamespace.js';
 import { chainIdOfDefinition } from '../host/hostEventDispatcher.js';
 import { getInstanceId } from '../host/instanceId.js';
 import { makeConnectionSafeFetch } from '../host/connectionInjection.js';
@@ -114,7 +117,7 @@ import { armRunAbort, isDeadlineAbort, notifyRunTerminal, runAbortSignal, runPau
 // exactly here, so both halves of the cancel story read one definition.
 import { isTerminalRunStatus } from '@openwop/openwop';
 import { emitRunFailureNotification } from '../notifications/notify.js';
-import { snapshotRunVariables, setRunVariable, hydrateRunVariables } from '../host/variablesRuntime.js';
+import { snapshotRunVariables, setRunVariable, hydrateRunVariables, seedRunVariables, deferredConfigurableInputs, applyForwardedParams, redactCompletedRunVariables } from '../host/variablesRuntime.js';
 import { stampRunCostOnTerminal } from '../observability/costEmitter.js';
 import { foldWorkflowSpendOnTerminal } from '../host/workflowBudgets.js';
 import { scoreOnlineEvalsOnTerminal } from '../host/workflowEvalOnline.js';
@@ -749,7 +752,10 @@ async function runOneNode(input: {
       payload: { ...payload },
     });
   };
-  const surfaces = buildHostSurfaceBundle({
+  // ADR 0998 — the RUN lane: every vector/search/nosql/blob name a node passes is
+  // moved under `wf:`, so a workflow can never name a host feature's index (a
+  // member's private memory, an org's KB, another member's chat search).
+  const surfaces = runNamespacedBundle(buildHostSurfaceBundle({
     tenantId: run.tenantId,
     ...(run.scopeId ? { scopeId: run.scopeId } : {}),
     runId: run.runId,
@@ -774,7 +780,7 @@ async function runOneNode(input: {
     // ADR 0832 D3 — the member who caused an actorless run (reserved, host-stamped),
     // read ONLY by the org-membership floors; never an actor.
     ...(bundleOrgScopeSubject ? { orgScopeSubject: bundleOrgScopeSubject } : {}),
-  });
+  }));
 
   // Fixture-shape input resolution. When the workflow definition's
   // `nodes[i].inputs[port]` carries a reference shape (e.g.,
@@ -1153,6 +1159,16 @@ async function runOneNode(input: {
     if (recorded?.kind === 'completed') {
       replayServed = { status: 'success', outputs: recorded.outputs ?? {} };
       recordReplayServed('recorded-success');
+      // ADR 0964 D1 — reproduce run state the live execution wrote outside its
+      // outputs (a sub-workflow's outputMapping into this run's bag). A throw is a
+      // closed failure of the served node, never a live re-execution.
+      if (module.applyServed) {
+        try {
+          await module.applyServed({ runId: run.runId, ...(nodeRef.config ? { config: nodeRef.config as Record<string, unknown> } : {}), outputs: recorded.outputs ?? {} });
+        } catch (err) {
+          replayServed = { status: 'failure', error: { code: 'replay_source_missing', message: err instanceof Error ? err.message : String(err) } };
+        }
+      }
     } else if (recorded?.kind === 'failed' && recorded.error) {
       replayServed = { status: 'failure', error: recorded.error };
       recordReplayServed('recorded-failure');
@@ -1438,7 +1454,8 @@ async function runOneNode(input: {
       // `nodeId` rides INSIDE the payload as well as on the envelope:
       // run-event-payloads.schema.json $defs/nodeCompleted requires it
       // (additionalProperties false), consistent with nodeStarted/nodeFailed.
-      payload: stripSecretsFromPersisted({ nodeId: nodeRef.nodeId, outputs: outcome.outputs }),
+      // ADR 0936 — a declared data port keeps its text (Tier 1 known-secret scrub only).
+      payload: { nodeId: nodeRef.nodeId, outputs: stripSecretsKeepingData(outcome.outputs, module?.dataFields?.outputs) },
     });
     closeExecution();
     // Normalize outputs to a Record<string, unknown> for the snapshot.
@@ -1963,6 +1980,15 @@ async function executeRunBody(input: ExecuteRunBodyInput): Promise<ExecuteRunRes
   // on a sweeper re-dispatch to another instance they recover the state the
   // crashed instance wrote, instead of running with empty state.
   await hydrateRunVariables(run.runId);
+  // The durable run/outbox may commit before the starter seeds its variable
+  // bag, then lose the process (or the insert acknowledgement). Only a fresh,
+  // never-started run may reconstruct that initial bag from accepted inputs.
+  // Existing bags, continuations and fork state remain authoritative.
+  if (run.status === 'pending' && !isResume && !run.forkMode && snapshotRunVariables(run.runId) === null) {
+    seedRunVariables(run.runId, definition.variables, deferredConfigurableInputs(definition, run.configurable, run.inputs));
+  }
+  // ADR 0964 D2 — a chain's forwarded params, where a sub-chain inputMapping reads them.
+  applyForwardedParams(run.runId, definition.metadata);
   await hydrateRunAgent(run.runId);
   // CS-WF-1 — channel state gets the same cross-instance recovery.
   await hydrateRunChannels(run.runId);
@@ -2116,7 +2142,10 @@ async function executeRunBody(input: ExecuteRunBodyInput): Promise<ExecuteRunRes
     // Redact the resume value once at this boundary (BYOK reference tokens +
     // free-text key shapes a HITL approver may have pasted) before it flows
     // anywhere. Applies to BOTH resume styles.
-    const safeResumeValue = sanitizeFreeTextDeep(stripSecretsFromPersisted(options.resumeValue));
+    // ADR 0936 — resume-value keys the gate's node declares as data (an author's
+    // answers) get the known-secret scrub only; the rest keep both passes.
+    const resumeDataKeys = await resumeDataFieldsOf(definition, options.resumeNodeId);
+    const safeResumeValue = scrubResumeValue(options.resumeValue, resumeDataKeys);
     if (options.resumeStyle === 'reinvoke') {
       // ctx.suspend/ctx.interrupt node: re-run it with the resolution seeded so
       // it shapes the result into its real output ports. Re-queue as 'ready';
@@ -2133,7 +2162,7 @@ async function executeRunBody(input: ExecuteRunBodyInput): Promise<ExecuteRunRes
         runId: run.runId,
         nodeId: options.resumeNodeId,
         type: 'node.completed',
-        payload: stripSecretsFromPersisted({ nodeId: options.resumeNodeId, outputs }),
+        payload: { nodeId: options.resumeNodeId, outputs: { output: stripSecretsKeepingData(safeResumeValue, resumeDataKeys) } },
       });
       releaseDownstream(options.resumeNodeId, graph, snapshot);
     }
@@ -2272,13 +2301,23 @@ async function executeRunBody(input: ExecuteRunBodyInput): Promise<ExecuteRunRes
         }
         releaseDownstream(d.nodeId, graph, snapshot);
       } else {
-        const outputs = { output: sanitizeFreeTextDeep(stripSecretsFromPersisted(d.resolvedValue)) };
-        snapshot.nodeOutputs.set(d.nodeId, outputs);
-        snapshot.nodeState.set(d.nodeId, 'completed');
-        if (!d.alreadyRecorded) {
-          await eventLog.append({ runId: run.runId, nodeId: d.nodeId, type: 'node.completed', payload: stripSecretsFromPersisted({ nodeId: d.nodeId, outputs }) });
+        const resumeDataKeys = await resumeDataFieldsOf(definition, d.nodeId);
+        const safeResumeValue = scrubResumeValue(d.resolvedValue, resumeDataKeys);
+        if (d.reinvoke) {
+          // Same semantics as a live ctx.suspend continuation above: the node
+          // owns its output ports. Classified effects serve the source outcome
+          // in the existing fast path; this never bypasses replay protection.
+          reinvokeResolutions.set(d.nodeId, { resumeKey: d.reinvoke.resumeKey, value: safeResumeValue });
+          snapshot.nodeState.set(d.nodeId, 'ready');
+        } else {
+          const outputs = { output: safeResumeValue };
+          snapshot.nodeOutputs.set(d.nodeId, outputs);
+          snapshot.nodeState.set(d.nodeId, 'completed');
+          if (!d.alreadyRecorded) {
+            await eventLog.append({ runId: run.runId, nodeId: d.nodeId, type: 'node.completed', payload: { nodeId: d.nodeId, outputs: { output: stripSecretsKeepingData(safeResumeValue, resumeDataKeys) } } });
+          }
+          releaseDownstream(d.nodeId, graph, snapshot);
         }
-        releaseDownstream(d.nodeId, graph, snapshot);
       }
     }
     if (derived.length > 0) {
@@ -2830,6 +2869,31 @@ async function executeRunBody(input: ExecuteRunBodyInput): Promise<ExecuteRunRes
           ...(terminalCause ? { compensationTrigger: compensationTriggerFor(terminalCause) } : {}),
         });
       }
+      // ADR 0975 D4 — a stall that FOLLOWS a terminal node failure is that
+      // failure, not an engine fault. The failure skipped its downstream; a
+      // `none_failed` fan-in over skipped branches reads as ready, the sweep in
+      // `inspectDisposition` keeps only skip verdicts, and the loop lands here
+      // with the join still pending. Reporting `internal_error: scheduler
+      // stalled` then hid the real, typed error from the creator and the
+      // classifier (kicktodo.com 2026-10-25: `openwop-app.no_supported_claims`
+      // at extract-claims surfaced as "Something went wrong"). Fail the run on
+      // the first failed node in graph order through the drained-failure path,
+      // so the dead-letter row and `run.failed` carry its code, message,
+      // node id and attempts. The join semantics are recorded, not changed here.
+      const stallFailedNodeId = snapshot.order.find((id) => snapshot.nodeState.get(id) === 'failed' && snapshot.nodeErrors.has(id));
+      if (stallFailedNodeId) {
+        log.warn('scheduler_stall_after_node_failure', {
+          runId: run.runId,
+          failedNodeId: stallFailedNodeId,
+          pendingNodeIds: snapshot.order.filter((id) => snapshot.nodeState.get(id) === 'pending'),
+        });
+        return await finalizeRun({
+          storage, run, snapshot, graph, definition,
+          disposition: { done: true, status: 'failed', failedNodeId: stallFailedNodeId },
+          suspendedKinds, nodeAttempts,
+          ...(terminalCause ? { compensationTrigger: compensationTriggerFor(terminalCause) } : {}),
+        });
+      }
       await emitTerminalFailure({
         storage,
         runId: run.runId,
@@ -3056,9 +3120,18 @@ async function finalizeRun(input: {
         now: new Date().toISOString(),
       });
     }
+    // ADR 0979 D2 — a run whose output was MADE UP (the mock-AI node, a `stub`
+    // placeholder) writes no summary and therefore no `memory.written`: a
+    // fabricated row is a second durable copy of the fabrication, and under the
+    // scope cap it evicts a real run's summary.
+    if (!runOutputWasFabricated(definition.nodes, snapshot.nodeState, snapshot.nodeOutputs)) {
     try {
       const preview = JSON.stringify(output ?? null);
       const summaryTags = ['run-summary', `run-id:${run.runId}`, `workflow:${run.workflowId}`];
+      // ADR 0979 D1 — the run's owner of record rides the row (host-internal,
+      // never a tag), so the inspector decides visibility with the run-payload
+      // rule without a run lookup, and a later retention delete changes nothing.
+      const summaryOwner = runOwner(run)?.principal;
       // SR-1 (`agent-memory.md` §SR-1) — this content embeds a slice of the
       // run's OUTPUT, which can carry a value the run's BYOK vault resolved, so
       // it MUST go through the redacting chokepoint rather than the bare write.
@@ -3076,6 +3149,7 @@ async function finalizeRun(input: {
             `Run ${run.runId} of "${run.workflowId}" completed` +
             (preview && preview !== 'null' ? ` → ${preview.slice(0, 280)}` : '.'),
           tags: summaryTags,
+          ...(summaryOwner ? { owner: summaryOwner } : {}),
         },
         run.runId,
       );
@@ -3090,6 +3164,7 @@ async function finalizeRun(input: {
       });
     } catch {
       /* memory is a demo surface; never block run completion */
+    }
     }
     } else if (typeof run.parentRunId === 'string') {
       // RFC 0057 §"Why the spec was silent" — on replay the `memory.written`
@@ -3137,6 +3212,9 @@ async function finalizeRun(input: {
     void foldWorkflowSpendOnTerminal(storage, run.runId, completedSpendUsd);
     // ADR 0480 — online eval scoring (fire-and-forget; production runs only).
     void scoreOnlineEvalsOnTerminal(storage, run.runId);
+    // Seal the cache before forgetting child-only keys; parent outputMapping
+    // reads it after executeRun returns and may record those values for replay.
+    redactCompletedRunVariables(run.runId);
     clearRunSecrets(run.runId);
     notifyRunTerminal(run.runId, 'completed');
     return { status: 'completed' };
@@ -3206,9 +3284,9 @@ async function finalizeRun(input: {
     .map(([id]) => id);
   const firstSuspended = disposition.suspendedNodeId ?? suspendedIds[0]!;
   const interruptKind = inferWaitingKind(firstSuspended, suspendedKinds);
-  await storage.updateRun(run.runId, { status: interruptKind, currentNodeId: firstSuspended });
-  // Persist scheduler snapshot for resume.
-  await persistSnapshot(storage, run.runId, snapshot, suspendedKinds);
+  // Publish parked status and its matching snapshot atomically. A recovery
+  // reader must never see a new wait with the preceding wave's snapshot.
+  await persistSnapshot(storage, run.runId, snapshot, suspendedKinds, { status: interruptKind, currentNodeId: firstSuspended });
   // ADR 0779 D5 — the suspend disposition is reached only with nothing in flight
   // and no retry timer pending, and every resume re-prepares; release the run's
   // provider plaintext for the length of the human wait. After the persist (its
@@ -3271,6 +3349,7 @@ async function persistSnapshot(
   runId: string,
   snapshot: SchedulerSnapshot,
   suspendedKinds: Map<string, string>,
+  patch: Partial<RunRecord> = {},
 ): Promise<void> {
   // ADR 0779 D4 — `scheduler_snapshot` was the one persisted copy of node
   // outputs/errors that bypassed the scrub every event gets. Round-trip through
@@ -3286,7 +3365,7 @@ async function persistSnapshot(
     nodeErrors: stripSecretsFromPersisted(jsonCopy([...snapshot.nodeErrors.entries()])),
     suspendedKinds: [...suspendedKinds.entries()],
   };
-  await storage.updateRun(runId, { schedulerSnapshot: JSON.stringify(ser) as never });
+  await storage.updateRun(runId, { ...patch, schedulerSnapshot: JSON.stringify(ser) as never });
 }
 
 function hydrateSnapshot(
@@ -3362,4 +3441,30 @@ async function prepareRunSecrets(
   if (required.size > 0 || opts.tolerant) {
     setRunSecrets(run.runId, Object.fromEntries(required));
   }
+}
+
+
+/** ADR 0936 — the resume-value data keys the resumed node declares, if any. */
+async function resumeDataFieldsOf(definition: WorkflowDefinition, nodeId: string | undefined): Promise<readonly string[] | undefined> {
+  if (!nodeId) return undefined;
+  const typeId = definition.nodes.find((n) => n.nodeId === nodeId)?.typeId;
+  if (!typeId) return undefined;
+  try {
+    return (await getNodeRegistry().resolve(typeId))?.dataFields?.resume;
+  } catch {
+    return undefined; // an unresolvable node scrubs in full
+  }
+}
+
+/** ADR 0936 — the resume boundary's two passes, skipping the shape and
+ *  free-text passes on the declared data keys only. */
+function scrubResumeValue(value: unknown, dataKeys: readonly string[] | undefined): unknown {
+  if (!dataKeys || dataKeys.length === 0 || !value || typeof value !== 'object' || Array.isArray(value)) {
+    return sanitizeFreeTextDeep(stripSecretsFromPersisted(value));
+  }
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    out[k] = dataKeys.includes(k) ? stripKnownRunSecrets(v) : sanitizeFreeTextDeep(stripSecretsFromPersisted(v));
+  }
+  return out;
 }

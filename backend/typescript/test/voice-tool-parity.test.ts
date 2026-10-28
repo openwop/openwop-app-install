@@ -15,7 +15,7 @@
  *  3. The identity is HOST-bound (session registry / sideband session at mint,
  *     from the authenticated caller) — the client body can never name it.
  */
-import { describe, expect, it, beforeAll, afterAll } from 'vitest';
+import { describe, expect, it, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { readFileSync } from 'node:fs';
@@ -79,6 +79,10 @@ afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
 });
 
+// `captured.at(-1)` must be THIS case's capture: a case whose tool never ran would
+// otherwise read the previous case's scope (order-dependent under shuffle).
+beforeEach(() => { captured.length = 0; });
+
 const srcOf = (rel: string): string => readFileSync(fileURLToPath(new URL(`../src/${rel}`, import.meta.url)), 'utf8');
 
 describe('ADR 0324 §1 — one scope composer, pinned at the source level', () => {
@@ -124,12 +128,13 @@ describe('ADR 0324 §2 — the realtime bridge threads the acting user + convers
     });
   });
 
-  it('without an authenticated opener the deliverable-tool floor still fail-closes (no synthetic user)', async () => {
+  it('without an authenticated opener no synthetic acting user is invented (the deliverable-tool floor then fail-closes)', async () => {
     const out = await executeRealtimeToolCall({
       tenantId: 'default', agentId: PARITY_AGENT, sessionId: 'sess-parity-2', name: CAPTURE_TOOL, args: {},
     });
     expect(out.status).toBe('ok');
-    expect(captured.at(-1)!.actingUserId).toBeUndefined();
+    expect(captured).toHaveLength(1);
+    expect(captured[0]!.actingUserId).toBeUndefined();
   });
 
   it('the OpenAI sideband threads the session OPENER as the acting user — also while a tool call runs delegated', async () => {
@@ -149,7 +154,12 @@ describe('ADR 0324 §3 — the identity is HOST-bound, never the client body', (
 
   it('CS-VX-1 — a resolve on a NON-minting instance recovers the binding from the durable row', async () => {
     const id = issueRealtimeSession('default', PARITY_AGENT, { userId: 'user-xinst-2', conversationId: 'conv-xinst-2' });
-    await new Promise((r) => setTimeout(r, 25)); // the fire-and-forget persist settles
+    // The persist is fire-and-forget: wait for the durable row itself, not a fixed 25 ms.
+    // (Resolve-then-evict on each poll keeps every attempt on the durable path.)
+    await vi.waitFor(async () => {
+      __evictRealtimeSessionForTests(id);
+      expect(await resolveRealtimeSession(id, 'default')).not.toBeNull();
+    });
     // Simulate the request landing on another instance: evict ONLY the
     // in-memory cache entry — the durable fallback must recover the binding
     // (previously this was a hard 403: every voice tool broken for the call).
@@ -165,8 +175,11 @@ describe('ADR 0324 §3 — the identity is HOST-bound, never the client body', (
     });
     expect(res.status).toBe(200);
     expect((await res.json() as { status: string }).status).toBe('ok');
-    const scope = captured.at(-1)!;
-    expect(scope.actingUserId).not.toBe('attacker-forged-user');
+    expect(captured).toHaveLength(1);
+    const scope = captured[0]!;
+    // Exactly the MINT binding: the wildcard bearer resolves to no human user, so the
+    // scope carries none (a negative `not.toBe(forged)` passed any other value).
+    expect(scope.actingUserId).toBeUndefined();
     // 'conv-never-created' fails the existence gate at mint; the forged body value never lands.
     expect(scope.conversationId).toBeUndefined();
   });

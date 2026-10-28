@@ -13,6 +13,10 @@
  *
  * RED on 65346ee0f: the module does not exist, and without the lift in `emit()` a
  * PII-declared `reasonCode` is hashed and a free-text one is written verbatim.
+ *
+ * Tracker TST-BJG. Red when (probe-witnessed, w65): the top-level lift is skipped (a
+ * vocabulary member is hashed, a free-text value reaches the line), or the vocabulary
+ * check accepts any string.
  */
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createLogger } from '../src/observability/logger.js';

@@ -1042,6 +1042,23 @@ export const MIGRATIONS: Record<number, (client: Queryable) => Promise<void>> = 
       DELETE FROM webhooks WHERE protocol_major IS NULL OR protocol_major = 1;
     `);
   },
+  49: async (client) => {
+    // ADR 0987 D2 — the run's concurrency-admission scope (a digest, never a raw
+    // session id, key or IP). Admission counts `pending`/`running` rows per key
+    // inside the run insert, through this index. NULLABLE WITH NO BACKFILL: a row
+    // that predates the column was admitted by the old per-process map and simply
+    // never counts toward the new cap; it drains as those runs finish. `ADD COLUMN`
+    // with no default rewrites no rows. Mirrors sqlite mig 51.
+    //
+    // The index is built as its own statement. A plain CREATE INDEX holds a lock
+    // that blocks writes to `runs` for the build (a scan of the table). An
+    // operator with a large `runs` table can pre-build it without that lock,
+    // `CREATE INDEX CONCURRENTLY IF NOT EXISTS runs_admission_key_status_idx ON
+    // runs (admission_key, status);`, before deploying, and this statement is then
+    // a no-op (IF NOT EXISTS): the route `idx_runs_tenant_created` took (see mig 1).
+    await client.query(`ALTER TABLE runs ADD COLUMN IF NOT EXISTS admission_key TEXT;`);
+    await client.query(`CREATE INDEX IF NOT EXISTS runs_admission_key_status_idx ON runs (admission_key, status);`);
+  },
 };
 
 /** Highest defined migration — DERIVED from MIGRATIONS, never a hand-bumped cap.

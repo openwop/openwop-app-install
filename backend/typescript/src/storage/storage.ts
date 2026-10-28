@@ -108,6 +108,17 @@ export interface InsertRunOptions {
    * `responseBody` is the response the route WILL send; it is computable before
    * the insert because it needs only `run.runId` and the request host.
    */
+  /**
+   * ADR 0987 D2 — concurrency admission, counted from authoritative run state INSIDE
+   * this insert. The adapter serializes on `key` (a Postgres transaction-scoped
+   * advisory lock; SQLite's single write transaction), counts this scope's runs in
+   * `ADMISSION_HOLDING_STATUSES`, and throws `AdmissionRefusedError` (rolling the
+   * whole insert back) when `cap` are already held. Otherwise the run row is written
+   * with `admission_key = key`, so it counts until it leaves a holding state, on
+   * whichever instance that happens: there is no slot to release and nothing to
+   * leak. `key` is a digest (never a raw session id, key or IP, S03-R4).
+   */
+  admission?: { key: string; cap: number };
   idempotencyCommit?: {
     tenantId: string;
     endpoint: string;
@@ -125,6 +136,24 @@ export interface InsertRunOptions {
  * been rolled back: no run row, no outbox row. The route maps this to the
  * protocol's in-flight 409 — the key IS in flight, under the reclaimer.
  */
+/**
+ * ADR 0987 D2 — the run insert was refused because its admission scope already
+ * holds `cap` runs in a holding state (`pending` or `running`). Thrown from INSIDE
+ * the insert transaction, so the run, its outbox row and its idempotency commit
+ * were all rolled back: nothing of this request exists.
+ */
+export class AdmissionRefusedError extends Error {
+  readonly code = 'admission_refused' as const;
+  constructor(public readonly cap: number, public readonly holding: number) {
+    super(`run admission refused: the scope already holds ${holding} of ${cap} concurrent runs`);
+    this.name = 'AdmissionRefusedError';
+  }
+}
+
+/** ADR 0987 D4 — the run states that occupy a concurrency slot. A run suspended on
+ *  an interrupt or approval (`waiting-*`, `paused`) holds no executor and no slot. */
+export const ADMISSION_HOLDING_STATUSES = ['pending', 'running'] as const;
+
 export class IdempotentCommitRejectedError extends Error {
   readonly code = 'idempotency_commit_rejected' as const;
   constructor(public readonly key: string) {
@@ -477,7 +506,7 @@ export interface Storage {
    * `type` is the caller's (v1) vocabulary, translated to the stored era by the
    * event-era wrapper exactly as `appendEvent` translates it.
    */
-  findFirstEventByPayload(runId: string, type: string, payloadKey: string, payloadValue: string): Promise<EventRecord | null>;
+  findFirstEventByPayload(runId: string, type: string, payloadKey: string, payloadValue: string, opts?: { nodeId?: string; newestFirst?: boolean }): Promise<EventRecord | null>;
   /** The highest sequence in the run's log, or **-1 when the log is empty** —
    *  the first event is 0 (RFC 0171 §A.3), so 0 is a real sequence and cannot
    *  double as the empty sentinel. */
@@ -1263,6 +1292,16 @@ export interface Storage {
    *  truth for unread math — exact even for rows written outside the adapter's
    *  atomic counter bump (post-merge CS-CH-3 architect review). */
   countChatSessionMessages(sessionId: string): Promise<number>;
+  /** ADR 0997 D1 — candidate rows for conversation search: messages in `sessionIds`
+   *  whose stored content contains EVERY needle (case-insensitive substring; SQLite
+   *  folds ASCII case only), ADR 0195 tombstones excluded, newest first, at most
+   *  `opts.limit`. A database PREFILTER over the raw stored envelope — the caller
+   *  re-checks each row against `messageView(row).text`, which is what decides a hit. */
+  searchChatMessages(
+    sessionIds: readonly string[],
+    needles: readonly string[],
+    opts: { limit: number },
+  ): Promise<readonly ChatMessageRecord[]>;
   /** Append a single message. The adapter bumps `chat_sessions.message_count`
    *  + `updated_at` ATOMICALLY with the insert (an earlier hardening — the old
    *  caller-side read-modify-write lost increments under concurrency; callers
@@ -1565,6 +1604,9 @@ export interface Storage {
   surfaceRowStats?(minTenantRows: number): Promise<ReadonlyArray<SurfaceFamilyRowStats>>;
   /** Delete one key. Returns true if a row existed. */
   kvDelete(key: string): Promise<boolean>;
+  /** Atomically delete only if the stored bytes still equal `expected`.
+   *  A concurrent replacement survives. True only for an actual deletion. */
+  kvCompareAndDelete(key: string, expected: string): Promise<boolean>;
   /** Atomically set `key` to `next` iff its current stored value equals
    *  `expected` (`expected: null` ⇒ swap only if the key is absent). Returns
    *  whether the swap occurred and the value observed at the call. This is the

@@ -364,7 +364,7 @@ export interface MemoryEntry {
  */
 export async function listMemory(
   opts: { memoryRef?: string; tag?: string; limit?: number } = {},
-): Promise<{ memoryRef: string; entries: MemoryEntry[] }> {
+): Promise<MemoryList> {
   const params = new URLSearchParams();
   if (opts.memoryRef) params.set('memoryRef', opts.memoryRef);
   if (opts.tag) params.set('tag', opts.tag);
@@ -383,7 +383,17 @@ export async function listMemory(
   }
   const body: unknown = await res.json();
   assertArrayField(body, 'entries', 'listMemory response');
-  return body as { memoryRef: string; entries: MemoryEntry[] };
+  return body as MemoryList;
+}
+
+/** ADR 0979 D1 — on the tenant ledger the host also says what the caller sees
+ *  (`own-runs`: only runs they started) and whether it will honour a delete.
+ *  Absent from other memory refs. */
+export interface MemoryList {
+  memoryRef: string;
+  entries: MemoryEntry[];
+  visibility?: 'all' | 'own-runs';
+  canDelete?: boolean;
 }
 
 /** Returns the underlying SDK client for surfaces not yet wrapped here. */

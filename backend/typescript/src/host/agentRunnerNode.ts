@@ -45,8 +45,12 @@ import { createLogger } from '../observability/logger.js';
 import { createAgentToolProvider, builtinAgentToolIds } from './agentToolProvider.js';
 import { resolveAgentIdentity } from './agentIdentity.js';
 import { getBorrowedRecallResolver } from './twinRecallSurface.js';
-import { resolveAgentKnowledgeRetrieve } from './agentKnowledgeComposition.js';
-import { agentMemoryScope, createAgentMemoryPort } from './agentMemoryAdapter.js';
+import { resolveAgentKnowledgeRetrieve, resolveDispatchMemory } from './agentKnowledgeComposition.js';
+import { createAgentMemoryPort, type AgentMemoryResolution } from './agentMemoryAdapter.js';
+import { resolveRunMemoryClient } from './runClientOrg.js';
+import { runClientCollectionIds } from './runClientKnowledge.js';
+import { CLIENT_MEMORY_PARTIAL_LABEL, CLIENT_MEMORY_UNAVAILABLE_LABEL } from './memoryScopeSentinel.js';
+import { getReadReceipt, recordingRecall, servedFromReceipt } from './memoryReadReceipts.js';
 import { autonomousDispatchVerdict } from './autonomousDispatchPolicy.js';
 import { currentEffectContext } from './runEffectContext.js';
 import { appendChatMessageLive } from './chatMessageBus.js';
@@ -54,6 +58,7 @@ import { agentRef } from './conversationStore.js';
 import { authorizeRunConversationWrite } from './runConversationWrite.js';
 import { hostExtStorage } from './hostExtPersistence.js';
 import { buildLaneFirewall } from './laneFirewall.js';
+import { frozenAgentBindingFor, isUnresolvedBinding, type RunAgentBinding } from './runAgentBindings.js';
 
 export const AGENT_RUNNER_TYPE_ID = 'local.openwop-app.agent-runner';
 
@@ -61,8 +66,14 @@ const log = createLogger('host.agentRunnerNode');
 
 /** Resolve the agent-runner node config/inputs (the synthetic workflow seeds
  *  `agentId` + `task` as run variables threaded into the node inputs). Reads the
- *  node inputs first, then falls back to config (an author-pinned agent). */
-export function resolveParams(ctx: NodeContext): { agentId: string; task: string; provider?: string; model?: string; credentialRef?: string; conversationId?: string; offerTools?: string[] } {
+ *  node inputs first, then falls back to config (an author-pinned agent).
+ *
+ *  ADR 0943 D2 — the order for `agentId` and the model keys is: inputs → the
+ *  run's FROZEN client binding for this node (`binding`, read from
+ *  `run.metadata` by `execute`) → config → configurable → the node's own pin
+ *  (`ctx.nodeAgent`, `nodes[].agent.agentId`). Before the last rung a node
+ *  pinned only through `nodes[].agent` failed "requires an agentId" (F1). */
+export function resolveParams(ctx: NodeContext, binding?: RunAgentBinding): { agentId: string; task: string; provider?: string; model?: string; credentialRef?: string; conversationId?: string; offerTools?: string[] } {
   const inputs = (ctx.inputs && typeof ctx.inputs === 'object' && !Array.isArray(ctx.inputs)) ? (ctx.inputs as Record<string, unknown>) : {};
   const cfg = (ctx.config ?? {}) as Record<string, unknown>;
   // The AUTONOMOUS dispatchers (ADR 0313 heartbeat bare-card fallback, ADR 0125
@@ -75,11 +86,21 @@ export function resolveParams(ctx: NodeContext): { agentId: string; task: string
   // `configurable` live on the run record, so this stays replay/fork-deterministic.
   const configurable = (ctx.configurable && typeof ctx.configurable === 'object' && !Array.isArray(ctx.configurable)) ? (ctx.configurable as Record<string, unknown>) : {};
   const pick = (key: string): unknown => (inputs[key] !== undefined ? inputs[key] : cfg[key] !== undefined ? cfg[key] : configurable[key]);
-  const agentId = typeof pick('agentId') === 'string' ? (pick('agentId') as string) : '';
+  // ADR 0943 D2 — a frozen binding replaces the pin, and its model (when it pins
+  // one) replaces the node's; only an explicit input outranks it.
+  // A binding that pins a model pins its key with it: the node's own
+  // `credentialRef` is never paired with the binding's provider (it may be a key
+  // for another vendor). No key on the binding ⇒ the run's default for that provider.
+  const bound: Record<string, unknown> = binding
+    ? { agentId: binding.agentId, ...(binding.model ? { provider: binding.model.provider, model: binding.model.model, credentialRef: binding.model.credentialRef ?? null } : {}) }
+    : {};
+  const pickBound = (key: string): unknown => (inputs[key] !== undefined ? inputs[key] : key in bound ? bound[key] : pick(key));
+  const nodePin = typeof ctx.nodeAgent?.agentId === 'string' ? ctx.nodeAgent.agentId : '';
+  const agentId = typeof pickBound('agentId') === 'string' && pickBound('agentId') !== '' ? (pickBound('agentId') as string) : nodePin;
   const task = typeof pick('task') === 'string' ? (pick('task') as string) : '';
-  const provider = typeof pick('provider') === 'string' ? (pick('provider') as string) : undefined;
-  const model = typeof pick('model') === 'string' ? (pick('model') as string) : undefined;
-  const credentialRef = typeof pick('credentialRef') === 'string' ? (pick('credentialRef') as string) : undefined;
+  const provider = typeof pickBound('provider') === 'string' ? (pickBound('provider') as string) : undefined;
+  const model = typeof pickBound('model') === 'string' ? (pickBound('model') as string) : undefined;
+  const credentialRef = typeof pickBound('credentialRef') === 'string' ? (pickBound('credentialRef') as string) : undefined;
   // ADR 0125 Phase 2c — optional: post the reply AS a turn in this conversation.
   const conversationId = typeof pick('conversationId') === 'string' ? (pick('conversationId') as string) : undefined;
   // ADR 0458 P2 — the CONFINEMENT lever. When set (even to []), this REPLACES the
@@ -113,7 +134,24 @@ const agentRunnerNode: NodeModule = {
   typeId: AGENT_RUNNER_TYPE_ID,
   version: '1.0.0',
   async execute(ctx): Promise<NodeOutcome> {
-    const { agentId, task, provider, model, credentialRef, conversationId, offerTools } = resolveParams(ctx);
+    // ADR 0943 D2 — the client binding frozen at run start; never the live store.
+    // A read that FAILS is not "no binding": running the chain's default agent for
+    // a client who replaced it would be the wrong agent, so the node fails retryable.
+    let run: Awaited<ReturnType<ReturnType<typeof hostExtStorage>['getRun']>> | null;
+    try {
+      run = await hostExtStorage().getRun(ctx.runId);
+    } catch (err) {
+      log.warn('agent_runner_binding_read_failed', { runId: ctx.runId, nodeId: ctx.nodeId, error: err instanceof Error ? err.message : String(err) });
+      return { status: 'failure', retryable: true, error: { code: 'storage_unavailable', message: 'agent-runner could not read its run\'s agent bindings; try again.' } };
+    }
+    const frozen = run && run.tenantId === ctx.tenantId
+      ? frozenAgentBindingFor(run.metadata as Record<string, unknown> | undefined, ctx.nodeId)
+      : undefined;
+    if (isUnresolvedBinding(frozen)) {
+      return { status: 'failure', retryable: false, error: { code: 'agent_binding_unresolved', message: 'This run could not read the client\'s agent bindings when it started, so it will not guess which agent to run. Start the run again.' } };
+    }
+    const binding = frozen;
+    const { agentId, task, provider, model, credentialRef, conversationId, offerTools } = resolveParams(ctx, binding);
     if (!agentId) {
       return { status: 'failure', error: { code: 'validation_error', message: 'agent-runner node requires an `agentId`.' } };
     }
@@ -234,18 +272,68 @@ const agentRunnerNode: NodeModule = {
     // into long-term memory (`memoryShape.longTerm`) records its turn here as it
     // does in chat (see `memoryWrite` there). Best-effort like
     // borrowed recall: a resolution fault degrades to no block, never fails the turn.
+    // ADR 0944 D3 — recall AND the turn-summary write go through the ONE
+    // resolver, with the run's client stamp (D2). This lane used to pass
+    // `agentMemoryScope(profileId)` straight in, so `memoryScope` on the profile
+    // was ignored on every workflow node (M2).
     let memory: AgentMemoryPort | undefined;
+    let memoryBinding: AgentMemoryResolution | undefined;
     let knowledgeRetrieve: AgentKnowledgeRetrieve | undefined;
     try {
       memory = createAgentMemoryPort(ctx.tenantId);
+      const client = ctx.runId
+        ? await resolveRunMemoryClient({ tenantId: ctx.tenantId, runId: ctx.runId, actingUserId: ctx.actingUserId, orgScopeSubject: ctx.orgScopeSubject })
+        : undefined;
+      const memoryCtx = { userId: ctx.actingUserId, client };
+      memoryBinding = await resolveDispatchMemory(ctx.tenantId, runnerIdentity.profileId, memoryCtx);
       knowledgeRetrieve = await resolveAgentKnowledgeRetrieve(
-        ctx.tenantId, runnerIdentity.profileId, memory, undefined,
+        ctx.tenantId, runnerIdentity.profileId, memory, memoryCtx,
         ctx.actingUserId ? { subject: ctx.actingUserId } : undefined,
+        // ADR 0944 D5 — only when the client binding held: a refused client gets
+        // neither its memory nor its knowledge.
+        client && 'orgId' in client ? await runClientCollectionIds(ctx.tenantId, ctx.runId) : [],
       );
     } catch (err) {
       log.warn('agent_runner_knowledge_resolve_failed', {
         tenantId: ctx.tenantId, agentId: runnerIdentity.profileId, error: err instanceof Error ? err.message : String(err),
       });
+    }
+    // ADR 0944 D6 — a CLIENT run records what this dispatch recalled; a `replay`
+    // fork of one is served from that receipt by id (erased rows stay absent). A
+    // `branch` fork reads live, as a new decision, and records its own receipt.
+    // One receipt per run node (ordinal 1), the same identity as the turn summary.
+    let recordRecall: ReturnType<typeof recordingRecall> | undefined;
+    let replayRecall: ReturnType<typeof servedFromReceipt> | undefined;
+    let receiptUnavailable = false;
+    const clientOrgId = memoryBinding?.scope.startsWith('org:') ? memoryBinding.scope.slice('org:'.length) : undefined;
+    if (memory && clientOrgId && ctx.runId) {
+      try {
+        const thisRun = await hostExtStorage().getRun(ctx.runId);
+        const source = thisRun?.forkMode === 'replay' && thisRun.parentRunId
+          ? await getReadReceipt(ctx.tenantId, thisRun.parentRunId, ctx.nodeId)
+          : null;
+        if (source && source.orgId === clientOrgId && source.scope === memoryBinding?.scope) {
+          replayRecall = servedFromReceipt({ tenantId: ctx.tenantId, receipt: source, memory, knowledgeRetrieve });
+        } else if (thisRun?.forkMode === 'replay') {
+          receiptUnavailable = true;
+        } else {
+          recordRecall = recordingRecall({ memory, knowledgeRetrieve });
+        }
+      } catch (err) {
+        receiptUnavailable = true;
+        log.warn('memory_receipt_resolve_failed', { tenantId: ctx.tenantId, runId: ctx.runId, error: err instanceof Error ? err.message : String(err) });
+      }
+    }
+    if (receiptUnavailable) {
+      // Missing/expired/unreadable evidence cannot authorize fresh recall on a
+      // historical decision. Do not fall back to today's client context.
+      memory = { read: async () => [], write: async () => {} };
+      knowledgeRetrieve = async () => [];
+    }
+    const recall = replayRecall ?? recordRecall;
+    if (recall) {
+      memory = recall.memory;
+      if (recall.knowledgeRetrieve) knowledgeRetrieve = recall.knowledgeRetrieve;
     }
     const borrowedResolver = getBorrowedRecallResolver();
     let borrowedRetrieve: AgentKnowledgeRetrieve | undefined;
@@ -343,10 +431,12 @@ const agentRunnerNode: NodeModule = {
           ...(knowledgeRetrieve ? { knowledgeRetrieve } : {}),
           // ADR 0775 P3e — cross-run memory, the chat lane's scope and opt-in.
           // One upserted entry per run node, none on a replay, always untrusted.
-          ...(memory ? {
+          ...(memory && memoryBinding ? {
             memory,
-            memoryScope: agentMemoryScope(runnerIdentity.profileId),
-            memoryWrite: { id: `run:${ctx.runId}:${ctx.nodeId}`, skip: currentEffectContext()?.replaying === true, untrusted: true },
+            memoryScope: memoryBinding.scope,
+            memoryWrite: { id: `run:${ctx.runId}:${ctx.nodeId}`, skip: currentEffectContext()?.replaying === true || !memoryBinding.writable || receiptUnavailable, untrusted: true },
+            ...(memoryBinding.unavailable || receiptUnavailable ? { memoryUnavailable: CLIENT_MEMORY_UNAVAILABLE_LABEL } : {}),
+            ...(replayRecall ? { recallNotice: () => (replayRecall.partial() ? CLIENT_MEMORY_PARTIAL_LABEL : undefined) } : {}),
           } : {}),
           ...(borrowedRetrieve ? { borrowedRetrieve } : {}),
           ...(borrowedOwnerName ? { borrowedOwnerName } : {}),
@@ -354,6 +444,11 @@ const agentRunnerNode: NodeModule = {
           ...(contextBlocks.length > 0 ? { contextBlocks } : {}),
         },
       );
+      // ADR 0944 D6 — what this turn recalled, by id (never content).
+      if (recordRecall && ctx.runId && clientOrgId && memoryBinding) {
+        await recordRecall.write({ tenantId: ctx.tenantId, runId: ctx.runId, nodeId: ctx.nodeId, ordinal: 1, orgId: clientOrgId, scope: memoryBinding.scope });
+      }
+      replayRecall?.finish();
       // Surface the loop's RFC 0064 agent.* events onto THIS run's event log so a
       // subscribed client renders live tool progress on the run bubble. Best-effort
       // ordering: emit sequentially (observability, not determinism — §Q4).

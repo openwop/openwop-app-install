@@ -256,6 +256,8 @@ export const messages = {
   templateVersionMismatch_other: 'Copié — mais {{count}} étapes sont installées dans des versions différentes de celles prévues par ce modèle : {{nodes}}. Leur comportement peut différer.',
   templateVersionMismatchItem: '{{label}} ({{installed}} installée, le modèle utilise {{pinned}})',
   templateIncompleteConfig: 'Copié — mais {{count}} étape nécessite encore une configuration : {{fields}}. Ouvrez l étape pour la compléter.',
+  templateUnfilledParams_one: 'Copié — mais {{count}} entrée du modèle est encore vide : {{params}}. Une exécution échouera tant qu’elle n’est pas remplie.',
+  templateUnfilledParams_other: 'Copié — mais {{count}} entrées du modèle sont encore vides : {{params}}. Une exécution échouera tant qu’elles ne sont pas remplies.',
   templateInstantiateError: 'Impossible de créer un workflow à partir de ce modèle. Veuillez réessayer.',
 
 
@@ -264,6 +266,7 @@ export const messages = {
   paletteCategoryData: 'Données',
   paletteCategoryAi: 'IA',
   paletteCategoryControl: 'Contrôle',
+  paletteCategoryJourney: 'Parcours',
   paletteCategoryIntegration: 'Intégration',
   paletteBuiltin: 'Intégré',
   nodes: 'Nœuds',

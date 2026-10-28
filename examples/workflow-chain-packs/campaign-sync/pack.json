@@ -1,8 +1,8 @@
 {
   "name": "core.openwop.workflows.campaign-sync",
-  "version": "1.4.0",
+  "version": "1.7.0",
   "kind": "workflow-chain",
-  "description": "Campaign Studio metrics-sync chain (RFC 0013; campaign gap plan C2 on ADR 0159). Pulls a rolling 7-day look-back of daily ad metrics, with conversions and revenue, for the dispatched campaigns or the whole configured ad account through the acting user's platform connection (ctx.ads; each day's row is replaced on re-pull, so late conversions settle and nothing double-counts) into the unified performance store, then delivers a short sync summary as a notification. Schedule it daily on the ONE scheduler, or run it ad hoc — the 15-minute cooldown makes overlapping fires harmless. Also carries the daily budget-pacing check (ADR 0220). And the hourly conversions delivery (ADR 0907 D7): queued server-side conversions go to the live conversions APIs, consent re-checked per row at send.",
+  "description": "Campaign Studio metrics-sync chain (RFC 0013; campaign gap plan C2 on ADR 0159). Pulls a rolling 7-day look-back of daily ad metrics, with conversions and revenue, for the dispatched campaigns or the whole configured ad account through the acting user's platform connection (ctx.ads; each day's row is replaced on re-pull, so late conversions settle and nothing double-counts) into the unified performance store, then delivers a short sync summary as a notification. Schedule it daily on the ONE scheduler, or run it ad hoc — the 15-minute cooldown makes overlapping fires harmless. Also carries the daily budget-pacing check (ADR 0220). And the hourly conversions delivery (ADR 0907 D7): queued server-side conversions go to the live conversions APIs, consent re-checked per row at send. And the governed budget reallocation (ADR 0952 D3): one approved plan, decreases first. And the product-feed push (ADR 0952 D6): the commerce catalog to Meta Catalog or Google Merchant Center, changed items only.",
   "author": "openwop",
   "license": "Apache-2.0",
   "engines": {
@@ -98,9 +98,9 @@
     },
     {
       "chainId": "campaign-sync.pacing-check",
-      "version": "1.0.1",
-      "label": "Daily Budget Pacing Check",
-      "description": "Compare every campaign's actual spend (performance store) against its budget plan and notify on band escalations (80% warning / 100% over) — once per escalation, never per run. Pair with a daily schedule after the metrics sync.",
+      "version": "1.1.0",
+      "label": "Budget Pacing Check + Spend Caps",
+      "description": "Compare every campaign's actual spend (performance store) against its budget plan and notify on band escalations (80% warning / 100% over) — once per escalation, never per run. Then enforce the org's hard spend caps (ADR 0952 D2): a reached cap, or spend unreadable past the cap's staleness limit, pauses the covered campaigns through the run owner's ad connections. Pair with a schedule after the metrics sync; caps act on whatever cadence you choose.",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
@@ -117,6 +117,19 @@
       "capabilities": [],
       "dag": {
         "nodes": [
+          {
+            "id": "caps",
+            "typeId": "feature.campaign-intel.nodes.enforce-caps@1.0.0",
+            "name": "Enforce spend caps",
+            "position": {
+              "x": 0,
+              "y": -150
+            },
+            "config": {},
+            "inputs": {
+              "orgId": "{{params.orgId}}"
+            }
+          },
           {
             "id": "pace",
             "typeId": "feature.campaign-intel.nodes.pacing-check@1.0.0",
@@ -137,6 +150,10 @@
         "alerted": {
           "type": "array",
           "description": "Band escalations that raised a notification."
+        },
+        "caps": {
+          "type": "array",
+          "description": "Per-cap enforcement results (status, spend read, paused targets)."
         }
       }
     },
@@ -197,6 +214,144 @@
         "expired": {
           "type": "number",
           "description": "Rows past every remaining platform's window — marked expired, not sent."
+        }
+      }
+    },
+    {
+      "chainId": "campaign-intel.reallocate",
+      "version": "1.0.0",
+      "label": "Budget Reallocation (one approved plan)",
+      "description": "Recommend a cross-channel budget shift from the performance store, turn it into ONE plan of per-campaign daily-budget changes (live current budgets read from the platforms, decreases first, increases a spend cap would not allow left out) and ask for one approval over the whole plan. The apply step applies the plan only once it is approved; until then the run ends with outcome awaiting_approval, and an approver applies it from Campaign Intelligence after deciding. A plan expires after 7 days. Runs as the person who starts it (their ad connections; workspace:write in the org).",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "orgId"
+        ],
+        "properties": {
+          "orgId": {
+            "type": "string",
+            "description": "The org whose campaigns are reallocated."
+          }
+        }
+      },
+      "capabilities": [],
+      "dag": {
+        "nodes": [
+          {
+            "id": "optimize",
+            "typeId": "feature.campaign-intel.nodes.budget-optimize@1.0.0",
+            "name": "Recommend a budget shift",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "orgId": "{{params.orgId}}",
+              "narrate": false
+            }
+          },
+          {
+            "id": "propose",
+            "typeId": "feature.campaign-intel.nodes.propose-reallocation@1.0.0",
+            "name": "Propose one reallocation plan",
+            "position": {
+              "x": 300,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "orgId": "{{params.orgId}}"
+            }
+          },
+          {
+            "id": "apply",
+            "typeId": "feature.campaign-intel.nodes.apply-reallocation@1.0.0",
+            "name": "Apply once approved",
+            "position": {
+              "x": 600,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "orgId": "{{params.orgId}}"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "optimize.recommendation",
+            "to": "propose.recommendation"
+          },
+          {
+            "from": "propose.planId",
+            "to": "apply.planId"
+          }
+        ]
+      },
+      "outputs": {
+        "outcome": {
+          "type": "string",
+          "description": "applied | partial | awaiting_approval | no_plan | disabled."
+        },
+        "planId": {
+          "type": "string",
+          "description": "The reallocation plan (GET …/campaign-intel/reallocations)."
+        }
+      }
+    },
+    {
+      "chainId": "campaign-sync.catalog-feed",
+      "version": "1.0.0",
+      "label": "Product Feed Push",
+      "description": "Push the org's product feed, generated from the commerce catalog, to Meta Catalog or Google Merchant Center through the run owner's connections. Only products that changed since the last push are sent; products that left the catalog are removed from the platform, so nothing you stopped selling keeps being advertised. Pair with a daily schedule. An honest no-op (outcome disabled) until the org turns its feed on (Campaign Connectors > Product feed). Until the push is verified on a test account the run FAILS with connector_not_configured, as does a push where every item is refused. Merchants can also fetch the signed feed URL instead, which needs no verification.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "orgId"
+        ],
+        "properties": {
+          "orgId": {
+            "type": "string",
+            "description": "The org whose catalog is pushed."
+          },
+          "platform": {
+            "type": "string",
+            "enum": [
+              "meta",
+              "google"
+            ],
+            "default": "meta",
+            "description": "Meta Catalog or Google Merchant Center."
+          }
+        }
+      },
+      "capabilities": [],
+      "dag": {
+        "nodes": [
+          {
+            "id": "push",
+            "typeId": "feature.campaign-connectors.nodes.push-catalog-feed@1.0.0",
+            "name": "Push the product feed",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "orgId": "{{params.orgId}}",
+              "platform": "{{params.platform}}"
+            }
+          }
+        ],
+        "edges": []
+      },
+      "outputs": {
+        "outcome": {
+          "type": "string",
+          "description": "pushed | disabled (unverified, unconfigured, no connection and all-refused are typed run failures, not outcomes)."
         }
       }
     }

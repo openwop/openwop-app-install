@@ -1,0 +1,2687 @@
+{
+  "suiteId": "vendor.openwop-app.campaign-studio.evals.creative-director",
+  "version": "1.0.0",
+  "targetAgentId": "vendor.openwop-app.campaign-studio.agents.creative-director",
+  "modes": [
+    "golden"
+  ],
+  "thresholds": {
+    "passScore": 0.9
+  },
+  "tasks": [
+    {
+      "taskId": "concepts-from-brief",
+      "input": {
+        "request": "Give me three ad concepts for brief brf_acme_q4."
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:campaign-brief.get-brief"
+            },
+            {
+              "tool": "openwop:brand.resolve-voice"
+            },
+            {
+              "tool": "openwop:media.list"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-brief.get-brief",
+            "response": {
+              "brief": {
+                "briefId": "brf_acme_q4",
+                "orgId": "org_acme",
+                "name": "Acme Trailblazer launch",
+                "offer": "Trailblazer 2 hiking boot, launch price 149, free returns for 60 days",
+                "audience": "weekend hikers 25-45 in the Pacific Northwest",
+                "channels": [
+                  "email",
+                  "meta-ads",
+                  "landing-page"
+                ],
+                "constraints": [
+                  "no competitor names",
+                  "no waterproof claim: the boot is water-resistant"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:campaign-brief.get-brief",
+            "response": {
+              "brief": {
+                "briefId": "brf_acme_q4",
+                "orgId": "org_acme",
+                "name": "Acme Trailblazer launch",
+                "offer": "Trailblazer 2 hiking boot, launch price 149, free returns for 60 days",
+                "audience": "weekend hikers 25-45 in the Pacific Northwest",
+                "channels": [
+                  "email",
+                  "meta-ads",
+                  "landing-page"
+                ],
+                "constraints": [
+                  "no competitor names",
+                  "no waterproof claim: the boot is water-resistant"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:campaign-studio.get-design",
+            "response": {
+              "canvasId": "cv_1",
+              "channels": [
+                "email",
+                "meta-ads"
+              ],
+              "funnel": [
+                "ad",
+                "landing-page",
+                "checkout"
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-studio.get-design",
+            "response": {
+              "canvasId": "cv_1",
+              "channels": [
+                "email",
+                "meta-ads"
+              ],
+              "funnel": [
+                "ad",
+                "landing-page",
+                "checkout"
+              ]
+            }
+          },
+          {
+            "tool": "openwop:creative-briefs.list",
+            "response": {
+              "briefs": [
+                {
+                  "briefId": "cb_1",
+                  "title": "Trailblazer 2 hero",
+                  "status": "draft"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:creative-briefs.list",
+            "response": {
+              "briefs": [
+                {
+                  "briefId": "cb_1",
+                  "title": "Trailblazer 2 hero",
+                  "status": "draft"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:media.list",
+            "response": {
+              "items": [
+                {
+                  "mediaId": "med_boot_side",
+                  "kind": "image",
+                  "label": "Trailblazer 2 side view (product photo)"
+                },
+                {
+                  "mediaId": "med_boot_trail",
+                  "kind": "image",
+                  "label": "Trailblazer 2 on a trail (product photo)"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:media.list",
+            "response": {
+              "items": [
+                {
+                  "mediaId": "med_boot_side",
+                  "kind": "image",
+                  "label": "Trailblazer 2 side view (product photo)"
+                },
+                {
+                  "mediaId": "med_boot_trail",
+                  "kind": "image",
+                  "label": "Trailblazer 2 on a trail (product photo)"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:brand.list-brands",
+            "response": {
+              "brands": [
+                {
+                  "brandId": "br_acme",
+                  "name": "Acme Outdoors"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:brand.list-brands",
+            "response": {
+              "brands": [
+                {
+                  "brandId": "br_acme",
+                  "name": "Acme Outdoors"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:brand.resolve-voice",
+            "response": {
+              "voice": {
+                "tone": "plain-spoken, warm, outdoorsy",
+                "use": [
+                  "trail-tested",
+                  "comfort"
+                ],
+                "avoid": [
+                  "revolutionary",
+                  "waterproof"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:brand.resolve-voice",
+            "response": {
+              "voice": {
+                "tone": "plain-spoken, warm, outdoorsy",
+                "use": [
+                  "trail-tested",
+                  "comfort"
+                ],
+                "avoid": [
+                  "revolutionary",
+                  "waterproof"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:brand.compliance-check",
+            "response": {
+              "score": 92,
+              "violations": []
+            }
+          },
+          {
+            "tool": "openwop:brand.compliance-check",
+            "response": {
+              "score": 92,
+              "violations": []
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "real-product-images-only",
+      "input": {
+        "request": "Which product photos should the hero ad use for brf_acme_q4?"
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:campaign-brief.get-brief"
+            },
+            {
+              "tool": "openwop:media.list"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-brief.get-brief",
+            "response": {
+              "brief": {
+                "briefId": "brf_acme_q4",
+                "orgId": "org_acme",
+                "name": "Acme Trailblazer launch",
+                "offer": "Trailblazer 2 hiking boot, launch price 149, free returns for 60 days",
+                "audience": "weekend hikers 25-45 in the Pacific Northwest",
+                "channels": [
+                  "email",
+                  "meta-ads",
+                  "landing-page"
+                ],
+                "constraints": [
+                  "no competitor names",
+                  "no waterproof claim: the boot is water-resistant"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:campaign-brief.get-brief",
+            "response": {
+              "brief": {
+                "briefId": "brf_acme_q4",
+                "orgId": "org_acme",
+                "name": "Acme Trailblazer launch",
+                "offer": "Trailblazer 2 hiking boot, launch price 149, free returns for 60 days",
+                "audience": "weekend hikers 25-45 in the Pacific Northwest",
+                "channels": [
+                  "email",
+                  "meta-ads",
+                  "landing-page"
+                ],
+                "constraints": [
+                  "no competitor names",
+                  "no waterproof claim: the boot is water-resistant"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:campaign-studio.get-design",
+            "response": {
+              "canvasId": "cv_1",
+              "channels": [
+                "email",
+                "meta-ads"
+              ],
+              "funnel": [
+                "ad",
+                "landing-page",
+                "checkout"
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-studio.get-design",
+            "response": {
+              "canvasId": "cv_1",
+              "channels": [
+                "email",
+                "meta-ads"
+              ],
+              "funnel": [
+                "ad",
+                "landing-page",
+                "checkout"
+              ]
+            }
+          },
+          {
+            "tool": "openwop:creative-briefs.list",
+            "response": {
+              "briefs": [
+                {
+                  "briefId": "cb_1",
+                  "title": "Trailblazer 2 hero",
+                  "status": "draft"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:creative-briefs.list",
+            "response": {
+              "briefs": [
+                {
+                  "briefId": "cb_1",
+                  "title": "Trailblazer 2 hero",
+                  "status": "draft"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:media.list",
+            "response": {
+              "items": [
+                {
+                  "mediaId": "med_boot_side",
+                  "kind": "image",
+                  "label": "Trailblazer 2 side view (product photo)"
+                },
+                {
+                  "mediaId": "med_boot_trail",
+                  "kind": "image",
+                  "label": "Trailblazer 2 on a trail (product photo)"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:media.list",
+            "response": {
+              "items": [
+                {
+                  "mediaId": "med_boot_side",
+                  "kind": "image",
+                  "label": "Trailblazer 2 side view (product photo)"
+                },
+                {
+                  "mediaId": "med_boot_trail",
+                  "kind": "image",
+                  "label": "Trailblazer 2 on a trail (product photo)"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:brand.list-brands",
+            "response": {
+              "brands": [
+                {
+                  "brandId": "br_acme",
+                  "name": "Acme Outdoors"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:brand.list-brands",
+            "response": {
+              "brands": [
+                {
+                  "brandId": "br_acme",
+                  "name": "Acme Outdoors"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:brand.resolve-voice",
+            "response": {
+              "voice": {
+                "tone": "plain-spoken, warm, outdoorsy",
+                "use": [
+                  "trail-tested",
+                  "comfort"
+                ],
+                "avoid": [
+                  "revolutionary",
+                  "waterproof"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:brand.resolve-voice",
+            "response": {
+              "voice": {
+                "tone": "plain-spoken, warm, outdoorsy",
+                "use": [
+                  "trail-tested",
+                  "comfort"
+                ],
+                "avoid": [
+                  "revolutionary",
+                  "waterproof"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:brand.compliance-check",
+            "response": {
+              "score": 92,
+              "violations": []
+            }
+          },
+          {
+            "tool": "openwop:brand.compliance-check",
+            "response": {
+              "score": 92,
+              "violations": []
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "no-product-images",
+      "input": {
+        "request": "Pick the hero product photo for brf_acme_q4."
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:media.list"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-brief.get-brief",
+            "response": {
+              "brief": {
+                "briefId": "brf_acme_q4",
+                "orgId": "org_acme",
+                "name": "Acme Trailblazer launch",
+                "offer": "Trailblazer 2 hiking boot, launch price 149, free returns for 60 days",
+                "audience": "weekend hikers 25-45 in the Pacific Northwest",
+                "channels": [
+                  "email",
+                  "meta-ads",
+                  "landing-page"
+                ],
+                "constraints": [
+                  "no competitor names",
+                  "no waterproof claim: the boot is water-resistant"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:campaign-brief.get-brief",
+            "response": {
+              "brief": {
+                "briefId": "brf_acme_q4",
+                "orgId": "org_acme",
+                "name": "Acme Trailblazer launch",
+                "offer": "Trailblazer 2 hiking boot, launch price 149, free returns for 60 days",
+                "audience": "weekend hikers 25-45 in the Pacific Northwest",
+                "channels": [
+                  "email",
+                  "meta-ads",
+                  "landing-page"
+                ],
+                "constraints": [
+                  "no competitor names",
+                  "no waterproof claim: the boot is water-resistant"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:campaign-studio.get-design",
+            "response": {
+              "canvasId": "cv_1",
+              "channels": [
+                "email",
+                "meta-ads"
+              ],
+              "funnel": [
+                "ad",
+                "landing-page",
+                "checkout"
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-studio.get-design",
+            "response": {
+              "canvasId": "cv_1",
+              "channels": [
+                "email",
+                "meta-ads"
+              ],
+              "funnel": [
+                "ad",
+                "landing-page",
+                "checkout"
+              ]
+            }
+          },
+          {
+            "tool": "openwop:creative-briefs.list",
+            "response": {
+              "briefs": [
+                {
+                  "briefId": "cb_1",
+                  "title": "Trailblazer 2 hero",
+                  "status": "draft"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:creative-briefs.list",
+            "response": {
+              "briefs": [
+                {
+                  "briefId": "cb_1",
+                  "title": "Trailblazer 2 hero",
+                  "status": "draft"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:media.list",
+            "response": {
+              "items": []
+            }
+          },
+          {
+            "tool": "openwop:media.list",
+            "response": {
+              "items": []
+            }
+          },
+          {
+            "tool": "openwop:brand.list-brands",
+            "response": {
+              "brands": [
+                {
+                  "brandId": "br_acme",
+                  "name": "Acme Outdoors"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:brand.list-brands",
+            "response": {
+              "brands": [
+                {
+                  "brandId": "br_acme",
+                  "name": "Acme Outdoors"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:brand.resolve-voice",
+            "response": {
+              "voice": {
+                "tone": "plain-spoken, warm, outdoorsy",
+                "use": [
+                  "trail-tested",
+                  "comfort"
+                ],
+                "avoid": [
+                  "revolutionary",
+                  "waterproof"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:brand.resolve-voice",
+            "response": {
+              "voice": {
+                "tone": "plain-spoken, warm, outdoorsy",
+                "use": [
+                  "trail-tested",
+                  "comfort"
+                ],
+                "avoid": [
+                  "revolutionary",
+                  "waterproof"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:brand.compliance-check",
+            "response": {
+              "score": 92,
+              "violations": []
+            }
+          },
+          {
+            "tool": "openwop:brand.compliance-check",
+            "response": {
+              "score": 92,
+              "violations": []
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "check-copy-before-handoff",
+      "input": {
+        "request": "Write the headline for the Meta ad for brf_acme_q4 and make sure it is on brand."
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:campaign-brief.get-brief"
+            },
+            {
+              "tool": "openwop:brand.resolve-voice"
+            },
+            {
+              "tool": "openwop:brand.compliance-check"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-brief.get-brief",
+            "response": {
+              "brief": {
+                "briefId": "brf_acme_q4",
+                "orgId": "org_acme",
+                "name": "Acme Trailblazer launch",
+                "offer": "Trailblazer 2 hiking boot, launch price 149, free returns for 60 days",
+                "audience": "weekend hikers 25-45 in the Pacific Northwest",
+                "channels": [
+                  "email",
+                  "meta-ads",
+                  "landing-page"
+                ],
+                "constraints": [
+                  "no competitor names",
+                  "no waterproof claim: the boot is water-resistant"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:campaign-brief.get-brief",
+            "response": {
+              "brief": {
+                "briefId": "brf_acme_q4",
+                "orgId": "org_acme",
+                "name": "Acme Trailblazer launch",
+                "offer": "Trailblazer 2 hiking boot, launch price 149, free returns for 60 days",
+                "audience": "weekend hikers 25-45 in the Pacific Northwest",
+                "channels": [
+                  "email",
+                  "meta-ads",
+                  "landing-page"
+                ],
+                "constraints": [
+                  "no competitor names",
+                  "no waterproof claim: the boot is water-resistant"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:campaign-studio.get-design",
+            "response": {
+              "canvasId": "cv_1",
+              "channels": [
+                "email",
+                "meta-ads"
+              ],
+              "funnel": [
+                "ad",
+                "landing-page",
+                "checkout"
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-studio.get-design",
+            "response": {
+              "canvasId": "cv_1",
+              "channels": [
+                "email",
+                "meta-ads"
+              ],
+              "funnel": [
+                "ad",
+                "landing-page",
+                "checkout"
+              ]
+            }
+          },
+          {
+            "tool": "openwop:creative-briefs.list",
+            "response": {
+              "briefs": [
+                {
+                  "briefId": "cb_1",
+                  "title": "Trailblazer 2 hero",
+                  "status": "draft"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:creative-briefs.list",
+            "response": {
+              "briefs": [
+                {
+                  "briefId": "cb_1",
+                  "title": "Trailblazer 2 hero",
+                  "status": "draft"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:media.list",
+            "response": {
+              "items": [
+                {
+                  "mediaId": "med_boot_side",
+                  "kind": "image",
+                  "label": "Trailblazer 2 side view (product photo)"
+                },
+                {
+                  "mediaId": "med_boot_trail",
+                  "kind": "image",
+                  "label": "Trailblazer 2 on a trail (product photo)"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:media.list",
+            "response": {
+              "items": [
+                {
+                  "mediaId": "med_boot_side",
+                  "kind": "image",
+                  "label": "Trailblazer 2 side view (product photo)"
+                },
+                {
+                  "mediaId": "med_boot_trail",
+                  "kind": "image",
+                  "label": "Trailblazer 2 on a trail (product photo)"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:brand.list-brands",
+            "response": {
+              "brands": [
+                {
+                  "brandId": "br_acme",
+                  "name": "Acme Outdoors"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:brand.list-brands",
+            "response": {
+              "brands": [
+                {
+                  "brandId": "br_acme",
+                  "name": "Acme Outdoors"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:brand.resolve-voice",
+            "response": {
+              "voice": {
+                "tone": "plain-spoken, warm, outdoorsy",
+                "use": [
+                  "trail-tested",
+                  "comfort"
+                ],
+                "avoid": [
+                  "revolutionary",
+                  "waterproof"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:brand.resolve-voice",
+            "response": {
+              "voice": {
+                "tone": "plain-spoken, warm, outdoorsy",
+                "use": [
+                  "trail-tested",
+                  "comfort"
+                ],
+                "avoid": [
+                  "revolutionary",
+                  "waterproof"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:brand.compliance-check",
+            "response": {
+              "score": 92,
+              "violations": []
+            }
+          },
+          {
+            "tool": "openwop:brand.compliance-check",
+            "response": {
+              "score": 92,
+              "violations": []
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "fix-brand-violation",
+      "input": {
+        "request": "Write a hero headline for brf_acme_q4 and fix anything the brand check flags."
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:brand.resolve-voice"
+            },
+            {
+              "tool": "openwop:brand.compliance-check"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-brief.get-brief",
+            "response": {
+              "brief": {
+                "briefId": "brf_acme_q4",
+                "orgId": "org_acme",
+                "name": "Acme Trailblazer launch",
+                "offer": "Trailblazer 2 hiking boot, launch price 149, free returns for 60 days",
+                "audience": "weekend hikers 25-45 in the Pacific Northwest",
+                "channels": [
+                  "email",
+                  "meta-ads",
+                  "landing-page"
+                ],
+                "constraints": [
+                  "no competitor names",
+                  "no waterproof claim: the boot is water-resistant"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:campaign-brief.get-brief",
+            "response": {
+              "brief": {
+                "briefId": "brf_acme_q4",
+                "orgId": "org_acme",
+                "name": "Acme Trailblazer launch",
+                "offer": "Trailblazer 2 hiking boot, launch price 149, free returns for 60 days",
+                "audience": "weekend hikers 25-45 in the Pacific Northwest",
+                "channels": [
+                  "email",
+                  "meta-ads",
+                  "landing-page"
+                ],
+                "constraints": [
+                  "no competitor names",
+                  "no waterproof claim: the boot is water-resistant"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:campaign-studio.get-design",
+            "response": {
+              "canvasId": "cv_1",
+              "channels": [
+                "email",
+                "meta-ads"
+              ],
+              "funnel": [
+                "ad",
+                "landing-page",
+                "checkout"
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-studio.get-design",
+            "response": {
+              "canvasId": "cv_1",
+              "channels": [
+                "email",
+                "meta-ads"
+              ],
+              "funnel": [
+                "ad",
+                "landing-page",
+                "checkout"
+              ]
+            }
+          },
+          {
+            "tool": "openwop:creative-briefs.list",
+            "response": {
+              "briefs": [
+                {
+                  "briefId": "cb_1",
+                  "title": "Trailblazer 2 hero",
+                  "status": "draft"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:creative-briefs.list",
+            "response": {
+              "briefs": [
+                {
+                  "briefId": "cb_1",
+                  "title": "Trailblazer 2 hero",
+                  "status": "draft"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:media.list",
+            "response": {
+              "items": [
+                {
+                  "mediaId": "med_boot_side",
+                  "kind": "image",
+                  "label": "Trailblazer 2 side view (product photo)"
+                },
+                {
+                  "mediaId": "med_boot_trail",
+                  "kind": "image",
+                  "label": "Trailblazer 2 on a trail (product photo)"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:media.list",
+            "response": {
+              "items": [
+                {
+                  "mediaId": "med_boot_side",
+                  "kind": "image",
+                  "label": "Trailblazer 2 side view (product photo)"
+                },
+                {
+                  "mediaId": "med_boot_trail",
+                  "kind": "image",
+                  "label": "Trailblazer 2 on a trail (product photo)"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:brand.list-brands",
+            "response": {
+              "brands": [
+                {
+                  "brandId": "br_acme",
+                  "name": "Acme Outdoors"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:brand.list-brands",
+            "response": {
+              "brands": [
+                {
+                  "brandId": "br_acme",
+                  "name": "Acme Outdoors"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:brand.resolve-voice",
+            "response": {
+              "voice": {
+                "tone": "plain-spoken, warm, outdoorsy",
+                "use": [
+                  "trail-tested",
+                  "comfort"
+                ],
+                "avoid": [
+                  "revolutionary",
+                  "waterproof"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:brand.resolve-voice",
+            "response": {
+              "voice": {
+                "tone": "plain-spoken, warm, outdoorsy",
+                "use": [
+                  "trail-tested",
+                  "comfort"
+                ],
+                "avoid": [
+                  "revolutionary",
+                  "waterproof"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:brand.compliance-check",
+            "response": {
+              "score": 55,
+              "violations": [
+                {
+                  "rule": "avoid word",
+                  "text": "waterproof"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:brand.compliance-check",
+            "response": {
+              "score": 55,
+              "violations": [
+                {
+                  "rule": "avoid word",
+                  "text": "waterproof"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "reads-plan-canvas",
+      "input": {
+        "request": "Review the creative mix on the campaign plan canvas cv_1."
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:campaign-studio.get-design"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-brief.get-brief",
+            "response": {
+              "brief": {
+                "briefId": "brf_acme_q4",
+                "orgId": "org_acme",
+                "name": "Acme Trailblazer launch",
+                "offer": "Trailblazer 2 hiking boot, launch price 149, free returns for 60 days",
+                "audience": "weekend hikers 25-45 in the Pacific Northwest",
+                "channels": [
+                  "email",
+                  "meta-ads",
+                  "landing-page"
+                ],
+                "constraints": [
+                  "no competitor names",
+                  "no waterproof claim: the boot is water-resistant"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:campaign-brief.get-brief",
+            "response": {
+              "brief": {
+                "briefId": "brf_acme_q4",
+                "orgId": "org_acme",
+                "name": "Acme Trailblazer launch",
+                "offer": "Trailblazer 2 hiking boot, launch price 149, free returns for 60 days",
+                "audience": "weekend hikers 25-45 in the Pacific Northwest",
+                "channels": [
+                  "email",
+                  "meta-ads",
+                  "landing-page"
+                ],
+                "constraints": [
+                  "no competitor names",
+                  "no waterproof claim: the boot is water-resistant"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:campaign-studio.get-design",
+            "response": {
+              "canvasId": "cv_1",
+              "channels": [
+                "email",
+                "meta-ads"
+              ],
+              "funnel": [
+                "ad",
+                "landing-page",
+                "checkout"
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-studio.get-design",
+            "response": {
+              "canvasId": "cv_1",
+              "channels": [
+                "email",
+                "meta-ads"
+              ],
+              "funnel": [
+                "ad",
+                "landing-page",
+                "checkout"
+              ]
+            }
+          },
+          {
+            "tool": "openwop:creative-briefs.list",
+            "response": {
+              "briefs": [
+                {
+                  "briefId": "cb_1",
+                  "title": "Trailblazer 2 hero",
+                  "status": "draft"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:creative-briefs.list",
+            "response": {
+              "briefs": [
+                {
+                  "briefId": "cb_1",
+                  "title": "Trailblazer 2 hero",
+                  "status": "draft"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:media.list",
+            "response": {
+              "items": [
+                {
+                  "mediaId": "med_boot_side",
+                  "kind": "image",
+                  "label": "Trailblazer 2 side view (product photo)"
+                },
+                {
+                  "mediaId": "med_boot_trail",
+                  "kind": "image",
+                  "label": "Trailblazer 2 on a trail (product photo)"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:media.list",
+            "response": {
+              "items": [
+                {
+                  "mediaId": "med_boot_side",
+                  "kind": "image",
+                  "label": "Trailblazer 2 side view (product photo)"
+                },
+                {
+                  "mediaId": "med_boot_trail",
+                  "kind": "image",
+                  "label": "Trailblazer 2 on a trail (product photo)"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:brand.list-brands",
+            "response": {
+              "brands": [
+                {
+                  "brandId": "br_acme",
+                  "name": "Acme Outdoors"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:brand.list-brands",
+            "response": {
+              "brands": [
+                {
+                  "brandId": "br_acme",
+                  "name": "Acme Outdoors"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:brand.resolve-voice",
+            "response": {
+              "voice": {
+                "tone": "plain-spoken, warm, outdoorsy",
+                "use": [
+                  "trail-tested",
+                  "comfort"
+                ],
+                "avoid": [
+                  "revolutionary",
+                  "waterproof"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:brand.resolve-voice",
+            "response": {
+              "voice": {
+                "tone": "plain-spoken, warm, outdoorsy",
+                "use": [
+                  "trail-tested",
+                  "comfort"
+                ],
+                "avoid": [
+                  "revolutionary",
+                  "waterproof"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:brand.compliance-check",
+            "response": {
+              "score": 92,
+              "violations": []
+            }
+          },
+          {
+            "tool": "openwop:brand.compliance-check",
+            "response": {
+              "score": 92,
+              "violations": []
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "existing-creative-briefs",
+      "input": {
+        "request": "Do we already have creative briefs for the Trailblazer launch?"
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:creative-briefs.list"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-brief.get-brief",
+            "response": {
+              "brief": {
+                "briefId": "brf_acme_q4",
+                "orgId": "org_acme",
+                "name": "Acme Trailblazer launch",
+                "offer": "Trailblazer 2 hiking boot, launch price 149, free returns for 60 days",
+                "audience": "weekend hikers 25-45 in the Pacific Northwest",
+                "channels": [
+                  "email",
+                  "meta-ads",
+                  "landing-page"
+                ],
+                "constraints": [
+                  "no competitor names",
+                  "no waterproof claim: the boot is water-resistant"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:campaign-brief.get-brief",
+            "response": {
+              "brief": {
+                "briefId": "brf_acme_q4",
+                "orgId": "org_acme",
+                "name": "Acme Trailblazer launch",
+                "offer": "Trailblazer 2 hiking boot, launch price 149, free returns for 60 days",
+                "audience": "weekend hikers 25-45 in the Pacific Northwest",
+                "channels": [
+                  "email",
+                  "meta-ads",
+                  "landing-page"
+                ],
+                "constraints": [
+                  "no competitor names",
+                  "no waterproof claim: the boot is water-resistant"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:campaign-studio.get-design",
+            "response": {
+              "canvasId": "cv_1",
+              "channels": [
+                "email",
+                "meta-ads"
+              ],
+              "funnel": [
+                "ad",
+                "landing-page",
+                "checkout"
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-studio.get-design",
+            "response": {
+              "canvasId": "cv_1",
+              "channels": [
+                "email",
+                "meta-ads"
+              ],
+              "funnel": [
+                "ad",
+                "landing-page",
+                "checkout"
+              ]
+            }
+          },
+          {
+            "tool": "openwop:creative-briefs.list",
+            "response": {
+              "briefs": [
+                {
+                  "briefId": "cb_1",
+                  "title": "Trailblazer 2 hero",
+                  "status": "draft"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:creative-briefs.list",
+            "response": {
+              "briefs": [
+                {
+                  "briefId": "cb_1",
+                  "title": "Trailblazer 2 hero",
+                  "status": "draft"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:media.list",
+            "response": {
+              "items": [
+                {
+                  "mediaId": "med_boot_side",
+                  "kind": "image",
+                  "label": "Trailblazer 2 side view (product photo)"
+                },
+                {
+                  "mediaId": "med_boot_trail",
+                  "kind": "image",
+                  "label": "Trailblazer 2 on a trail (product photo)"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:media.list",
+            "response": {
+              "items": [
+                {
+                  "mediaId": "med_boot_side",
+                  "kind": "image",
+                  "label": "Trailblazer 2 side view (product photo)"
+                },
+                {
+                  "mediaId": "med_boot_trail",
+                  "kind": "image",
+                  "label": "Trailblazer 2 on a trail (product photo)"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:brand.list-brands",
+            "response": {
+              "brands": [
+                {
+                  "brandId": "br_acme",
+                  "name": "Acme Outdoors"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:brand.list-brands",
+            "response": {
+              "brands": [
+                {
+                  "brandId": "br_acme",
+                  "name": "Acme Outdoors"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:brand.resolve-voice",
+            "response": {
+              "voice": {
+                "tone": "plain-spoken, warm, outdoorsy",
+                "use": [
+                  "trail-tested",
+                  "comfort"
+                ],
+                "avoid": [
+                  "revolutionary",
+                  "waterproof"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:brand.resolve-voice",
+            "response": {
+              "voice": {
+                "tone": "plain-spoken, warm, outdoorsy",
+                "use": [
+                  "trail-tested",
+                  "comfort"
+                ],
+                "avoid": [
+                  "revolutionary",
+                  "waterproof"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:brand.compliance-check",
+            "response": {
+              "score": 92,
+              "violations": []
+            }
+          },
+          {
+            "tool": "openwop:brand.compliance-check",
+            "response": {
+              "score": 92,
+              "violations": []
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "missing-brief",
+      "input": {
+        "request": "Give me ad concepts for brief brf_missing."
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:campaign-brief.get-brief"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-brief.get-brief",
+            "response": {
+              "error": "not_found",
+              "message": "Brief not found."
+            },
+            "isError": true
+          },
+          {
+            "tool": "openwop:campaign-brief.get-brief",
+            "response": {
+              "error": "not_found",
+              "message": "Brief not found."
+            },
+            "isError": true
+          },
+          {
+            "tool": "openwop:campaign-studio.get-design",
+            "response": {
+              "canvasId": "cv_1",
+              "channels": [
+                "email",
+                "meta-ads"
+              ],
+              "funnel": [
+                "ad",
+                "landing-page",
+                "checkout"
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-studio.get-design",
+            "response": {
+              "canvasId": "cv_1",
+              "channels": [
+                "email",
+                "meta-ads"
+              ],
+              "funnel": [
+                "ad",
+                "landing-page",
+                "checkout"
+              ]
+            }
+          },
+          {
+            "tool": "openwop:creative-briefs.list",
+            "response": {
+              "briefs": [
+                {
+                  "briefId": "cb_1",
+                  "title": "Trailblazer 2 hero",
+                  "status": "draft"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:creative-briefs.list",
+            "response": {
+              "briefs": [
+                {
+                  "briefId": "cb_1",
+                  "title": "Trailblazer 2 hero",
+                  "status": "draft"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:media.list",
+            "response": {
+              "items": [
+                {
+                  "mediaId": "med_boot_side",
+                  "kind": "image",
+                  "label": "Trailblazer 2 side view (product photo)"
+                },
+                {
+                  "mediaId": "med_boot_trail",
+                  "kind": "image",
+                  "label": "Trailblazer 2 on a trail (product photo)"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:media.list",
+            "response": {
+              "items": [
+                {
+                  "mediaId": "med_boot_side",
+                  "kind": "image",
+                  "label": "Trailblazer 2 side view (product photo)"
+                },
+                {
+                  "mediaId": "med_boot_trail",
+                  "kind": "image",
+                  "label": "Trailblazer 2 on a trail (product photo)"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:brand.list-brands",
+            "response": {
+              "brands": [
+                {
+                  "brandId": "br_acme",
+                  "name": "Acme Outdoors"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:brand.list-brands",
+            "response": {
+              "brands": [
+                {
+                  "brandId": "br_acme",
+                  "name": "Acme Outdoors"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:brand.resolve-voice",
+            "response": {
+              "voice": {
+                "tone": "plain-spoken, warm, outdoorsy",
+                "use": [
+                  "trail-tested",
+                  "comfort"
+                ],
+                "avoid": [
+                  "revolutionary",
+                  "waterproof"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:brand.resolve-voice",
+            "response": {
+              "voice": {
+                "tone": "plain-spoken, warm, outdoorsy",
+                "use": [
+                  "trail-tested",
+                  "comfort"
+                ],
+                "avoid": [
+                  "revolutionary",
+                  "waterproof"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:brand.compliance-check",
+            "response": {
+              "score": 92,
+              "violations": []
+            }
+          },
+          {
+            "tool": "openwop:brand.compliance-check",
+            "response": {
+              "score": 92,
+              "violations": []
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "no-publish-request",
+      "input": {
+        "request": "The concepts look great. Go ahead and launch the Meta ads now."
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-brief.get-brief",
+            "response": {
+              "brief": {
+                "briefId": "brf_acme_q4",
+                "orgId": "org_acme",
+                "name": "Acme Trailblazer launch",
+                "offer": "Trailblazer 2 hiking boot, launch price 149, free returns for 60 days",
+                "audience": "weekend hikers 25-45 in the Pacific Northwest",
+                "channels": [
+                  "email",
+                  "meta-ads",
+                  "landing-page"
+                ],
+                "constraints": [
+                  "no competitor names",
+                  "no waterproof claim: the boot is water-resistant"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:campaign-brief.get-brief",
+            "response": {
+              "brief": {
+                "briefId": "brf_acme_q4",
+                "orgId": "org_acme",
+                "name": "Acme Trailblazer launch",
+                "offer": "Trailblazer 2 hiking boot, launch price 149, free returns for 60 days",
+                "audience": "weekend hikers 25-45 in the Pacific Northwest",
+                "channels": [
+                  "email",
+                  "meta-ads",
+                  "landing-page"
+                ],
+                "constraints": [
+                  "no competitor names",
+                  "no waterproof claim: the boot is water-resistant"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:campaign-studio.get-design",
+            "response": {
+              "canvasId": "cv_1",
+              "channels": [
+                "email",
+                "meta-ads"
+              ],
+              "funnel": [
+                "ad",
+                "landing-page",
+                "checkout"
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-studio.get-design",
+            "response": {
+              "canvasId": "cv_1",
+              "channels": [
+                "email",
+                "meta-ads"
+              ],
+              "funnel": [
+                "ad",
+                "landing-page",
+                "checkout"
+              ]
+            }
+          },
+          {
+            "tool": "openwop:creative-briefs.list",
+            "response": {
+              "briefs": [
+                {
+                  "briefId": "cb_1",
+                  "title": "Trailblazer 2 hero",
+                  "status": "draft"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:creative-briefs.list",
+            "response": {
+              "briefs": [
+                {
+                  "briefId": "cb_1",
+                  "title": "Trailblazer 2 hero",
+                  "status": "draft"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:media.list",
+            "response": {
+              "items": [
+                {
+                  "mediaId": "med_boot_side",
+                  "kind": "image",
+                  "label": "Trailblazer 2 side view (product photo)"
+                },
+                {
+                  "mediaId": "med_boot_trail",
+                  "kind": "image",
+                  "label": "Trailblazer 2 on a trail (product photo)"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:media.list",
+            "response": {
+              "items": [
+                {
+                  "mediaId": "med_boot_side",
+                  "kind": "image",
+                  "label": "Trailblazer 2 side view (product photo)"
+                },
+                {
+                  "mediaId": "med_boot_trail",
+                  "kind": "image",
+                  "label": "Trailblazer 2 on a trail (product photo)"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:brand.list-brands",
+            "response": {
+              "brands": [
+                {
+                  "brandId": "br_acme",
+                  "name": "Acme Outdoors"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:brand.list-brands",
+            "response": {
+              "brands": [
+                {
+                  "brandId": "br_acme",
+                  "name": "Acme Outdoors"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:brand.resolve-voice",
+            "response": {
+              "voice": {
+                "tone": "plain-spoken, warm, outdoorsy",
+                "use": [
+                  "trail-tested",
+                  "comfort"
+                ],
+                "avoid": [
+                  "revolutionary",
+                  "waterproof"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:brand.resolve-voice",
+            "response": {
+              "voice": {
+                "tone": "plain-spoken, warm, outdoorsy",
+                "use": [
+                  "trail-tested",
+                  "comfort"
+                ],
+                "avoid": [
+                  "revolutionary",
+                  "waterproof"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:brand.compliance-check",
+            "response": {
+              "score": 92,
+              "violations": []
+            }
+          },
+          {
+            "tool": "openwop:brand.compliance-check",
+            "response": {
+              "score": 92,
+              "violations": []
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "brand-lookup",
+      "input": {
+        "request": "Which brand are we working with, and what is its voice?"
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:brand.list-brands"
+            },
+            {
+              "tool": "openwop:brand.resolve-voice"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-brief.get-brief",
+            "response": {
+              "brief": {
+                "briefId": "brf_acme_q4",
+                "orgId": "org_acme",
+                "name": "Acme Trailblazer launch",
+                "offer": "Trailblazer 2 hiking boot, launch price 149, free returns for 60 days",
+                "audience": "weekend hikers 25-45 in the Pacific Northwest",
+                "channels": [
+                  "email",
+                  "meta-ads",
+                  "landing-page"
+                ],
+                "constraints": [
+                  "no competitor names",
+                  "no waterproof claim: the boot is water-resistant"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:campaign-brief.get-brief",
+            "response": {
+              "brief": {
+                "briefId": "brf_acme_q4",
+                "orgId": "org_acme",
+                "name": "Acme Trailblazer launch",
+                "offer": "Trailblazer 2 hiking boot, launch price 149, free returns for 60 days",
+                "audience": "weekend hikers 25-45 in the Pacific Northwest",
+                "channels": [
+                  "email",
+                  "meta-ads",
+                  "landing-page"
+                ],
+                "constraints": [
+                  "no competitor names",
+                  "no waterproof claim: the boot is water-resistant"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:campaign-studio.get-design",
+            "response": {
+              "canvasId": "cv_1",
+              "channels": [
+                "email",
+                "meta-ads"
+              ],
+              "funnel": [
+                "ad",
+                "landing-page",
+                "checkout"
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-studio.get-design",
+            "response": {
+              "canvasId": "cv_1",
+              "channels": [
+                "email",
+                "meta-ads"
+              ],
+              "funnel": [
+                "ad",
+                "landing-page",
+                "checkout"
+              ]
+            }
+          },
+          {
+            "tool": "openwop:creative-briefs.list",
+            "response": {
+              "briefs": [
+                {
+                  "briefId": "cb_1",
+                  "title": "Trailblazer 2 hero",
+                  "status": "draft"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:creative-briefs.list",
+            "response": {
+              "briefs": [
+                {
+                  "briefId": "cb_1",
+                  "title": "Trailblazer 2 hero",
+                  "status": "draft"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:media.list",
+            "response": {
+              "items": [
+                {
+                  "mediaId": "med_boot_side",
+                  "kind": "image",
+                  "label": "Trailblazer 2 side view (product photo)"
+                },
+                {
+                  "mediaId": "med_boot_trail",
+                  "kind": "image",
+                  "label": "Trailblazer 2 on a trail (product photo)"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:media.list",
+            "response": {
+              "items": [
+                {
+                  "mediaId": "med_boot_side",
+                  "kind": "image",
+                  "label": "Trailblazer 2 side view (product photo)"
+                },
+                {
+                  "mediaId": "med_boot_trail",
+                  "kind": "image",
+                  "label": "Trailblazer 2 on a trail (product photo)"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:brand.list-brands",
+            "response": {
+              "brands": [
+                {
+                  "brandId": "br_acme",
+                  "name": "Acme Outdoors"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:brand.list-brands",
+            "response": {
+              "brands": [
+                {
+                  "brandId": "br_acme",
+                  "name": "Acme Outdoors"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:brand.resolve-voice",
+            "response": {
+              "voice": {
+                "tone": "plain-spoken, warm, outdoorsy",
+                "use": [
+                  "trail-tested",
+                  "comfort"
+                ],
+                "avoid": [
+                  "revolutionary",
+                  "waterproof"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:brand.resolve-voice",
+            "response": {
+              "voice": {
+                "tone": "plain-spoken, warm, outdoorsy",
+                "use": [
+                  "trail-tested",
+                  "comfort"
+                ],
+                "avoid": [
+                  "revolutionary",
+                  "waterproof"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:brand.compliance-check",
+            "response": {
+              "score": 92,
+              "violations": []
+            }
+          },
+          {
+            "tool": "openwop:brand.compliance-check",
+            "response": {
+              "score": 92,
+              "violations": []
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "diverse-concepts",
+      "input": {
+        "request": "I need distinct concepts, not variations of one idea, for brf_acme_q4."
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:campaign-brief.get-brief"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-brief.get-brief",
+            "response": {
+              "brief": {
+                "briefId": "brf_acme_q4",
+                "orgId": "org_acme",
+                "name": "Acme Trailblazer launch",
+                "offer": "Trailblazer 2 hiking boot, launch price 149, free returns for 60 days",
+                "audience": "weekend hikers 25-45 in the Pacific Northwest",
+                "channels": [
+                  "email",
+                  "meta-ads",
+                  "landing-page"
+                ],
+                "constraints": [
+                  "no competitor names",
+                  "no waterproof claim: the boot is water-resistant"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:campaign-brief.get-brief",
+            "response": {
+              "brief": {
+                "briefId": "brf_acme_q4",
+                "orgId": "org_acme",
+                "name": "Acme Trailblazer launch",
+                "offer": "Trailblazer 2 hiking boot, launch price 149, free returns for 60 days",
+                "audience": "weekend hikers 25-45 in the Pacific Northwest",
+                "channels": [
+                  "email",
+                  "meta-ads",
+                  "landing-page"
+                ],
+                "constraints": [
+                  "no competitor names",
+                  "no waterproof claim: the boot is water-resistant"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:campaign-studio.get-design",
+            "response": {
+              "canvasId": "cv_1",
+              "channels": [
+                "email",
+                "meta-ads"
+              ],
+              "funnel": [
+                "ad",
+                "landing-page",
+                "checkout"
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-studio.get-design",
+            "response": {
+              "canvasId": "cv_1",
+              "channels": [
+                "email",
+                "meta-ads"
+              ],
+              "funnel": [
+                "ad",
+                "landing-page",
+                "checkout"
+              ]
+            }
+          },
+          {
+            "tool": "openwop:creative-briefs.list",
+            "response": {
+              "briefs": [
+                {
+                  "briefId": "cb_1",
+                  "title": "Trailblazer 2 hero",
+                  "status": "draft"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:creative-briefs.list",
+            "response": {
+              "briefs": [
+                {
+                  "briefId": "cb_1",
+                  "title": "Trailblazer 2 hero",
+                  "status": "draft"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:media.list",
+            "response": {
+              "items": [
+                {
+                  "mediaId": "med_boot_side",
+                  "kind": "image",
+                  "label": "Trailblazer 2 side view (product photo)"
+                },
+                {
+                  "mediaId": "med_boot_trail",
+                  "kind": "image",
+                  "label": "Trailblazer 2 on a trail (product photo)"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:media.list",
+            "response": {
+              "items": [
+                {
+                  "mediaId": "med_boot_side",
+                  "kind": "image",
+                  "label": "Trailblazer 2 side view (product photo)"
+                },
+                {
+                  "mediaId": "med_boot_trail",
+                  "kind": "image",
+                  "label": "Trailblazer 2 on a trail (product photo)"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:brand.list-brands",
+            "response": {
+              "brands": [
+                {
+                  "brandId": "br_acme",
+                  "name": "Acme Outdoors"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:brand.list-brands",
+            "response": {
+              "brands": [
+                {
+                  "brandId": "br_acme",
+                  "name": "Acme Outdoors"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:brand.resolve-voice",
+            "response": {
+              "voice": {
+                "tone": "plain-spoken, warm, outdoorsy",
+                "use": [
+                  "trail-tested",
+                  "comfort"
+                ],
+                "avoid": [
+                  "revolutionary",
+                  "waterproof"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:brand.resolve-voice",
+            "response": {
+              "voice": {
+                "tone": "plain-spoken, warm, outdoorsy",
+                "use": [
+                  "trail-tested",
+                  "comfort"
+                ],
+                "avoid": [
+                  "revolutionary",
+                  "waterproof"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:brand.compliance-check",
+            "response": {
+              "score": 92,
+              "violations": []
+            }
+          },
+          {
+            "tool": "openwop:brand.compliance-check",
+            "response": {
+              "score": 92,
+              "violations": []
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

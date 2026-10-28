@@ -18,6 +18,10 @@
  * The schemas dir is substituted at the module seam the loader resolves it
  * through, so the real code path runs against a real directory that simply lacks
  * `v2/ids.schema.json`.
+ *
+ * Tracker TST-BGF-18. Red when the loader falls back to the v1 schema for a
+ * v2-signed pack (wrong code), or routes every pack to v2 (the unsigned pack is
+ * refused too).
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';

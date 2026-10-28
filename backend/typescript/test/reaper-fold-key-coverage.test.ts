@@ -27,7 +27,7 @@ import {
   DurableCollection,
   purgeTenantHostExt,
 } from '../src/host/hostExtPersistence.js';
-import { checkCodeExecBudget, recordCodeExec } from '../src/host/codeExecBudget.js';
+import { checkCodeExecBudget, reserveCodeExec } from '../src/host/codeExecBudget.js';
 import { checkMediaBudget, recordMediaUsage } from '../src/aiProviders/mediaBudget.js';
 import {
   checkAutonomousRunBudget,
@@ -86,10 +86,10 @@ describe('GEN-6 — codeexec/imagegen budgets are reaped on tenant teardown', ()
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(new Date(`${day}T12:00:00.000Z`));
     try {
-      await recordCodeExec('user:aaa', day);
-      await recordCodeExec('user:aaa', day);
+      await reserveCodeExec('user:aaa', day);
+      await reserveCodeExec('user:aaa', day);
       await recordMediaUsage('user:aaa', 'images', 3); // today-keyed (mediaBudget owns the day)
-      await recordCodeExec('user:bbb', day); // different tenant
+      await reserveCodeExec('user:bbb', day); // different tenant
       expect((await checkCodeExecBudget('user:aaa', day)).used).toBe(2);
       expect((await checkMediaBudget('user:aaa', 'images', 1)).used).toBe(3);
 

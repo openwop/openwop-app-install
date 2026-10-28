@@ -32,7 +32,7 @@ import { PackBrowser } from '../../registry/PackBrowser.js';
 import { ChevronRightIcon, ChevronDownIcon, XIcon } from '../../ui/icons/index.js';
 
 
-const CATEGORY_ORDER: NodeCategory[] = ['flow', 'data', 'control', 'ai', 'integration'];
+const CATEGORY_ORDER: NodeCategory[] = ['flow', 'data', 'control', 'ai', 'integration', 'journey'];
 
 const BUILTIN_SUBSECTION = '__builtin__';
 

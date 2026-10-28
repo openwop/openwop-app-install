@@ -88,6 +88,8 @@ import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { buildFeatureSurfaces } from '../src/host/featureSurfaces.js';
 import { getChain, expandChain } from '../src/host/workflowChainPackLoader.js';
 import type { WorkflowDefinition } from '../src/executor/types.js';
+import { buildGraph, buildNodeInputs, freshSnapshot } from '../src/executor/scheduler.js';
+import { buildNodeCtxInputs, resolveDeclaredInputs } from '../src/executor/nodeCtxInputs.js';
 
 type WorkflowNodeDefinition = WorkflowDefinition['nodes'][number];
 
@@ -118,7 +120,7 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+interface Res<T = unknown> { status: number; body: T }
 function client(): { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res> } {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
@@ -216,18 +218,31 @@ describe('it-support.incident-triage — real conditional routing (ADR 0201)', (
     // The expanded node carries the params on its `inputs` — the mechanism the
     // old docblock claimed did not exist ("needs a new shipped reshape-ports
     // node"). It does: ADR 0237 resolves node-level `inputs` and merges them
-    // OVER the edge-derived ones (`executor.ts` — "fixture wins on conflict"),
+    // OVER the edge-derived ones (`executor/nodeCtxInputs.ts` — "fixture wins on conflict"),
     // which is why an inbound edge does not block this.
     const declared = (kbArticleNode.inputs ?? {}) as Record<string, unknown>;
     expect(declared.orgId, 'the chain must bind orgId onto ctx.inputs').toBe(ORG);
     expect(declared.collectionId).toBe(col.collectionId);
     expect(declared.query).toBe(params.alert);
 
-    // Reproduce the executor's merge exactly: edge-derived inputs first, the
-    // node's declared inputs on top. `kbArticle` is the ONLY fixed chain with an
-    // inbound edge, so this is the case that proves the semantics rather than
-    // assuming them.
-    const merged = { ...(routed.outputs as Record<string, unknown>), ...declared };
+    // Build kbArticle's ctx.inputs with the PRODUCT's own pieces (grade-tests
+    // wave 64: this used to hand-write `{...edge, ...declared}`): the real
+    // scheduler graph + `buildNodeInputs` (which also evaluates the
+    // `contains branches routine` condition on the route → kbArticle edge),
+    // then the executor's `resolveDeclaredInputs` + `buildNodeCtxInputs` merge.
+    // The edge payload (`{branches, value}`) shares no key with the declared
+    // inputs, so this proves declared inputs REACH ctx.inputs alongside the
+    // edge payload; "declared wins on a conflict" is not exercised by this chain.
+    const graph = buildGraph(def);
+    const snap = freshSnapshot(def);
+    snap.nodeState.set(classifyNode.nodeId, 'completed');
+    snap.nodeOutputs.set(classifyNode.nodeId, classified.outputs);
+    snap.nodeState.set(routeNode.nodeId, 'completed');
+    snap.nodeOutputs.set(routeNode.nodeId, routed.outputs);
+    const byPort = buildNodeInputs(kbArticleNode.nodeId, graph, snap, {});
+    expect(Object.keys(byPort), 'the routine-conditioned route → kbArticle edge must deliver').toEqual(['input']);
+    const merged = buildNodeCtxInputs(byPort, resolveDeclaredInputs(kbArticleNode.inputs, {})) as Record<string, unknown>;
+    expect(merged).toMatchObject({ orgId: ORG, collectionId: col.collectionId, query: params.alert, branches: ['routine'] });
     const features = buildFeatureSurfaces({ tenantId, runId: 'run:it-support-probe' });
     const out = await ragNode({ inputs: merged, config: kbArticleNode.config, features });
 

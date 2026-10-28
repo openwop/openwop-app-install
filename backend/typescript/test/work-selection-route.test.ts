@@ -5,10 +5,17 @@
  * session binding and tenant isolation are only observable at the boundary — a
  * service-level test cannot see a route that is unregistered, ungated, or
  * reachable by the wrong caller. This is the suite that would catch that.
+ *
+ * Sabotage-witnessed (wave 64, probes 8fw5g1-ws-*): the toggle gate, the board's
+ * tenant fence (stranger + anon), the score projection (ordering + reasons) and the
+ * #4496 caller hand-off to the subject-access seam each turn their case red.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { bootPlanningApp, makeClient, enableToggle, uniqEmail, type Client } from './planningHarness.js';
 import { createBoard } from '../src/host/kanbanService.js';
+import type { RankedCardView } from '../src/features/work-selection/agentTools.js';
+import { saveConfig } from '../src/host/featureToggles/service.js';
+import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 
 let BASE = '';
 let closeApp: () => Promise<void>;
@@ -61,6 +68,8 @@ describe('ADR 0534 — the ranking route', () => {
 
     const res = await c.get(RANKING(boardId));
     expect(res.status).toBe(404);
+    // The feature gate's refusal, not an unregistered route's.
+    expect(res.body).toMatchObject({ error: 'not_found', message: 'Ranked work selection is not enabled for this tenant.' });
   });
 
   it('ranks the To Do lane when ON, highest first, with the reasons', async () => {
@@ -72,10 +81,11 @@ describe('ADR 0534 — the ranking route', () => {
     const res = await c.get(RANKING(boardId));
     expect(res.status, JSON.stringify(res.body)).toBe(200);
 
-    const ranked = res.body.ranked as Array<{ title: string; rank: number; why: unknown[] }>;
+    const ranked: RankedCardView[] = res.body.ranked;
     expect(ranked.map((r) => r.title)).toEqual(['high one', 'low one']);
-    expect(ranked[0]!.rank).toBe(1);
+    expect(ranked.map((r) => r.rank)).toEqual([1, 2]);
     expect(ranked[0]!.why.length, 'each card explains itself').toBeGreaterThan(0);
+    expect(ranked[1]!.why.length).toBeGreaterThan(0);
   });
 
   it('another tenant reads EMPTY for the same board id — no cross-tenant leak', async () => {
@@ -88,6 +98,8 @@ describe('ADR 0534 — the ranking route', () => {
     const stranger = client();
     await signup(stranger);
 
+    // Control: the owner DOES rank this board, so the stranger's empty answer is the fence.
+    expect(((await owner.get(RANKING(boardId))).body.ranked as RankedCardView[]).length).toBe(2);
     const res = await stranger.get(RANKING(boardId));
     expect(res.status, 'empty rather than 403 — existence must not leak').toBe(200);
     expect(res.body.ranked).toEqual([]);
@@ -114,22 +126,29 @@ describe('ADR 0534 — the ranking route', () => {
     // session's principal; `req.userId` is undefined for an anonymous session.
     await enableToggle('work-selection', 'on');
     await enableToggle('projects', 'on');
-    const anon = client();
-    const orgId = (await anon.post('/host/openwop-app/orgs', { name: 'Anon org' })).body?.orgId as string;
-    const project = await anon.post('/host/openwop-app/projects', { orgId, name: 'Anon project' });
-    expect(project.status, JSON.stringify(project.body)).toBe(201);
-    // The kanban create route does not bind a board to a project; seed the
-    // project-owned board through the service, as the project surfaces do.
-    const board = await createBoard({
-      tenantId: project.body.tenantId,
-      name: 'Project board',
-      ownerSubject: { kind: 'project', id: project.body.id },
-      columns: [{ id: 'todo', name: 'To Do' }, { id: 'working', name: 'Working' }, { id: 'done', name: 'Done', terminal: true }],
-    });
-    expect((await anon.post(`/host/openwop-app/kanban/boards/${board.id}/cards`, { title: 'anon card', columnId: 'todo' })).status).toBe(201);
+    try {
+      const anon = client();
+      const orgId = (await anon.post('/host/openwop-app/orgs', { name: 'Anon org' })).body?.orgId as string;
+      const project = await anon.post('/host/openwop-app/projects', { orgId, name: 'Anon project' });
+      expect(project.status, JSON.stringify(project.body)).toBe(201);
+      // The kanban create route does not bind a board to a project; seed the
+      // project-owned board through the service, as the project surfaces do.
+      const board = await createBoard({
+        tenantId: project.body.tenantId,
+        name: 'Project board',
+        ownerSubject: { kind: 'project', id: project.body.id },
+        columns: [{ id: 'todo', name: 'To Do' }, { id: 'working', name: 'Working' }, { id: 'done', name: 'Done', terminal: true }],
+      });
+      expect((await anon.post(`/host/openwop-app/kanban/boards/${board.id}/cards`, { title: 'anon card', columnId: 'todo' })).status).toBe(201);
 
-    const res = await anon.get(RANKING(board.id));
-    expect(res.status, JSON.stringify(res.body)).toBe(200);
-    expect((res.body.ranked as Array<{ title: string }>).map((r) => r.title)).toEqual(['anon card']);
+      const res = await anon.get(RANKING(board.id));
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      const ranked: RankedCardView[] = res.body.ranked;
+      expect(ranked.map((r) => r.title)).toEqual(['anon card']);
+    } finally {
+      // Back to the registry default (whatever it is), not a guessed status.
+      const d = getToggleDefault('projects');
+      if (d) await saveConfig(d, 'test');
+    }
   });
 });

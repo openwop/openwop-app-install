@@ -87,14 +87,34 @@ export function isBoundIdKey(key: string): boolean {
 /** @deprecated alias — the predicate covers every bound kind (ADR 0723), not runs alone. */
 export const isRunIdKey = isBoundIdKey;
 
-/** `<tenant>/<opaque>` → `<opaque>`; anything else unchanged. Every bound id
- *  the wire hands back also tells us the caller's tenant, so it is remembered
- *  for `bindRunId` — the cheapest possible source, and always current. */
+/** `<tenant>/<opaque>` → `<opaque>`; anything else unchanged. The tenant is
+ *  remembered for THAT id only, so `bindRunId` sends it back exactly as the host
+ *  minted it.
+ *
+ *  CORRECTED (ADR 0975 follow-up, kicktodo.com 2026-10-25): this used to
+ *  remember the tenant as THE CALLER'S, on the claim that every bound id the wire
+ *  returns is the active workspace's. It is not: the Inbox lists items from every
+ *  workspace the person belongs to, so opening it while in `host-kicktodo` set the
+ *  binder to the PERSONAL tenant, and the next run read went out as
+ *  `/runs/u-<personal>~2F<kicktodo run>` → 403 on every poll. The active tenant
+ *  now comes only from the host's own statements (`/me/workspaces`, a switch). */
 export function fromWireRunId(id: string): string {
   if (!TENANT_BOUND_RUN_ID.test(id)) return id;
   const slash = id.indexOf('/');
-  rememberWireTenant(id.slice(0, slash));
-  return id.slice(slash + 1);
+  const opaque = id.slice(slash + 1);
+  rememberIdTenant(opaque, id.slice(0, slash));
+  return opaque;
+}
+
+/** A run's tenant never changes, so an id the wire returned bound is re-sent
+ *  with that tenant. Bounded: oldest entries go first. */
+const ID_TENANT_MAX = 2000;
+const idTenant = new Map<string, string>();
+function rememberIdTenant(opaque: string, tenant: string): void {
+  if (!tenant) return;
+  idTenant.delete(opaque);
+  idTenant.set(opaque, tenant);
+  if (idTenant.size > ID_TENANT_MAX) idTenant.delete(idTenant.keys().next().value as string);
 }
 
 // ── Outbound: the request side of identity.md §5 ────────────────────────────
@@ -115,16 +135,16 @@ let wireTenant: string | null = null;
 let tenantInflight: Promise<string | null> | null = null;
 let warnedUnbound = false;
 
-/** Learned from any bound id the wire returned, or from `switchWorkspace`. */
+/** The session's ACTIVE tenant, from `/me/workspaces` or `switchWorkspace` only. */
 export function rememberWireTenant(tenant: string): void {
   if (tenant && wireTenant !== tenant) { wireTenant = tenant; tenantInflight = null; }
 }
-/** Auth or workspace changed: the next bind re-resolves. */
-export function resetWireTenant(): void { wireTenant = null; tenantInflight = null; }
+/** Auth changed: the next bind re-resolves, and no other caller's ids are kept. */
+export function resetWireTenant(): void { wireTenant = null; tenantInflight = null; idTenant.clear(); }
 
 /**
- * The caller's active tenant for binding. Remembered from the wire when we
- * have it; otherwise resolved ONCE (single-flight) from
+ * The caller's active tenant for binding an id the wire never returned bound.
+ * Set by `/me/workspaces` or a switch; otherwise resolved ONCE (single-flight) from
  * `GET /host/openwop-app/me/workspaces` `.active` — the host's own statement
  * of which tenant the session is bound to. `null` only when the host cannot
  * say (unauthenticated): the request that follows is refused anyway.
@@ -155,6 +175,8 @@ export const bindRunId = async (id: string, loader: () => Promise<{ active: stri
 /** The bound VALUE (`<tenant>/<opaque>`), unprojected — for a request BODY field, never a path segment. */
 export async function bindRunIdValue(id: string, loader: () => Promise<{ active: string }>): Promise<string> {
   if (TENANT_BOUND_RUN_ID.test(id)) return id;
+  const own = idTenant.get(id);
+  if (own) return toWireRunId(id, own);
   const tenant = await ensureWireTenant(loader);
   if (!tenant) {
     if (!warnedUnbound) { warnedUnbound = true; console.warn('[v2Wire] sending an UNBOUND run id on a major-2 request — the tenant could not be resolved; identity.md §5 requires the bound form'); }

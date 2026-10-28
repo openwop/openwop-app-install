@@ -363,14 +363,19 @@ export function registerGovernanceRoutes(app: Express, deps: { storage: Storage 
           : undefined;
       // Campaign gap plan §5B B3 — ad-spend approval threshold (minor units).
       // `null` clears it; a finite ≥0 number sets it.
-      let adSpend: { approvalThresholdMinor?: number } | undefined;
+      let adSpend: { approvalThresholdMinor?: number; approvalThresholdCurrency?: string } | undefined;
       if (body.adSpend !== undefined) {
         if (body.adSpend === null) {
           adSpend = {};
         } else if (typeof body.adSpend === 'object') {
           const t = (body.adSpend as Record<string, unknown>).approvalThresholdMinor;
+          // ADR 0952 residual (a) — the threshold's currency (absent ⇒ USD).
+          const cur = (body.adSpend as Record<string, unknown>).approvalThresholdCurrency;
+          if (cur !== undefined && cur !== null && (typeof cur !== 'string' || !/^[A-Z]{3}$/.test(cur))) {
+            throw new OpenwopError('validation_error', '`adSpend.approvalThresholdCurrency` MUST be an ISO-4217 code such as USD.', 400, {});
+          }
           if (t === undefined || t === null) adSpend = {};
-          else if (typeof t === 'number' && Number.isFinite(t) && t >= 0) adSpend = { approvalThresholdMinor: Math.floor(t) };
+          else if (typeof t === 'number' && Number.isFinite(t) && t >= 0) adSpend = { approvalThresholdMinor: Math.floor(t), ...(typeof cur === 'string' ? { approvalThresholdCurrency: cur } : {}) };
           else throw new OpenwopError('validation_error', '`adSpend.approvalThresholdMinor` MUST be null or a non-negative number (minor units).', 400, {});
         } else {
           throw new OpenwopError('validation_error', '`adSpend` MUST be an object or null.', 400, {});

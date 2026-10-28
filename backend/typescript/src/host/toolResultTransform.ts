@@ -151,6 +151,9 @@ export const SCHEMA_READ_EXEMPT_TOOLS: readonly string[] = [
   'openwop:team-ledger.get', // ADR 0831 — its outOfScope list must never be shortened
   'openwop:cms.get-draft-page',
   'openwop:interactive-artifacts.get',
+  // ADR 0948 P3a — each blueprint's `parameters` JSON Schema: the model authors
+  // `openwop:funnels.generate` params against it, so a compacted schema is a lie.
+  'openwop:funnels.blueprints',
 ];
 
 /**

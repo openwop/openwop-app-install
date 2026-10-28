@@ -11,7 +11,7 @@
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { IconButton } from '../../ui/IconButton.js';
-import { ImageIcon, LinkIcon, TrashIcon, PencilIcon } from '../../ui/icons/index.js';
+import { ImageIcon, LinkIcon, TrashIcon, PencilIcon, ShieldIcon } from '../../ui/icons/index.js';
 import { formatBytes, formatNumber } from '../../i18n/format.js';
 import { absoluteServeUrl, type MediaAsset } from './mediaClient.js';
 
@@ -66,10 +66,25 @@ function AltStatusChip({ a, t }: { a: MediaAsset; t: TFunction }): JSX.Element |
   return <span className="chip chip--warning">{t('altMissingLabel')}</span>;
 }
 
+/** ADR 0945 P5 — the fidelity status of a generated asset (color-never-alone:
+ *  the label carries the meaning). Shown only for assets with a generation
+ *  stamp; the cached summary is for display — the publish gate reads the
+ *  verdict store. */
+export function FidelityChip({ a, t }: { a: MediaAsset; t: TFunction }): JSX.Element | null {
+  const g = a.lineage?.grounding;
+  if (!g) return null;
+  const outcome = g.fidelity?.outcome;
+  if (outcome === 'pass') return <span className="chip chip--success">{t('fidelityPass')}</span>;
+  if (outcome === 'needs_review') return <span className="chip chip--warning">{t('fidelityReview')}</span>;
+  if (outcome === 'fail') return <span className="chip chip--danger">{t('fidelityFail')}</span>;
+  return g.productId ? <span className="chip chip--muted">{t('fidelityUnchecked')}</span> : null;
+}
+
 function AssetChips({ a, t }: { a: MediaAsset; t: TFunction }): JSX.Element {
   return (
     <>
       <span className="chip chip--muted">{assetFormat(a)}</span>
+      <FidelityChip a={a} t={t} />
       <AltStatusChip a={a} t={t} />
       {a.tags.map((tag) => (
         <span key={tag} className="chip">{tag}</span>
@@ -83,9 +98,12 @@ export function MediaAssetCard({
   onDelete,
   onShowUsage,
   onEditAltText,
+  onShowProvenance,
   deleting = false,
 }: {
   asset: MediaAsset;
+  /** ADR 0945 P5 — open the provenance drawer (generated assets only). */
+  onShowProvenance?: () => void;
   onDelete: () => void;
   /** Open the "used by" list (ADR 0206 B4 usage refs). */
   onShowUsage?: () => void;
@@ -108,6 +126,7 @@ export function MediaAssetCard({
         <AssetUsage a={a} t={t} />
         <span className="u-flex u-gap-1">
           {onEditAltText && isImage(a) ? <IconButton label={t('altEditLabel')} icon={<PencilIcon />} className="btn-ghost" onClick={onEditAltText} /> : null}
+          {onShowProvenance && a.lineage?.grounding ? <IconButton label={t('provenanceLabel')} icon={<ShieldIcon />} className="btn-ghost" onClick={onShowProvenance} /> : null}
           {onShowUsage ? <IconButton label={t('usedByLabel')} icon={<LinkIcon />} className="btn-ghost" onClick={onShowUsage} /> : null}
           <IconButton label={t('deleteAssetLabel')} icon={<TrashIcon />} className="btn-ghost" onClick={onDelete} disabled={deleting} aria-busy={deleting || undefined} />
         </span>
@@ -121,9 +140,12 @@ export function MediaAssetRow({
   onDelete,
   onShowUsage,
   onEditAltText,
+  onShowProvenance,
   deleting = false,
 }: {
   asset: MediaAsset;
+  /** ADR 0945 P5 — open the provenance drawer (generated assets only). */
+  onShowProvenance?: () => void;
   onDelete: () => void;
   /** Open the "used by" list (ADR 0206 B4 usage refs). */
   onShowUsage?: () => void;
@@ -150,6 +172,7 @@ export function MediaAssetRow({
       </div>
       <div className="list-row-actions action-bar">
         {onEditAltText && isImage(a) ? <IconButton label={t('altEditLabel')} icon={<PencilIcon />} className="btn-ghost" onClick={onEditAltText} /> : null}
+        {onShowProvenance && a.lineage?.grounding ? <IconButton label={t('provenanceLabel')} icon={<ShieldIcon />} className="btn-ghost" onClick={onShowProvenance} /> : null}
         {onShowUsage ? <IconButton label={t('usedByLabel')} icon={<LinkIcon />} className="btn-ghost" onClick={onShowUsage} /> : null}
         <IconButton label={t('deleteAssetLabel')} icon={<TrashIcon />} className="btn-ghost" onClick={onDelete} disabled={deleting} aria-busy={deleting || undefined} />
       </div>

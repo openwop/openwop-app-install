@@ -1,8 +1,8 @@
 {
   "name": "vendor.openwop-app.campaign-studio.agents",
-  "version": "1.0.3",
+  "version": "1.1.0",
   "kind": "node",
-  "description": "Campaign Strategist agent. Turns a marketing goal into a structured multi-channel campaign rendered in the EXISTING chat artifact workbench \u2014 composes the AI chat + the feature.campaign-studio.nodes pack; no new chat surface. Pure-agent pack.",
+  "description": "Campaign Strategist agent. Turns a marketing goal into a structured multi-channel campaign rendered in the EXISTING chat artifact workbench — composes the AI chat + the feature.campaign-studio.nodes pack; no new chat surface. Pure-agent pack.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "homepage": "https://openwop.dev/packs/vendor.openwop-app.campaign-studio.agents",
@@ -24,6 +24,7 @@
   "agents": [
     {
       "agentId": "vendor.openwop-app.campaign-studio.agents.default",
+      "a2aExposed": false,
       "persona": "Campaign Strategist",
       "label": "Campaign Strategist",
       "description": "Turns a marketing goal into a structured multi-channel campaign (channels, funnel, content assets) rendered live in the artifact workbench. Uses openwop:campaign-studio.render and openwop:campaign-studio.get-design.",
@@ -41,6 +42,221 @@
       "confidence": {
         "defaultThreshold": 0.8
       }
+    },
+    {
+      "agentId": "vendor.openwop-app.campaign-studio.agents.creative-director",
+      "persona": "Campaign Creative Director",
+      "label": "Campaign Creative Director",
+      "description": "Gives creative direction from the brief, the brand voice and the client's real product images, and checks proposed copy against the brand rules. Never publishes, sends or spends.",
+      "modelClass": "general",
+      "systemPromptRef": "prompts/creative-director.md",
+      "evalSuiteRef": "evals/creative-director.json",
+      "toolAllowlist": [
+        "openwop:campaign-brief.get-brief",
+        "openwop:campaign-studio.get-design",
+        "openwop:creative-briefs.list",
+        "openwop:media.list",
+        "openwop:brand.list-brands",
+        "openwop:brand.resolve-voice",
+        "openwop:brand.compliance-check"
+      ],
+      "memoryShape": {
+        "scratchpad": true,
+        "conversation": false,
+        "longTerm": false
+      },
+      "confidence": {
+        "defaultThreshold": 0.7
+      },
+      "a2aExposed": false
+    },
+    {
+      "agentId": "vendor.openwop-app.campaign-studio.agents.copywriter",
+      "persona": "Campaign Copywriter",
+      "label": "Campaign Copywriter",
+      "description": "Writes channel copy in the client's voice from the approved brief: starts channel generation (each channel then waits for approval) and saves email drafts. Never publishes or sends.",
+      "modelClass": "general",
+      "systemPromptRef": "prompts/copywriter.md",
+      "evalSuiteRef": "evals/copywriter.json",
+      "toolAllowlist": [
+        "openwop:campaign-brief.get-brief",
+        "openwop:brand.resolve-voice",
+        "openwop:campaign-channels.channels",
+        "openwop:campaign-channels.generate",
+        "openwop:email.get-campaign",
+        "openwop:email.save-draft",
+        "openwop:brand.compliance-check"
+      ],
+      "memoryShape": {
+        "scratchpad": true,
+        "conversation": false,
+        "longTerm": false
+      },
+      "confidence": {
+        "defaultThreshold": 0.7
+      },
+      "a2aExposed": false
+    },
+    {
+      "agentId": "vendor.openwop-app.campaign-studio.agents.cro-analyst",
+      "persona": "Campaign CRO Analyst",
+      "label": "Campaign CRO Analyst",
+      "description": "Reads funnels, analytics and landing pages to find where visitors drop off, and proposes tests as hypotheses. Read-only: never promotes a winner or edits a page.",
+      "modelClass": "reasoning",
+      "systemPromptRef": "prompts/cro-analyst.md",
+      "evalSuiteRef": "evals/cro-analyst.json",
+      "toolAllowlist": [
+        "openwop:funnels.list",
+        "openwop:funnels.get",
+        "openwop:funnels.step-stats",
+        "openwop:analytics.query",
+        "openwop:cms.list-pages",
+        "openwop:cms.get-page",
+        "openwop:bi.list-metrics",
+        "openwop:bi.run-metric"
+      ],
+      "memoryShape": {
+        "scratchpad": true,
+        "conversation": false,
+        "longTerm": false
+      },
+      "confidence": {
+        "defaultThreshold": 0.7
+      },
+      "a2aExposed": false
+    },
+    {
+      "agentId": "vendor.openwop-app.campaign-studio.agents.lifecycle-marketer",
+      "persona": "Campaign Lifecycle Marketer",
+      "label": "Campaign Lifecycle Marketer",
+      "description": "Plans who gets which message and when over real segment fields, and drafts the emails. Never sends.",
+      "modelClass": "general",
+      "systemPromptRef": "prompts/lifecycle-marketer.md",
+      "evalSuiteRef": "evals/lifecycle-marketer.json",
+      "toolAllowlist": [
+        "openwop:feature.crm.nodes.segment-vocabulary",
+        "openwop:feature.crm.nodes.validate-segment",
+        "openwop:feature.crm.nodes.list-segment-members",
+        "openwop:email.get-campaign",
+        "openwop:email.save-draft",
+        "openwop:brand.resolve-voice"
+      ],
+      "memoryShape": {
+        "scratchpad": true,
+        "conversation": false,
+        "longTerm": false
+      },
+      "confidence": {
+        "defaultThreshold": 0.7
+      },
+      "a2aExposed": false
+    },
+    {
+      "agentId": "vendor.openwop-app.campaign-studio.agents.lead-qualifier",
+      "persona": "Campaign Lead Qualifier",
+      "label": "Campaign Lead Qualifier",
+      "description": "In-run lead grader: reads the company, deals, tasks and resolved identity and reports fit with evidence. Never contacts a lead or sets a grade.",
+      "modelClass": "reasoning",
+      "systemPromptRef": "prompts/lead-qualifier.md",
+      "evalSuiteRef": "evals/lead-qualifier.json",
+      "toolAllowlist": [
+        "openwop:feature.crm.nodes.get-company",
+        "openwop:feature.crm.nodes.list-companies",
+        "openwop:feature.crm.nodes.list-deals",
+        "openwop:feature.crm.nodes.get-deal",
+        "openwop:feature.crm.nodes.list-tasks",
+        "openwop:cdp.identity.resolve"
+      ],
+      "memoryShape": {
+        "scratchpad": true,
+        "conversation": false,
+        "longTerm": false
+      },
+      "confidence": {
+        "defaultThreshold": 0.7
+      },
+      "a2aExposed": false
+    },
+    {
+      "agentId": "vendor.openwop-app.campaign-studio.agents.compliance-reviewer",
+      "persona": "Campaign Compliance Reviewer",
+      "label": "Campaign Compliance Reviewer",
+      "description": "Checks copy, pages and briefs against the brand rules and accessibility and reports what must change. Read-only: never fixes, approves or publishes.",
+      "modelClass": "reasoning",
+      "systemPromptRef": "prompts/compliance-reviewer.md",
+      "evalSuiteRef": "evals/compliance-reviewer.json",
+      "toolAllowlist": [
+        "openwop:brand.compliance-check",
+        "openwop:brand.resolve-voice",
+        "openwop:campaign-brief.get-brief",
+        "openwop:campaign-brief.validate",
+        "openwop:accessibility.check",
+        "openwop:cms.get-page",
+        "openwop:email.get-campaign"
+      ],
+      "memoryShape": {
+        "scratchpad": true,
+        "conversation": false,
+        "longTerm": false
+      },
+      "confidence": {
+        "defaultThreshold": 0.7
+      },
+      "a2aExposed": false
+    },
+    {
+      "agentId": "vendor.openwop-app.campaign-studio.agents.reporting-analyst",
+      "persona": "Campaign Reporting Analyst",
+      "label": "Campaign Reporting Analyst",
+      "description": "Explains campaign performance in plain language with the numbers behind it: attribution, pacing, fatigue, funnels and business metrics. Read-only.",
+      "modelClass": "general",
+      "systemPromptRef": "prompts/reporting-analyst.md",
+      "evalSuiteRef": "evals/reporting-analyst.json",
+      "toolAllowlist": [
+        "openwop:campaign-intel.attribution",
+        "openwop:campaign-intel.pacing",
+        "openwop:campaign-intel.forecast",
+        "openwop:campaign-orchestration.status",
+        "openwop:analytics.query",
+        "openwop:funnels.step-stats",
+        "openwop:bi.list-metrics",
+        "openwop:bi.run-metric"
+      ],
+      "memoryShape": {
+        "scratchpad": true,
+        "conversation": false,
+        "longTerm": false
+      },
+      "confidence": {
+        "defaultThreshold": 0.7
+      },
+      "a2aExposed": false
+    },
+    {
+      "agentId": "vendor.openwop-app.campaign-studio.agents.producer",
+      "persona": "Campaign Producer",
+      "label": "Campaign Producer",
+      "description": "Keeps the campaign moving: reads where it stands, turns the next steps into task cards, posts status updates and notifies. Never writes channel content, publishes, spends or grants access.",
+      "modelClass": "general",
+      "systemPromptRef": "prompts/producer.md",
+      "evalSuiteRef": "evals/producer.json",
+      "toolAllowlist": [
+        "openwop:campaign-orchestration.status",
+        "openwop:projects.list",
+        "openwop:comments.list",
+        "openwop:comments.post",
+        "openwop:kanban.add-todo",
+        "openwop:notifications.notify-me"
+      ],
+      "memoryShape": {
+        "scratchpad": true,
+        "conversation": false,
+        "longTerm": false
+      },
+      "confidence": {
+        "defaultThreshold": 0.7
+      },
+      "a2aExposed": false
     }
   ],
   "runtime": {

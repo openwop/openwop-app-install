@@ -4,8 +4,13 @@
  * loopback reachability under OPENWOP_WEBHOOK_ALLOW_PRIVATE. Validates the money paths
  * — metrics micros→major, the two-step budget lookup→mutate, dry-run zero-call preview,
  * Bearer + developer-token, RFC 0079 provenance — that the node tests mock out.
+ *
+ * Tracker TST-BKU-3. Red when CPC micros convert wrongly, the budget minor→micros
+ * factor changes, a dry-run calls the platform, or the updateMask widens — each
+ * sabotage-witnessed (w65).
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { answerCurrencyRead, platformRequests, currencyReads } from './adsCurrencyFixture.js';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from '../src/index.js';
@@ -29,6 +34,7 @@ describe('ADR 0186 slice 4a/4b — ctx.ads Google Ads HTTP paths', () => {
     await __resetConnectionsStore();
     g = http.createServer((req, res) => {
       let raw = ''; req.on('data', (c) => (raw += c)); req.on('end', () => {
+        if (answerCurrencyRead(req.url ?? '', raw, res)) return;
         const body = raw ? JSON.parse(raw) : {};
         hits.push({ path: req.url ?? '', auth: req.headers.authorization, dev: req.headers['developer-token'] as string, body });
         res.writeHead(200, { 'content-type': 'application/json' });
@@ -49,7 +55,7 @@ describe('ADR 0186 slice 4a/4b — ctx.ads Google Ads HTTP paths', () => {
   const adapter = (runId: string) => makeAdsAdapter({ storage, tenantId: 'tg', runId, actingUserId: 'u1', orgId: 'tg' });
 
   it('getMetrics: queries googleAds:search and normalizes micros → major units', async () => {
-    hits = [];
+    hits = []; platformRequests.length = 0; currencyReads.length = 0;
     const out = await adapter('r-metrics').getMetrics({ platform: 'google', adAccountId: '123-456-7890', campaignId: '222' });
     expect(out.outcome).toBe('ok');
     if (out.outcome !== 'ok') return;
@@ -62,14 +68,14 @@ describe('ADR 0186 slice 4a/4b — ctx.ads Google Ads HTTP paths', () => {
   });
 
   it('updateBudget dryRun: returns a preview with ZERO platform calls', async () => {
-    hits = [];
+    hits = []; platformRequests.length = 0; currencyReads.length = 0;
     const out = await adapter('r-budget').updateBudget({ platform: 'google', adAccountId: '123', campaignId: '222', dailyBudgetMinor: 7500, dryRun: true });
     expect(out.outcome).toBe('preview');
-    expect(hits.length).toBe(0);
+    expect(hits.length).toBe(0); expect(platformRequests).toHaveLength(0);
   });
 
   it('updateBudget real: resolves the budget then mutates amount_micros (×1e4)', async () => {
-    hits = [];
+    hits = []; platformRequests.length = 0; currencyReads.length = 0;
     const out = await adapter('r-budget').updateBudget({ platform: 'google', adAccountId: '123', campaignId: '222', dailyBudgetMinor: 7500, dryRun: false });
     expect(out.outcome).toBe('updated');
     if (out.outcome !== 'updated') return;

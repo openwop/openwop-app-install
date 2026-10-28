@@ -20,11 +20,19 @@
  * member could read or DELETE any person's or agent's memory. Every handler now
  * calls `assertMemoryRefAccess` BEFORE touching the store — one helper over the
  * same primitives the two sibling doors onto these rows already use.
+ *
+ * ADR 0979 D1 — AND ROW-scoped for the tenant ledger (`MEMORY_DEMO_REF`). Each
+ * row there carries a slice of one run's OUTPUT, so it is decided by the
+ * run-payload rule (`tenantMemoryAccess`): a member sees the summaries of runs
+ * they started, an admin sees all, and a row they may not see is a 404, never a
+ * 403. The list answers `visibility` + `canDelete` so the inspector says what it
+ * shows and offers only what the server will do. Every response is projected
+ * through `toMemoryEntry` (the stored `owner` stamp is host-internal).
  */
 
 import type { Express } from 'express';
-import { getMemoryEntry, listMemoryEntries, removeMemoryEntry, MEMORY_DEMO_REF } from '../host/inMemorySurfaces.js';
-import { assertMemoryRefAccess } from '../host/memoryRefAccess.js';
+import { getMemoryEntry, listMemoryEntries, removeMemoryEntry, toMemoryEntry, MEMORY_DEMO_REF } from '../host/inMemorySurfaces.js';
+import { assertMemoryRefAccess, tenantMemoryAccess } from '../host/memoryRefAccess.js';
 import { createLogger } from '../observability/logger.js';
 
 const log = createLogger('routes.memory');
@@ -52,13 +60,19 @@ export function registerMemoryRoutes(app: Express): void {
     const tbRaw = typeof req.query.tokenBudget === 'string' ? Number(req.query.tokenBudget) : NaN;
     const tokenBudget = Number.isFinite(tbRaw) && tbRaw > 0 ? Math.floor(tbRaw) : undefined;
     const rank = req.query.rank === 'recency' ? ('recency' as const) : undefined;
+    const ledger = memoryRef === MEMORY_DEMO_REF ? await tenantMemoryAccess(req) : undefined;
     const entries = await listMemoryEntries(tenantId, memoryRef, {
       ...(tag ? { tag } : {}),
       ...(limit ? { limit } : {}),
       ...(tokenBudget ? { tokenBudget } : {}),
       ...(rank ? { rank } : {}),
+      ...(ledger ? { admit: ledger.admits } : {}),
     });
-    res.status(200).json({ memoryRef, entries });
+    res.status(200).json({
+      memoryRef,
+      entries: entries.map(toMemoryEntry),
+      ...(ledger ? { visibility: ledger.visibility, canDelete: ledger.canDelete } : {}),
+    });
     } catch (err) { next(err); }
   });
 
@@ -67,12 +81,14 @@ export function registerMemoryRoutes(app: Express): void {
       const tenantId = req.tenantId ?? 'default';
       const memoryRef = resolveRef(req.query.memoryRef);
       await assertMemoryRefAccess(req, memoryRef, 'read');
-      const entry = await getMemoryEntry(tenantId, memoryRef, req.params.memoryId);
+      const ledger = memoryRef === MEMORY_DEMO_REF ? await tenantMemoryAccess(req) : undefined;
+      const found = await getMemoryEntry(tenantId, memoryRef, req.params.memoryId);
+      const entry = found && (!ledger || ledger.admits(found)) ? found : null;
       if (!entry) {
         res.status(404).json({ error: 'not_found', message: 'memory entry not found' });
         return;
       }
-      res.status(200).json({ memoryRef, entry });
+      res.status(200).json({ memoryRef, entry: toMemoryEntry(entry) });
     } catch (err) { next(err); }
   });
 
@@ -82,6 +98,17 @@ export function registerMemoryRoutes(app: Express): void {
       const memoryRef = resolveRef(req.query.memoryRef);
       // 'write': deleting an agent's memory needs workspace:WRITE, not read.
       await assertMemoryRefAccess(req, memoryRef, 'write');
+      if (memoryRef === MEMORY_DEMO_REF) {
+        // ADR 0979 D1 — the scope first (independent of the id), then the row
+        // must be one the caller sees; otherwise the same 404 an absent id gets.
+        const ledger = await tenantMemoryAccess(req);
+        await ledger.assertMayDelete();
+        const target = await getMemoryEntry(tenantId, memoryRef, req.params.memoryId);
+        if (!target || !ledger.admits(target)) {
+          res.status(404).json({ error: 'not_found', message: 'memory entry not found' });
+          return;
+        }
+      }
       const removed = await removeMemoryEntry(tenantId, memoryRef, req.params.memoryId);
       if (!removed) {
         res.status(404).json({ error: 'not_found', message: 'memory entry not found' });

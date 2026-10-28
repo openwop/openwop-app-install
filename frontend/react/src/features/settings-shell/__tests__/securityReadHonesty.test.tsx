@@ -80,7 +80,7 @@ describe('UX-SET-1 — a failed security read states nothing about MFA posture',
 
   it('ENROLLED: a real answer still renders the factors and the verified chip', async () => {
     api.getMySecurity.mockResolvedValue({ source: 'oidc', mfaSessionVerified: true });
-    fb.listMfaFactors.mockResolvedValue([{ uid: 'f1', displayName: 'Phone', enrolledAt: null }]);
+    fb.listMfaFactors.mockResolvedValue([{ uid: 'f1', displayName: 'Phone', enrolledAt: null, factorId: 'totp' }]);
     render(<SecurityPanel />);
 
     expect(await screen.findByText('Phone')).toBeTruthy();
@@ -104,7 +104,7 @@ describe('UX-SET-1 — a failed security read states nothing about MFA posture',
     // Promise.allSettled means one arm can succeed; the chip must not render
     // "Single-factor session" off a null security read.
     api.getMySecurity.mockRejectedValue(new Error('sec_500'));
-    fb.listMfaFactors.mockResolvedValue([{ uid: 'f1', displayName: 'Phone', enrolledAt: null }]);
+    fb.listMfaFactors.mockResolvedValue([{ uid: 'f1', displayName: 'Phone', enrolledAt: null, factorId: 'totp' }]);
     render(<SecurityPanel />);
 
     expect(await screen.findByText(/unknown, not off/i)).toBeTruthy();

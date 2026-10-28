@@ -41,31 +41,41 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
 const V2 = { 'OpenWOP-Version': '2' };
-async function req(method: string, path: string, body?: unknown, headers: Record<string, string> = V2) {
+interface Snapshot { runId?: string; status?: string; metadata?: Record<string, unknown> }
+interface RunEvent { type: string; sequence: number; payload?: { reason?: string; drainPolicy?: string; interruptedNodeId?: string; nodeId?: string; error?: { message?: string } } }
+interface EntryError { error?: string; message?: string; code?: string; details?: Record<string, unknown> }
+interface Body extends Snapshot {
+  error?: string; message?: string; details?: { runStatus?: string; pausedAt?: string; field?: string };
+  events?: RunEvent[];
+  results?: Array<{ runId?: string; ok?: boolean; status?: string; error?: EntryError }>;
+}
+async function req(method: string, path: string, body?: unknown, headers: Record<string, string> = V2): Promise<{ status: number; json: Body | undefined; text: string }> {
   const res = await fetch(`${base}${path}`, { method, headers: { Authorization: 'Bearer dev-token', 'Content-Type': 'application/json', ...headers }, body: body === undefined ? undefined : JSON.stringify(body) });
-  const text = await res.text(); let json: any; try { json = JSON.parse(text); } catch { json = undefined; }
+  const text = await res.text(); let json: Body | undefined; try { json = JSON.parse(text) as Body; } catch { json = undefined; }
   return { status: res.status, json, text };
 }
 const enc = (id: string) => encodeURIComponent(id);
 async function create(workflowId: string, inputs: Record<string, unknown> = {}): Promise<string> {
   const r = await req('POST', '/runs', { workflowId, inputs });
   expect(r.status, r.text.slice(0, 160)).toBe(201);
-  return r.json.runId as string;
+  return String(r.json?.runId);
 }
-async function snapshot(id: string) { return (await req('GET', `/runs/${enc(id)}`)).json; }
-async function waitFor(id: string, pred: (s: any) => boolean, ms = 6000) {
+async function snapshot(id: string): Promise<Snapshot> { return (await req('GET', `/runs/${enc(id)}`)).json ?? {}; }
+async function waitFor(id: string, pred: (s: Snapshot) => boolean, ms = 6000): Promise<Snapshot> {
   const until = Date.now() + ms; let s = await snapshot(id);
   while (!pred(s) && Date.now() < until) { await new Promise((r) => setTimeout(r, 60)); s = await snapshot(id); }
   return s;
 }
-async function events(id: string): Promise<Array<{ type: string; payload?: any; sequence: number }>> {
-  return (await req('GET', `/runs/${enc(id)}/events/poll?afterSequence=0&limit=200`)).json.events;
+async function events(id: string): Promise<RunEvent[]> {
+  return (await req('GET', `/runs/${enc(id)}/events/poll?afterSequence=0&limit=200`)).json?.events ?? [];
 }
+/** Leftover delay runs are cancelled so no 20 s node outlives its case. */
+async function cancel(id: string): Promise<void> { await req('POST', `/runs/${enc(id)}:cancel`, {}); }
 
 describe('pause', () => {
   it('a terminal run → 409 run_terminal', async () => {
     const id = await create('conformance-noop');
-    await waitFor(id, (s) => ['completed', 'failed'].includes(s.status));
+    await waitFor(id, (s) => ['completed', 'failed'].includes(String(s.status)));
     const r = await req('POST', `/runs/${enc(id)}:pause`, {});
     expect(r.status, r.text.slice(0, 160)).toBe(409);
     expect(r.json?.error).toBe('run_terminal');
@@ -75,7 +85,7 @@ describe('pause', () => {
     await waitFor(id, (s) => s.status === 'running', 3000);
     const r = await req('POST', `/runs/${enc(id)}:pause`, { reason: 'operator', drainPolicy: 'immediate' });
     expect(r.status, r.text.slice(0, 200)).toBe(202);
-    expect(r.json.runId).toBe(id); expect(r.json.status).toBe('paused');
+    expect(r.json?.runId).toBe(id); expect(r.json?.status).toBe('paused');
     const s = await waitFor(id, (x) => x.status === 'paused', 4000);
     expect(s.status).toBe('paused');
     const paused = (await events(id)).find((e) => e.type === 'run.paused');
@@ -87,6 +97,7 @@ describe('pause', () => {
     expect(paused?.payload?.interruptedNodeId).toBe(startedNode);
     // The interrupted attempt is NOT a failure: no `node.failed` in the history (replay poison otherwise).
     expect((await events(id)).filter((e) => e.type === 'node.failed')).toEqual([]);
+    await cancel(id);
   });
   it('an IMMEDIATE pause is true when answered: a second pause sent with NO delay sees runStatus paused (production race, ad3717cde)', async () => {
     pausedWriteDelayMs = 400;
@@ -99,8 +110,10 @@ describe('pause', () => {
       // No waitFor here — the conformance scenario doesn't wait either.
       const again = await req('POST', `/runs/${enc(id)}:pause`, {});
       expect(again.status).toBe(409);
-      expect(again.json?.details?.runStatus ?? again.json?.error?.details?.runStatus).toBe('paused');
-      await req('POST', `/runs/${enc(id)}:cancel`, {});
+      // The v2 envelope is flat: `{ error, message, details }`.
+      expect(again.json?.error).toBe('run_state_conflict');
+      expect(again.json?.details?.runStatus).toBe('paused');
+      await cancel(id);
     }
     } finally { pausedWriteDelayMs = 0; }
   });
@@ -113,16 +126,19 @@ describe('pause', () => {
     expect(r.status).toBe(409);
     expect(r.json?.error).toBe('run_state_conflict');
     expect(r.json?.details?.runStatus).toBe('paused');
+    await cancel(id);
   });
   it('drain-current-node (default): the running node FINISHES first, then the run pauses; run.paused follows node.completed', async () => {
-    const id = await create('conformance-cancellable', { delayMs: 1500 });
+    // 400 ms is long enough for the pause to land while the node runs (the running
+    // wait resolves within one 60 ms poll) and short enough to keep the case under 1.5 s.
+    const id = await create('conformance-cancellable', { delayMs: 400 });
     await waitFor(id, (s) => s.status === 'running', 3000);
     const t0 = Date.now();
     const r = await req('POST', `/runs/${enc(id)}:pause`, { reason: 'drain me' });
-    expect(r.status).toBe(202); expect(r.json.status).toBe('paused');
+    expect(r.status).toBe(202); expect(r.json?.status).toBe('paused');
     const early = await snapshot(id);
-    expect(['running', 'paused']).toContain(early.status);
-    const s = await waitFor(id, (x) => x.status === 'paused' || ['completed', 'failed'].includes(x.status), 6000);
+    expect(['running', 'paused']).toContain(String(early.status));
+    const s = await waitFor(id, (x) => x.status === 'paused' || ['completed', 'failed'].includes(String(x.status)), 6000);
     expect(s.status, `after ${Date.now() - t0}ms: ${JSON.stringify(s).slice(0, 120)}`).toBe('paused');
     const ev = await events(id);
     const nc = ev.findIndex((e) => e.type === 'node.completed'); const rp = ev.findIndex((e) => e.type === 'run.paused');
@@ -149,6 +165,7 @@ describe('resume', () => {
     expect(r.status).toBe(409);
     expect(r.json?.error).toBe('run_state_conflict');
     expect(r.json?.details?.runStatus).toBe('running');
+    await cancel(id);
   });
   it('a paused run → 202 {status: running}, run.resumed, and the run completes (the aborted node re-executes)', async () => {
     const id = await create('conformance-cancellable', { delayMs: 1200 });
@@ -157,8 +174,8 @@ describe('resume', () => {
     await waitFor(id, (x) => x.status === 'paused', 4000);
     const r = await req('POST', `/runs/${enc(id)}:resume`, { reason: 'go' });
     expect(r.status, r.text.slice(0, 160)).toBe(202);
-    expect(r.json.status).toBe('running');
-    const s = await waitFor(id, (x) => ['completed', 'failed'].includes(x.status), 8000);
+    expect(r.json?.status).toBe('running');
+    const s = await waitFor(id, (x) => ['completed', 'failed'].includes(String(x.status)), 8000);
     expect(s.status).toBe('completed');
     const ev = await events(id);
     expect(ev.some((e) => e.type === 'run.resumed')).toBe(true);
@@ -170,7 +187,10 @@ describe('resume — the 202 is true when answered', () => {
   it('run.resumed is already in the log when :resume answers 202, even when the write is slow (prod floor row, rev 00780)', async () => {
     resumedAppendDelayMs = 600;
     try {
-      const id = await create('conformance-cancellable', { delayMs: 1500 });
+      // The node is aborted by the immediate pause and re-executes on resume; it
+      // never needs to finish for this claim, so a long delay + cancel keeps the
+      // case to the 600 ms write delay instead of a full re-execution.
+      const id = await create('conformance-cancellable', { delayMs: 20000 });
       await waitFor(id, (s) => s.status === 'running', 3000);
       expect((await req('POST', `/runs/${enc(id)}:pause`, { drainPolicy: 'immediate' })).status).toBe(202);
       await waitFor(id, (x) => x.status === 'paused', 4000);
@@ -180,7 +200,7 @@ describe('resume — the 202 is true when answered', () => {
       const types = (await events(id)).map((e) => e.type);
       const p = types.indexOf('run.paused'); const q = types.indexOf('run.resumed');
       expect(p >= 0 && q > p, `run.paused then run.resumed at 202 time — got ${types.join(', ')}`).toBe(true);
-      await waitFor(id, (x) => ['completed', 'failed'].includes(x.status), 8000);
+      await cancel(id);
     } finally { resumedAppendDelayMs = 0; }
   });
 });
@@ -192,16 +212,16 @@ describe('replay/fork safety (ADR 0632 P4)', () => {
     expect((await req('POST', `/runs/${enc(id)}:pause`, { drainPolicy: 'immediate' })).status).toBe(202);
     await waitFor(id, (x) => x.status === 'paused', 4000);
     expect((await req('POST', `/runs/${enc(id)}:resume`, {})).status).toBe(202);
-    expect((await waitFor(id, (x) => ['completed', 'failed'].includes(x.status), 8000)).status).toBe('completed');
+    expect((await waitFor(id, (x) => ['completed', 'failed'].includes(String(x.status)), 8000)).status).toBe('completed');
     const src = await events(id);
     expect(src.some((e) => e.type === 'run.paused') && src.some((e) => e.type === 'run.resumed')).toBe(true);
     expect(src.some((e) => e.type === 'node.completed'), 'source has a completed node to replay').toBe(true);
     // This host's `mode:'replay'` is full deterministic re-execution (fromSeq 0 only).
     const fork = await req('POST', `/runs/${enc(id)}:fork`, { mode: 'replay', fromSeq: 0 });
     expect([200, 201, 202], fork.text.slice(0, 160)).toContain(fork.status);
-    const child = fork.json.runId as string;
+    const child = String(fork.json?.runId);
     expect(child).not.toBe(id);
-    const cs = await waitFor(child, (x) => ['completed', 'failed'].includes(x.status), 8000);
+    const cs = await waitFor(child, (x) => ['completed', 'failed'].includes(String(x.status)), 8000);
     const cev = await events(child);
     expect(cs.status, `child status=${cs.status} events=${cev.map((e) => e.type + (e.payload?.error?.message ? '(' + String(e.payload.error.message).slice(0, 80) + ')' : '')).join(',')} meta=${JSON.stringify(cs.metadata ?? {}).slice(0, 200)}`).toBe('completed');
     // A replayed child never pauses on its own: the source's pause/resume are the
@@ -219,11 +239,11 @@ describe('bulk-cancel entries under major 2 (bus finding cea0)', () => {
     await waitFor(live, (s) => s.status === 'running', 3000);
     const r = await req('POST', '/runs:bulk-cancel', { runIds: [done, 'openwop-conformance-foreign-tenant/foreignopaque0123456789abcdef', live], reason: 'conformance' });
     expect(r.status, r.text.slice(0, 200)).toBe(200);
-    const results = r.json.results as Array<Record<string, any>>;
+    const results = r.json?.results ?? [];
     expect(results.map((x) => x.ok)).toEqual([false, false, true]);
     expect(results[0]!.error).toMatchObject({ error: 'run_terminal', details: { status: 'completed' } });
-    expect(results[1]!.error.error).toBe('not_found');
-    for (const e of results.slice(0, 2)) { expect(typeof e.error.message).toBe('string'); expect(e.error).not.toHaveProperty('code'); }
+    expect(results[1]!.error?.error).toBe('not_found');
+    for (const e of results.slice(0, 2)) { expect(typeof e.error?.message).toBe('string'); expect(e.error).not.toHaveProperty('code'); }
     expect(results[2]!.status).toBe('cancelled');
   });
 });
@@ -249,7 +269,7 @@ describe(':pause idempotency (rest-endpoints.md:169, bus ruling d4e4)', () => {
     expect(b.json).toEqual(a.json);
     const c = await req('POST', `/runs/${enc(id)}:pause`, {}, { ...V2, 'Idempotency-Key': 'a-different-key-0123456789' });
     expect(c.status).toBe(409);
-    await req('POST', `/runs/${enc(id)}:cancel`, {});
+    await cancel(id);
   });
   it('a second pause WITHOUT the key → 409 run_state_conflict with details.runStatus=paused and the existing pausedAt', async () => {
     const id = await runningRun();

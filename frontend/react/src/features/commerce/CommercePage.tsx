@@ -7,7 +7,7 @@
  * Money-adjacent actions can 409 `approval_required` — surfaced as a notice
  * pointing at the reviews inbox, retry after sign-off.
  */
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '../../ui/Button.js';
 import { PageHeader } from '../../ui/PageHeader.js';
@@ -27,6 +27,8 @@ import { actionError, StatusChip, OrderActions } from './commerceShared.js';
 import { scrollBehavior } from '../../ui/motion.js';
 import { KeyFigureBand } from '../../ui/KeyFigure.js';
 import { useFeatureAccess } from '../../featureToggles/FeatureAccessContext.js';
+// ADR 0945 P5 — only the product editor needs it.
+const ProductShotsPanel = lazy(() => import('./ProductShotsPanel.js'));
 import { ChatPocket } from '../../chat/ChatPocket.js';
 import { useFormat } from '../../i18n/useFormat.js';
 import { copyToClipboard } from '../../ui/copyToClipboard.js';
@@ -40,7 +42,7 @@ import {
   CURRENCIES,
   type Org, type Product, type Order, type Quote, type PriceList, type CommerceSummary, type Coupon,
   type ProductFieldDef, type ProductFieldType,
-  getPaymentsReadiness, type PaymentsReadiness,
+  getPaymentsReadiness, startClientPayments, syncClientPayments, CommerceApiError, type PaymentsReadiness,
 } from './commerceClient.js';
 
 type Tab = 'products' | 'orders' | 'quotes' | 'pricing' | 'reports';
@@ -52,6 +54,42 @@ const ORDER_STATUSES = ['pending', 'paid', 'fulfilled', 'refunding', 'refunded',
 const QUOTE_STATUSES = ['draft', 'sent', 'accepted', 'declined', 'expired'] as const;
 const PRODUCT_TYPES = ['physical', 'digital', 'service'] as const;
 
+/** ADR 0948 P0b — a client-payments failure in the reader's language. The
+ *  server's message is never echoed: it is English and names scopes. */
+function clientPaymentsError(e: unknown, t: (k: string) => string): string {
+  if (e instanceof CommerceApiError) {
+    if (e.status === 403) return t('paymentsClientOwnerOnly');
+    if (e.status === 409) return t('paymentsClientInProgress');
+  }
+  return t('paymentsClientSetupFailed');
+}
+
+/** ADR 0948 P0b — start (or resume) the client org's own Stripe onboarding and
+ *  follow Stripe's hosted page. The button stays busy while the browser leaves
+ *  for Stripe, so a second click cannot start a second request. */
+function ClientPaymentsAction({ orgId, label }: { orgId: string; label: string }): JSX.Element {
+  const { t } = useTranslation('commerce');
+  const [busy, setBusy] = useState(false);
+  const start = async (): Promise<void> => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const out = await startClientPayments(orgId);
+      if (out.mode === 'live') {
+        if (!/^https:\/\//.test(out.url)) throw new Error('unexpected onboarding url');
+        window.location.assign(out.url);
+        return; // stay busy: the page is leaving
+      }
+      // Only reachable when the host lost its Stripe key after this page loaded.
+      toast.info(t('paymentsClientDemoStarted'));
+    } catch (e) {
+      toast.error(clientPaymentsError(e, t));
+    }
+    setBusy(false);
+  };
+  return <Button variant="secondary" size="sm" loading={busy} onClick={() => void start()}>{label}</Button>;
+}
+
 /**
  * ADR 0877 D6 — tell the owner which lane their checkout settles on. A store that
  * has not connected Stripe takes DEMO orders on a live host (no card charged); an
@@ -62,26 +100,60 @@ const PRODUCT_TYPES = ['physical', 'digital', 'service'] as const;
 function PaymentsNotice({ orgId }: { orgId: string }): JSX.Element | null {
   const { t } = useTranslation('commerce');
   const [r, setR] = useState<PaymentsReadiness | null>(null);
+  const [reload, setReload] = useState(0);
+  const [params, setParams] = useSearchParams();
+  const onboarding = params.get('onboarding');
   useEffect(() => {
     let live = true;
     setR(null);
     getPaymentsReadiness(orgId).then((x) => { if (live) setR(x); }).catch(() => { if (live) setR(null); });
     return () => { live = false; };
-  }, [orgId]);
+  }, [orgId, reload]);
+  // ADR 0948 P0b — Stripe sends a client org's owner back here
+  // (`?onboarding=return|refresh`). On return, pull the account state now rather
+  // than waiting for the webhook; on refresh the link expired, so say how to go on.
+  useEffect(() => {
+    if (onboarding !== 'return' && onboarding !== 'refresh') return;
+    setParams((p) => { const n = new URLSearchParams(p); n.delete('onboarding'); return n; }, { replace: true });
+    if (onboarding === 'refresh') { toast.info(t('paymentsClientLinkExpired')); return; }
+    syncClientPayments(orgId)
+      .then(() => { toast.success(t('paymentsClientReturned')); setReload((n) => n + 1); })
+      .catch(() => toast.error(t('paymentsClientSyncFailed')));
+  }, [onboarding, orgId, setParams, t]);
   if (!r) return null;
   if (r.settlement === 'connect') {
     // grade-ux CC2UX-9 — never claim a "0%" fee from an absent field.
     return <Notice variant="info">{r.applicationFeePct !== undefined ? t('paymentsConnectLive', { pct: r.applicationFeePct }) : t('paymentsConnectLiveNoFee')}</Notice>;
   }
   if (r.settlement !== 'demo' || r.reason === 'no_key' || r.reason === 'anon') return null;
-  const body = r.reason === 'connect_incomplete' ? t('paymentsDemoIncomplete')
+  const body = r.reason === 'client_seller_required' ? t('paymentsDemoClientSeller')
+    : r.reason === 'connect_incomplete' ? t('paymentsDemoIncomplete')
     : r.reason === 'connect_region' ? t('paymentsDemoRegion')
     : r.reason === 'connect_disabled' && !r.connectAvailable ? t('paymentsDemoDisabled')
     : t('paymentsDemoBody');
   // grade-ux CC2UX-3 — the action names what the owner can actually do next: an
   // account that exists needs FINISHING, not connecting, and a region the host
   // cannot pay out to is not fixable on the Connect page at all (no link).
-  const action = r.reason === 'connect_region' ? null
+  if (r.clientOrg) {
+    // ADR 0948 P0b — a client org onboards its OWN payment account from here; the
+    // agency's Commerce Connect page would onboard the agency, so it is never
+    // linked. Only the client org's owner is offered the button (an unreachable
+    // next action is worse than none); everyone else is told who can act.
+    const blocked = r.reason === 'connect_region' || r.reason === 'connect_disabled';
+    const note = blocked ? null
+      : !r.connectAvailable ? t('paymentsAskOperator')
+      : !r.canOnboardClient ? t('paymentsClientAskOwner')
+      : null;
+    const button = blocked || note ? null
+      : <ClientPaymentsAction orgId={orgId} label={r.reason === 'connect_incomplete' ? t('paymentsClientFinishCta') : t('paymentsClientSetupCta')} />;
+    return (
+      <Notice variant="warning">
+        <strong>{t('paymentsDemoTitle')}</strong>{' '}{body}{note ? ` ${note}` : null}
+        {button ? <div className="u-mt-2">{button}</div> : null}
+      </Notice>
+    );
+  }
+  const action = r.reason === 'connect_region' || r.reason === 'client_seller_required' ? null
     : !r.connectAvailable ? <span>{t('paymentsAskOperator')}</span>
     : <Link className="inline-link" to="/commerce-connect">{r.reason === 'connect_incomplete' ? t('paymentsFinishCta') : t('paymentsConnectCta')}</Link>;
   return (
@@ -453,6 +525,7 @@ export function ProductForm({ orgId, product, onDone, onCancel }: { orgId: strin
         </Notice>
       ) : null}
       <Field label={t('fieldName')} required>{(w) => <input {...w} value={name} onChange={(e) => setName(e.target.value)} maxLength={200} autoFocus />}</Field>
+      {product ? <Suspense fallback={null}><ProductShotsPanel orgId={orgId} productId={product.productId} /></Suspense> : null}
       <div className="action-bar u-gap-2">
         <Field label={t('fieldType')} help={isEdit ? t('typeLockedHint') : undefined}>{(w) => (
           <select {...w} value={type} disabled={isEdit} onChange={(e) => setType(e.target.value as typeof type)}>

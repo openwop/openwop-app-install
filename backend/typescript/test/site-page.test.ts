@@ -11,6 +11,15 @@
  *
  * The bespoke `/site-page` route was retired in the collapse — editing now goes
  * through `/cms/orgs/host-site/*`, so there is no second edit path to test.
+ *
+ * What breaks it (sabotage-witnessed, /grade-tests wave 61, 8fw3g1-spg-*): the
+ * superadmin branch of `requireCmsScope` (the isolation case asserts the exact
+ * `not_found` envelope), the sections validator, a public render that ignores
+ * draft status, or an edit that does not snapshot a version.
+ *
+ * The cases share ONE seeded home page. Each case that changes its state
+ * establishes the state it asserts on, and the publish round-trip re-publishes
+ * in `finally`, so the file passes in any order.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -36,6 +45,8 @@ beforeAll(async () => {
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 const j = async <T>(res: Response): Promise<T> => (await res.json()) as T;
+interface Section { type: string; data: { heading?: string } }
+interface PageBody { pageId: string; slug: string; status: string; sections: Section[] }
 /** Super-admin (wildcard bearer) drives the CMS route family on the reserved org. */
 const cms = (method: string, path: string, body?: unknown) =>
   fetch(`${BASE}/host/openwop-app/cms/orgs/host-site${path}`, {
@@ -75,9 +86,15 @@ describe('system home page — public render (unauthenticated)', () => {
     await cms('GET', '/pages'); // ensure the site (boot also does this in prod)
     const res = await publicHome();
     expect(res.status).toBe(200);
-    const page = await j<{ slug: string; sections: unknown[] }>(res);
+    const page = await j<{ slug: string; sections: Section[] }>(res);
     expect(page.slug).toBe('home');
     expect(page.sections.length).toBeGreaterThan(0);
+    // The public render IS the stored page (not a fallback): same section types
+    // and headings as the CMS read (the public projection drops per-locale
+    // `localizations`, so the whole objects legitimately differ).
+    const stored = await j<PageBody>(await cms('GET', `/pages/${await homeId()}`));
+    const outline = (xs: Section[]) => xs.map((x) => [x.type, x.data.heading]);
+    expect(outline(page.sections)).toEqual(outline(stored.sections));
   });
 });
 
@@ -85,8 +102,14 @@ describe('front-page collapse — super admin drives the CMS route family on hos
   it('lists + reads the seeded home page through /cms/orgs/host-site', async () => {
     const list = await cms('GET', '/pages');
     expect(list.status).toBe(200);
-    const one = await cms('GET', `/pages/${await homeId()}`);
+    const pages = (await j<{ pages: { slug: string; pageId: string }[] }>(list)).pages;
+    const home = pages.find((p) => p.slug === 'home');
+    expect(home, 'the seeded home page is in the host-site list').toBeDefined();
+    const one = await cms('GET', `/pages/${home!.pageId}`);
     expect(one.status).toBe(200);
+    const page = await j<PageBody>(one);
+    expect(page.pageId).toBe(home!.pageId);
+    expect(page.slug).toBe('home');
   });
 
   it('edits the published home page via the standard CMS PATCH — the change goes live in place', async () => {
@@ -100,15 +123,28 @@ describe('front-page collapse — super admin drives the CMS route family on hos
 
   it('runs the draft→publish transition on a host-site page (unpublish → publish round-trip)', async () => {
     const id = await homeId();
-    expect((await cms('POST', `/pages/${id}/unpublish`)).status).toBe(200);
-    const draft = await j<{ status: string }>(await cms('GET', `/pages/${id}`));
-    expect(draft.status).toBe('draft');
-    expect((await cms('POST', `/pages/${id}/publish`)).status).toBe(200);
+    try {
+      expect((await cms('POST', `/pages/${id}/unpublish`)).status).toBe(200);
+      const draft = await j<PageBody>(await cms('GET', `/pages/${id}`));
+      expect(draft.status).toBe('draft');
+      // A draft is NOT served publicly — the user-visible half of the transition.
+      expect((await publicHome()).status).toBe(404);
+
+      expect((await cms('POST', `/pages/${id}/publish`)).status).toBe(200);
+      expect((await j<PageBody>(await cms('GET', `/pages/${id}`))).status).toBe('published');
+      expect((await publicHome()).status).toBe(200);
+    } finally {
+      await cms('POST', `/pages/${id}/publish`);
+    }
   });
 
   it('lists page versions on host-site (capability the bespoke editor lacked)', async () => {
-    const versions = await cms('GET', `/pages/${await homeId()}/versions`);
+    const id = await homeId();
+    // Make an edit in THIS case so the list cannot be empty for an order reason.
+    expect((await cms('PATCH', `/pages/${id}`, { sections: [{ type: 'hero', data: { heading: 'Versioned' } }] })).status).toBe(200);
+    const versions = await cms('GET', `/pages/${id}/versions`);
     expect(versions.status).toBe(200);
+    expect((await j<{ versions: unknown[] }>(versions)).versions.length).toBeGreaterThanOrEqual(1);
   });
 
   it('writes + reads SEO metadata for the reserved host-site page', async () => {
@@ -134,6 +170,7 @@ describe('front-page collapse — super admin drives the CMS route family on hos
     // malformed sections (not an array) → 400; the in-place edit never commits, so the page stays live
     const bad = await cms('PATCH', `/pages/${id}`, { sections: { not: 'an array' } });
     expect(bad.status).toBe(400);
+    expect(await j(bad)).toMatchObject({ error: 'validation_error', message: '`sections` must be an array.', details: { field: 'sections' } });
     const pub = await publicHome();
     expect(pub.status).toBe(200);
     expect((await j<{ sections: { data: { heading?: string } }[] }>(pub)).sections[0]?.data?.heading).toBe('Live');
@@ -145,10 +182,16 @@ describe('system home page — authority + isolation', () => {
     const call = await normalClient();
     // requireCmsScope: a non-superadmin gets the same 404 any foreign org yields,
     // so the reserved org's editability stays invisible in the CMS namespace.
-    expect((await call('GET', '/host/openwop-app/cms/orgs/host-site/pages')).status).toBe(404);
-    expect((await call('POST', '/host/openwop-app/cms/orgs/host-site/pages', { title: 'X' })).status).toBe(404);
+    // Exact envelope (the requireCmsScope refusal), so a 404 from an unrelated
+    // missing route or page cannot stand in for the isolation guard.
+    const hidden = async (r: Response): Promise<void> => {
+      expect(r.status).toBe(404);
+      expect(await j(r)).toMatchObject({ error: 'not_found', message: 'Organization not found.' });
+    };
+    await hidden(await call('GET', '/host/openwop-app/cms/orgs/host-site/pages'));
+    await hidden(await call('POST', '/host/openwop-app/cms/orgs/host-site/pages', { title: 'X' }));
     const pageId = await homeId();
-    expect((await call('GET', `/host/openwop-app/publishing/orgs/host-site/pages/${encodeURIComponent(pageId)}/seo`)).status).toBe(404);
-    expect((await call('PUT', `/host/openwop-app/publishing/orgs/host-site/pages/${encodeURIComponent(pageId)}/seo`, { metaTitle: 'X' })).status).toBe(404);
+    await hidden(await call('GET', `/host/openwop-app/publishing/orgs/host-site/pages/${encodeURIComponent(pageId)}/seo`));
+    await hidden(await call('PUT', `/host/openwop-app/publishing/orgs/host-site/pages/${encodeURIComponent(pageId)}/seo`, { metaTitle: 'X' }));
   });
 });

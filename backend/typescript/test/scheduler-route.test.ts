@@ -1,13 +1,28 @@
 /**
  * Sample-extension scheduler CRUD route — /host/openwop-app/scheduler/jobs.
  *
- * Exercises the list/create/delete/trigger surface (C-6) backed by the RFC
- * 0052 scheduling service. Verifies:
- *   - create → list round-trips a job
- *   - trigger fires the job once (RFC 0052 §B.2 fire-once-per-tick)
- *   - delete removes the job; a second delete 404s
+ * Exercises the list/create/patch/delete/trigger surface (C-6) backed by the
+ * RFC 0052 scheduling service (`src/routes/scheduler.ts`). Verifies:
+ *   - create → list round-trips a job; a missing jobId is minted
+ *   - PATCH edits cronExpr/workflowId/timezone in place, PERSISTED (re-read
+ *     through the list), and an empty PATCH is a validation_error
+ *   - a create with no cronExpr is refused by the ROUTE's own guard (exact
+ *     message, so the service-level cadence refusal cannot stand in for it)
+ *   - trigger fires and reports the consumed tick (the §B.2 seam). The
+ *     "same tick yields 0" half of §B.2 has no reachable product branch
+ *     (`singleTick` advances the tick before it compares): grade-code lead
+ *     SCHED-TICK-DEAD-1. This file does not claim it.
+ *   - WF-COS-4 / ADR 0787 D5: an UNBOUND job's fire records lastRunAt; a BOUND
+ *     job whose workflow does not resolve records a SKIP and never lastRunAt
  *   - a firstFireAtMs beyond maxFutureHorizon is rejected with
- *     schedule_horizon_exceeded (RFC 0052 §B.3)
+ *     schedule_horizon_exceeded (RFC 0052 §B.3), with the route's own
+ *     `details.maxFutureHorizon` mapping (the service-level refusal is unit
+ *     tested in scheduling-service.test.ts)
+ *   - delete removes the job; a second delete 404s
+ *
+ * Sabotage witnesses (grade-tests 8f w2): sr-patch-empty, sr-patch-tz,
+ * sr-unbound-lastrun, sr-bound-skip, sr-skip-record, sr-horizon,
+ * sr-cron-required, sr-jobid-mint, sr-delete, sr-tick-once.
  *
  * @see RFCS/0052-scheduling-and-time-based-triggers.md §B
  */
@@ -16,7 +31,7 @@ import { describe, expect, it, beforeAll, afterAll, beforeEach } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
-import { resetScheduling, MAX_FUTURE_HORIZON_MS } from '../src/host/schedulingService.js';
+import { resetScheduling, MAX_FUTURE_HORIZON_MS, currentTick } from '../src/host/schedulingService.js';
 
 let server: http.Server;
 let BASE: string;
@@ -99,6 +114,14 @@ describe('scheduler CRUD route (C-6 / RFC 0052)', () => {
     expect(patched.body.timezone).toBe('America/New_York');
     // enabled untouched by a partial patch.
     expect(patched.body.enabled).toBe(true);
+
+    // Persisted, not only echoed: read the job back through the list.
+    const list = await jsonFetch<{ jobs: Array<Job & { timezone?: string; enabled: boolean }> }>('/host/openwop-app/scheduler/jobs');
+    const stored = list.body.jobs.find((j) => j.jobId === 'job-e');
+    expect(stored?.cronExpr).toBe('0 9 * * 1-5');
+    expect(stored?.workflowId).toBe('wf-new');
+    expect(stored?.timezone).toBe('America/New_York');
+    expect(stored?.enabled).toBe(true);
   });
 
   it('PATCH with no editable field is a validation_error', async () => {
@@ -169,16 +192,18 @@ describe('scheduler CRUD route (C-6 / RFC 0052)', () => {
   });
 
   it('rejects a create with no cronExpr (validation_error)', async () => {
-    const res = await jsonFetch<{ error: string }>('/host/openwop-app/scheduler/jobs', {
+    const res = await jsonFetch<{ error: string; message: string }>('/host/openwop-app/scheduler/jobs', {
       method: 'POST',
       body: JSON.stringify({ jobId: 'no-cron' }),
     });
     expect(res.status).toBe(400);
     expect(res.body.error).toBe('validation_error');
+    // The ROUTE's guard, not the service's cadence refusal (same code).
+    expect(res.body.message).toBe('Field `cronExpr` is required and MUST be a non-empty string.');
   });
 
   it('rejects a schedule beyond maxFutureHorizon with schedule_horizon_exceeded', async () => {
-    const res = await jsonFetch<{ error: string }>('/host/openwop-app/scheduler/jobs', {
+    const res = await jsonFetch<{ error: string; details: { maxFutureHorizon: string } }>('/host/openwop-app/scheduler/jobs', {
       method: 'POST',
       body: JSON.stringify({
         jobId: 'far',
@@ -188,9 +213,11 @@ describe('scheduler CRUD route (C-6 / RFC 0052)', () => {
     });
     expect(res.status).toBe(400);
     expect(res.body.error).toBe('schedule_horizon_exceeded');
+    // The route's own mapping: the advertised horizon (366 days), as a literal.
+    expect(res.body.details.maxFutureHorizon).toBe('P366D');
   });
 
-  it('triggers a job exactly once (RFC 0052 §B.2)', async () => {
+  it('a trigger fires once and reports the consumed tick (§B.2 seam)', async () => {
     await jsonFetch('/host/openwop-app/scheduler/jobs', {
       method: 'POST',
       body: JSON.stringify({ jobId: 'job-t', cronExpr: '* * * * *' }),
@@ -202,6 +229,8 @@ describe('scheduler CRUD route (C-6 / RFC 0052)', () => {
     expect(fired.status).toBe(200);
     expect(fired.body.runsFired).toBe(1);
     expect(fired.body.lastFiredTick).toBeGreaterThan(0);
+    // The reported tick is the one the trigger consumed (the clock's current tick).
+    expect(fired.body.lastFiredTick).toBe(currentTick());
   });
 
   it('404s a trigger for an unknown job', async () => {

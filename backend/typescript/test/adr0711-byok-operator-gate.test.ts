@@ -1,6 +1,6 @@
 /**
  * ADR 0711 — BYOK writes in a SHARED workspace are admin-class, and a
- * `?force=true` secret delete is audited on its own.
+ * `?force=true` secret delete is audited on its own (tracker TST-BAA-2).
  *
  * WHY THIS IS A ROUTE TEST AND NOT A SERVICE TEST. The defect was never in
  * `secretResolver`; it was that the ROUTE asked only "are you signed in?".
@@ -25,7 +25,9 @@
  *   - drop the gate on DELETE /ai-default       → leg 5c only (ADR 0779 D1)
  *   - drop the `if (force)` audit append        → leg 7 only
  *   - move the audit inside a `!force` branch   → leg 7 only
- *   - gate the READ route too                   → leg 6 only
+ *   - gate the READ route too                   → leg 1 only
+ *   - refuse every caller in `requireByokManage` → leg 6 only
+ *   - drop `referencesKnown` from the audit       → leg 7 only
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Server } from 'node:http';
@@ -34,6 +36,8 @@ import { createApp } from '../src/index.js';
 import { createWorkspace, createMember } from '../src/host/accessControlService.js';
 import { userIdFor } from '../src/features/users/usersService.js';
 import { listChain } from '../src/host/auditChainService.js';
+import { configureKmsClient, createLocalAesKmsClient, _resetKmsForTesting } from '../src/byok/kmsEncryption.js';
+import { randomBytes } from 'node:crypto';
 
 const B = '/host/openwop-app/byok';
 let server: Server;
@@ -66,6 +70,10 @@ beforeAll(async () => {
   await new Promise<void>((res) => {
     server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
   });
+  // A hermetic tenant KMS (the `byok-kms` recipe). Without one a signed-in
+  // tenant's secret write answers 500, and legs 6–8 (which used to accept any
+  // non-401/403 status) ran against secrets that were never stored — found wave 60.
+  configureKmsClient(createLocalAesKmsClient(randomBytes(32), 'test/local-aes'));
   const ws = await createWorkspace({ name: 'ADR 0711 workspace', ownerSubject: 'oidc:byok-owner' });
   WS = ws.orgId ?? ws.tenantId;
   // Membership BEFORE login (correction 3), in the workspace-root org (correction 2).
@@ -73,7 +81,7 @@ beforeAll(async () => {
   await createMember({ orgId: WS, tenantId: WS, displayName: 'Editor', subject: userIdFor(WS, EDITOR), roles: ['editor'] });
 });
 
-afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
+afterAll(async () => { _resetKmsForTesting(); await new Promise<void>((r) => server.close(() => r())); });
 
 describe('ADR 0711 — BYOK writes are admin-class in a shared workspace', () => {
   it('leg 1: the fixture is honest — an editor IS a member, so a refusal is the GATE, not absence', async () => {
@@ -108,17 +116,27 @@ describe('ADR 0711 — BYOK writes are admin-class in a shared workspace', () =>
     });
   }
 
+  // The admin's ACTUAL outcome per write, in WRITES order (each leg runs the
+  // route's own handler, so a 400/500 here is not "admitted").
+  const ADMIN_STATUS: Readonly<Record<string, number>> = {
+    'leg 2': 201, 'leg 3': 204, 'leg 4': 200, 'leg 5': 204, 'leg 5b': 200, 'leg 5c': 204,
+  };
+
   it('leg 6: an ADMIN is admitted through every write route (the gate is not a blanket denial)', async () => {
     const admin = await login(ADMIN, WS);
-    for (const [, method, path, body] of WRITES) {
+    // Store the secret first and delete it LAST: the two config PUTs require a
+    // stored ref, and the ref's delete needs its bindings gone.
+    const order = ['leg 2', 'leg 4', 'leg 5', 'leg 5b', 'leg 5c', 'leg 3'];
+    const byLeg = new Map(WRITES.map((w) => [w[0], w] as const));
+    for (const [leg, method, path, body] of order.map((l) => byLeg.get(l)!)) {
       const res = await call(path, admin, method, body);
-      expect([401, 403], `${method} ${path} refused an ADMIN — the gate is over-tight`).not.toContain(res.status);
+      expect(res.status, `${method} ${path} did not complete for an ADMIN (${await res.text()})`).toBe(ADMIN_STATUS[leg]);
     }
   });
 
   it('leg 7: a ?force=true delete writes its own audit record, carrying what it overrode', async () => {
     const admin = await login(ADMIN, WS);
-    await call(`${B}/secrets`, admin, 'POST', { credentialRef: 'adr0711-force', value: 'x' });
+    expect((await call(`${B}/secrets`, admin, 'POST', { credentialRef: 'adr0711-force', value: 'x' })).status).toBe(201);
     // Count entries OF THIS KIND, not chain length. The chain lazily writes a
     // genesis entry on its first append, so `length` moves by 2 on the first
     // override and by 1 thereafter — an assertion on total length is a function
@@ -139,16 +157,20 @@ describe('ADR 0711 — BYOK writes are admin-class in a shared workspace', () =>
     // `referencesKnown` is what the guard WOULD have said. Recording only "a force
     // happened" would leave the reader unable to tell an override of a real
     // conflict from one that skipped nothing.
-    expect(payload, 'the record must carry what was overridden').toHaveProperty('referencesKnown');
+    expect(payload.referencesKnown, 'the record must carry what was overridden').toBe(true);
+    expect(payload.consumers, 'a known lookup records its (empty) consumer list').toEqual([]);
+    expect(typeof payload.actorId === 'string' && payload.actorId.length > 0, 'the override is attributed').toBe(true);
   });
 
   it('leg 8: a delete WITHOUT force appends nothing — the override is the event, not the delete', async () => {
     const admin = await login(ADMIN, WS);
-    await call(`${B}/secrets`, admin, 'POST', { credentialRef: 'adr0711-plain', value: 'x' });
+    expect((await call(`${B}/secrets`, admin, 'POST', { credentialRef: 'adr0711-plain', value: 'x' })).status).toBe(201);
     const forceCount = async (): Promise<number> =>
       (await listChain(WS)).filter((e) => e.kind === 'byok.secret.force_deleted').length;
     const before = await forceCount();
-    await call(`${B}/secrets/adr0711-plain`, admin, 'DELETE');
+    // The delete must SUCCEED, or the count below holds because the request never
+    // reached the audit branch at all.
+    expect((await call(`${B}/secrets/adr0711-plain`, admin, 'DELETE')).status).toBe(204);
     expect(await forceCount(), 'a non-force delete must NOT write a force-override record').toBe(before);
   });
 });

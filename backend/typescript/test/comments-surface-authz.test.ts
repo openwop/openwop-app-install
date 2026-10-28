@@ -111,7 +111,7 @@ describe('CMNT-4 — the NON-MEMBER lane is refused (this is the defect)', () =>
   it('a same-tenant non-member cannot WRITE into another org’s thread', async () => {
     const p = await page();
     await expect(asUser(STRANGER).post({ orgId: ORG, resourceType: 'cms_page', resourceId: p.pageId, body: 'intruding' }))
-      .rejects.toThrow(/Missing required scope: workspace:write/);
+      .rejects.toThrow(/Missing required scope: host:comments:write/);
     expect(await listThreadOrFail(T, ORG, 'cms_page', p.pageId, PREAUTHORIZED_CALLER)).toHaveLength(0);
   });
 
@@ -121,7 +121,7 @@ describe('CMNT-4 — the NON-MEMBER lane is refused (this is the defect)', () =>
     const s = asUser(READER);
     expect(((await s.list({ orgId: ORG, resourceType: 'cms_page', resourceId: p.pageId })) as { comments: unknown[] }).comments).toHaveLength(1);
     await expect(s.post({ orgId: ORG, resourceType: 'cms_page', resourceId: p.pageId, body: 'nope' }))
-      .rejects.toThrow(/Missing required scope: workspace:write/);
+      .rejects.toThrow(/Missing required scope: host:comments:write/);
   });
 
   it('an org in ANOTHER tenant is a uniform 404 — never a cross-tenant existence leak', async () => {

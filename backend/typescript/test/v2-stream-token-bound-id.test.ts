@@ -13,6 +13,12 @@
  * still admits under the caller's tenant, so it could not see this.
  *
  * Each admit leg has a refusal twin, so the token — not the path — is what admits.
+ *
+ * DOUBLE GUARD (named): a presented token is verified twice — by `v2Identity`
+ * (`streamTokenAdmits`) and again by the route (`runAccess.loadReadableRun`). So
+ * dropping the identity layer's verify alone stays green (probe
+ * 8fw4g4-stb-verify, vacuous by design); the shared piece both call,
+ * `verifyRunStreamToken`, is probed as 8fw4g4-stb-verify-shared-r2.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -25,7 +31,7 @@ import type { Storage } from '../src/storage/storage.js';
 
 const RUN: RunRecord = {
   runId: 'run-v2tok-bound-0000001', workflowId: 'wf', tenantId: 'tenant-a', status: 'completed',
-  inputs: {}, metadata: {}, configurable: {}, createdAt: 'now', updatedAt: 'now',
+  inputs: {}, metadata: {}, configurable: {}, createdAt: '2026-01-15T10:00:00.000Z', updatedAt: '2026-01-15T10:00:05.000Z',
 };
 const OTHER: RunRecord = { ...RUN, runId: 'run-v2tok-bound-0000002' };
 const BOUND = encodeURIComponent(toWireRunId(RUN.runId, RUN.tenantId));
@@ -50,12 +56,12 @@ afterAll(async () => {
   await new Promise<void>((r) => server.close(() => r()));
 });
 
-async function get(path: string): Promise<{ status: number; error?: string }> {
+async function get(path: string): Promise<{ status: number; error?: string; challenge: string }> {
   const res = await fetch(`${base}${path}`, { headers: SSE });
   const text = await res.text();
   let error: string | undefined;
   try { error = (JSON.parse(text) as { error?: string }).error; } catch { /* SSE body */ }
-  return { status: res.status, error };
+  return { status: res.status, error, challenge: res.headers.get('www-authenticate') ?? '' };
 }
 
 describe('v2 run stream: a stream token admits the tenant-bound id, cookie-less', () => {
@@ -67,10 +73,15 @@ describe('v2 run stream: a stream token admits the tenant-bound id, cookie-less'
     await res.text();
   });
 
-  it('refusal twin: with NO token the same bound id is still the tenant mismatch', async () => {
+  it('refusal twin: with NO token the same bound id is refused — no credential at all, 401', async () => {
+    // Corrected in grade-tests wave 63: this was titled "still the tenant
+    // mismatch" and accepted [401, 403]. MEASURED: it is the AUTH layer's 401 —
+    // with no token a cookie-less request presents no credential, so the request
+    // never reaches the identity layer's tenant check (which is why skipping that
+    // check stayed green: probe 8fw4g4-stb-tenant-skip, vacuous).
     const r = await get(`/runs/${BOUND}/events`);
-    expect([401, 403]).toContain(r.status);
-    expect(r.status).not.toBe(200);
+    expect(r.status).toBe(401);
+    expect(r.error).toBe('unauthenticated');
   });
 
   it('refusal twin: a token for ANOTHER run does not admit this one — a rejected credential, 401', async () => {
@@ -86,7 +97,9 @@ describe('v2 run stream: a stream token admits the tenant-bound id, cookie-less'
 
   it('refusal twin: a forged token does not admit it', async () => {
     const r = await get(`/runs/${BOUND}/events?streamToken=v1.99999999999.forged`);
-    expect(r.status).not.toBe(200);
+    expect(r.status).toBe(401);
+    expect(r.error).toBe('unauthenticated');
+    expect(r.challenge).toContain('error="invalid_token"');
   });
 
   it('scope: the token admits ONLY the events stream, not the run snapshot', async () => {
@@ -95,5 +108,6 @@ describe('v2 run stream: a stream token admits the tenant-bound id, cookie-less'
     // here nothing was presented: 401 before the id is even resolved.
     const r = await get(`/runs/${BOUND}?streamToken=${tok}`);
     expect(r.status).toBe(401);
+    expect(r.error).toBe('unauthenticated');
   });
 });

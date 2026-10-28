@@ -15,8 +15,15 @@
  *    and readmit can reverse them as a group.
  *
  * Each case is a witness for one mechanism; none reads the others' state.
+ *
+ * Two fixtures were made asymmetric in grade-tests wave 61 after their probes
+ * came back vacuous: the default-timeout arm now uses a NEVER-settling eraser
+ * under fake timers (an 80 ms eraser finished under a default of 0 too,
+ * 8fw3g2-fo-default), and the throwing-resolver case feeds it TWO hop-2 keys
+ * (with one, "once per resolver" and "once per key" were the same number,
+ * 8fw3g2-fo-perresolver).
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import {
@@ -38,44 +45,102 @@ afterEach(() => {
   delete process.env.OPENWOP_ERASER_TIMEOUT_MS;
 });
 
+type EraseOut = Awaited<ReturnType<typeof eraseSubject>>;
+
+/** Start a fan-out under FAKE timers and hand back a probe of its outcome.
+ *  `vi.waitFor` is not used anywhere here: it ADVANCES fake timers while it
+ *  polls, which would spend the very budget a case measures. */
+function startFanOut(subjectKey: string): () => EraseOut | undefined {
+  let settled: EraseOut | undefined;
+  void eraseSubject(T, subjectKey).then((o) => { settled = o; });
+  return () => settled;
+}
+/** Microtask drain until `cond` holds (bounded): an eraser is entered, and so
+ *  its timer armed, a few awaits after `eraseSubject` starts. */
+async function drainUntil(cond: () => boolean): Promise<void> {
+  for (let i = 0; i < 200 && !cond(); i += 1) await Promise.resolve();
+}
+
+// Fake timers for every case here (wave 61): the budgets are exact fake ms, so
+// no case sleeps on the wall clock and none can flake under a loaded runner.
 describe('CONS-30 — a per-eraser timeout is a NAMED failure, and the fan-out continues', () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
   it('an eraser that never resolves counts into `failed` by name; the next eraser still ran', async () => {
     process.env.OPENWOP_ERASER_TIMEOUT_MS = '50';
+    let entered = false;
     let nextRan = 0;
-    registerSubjectEraser(async function hangsForever() { await new Promise<void>(() => { /* never settles */ }); });
+    registerSubjectEraser(async function hangsForever() { entered = true; await new Promise<void>(() => { /* never settles */ }); });
     registerSubjectEraser(async function stillRuns() { nextRan += 1; return { rowsTouched: 1 }; });
 
-    const out = await eraseSubject(T, 'u-timeout');
+    const result = startFanOut('u-timeout');
+    await drainUntil(() => entered);
+    expect(entered).toBe(true);
+    await vi.advanceTimersByTimeAsync(49);
+    expect(result(), 'nothing times out before the 50 ms budget').toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
+    await drainUntil(() => result() !== undefined);
+    const out = result();
 
     // Same shape as a throw: counted AND named.
-    expect(out.failed).toBe(1);
-    expect(out.failedFeatures).toEqual(['hangsForever']);
-    expect(out.total).toBe(2);
+    expect(out?.failed).toBe(1);
+    expect(out?.failedFeatures).toEqual(['hangsForever']);
+    expect(out?.total).toBe(2);
     // The fan-out CONTINUED past the hung eraser (registration order is the
     // call order, so `stillRuns` was queued BEHIND the hang).
     expect(nextRan, 'the eraser after the hung one must still run').toBe(1);
-    expect(out.reportingErasers).toBe(1);
-    expect(out.rowsTouched).toBe(1);
+    expect(out?.reportingErasers).toBe(1);
+    expect(out?.rowsTouched).toBe(1);
   });
 
   it('`0` disables the timeout; the default applies when unset; a slow-but-finite eraser is not a failure under a generous budget', async () => {
     let calls = 0;
     registerSubjectEraser(async function slowButFinite() { calls += 1; await new Promise((r) => setTimeout(r, 80)); });
 
+    /** One fan-out of the 80 ms eraser, driven 80 fake ms forward. */
+    const runSlow = async (): Promise<EraseOut | undefined> => {
+      const before = calls;
+      const result = startFanOut('u-slow');
+      await drainUntil(() => calls > before);
+      await vi.advanceTimersByTimeAsync(80);
+      await drainUntil(() => result() !== undefined);
+      return result();
+    };
+
     process.env.OPENWOP_ERASER_TIMEOUT_MS = '20';
-    const tight = await eraseSubject(T, 'u-slow');
-    expect(tight.failed, 'a 20 ms budget times an 80 ms eraser out').toBe(1);
-    expect(tight.failedFeatures).toEqual(['slowButFinite']);
+    const tight = await runSlow();
+    expect(tight?.failed, 'a 20 ms budget times an 80 ms eraser out').toBe(1);
+    expect(tight?.failedFeatures).toEqual(['slowButFinite']);
 
     process.env.OPENWOP_ERASER_TIMEOUT_MS = '0';
-    const disabled = await eraseSubject(T, 'u-slow');
-    expect(disabled.failed, '`0` disables the timeout').toBe(0);
+    const disabled = await runSlow();
+    expect(disabled?.failed, '`0` disables the timeout').toBe(0);
 
     delete process.env.OPENWOP_ERASER_TIMEOUT_MS;
-    const dflt = await eraseSubject(T, 'u-slow');
-    expect(dflt.failed, 'the 10 s default does not time out an 80 ms eraser').toBe(0);
+    const dflt = await runSlow();
+    expect(dflt?.failed, 'the 10 s default does not time out an 80 ms eraser').toBe(0);
     // Read PER CALL: three calls, three different budgets, one registration.
     expect(calls).toBe(3);
+
+    // The default APPLIES when unset: a never-settling eraser times out at
+    // exactly 10 s (a default of 0 = disabled would hang it forever, and the
+    // outcome would stay undefined).
+    __resetSubjectErasers();
+    let started = false;
+    registerSubjectEraser(async function neverSettlesUnderDefault() {
+      started = true;
+      await new Promise<void>(() => { /* never settles */ });
+    });
+    const result = startFanOut('u-default');
+    await drainUntil(() => started);
+    expect(started, 'the eraser was entered, so its timer is armed').toBe(true);
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(result(), 'nothing times out before the 10 s default').toBeUndefined();
+    await vi.advanceTimersByTimeAsync(2);
+    await drainUntil(() => result() !== undefined);
+    expect(result()?.failed, 'the unset default (10 s) times a hung eraser out').toBe(1);
+    expect(result()?.failedFeatures).toEqual(['neverSettlesUnderDefault']);
   });
 });
 
@@ -135,19 +200,21 @@ describe('CONS-11 — the resolver closure is two hops, deduped, and bounded', (
   });
 
   it('a resolver that throws in hop 2 counts ONCE per resolver, never once per key', async () => {
-    registerSubjectKeyResolver(resolverA);
+    // A: u1 → TWO emails, so the thrower below fails for two hop-2 keys; a
+    // per-key count would read 2.
+    registerSubjectKeyResolver(async (_t, key) => (key === 'u1' ? ['a@x.test', 'b@x.test'] : []));
     registerSubjectKeyResolver(resolverB);
     registerSubjectKeyResolver(async (_t, key) => { if (key !== 'u1') throw new Error('store down'); return []; });
     registerSubjectEraser(async function ok() {});
 
     const out = await eraseSubject(T, 'u1');
 
-    // It threw for a@x.test (hop 2) — one broken resolver is ONE failure.
+    // It threw for a@x.test AND b@x.test (hop 2) — one broken resolver is ONE failure.
     expect(out.resolverFailures).toBe(1);
     expect(out.failedFeatures).toEqual(['identity-link-resolution']);
     expect(out.failed).toBe(1);
-    // …and the keys the OTHER resolvers found were still erased.
-    expect(out.keysResolved).toBe(3);
+    // …and the keys the OTHER resolvers found were still erased (u1, both emails, crm:c1).
+    expect(out.keysResolved).toBe(4);
   });
 
   it('a falsy derived key is dropped (the existing non-subject guard is unchanged)', async () => {

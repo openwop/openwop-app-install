@@ -1,13 +1,24 @@
 /**
  * ADR 0783 phase 1 — `ctx.dataIntegration`: `fetchMCP`, `fetchVariable`,
- * `transform`, `computeVariable`, and deliberately NOT `fetchRest`.
+ * `transform`, `computeVariable` (tracker TST-BDI-1..5). The phase-2 methods
+ * (`fetchRest`, `fetchGraphql`) are witnessed in `adr0783-p2a-data-sources.test.ts`;
+ * the ext-family claim's method parity in `adr0765-ext-family-records.test.ts`.
  *
  * Three legs, because a mechanism and its wiring fail independently:
  *   1. the adapter, against the shapes the pack's own schemas declare;
- *   2. the pack (`vendor.myndhyve.data-integration`) driven through the adapter —
- *      and, the honesty leg, its `ensureDI` STILL refusing every node, because
- *      phase 1 serves no `fetchRest` and so claims nothing;
+ *   2. the pack (`vendor.myndhyve.data-integration`) driven through the real adapter;
  *   3. the executor wiring: a real run's node sees the adapter on its ctx.
+ *
+ * Red when (sabotage-witnessed, wave 60): the JSONata budget codes (D1011/D1012)
+ * stop mapping to `expression_budget_exceeded`; `fetchVariable` tests truthiness
+ * instead of presence; `computeVariable` stops writing the bag or lets the bag win
+ * over the context; `fetchMCP` drops `structuredContent` or the `untrustedContent`
+ * mark, or calls a missing MCP client; `jq` is evaluated; the expression, input or
+ * output size caps go; an unknown operation kind is accepted; the executor hands
+ * the adapter another run's id; the data-integration claim lists an unavailable node.
+ *
+ * Double cap: the input cap and the output cap both answer `payload_too_large`, so
+ * the input leg uses `$length(s)` (a small result) and asserts the input message.
  */
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { dirname, join } from 'node:path';
@@ -20,12 +31,19 @@ import {
 } from '../src/host/dataIntegrationAdapter.js';
 import { __resetAllRunVariablesForTests, setRunVariable, snapshotRunVariables } from '../src/host/variablesRuntime.js';
 import { EXT_FAMILY_CLAIMS } from '../src/host/extFamilyRecords.js';
+import type { RunRecord } from '../src/types.js';
+import type { NodeModule, WorkflowDefinition } from '../src/executor/types.js';
+import type { ProviderPolicyResolver } from '../src/host/index.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
 /** Run `p` and return the thrown `code` (the pack's error convention). */
 async function codeOf(p: Promise<unknown>): Promise<string | undefined> {
-  try { await p; return undefined; } catch (e) { return (e as { code?: string }).code; }
+  return (await failureOf(p))?.code;
+}
+/** Run `p` and return the thrown `{ code, message }` (two refusals can share a code). */
+async function failureOf(p: Promise<unknown>): Promise<{ code?: string; message: string } | undefined> {
+  try { await p; return undefined; } catch (e) { const f = e as { code?: string; message?: string }; return { ...(f.code !== undefined ? { code: f.code } : {}), message: f.message ?? '' }; }
 }
 
 afterEach(() => __resetAllRunVariablesForTests());
@@ -59,13 +77,16 @@ describe('ADR 0783 P1 — transform (JSONata under a budget)', () => {
   });
 
   it('an oversized expression or input is refused before evaluation', async () => {
-    expect(await codeOf(di.transform({ expression: 'a'.repeat(DATA_INTEGRATION_BUDGET.maxExpressionChars + 1), data: {} }))).toBe('validation_error');
+    const longExpr = await failureOf(di.transform({ expression: 'a'.repeat(DATA_INTEGRATION_BUDGET.maxExpressionChars + 1), data: {} }));
+    expect(longExpr).toEqual({ code: 'validation_error', message: 'expression exceeds 8192 characters' });
+    // `$length(s)` is a small number, so only the INPUT cap can refuse this (the
+    // output cap answers the same code for an oversized result).
     const big = { s: 'x'.repeat(DATA_INTEGRATION_BUDGET.maxInputBytes) };
-    expect(await codeOf(di.transform({ expression: 's', data: big }))).toBe('payload_too_large');
+    expect(await failureOf(di.transform({ expression: '$length(s)', data: big }))).toEqual({ code: 'payload_too_large', message: 'expression input exceeds 1000000 bytes' });
   });
 
   it('an oversized result is refused', async () => {
-    expect(await codeOf(evaluateJsonata('$pad("", 1100000, "x")', 'jsonata', {}))).toBe('payload_too_large');
+    expect(await failureOf(evaluateJsonata('$pad("", 1100000, "x")', 'jsonata', {}))).toEqual({ code: 'payload_too_large', message: 'expression result exceeds 1000000 bytes' });
   });
 });
 
@@ -130,13 +151,14 @@ describe('ADR 0783 P1 — the pack, driven through the adapter', () => {
     const ctx = { runId: 'run-di-pack', nodeId: 'n', config: { expression: '1 + 1', language: 'jsonata' }, inputs: {}, dataIntegration: makeDataIntegrationAdapter({ runId: 'run-di-pack' }) };
     expect((await pack.dataTransform(ctx)).outputs).toEqual({ result: 2 });
     const claim = EXT_FAMILY_CLAIMS.find((c) => c.extensionName === 'data-integration');
-    expect(claim?.unavailable).toBeUndefined(); // ADR 0865 served data.binding.apply (P1) and data.source.a2a (P2)
+    expect(claim, 'the data-integration family is claimed').toBeDefined();
+    expect(claim!.unavailable).toBeUndefined(); // ADR 0865 served data.binding.apply (P1) and data.source.a2a (P2)
   });
 
-  it('once fetchRest exists (phase 2), the phase-1 nodes run on this adapter end to end', async () => {
+  it('the phase-1 nodes run on the real adapter end to end', async () => {
     const runId = 'run-di-pack2';
-    // A STUB fetchRest stands in for phase 2 so ensureDI passes; it is never called.
-    const dataIntegration = { ...makeDataIntegrationAdapter({ runId }), fetchRest: async () => { throw new Error('not in phase 1'); } };
+    // The real adapter: it serves `fetchRest` (phase 2a), so the pack's `ensureDI` passes.
+    const dataIntegration = makeDataIntegrationAdapter({ runId });
     const base = { runId, nodeId: 'n', dataIntegration };
     const computed = await pack.variableCompute({ ...base, config: { variableName: 'v', expression: 'a * 2' }, inputs: { context: { a: 21 } } });
     expect(computed.outputs).toEqual({ variableName: 'v', value: 42 });
@@ -159,10 +181,10 @@ describe('ADR 0783 P1 — the executor wires ctx.dataIntegration onto a real run
     const { executeRun } = await import('../src/executor/executor.js');
     const { getNodeRegistry } = await import('../src/executor/nodeRegistry.js');
     const typeId = 'test.adr0783.di-probe';
-    getNodeRegistry().register({
+    const probeNode: NodeModule = {
       typeId,
       version: '1.0.0',
-      async execute(ctx: { dataIntegration?: ReturnType<typeof makeDataIntegrationAdapter> }) {
+      async execute(ctx) {
         const di = ctx.dataIntegration;
         if (!di) return { status: 'failure', error: { code: 'no_surface', message: 'ctx.dataIntegration absent' } };
         await di.computeVariable({ variableName: 'probe', expression: '6 * 7' });
@@ -171,17 +193,19 @@ describe('ADR 0783 P1 — the executor wires ctx.dataIntegration onto a real run
           ? { status: 'success', outputs: { value: back.value } }
           : { status: 'failure', error: { code: 'roundtrip', message: JSON.stringify(back) } };
       },
-    } as never);
+    };
+    getNodeRegistry().register(probeNode);
     const storage = await openStorage('memory://');
     const now = new Date().toISOString();
-    const run = {
-      runId: `run-0783-${Math.random().toString(36).slice(2, 10)}`,
+    const run: RunRecord = {
+      runId: 'run-0783-exec-wiring',
       workflowId: 'wf.test.adr0783.probe', tenantId: 'default', status: 'pending',
       inputs: {}, metadata: {}, configurable: {}, createdAt: now, updatedAt: now,
     };
-    await storage.insertRun(run as never);
-    const result = await executeRun(storage, run as never, { workflowId: 'wf.test.adr0783.probe', nodes: [{ nodeId: 'p', typeId }] } as never,
-      { policyResolver: { async resolveForRun() { return []; } } } as never);
+    await storage.insertRun(run);
+    const definition: WorkflowDefinition = { workflowId: 'wf.test.adr0783.probe', nodes: [{ nodeId: 'p', typeId }] };
+    const policyResolver: ProviderPolicyResolver = { async resolveForRun() { return []; } };
+    const result = await executeRun(storage, run, definition, { policyResolver });
     expect(result.status).toBe('completed');
     expect(snapshotRunVariables(run.runId)?.probe).toBe(42);
   });

@@ -13,6 +13,21 @@
  *     user-authored agents to the requesting tenant
  *   - vendor.openwop-app.agent.routed event namespacing (#3) is
  *     covered by the chat-responder; not exercised here
+ *
+ * "Cross-tenant" here means the wildcard dev-token's explicit `?tenantId=`
+ * inventory/dispatch filter (`tenantForInventory`), which is the filter the
+ * routes really apply; no second principal is involved.
+ *
+ * DOUBLE GUARDS, named so a vacuous single probe reads as expected:
+ *  - DELETE 404: `storage.getUserAgent(tenant, id)` null → 404 first; the
+ *    `removed ? 204 : 404` tail is a second copy.
+ *  - dispatch gate: `resolveAgentForTenant` = a tenant-keyed registry resolve
+ *    AND `agentVisibleToTenant` (round-1 probe ua-resolve-vis: vacuous on the
+ *    visibility half alone). The route-level `if (!gateAgent)` is pinned by the
+ *    exact `error: 'not_found'` (the fall-through answers `agent_not_found`).
+ * Sabotage witnesses (grade-tests w63): drop the dispatch gate → the AGENTRT-2
+ * case red; visibility `return true` → the tenant-filter case red; a no-op
+ * delete → the DELETE case red (read-back below).
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -64,10 +79,20 @@ async function jsonFetch<T = unknown>(
       ...(init.headers ?? {}),
     },
   });
-  if (res.status === 204) {
-    return { status: 204, headers: res.headers, body: undefined as unknown as T };
-  }
   return { status: res.status, headers: res.headers, body: (await res.json()) as T };
+}
+
+/** DELETE answers 204 with no body on success, a JSON envelope otherwise. */
+async function del(path: string): Promise<{ status: number; error?: string }> {
+  const res = await fetch(`${BASE}${path}`, { method: 'DELETE', headers: { authorization: `Bearer ${TOKEN}` } });
+  if (res.status === 204) return { status: 204 };
+  return { status: res.status, error: ((await res.json()) as { error?: string }).error };
+}
+
+async function personasListed(persona: string): Promise<string[]> {
+  const r = await jsonFetch<{ agents: Array<{ agentId: string; persona: string }> }>('/agents');
+  expect(r.status).toBe(200);
+  return r.body.agents.filter((a) => a.persona === persona).map((a) => a.agentId);
 }
 
 interface AgentEntry {
@@ -96,7 +121,8 @@ describe('user-authored agents — POST /host/openwop-app/agents', () => {
     expect(r.body.modelClass).toBe('coding');
     // packName carries the synthetic `user:<tenant>` prefix per phase E1.
     expect(r.body.packName).toMatch(/^user:/);
-    // agentId shape: `user.<tenant>.<persona-slug>`.
+    // agentId shape: `user.<persona-slug>` — persona-scoped since ADR 0379 P2
+    // (the tenant lives in the ROW, not the id).
     expect(r.body.agentId).toMatch(/^user\.test-reviewer$/);
   });
 
@@ -141,7 +167,7 @@ describe('user-authored agents — POST /host/openwop-app/agents', () => {
 
   it('returns 409 on duplicate persona', async () => {
     // First create succeeds.
-    await jsonFetch('/host/openwop-app/agents', {
+    const r1 = await jsonFetch<AgentEntry>('/host/openwop-app/agents', {
       method: 'POST',
       body: JSON.stringify({
         persona: 'Dupe Test',
@@ -149,6 +175,7 @@ describe('user-authored agents — POST /host/openwop-app/agents', () => {
         systemPrompt: 'You are helpful.',
       }),
     });
+    expect(r1.status).toBe(201);
     // Second create with the same persona → 409.
     const r2 = await jsonFetch<{ message: string }>('/host/openwop-app/agents', {
       method: 'POST',
@@ -182,6 +209,8 @@ describe('user-authored agents — POST /host/openwop-app/agents', () => {
     expect(r2.status).toBe(201);
     expect(r2.headers.get('openwop-Idempotent-Replay')).toBe('true');
     expect(r2.body.agentId).toBe(r1.body.agentId);
+    // The replay wrote nothing: exactly ONE agent carries this persona.
+    expect(await personasListed('Idem Test')).toEqual([r1.body.agentId]);
   });
 
   it('Idempotency-Key with mismatched body returns 409', async () => {
@@ -219,26 +248,24 @@ describe('user-authored agents — DELETE /host/openwop-app/agents/{agentId}', (
       }),
     });
     expect(created.status).toBe(201);
-    const del = await jsonFetch(`/host/openwop-app/agents/${encodeURIComponent(created.body.agentId)}`, {
-      method: 'DELETE',
-    });
-    expect(del.status).toBe(204);
+    expect(await personasListed('Delete Me')).toEqual([created.body.agentId]);
+    const path = `/host/openwop-app/agents/${encodeURIComponent(created.body.agentId)}`;
+    expect((await del(path)).status).toBe(204);
+    // Read back: the agent is GONE from the inventory, and a second delete is a
+    // 404 — a 204 that removed nothing would leave it listed.
+    expect(await personasListed('Delete Me')).toEqual([]);
+    expect(await del(path)).toEqual({ status: 404, error: 'not_found' });
   });
 
   it('returns 404 for a non-existent agentId', async () => {
-    const del = await jsonFetch<{ message: string }>('/host/openwop-app/agents/user.default.does-not-exist', { method: 'DELETE' });
-    expect(del.status).toBe(404);
+    expect(await del('/host/openwop-app/agents/user.default.does-not-exist')).toEqual({ status: 404, error: 'not_found' });
   });
 
   it('returns 404 for a pack-installed agentId', async () => {
     // Pack agents register in the AgentRegistry but have no row in
     // `user_agents` — the DELETE route gates on the storage row, so
     // it 404s rather than mistakenly removing a pack agent.
-    const del = await jsonFetch<{ message: string }>(
-      '/host/openwop-app/agents/core.openwop.agents.code-reviewer.default',
-      { method: 'DELETE' },
-    );
-    expect(del.status).toBe(404);
+    expect(await del('/host/openwop-app/agents/core.openwop.agents.code-reviewer.default')).toEqual({ status: 404, error: 'not_found' });
   });
 });
 
@@ -311,11 +338,14 @@ describe('user-authored agents — cross-tenant dispatch gate (AGENTRT-2)', () =
     expect(crossTenant.body.error).toBe('not_found');
 
     // The owning tenant (bearer-shared default) CAN dispatch it.
-    const owner = await jsonFetch<{ status: string }>(
+    const owner = await jsonFetch<{ agentId: string; persona: string; status: string }>(
       `/host/openwop-app/agents/${agentId}/dispatch`,
       { method: 'POST', body: dispatchBody },
     );
     expect(owner.status).toBe(200);
+    // It dispatched THIS agent (the deterministic seam echoes its identity).
+    expect(owner.body.agentId).toBe(agentId);
+    expect(owner.body.persona).toBe('Dispatch Gate Probe');
   });
 });
 

@@ -8,6 +8,9 @@
  * key, which resolves to `tenants: [key.tenantId]`:
  *   - it cannot be ISSUED for `'*'`;
  *   - a stored `'*'` row (however it got there) never AUTHENTICATES.
+ *
+ * Tracker TST-BLO-2. Sabotage-witnessed (w62): red when the mint stops refusing
+ * '*' or verify stops refusing a stored '*' row.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
@@ -22,7 +25,7 @@ beforeAll(async () => {
 
 describe('ADR 0823 — an owk_ key can never be a wildcard principal', () => {
   it('issuing a key for tenant "*" is refused', async () => {
-    await expect(issueApiKey({ tenantId: '*', name: 'x', createdBy: 'u1' })).rejects.toMatchObject({ httpStatus: 400 });
+    await expect(issueApiKey({ tenantId: '*', name: 'x', createdBy: 'u1' })).rejects.toMatchObject({ httpStatus: 400, message: 'a self-service key cannot be cross-tenant.' });
   });
 
   it('a stored "*" key row never verifies (and the same row verifies under a real tenant)', async () => {

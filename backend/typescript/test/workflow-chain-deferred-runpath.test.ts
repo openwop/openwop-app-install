@@ -10,6 +10,12 @@
  * rides the `<UNTRUSTED>` fence (R1), and a `sensitive` param REDACTS in the
  * observability payload while its real value reaches the model (SR-1). This is the
  * non-vacuous leg the server-free scenario + witness #2 mirror.
+ *
+ * On THIS host the composed body carries `[REDACTED:<credentialRef>]` for a
+ * `source:"secret"` slot, not the plaintext (`host/promptCompose.ts`
+ * `resolveBinding`: the reference impl resolves the secret to prove it exists and
+ * discards it). The resolution is witnessed by the second case: an unprovisioned
+ * credentialRef must fail the node with `prompt_secret_unresolvable`, never compose.
  */
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -19,7 +25,7 @@ import { setEventLogBackend } from '../src/executor/eventLog.js';
 import { setSuspendBackend } from '../src/executor/suspendManager.js';
 import { setRuntimeCapabilities } from '../src/executor/runtimeCapabilities.js';
 import { ensureNodesRegistered } from '../src/bootstrap/nodes.js';
-import { configureSecretResolver, setSecret } from '../src/byok/secretResolver.js';
+import { clearCache, configureSecretResolver, setSecret } from '../src/byok/secretResolver.js';
 import { initInMemorySurfaces } from '../src/host/inMemorySurfaces.js';
 import { expandChain, type WorkflowChain } from '../src/host/workflowChainPackLoader.js';
 import { seedRunVariables, deferredConfigurableInputs } from '../src/host/variablesRuntime.js';
@@ -40,6 +46,9 @@ beforeEach(async () => {
   setSuspendBackend(storage);
   setRuntimeCapabilities([]);
   const dataDir = mkdtempSync(join(tmpdir(), 'openwop-runpath-'));
+  // The resolver keeps a module-level plaintext cache that survives a re-configure;
+  // without this a secret provisioned by one case resolves in the next.
+  clearCache();
   configureSecretResolver({ storage, dataDir });
   initInMemorySurfaces({ dataDir });
 });
@@ -68,37 +77,43 @@ const chain: WorkflowChain = {
   },
 };
 
+let runSeq = 0;
+/** Expand, seed the per-run bag from a `configurable` override, and execute. */
+async function runDeferred(): Promise<{ runId: string; def: ReturnType<typeof expandChain> }> {
+  // Deferred expansion: apiKey (sensitive, in a prompt body) → source:secret
+  // PromptVariable; topic (non-sensitive) → source:variable. Mints + registers.
+  const def = expandChain(chain, { deferred: true, params: { topic: 'default' } });
+  runSeq += 1;
+  const runId = `run-runpath-${runSeq}`;
+  // configurable: topic = a plaintext override; apiKey = the SECRET REFERENCE.
+  seedRunVariables(
+    runId,
+    def.variables,
+    deferredConfigurableInputs(def, { topic: 'QUANTUM WIDGETS', apiKey: 'cred-apikey-1' }, undefined),
+  );
+  const now = new Date().toISOString();
+  const run: RunRecord = {
+    runId,
+    workflowId: def.workflowId,
+    tenantId: 'demo',
+    status: 'pending',
+    inputs: {},
+    metadata: {},
+    configurable: {},
+    createdAt: now,
+    updatedAt: now,
+  };
+  await executeRun(storage, run, def);
+  return { runId, def };
+}
+
 describe('RFC 0124 2b-2 — gated run-path leg (end-to-end, source:secret)', () => {
   it('non-sensitive override flows into the prompt (fenced); sensitive param resolves via BYOK + redacts, plaintext never appears', async () => {
     // A sensitive param supplied per run is a SECRET REFERENCE (credentialRef),
     // resolved from the run owner's BYOK store — never a plaintext. Provision it.
     await setSecret('cred-apikey-1', 'sk-live-actual-secret', { tenantId: 'demo' });
 
-    // Deferred expansion: apiKey (sensitive, in a prompt body) → source:secret
-    // PromptVariable; topic (non-sensitive) → source:variable. Mints + registers.
-    const def = expandChain(chain, { deferred: true, params: { topic: 'default' } });
-
-    const runId = `run-${Math.random().toString(36).slice(2, 10)}`;
-    // configurable: topic = a plaintext override; apiKey = the SECRET REFERENCE.
-    seedRunVariables(
-      runId,
-      def.variables,
-      deferredConfigurableInputs(def, { topic: 'QUANTUM WIDGETS', apiKey: 'cred-apikey-1' }, undefined),
-    );
-
-    const now = new Date().toISOString();
-    const run: RunRecord = {
-      runId,
-      workflowId: def.workflowId,
-      tenantId: 'demo',
-      status: 'pending',
-      inputs: {},
-      configurable: {},
-      createdAt: now,
-      updatedAt: now,
-    } as RunRecord;
-
-    await executeRun(storage, run, def);
+    const { runId } = await runDeferred();
 
     const events = await storage.listEvents(runId, { fromSeq: -1, limit: 1000 });
     const composedEv = events.find((e) => e.type === 'prompt.composed');
@@ -108,8 +123,6 @@ describe('RFC 0124 2b-2 — gated run-path leg (end-to-end, source:secret)', () 
       contentTrust?: string;
       variableBindings?: Record<string, unknown>;
     };
-    const keyVar = (def.variables ?? []).find((v) => v.name.endsWith('_apiKey'))!.name;
-
     // (1) the non-sensitive OVERRIDE resolved into the composed prompt, fenced untrusted (R1).
     expect(payload.composed).toContain('<UNTRUSTED>QUANTUM WIDGETS</UNTRUSTED>');
     expect(payload.contentTrust).toBe('untrusted');
@@ -123,6 +136,19 @@ describe('RFC 0124 2b-2 — gated run-path leg (end-to-end, source:secret)', () 
     const vb = JSON.stringify(payload.variableBindings ?? {});
     expect(vb).toContain(`[REDACTED:cred-apikey-1]`);
     expect(vb).not.toContain('sk-live-actual-secret');
-    void keyVar;
+  });
+
+  it('an UNPROVISIONED credentialRef fails the node (prompt_secret_unresolvable) and composes nothing', async () => {
+    // No setSecret: `cred-apikey-1` does not exist in this run's BYOK store (a fresh
+    // storage + dataDir per case). The redaction marker must never stand in for a
+    // secret that was never resolved.
+    const { runId } = await runDeferred();
+    const events = await storage.listEvents(runId, { fromSeq: -1, limit: 1000 });
+    expect(events.some((e) => e.type === 'prompt.composed'), 'nothing may be composed').toBe(false);
+    const failed = events.find((e) => e.type === 'node.failed');
+    expect(failed, `expected node.failed, got ${events.map((e) => e.type).join(',')}`).toBeDefined();
+    expect(JSON.stringify(failed!.payload)).toContain(
+      "prompt_secret_unresolvable: credentialRef 'cred-apikey-1' not provisioned in BYOK store",
+    );
   });
 });

@@ -224,6 +224,24 @@ describe('titledFromEvent — ADR 0151 auto-title', () => {
   });
 });
 
+describe('openConversationSession — ADR 0975 D8 agent scope', () => {
+  afterEach(() => { openConversation.mockReset(); listOpenInterrupts.mockReset(); });
+
+  it('carries the agent it opens with as metadata.agentScope, beside the chat session id', async () => {
+    openConversation.mockResolvedValue({ runId: 'run-a' });
+    listOpenInterrupts.mockResolvedValue([{ interruptId: 'i-gate', nodeId: 'gate', kind: 'conversation.start', data: null, createdAt: '2026-10-26T00:00:00.000Z' }]);
+    await openConversationSession({ chatSessionId: 's-1', agentScope: 'vendor.openwop-app.kicktodo.agents.challenge-author' });
+    expect(openConversation.mock.calls[0]![0]).toMatchObject({ metadata: { chatSessionId: 's-1', agentScope: 'vendor.openwop-app.kicktodo.agents.challenge-author' } });
+  });
+
+  it('sends no agentScope when none is given', async () => {
+    openConversation.mockResolvedValue({ runId: 'run-b' });
+    listOpenInterrupts.mockResolvedValue([{ interruptId: 'i-gate', nodeId: 'gate', kind: 'conversation.start', data: null, createdAt: '2026-10-26T00:00:00.000Z' }]);
+    await openConversationSession({ chatSessionId: 's-2' });
+    expect(openConversation.mock.calls[0]![0]).toEqual(expect.objectContaining({ metadata: { chatSessionId: 's-2' } }));
+  });
+});
+
 describe('openConversationSession — waits for the gate before the first turn', () => {
   const interrupt = (nodeId: string): OpenInterrupt => ({ interruptId: `i-${nodeId}`, nodeId, kind: 'conversation.start', data: null, createdAt: '2026-07-25T12:00:00.000Z' });
   const snapshot = (status: RunSnapshot['status']): RunSnapshot => ({

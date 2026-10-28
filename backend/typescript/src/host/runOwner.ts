@@ -287,6 +287,15 @@ function toV2Subject(subject: RunSubject): RunSubjectV2 {
   return out;
 }
 
+/** ADR 0932 — the v2 Subject of the CALLER of `req` in `tenant` (the same
+ *  mapping as the run-owner stamp), or undefined when the request carries no
+ *  principal. `interrupt.resolved.resolvedBy` uses it. */
+export function requestSubjectV2(req: Request, tenant: string): RunSubjectV2 | undefined {
+  const stamp = ownerStampFromRequest(req);
+  if (!stamp) return undefined;
+  return toV2Subject({ ...stamp.subject, tenant });
+}
+
 export function runOwnerV2(run: { tenantId: string; metadata?: Record<string, unknown> | null }): RunOwnerBlockV2 {
   const v1 = runOwner(run);
   const tenant = run.tenantId;

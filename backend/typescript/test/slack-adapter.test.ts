@@ -3,9 +3,15 @@
  * ctx.slack.postMessage resolves the acting user's Slack Connection, calls
  * chat.postMessage with the token, maps the args, stamps provenance, and
  * gracefully no-ops (never throws) when no connection exists.
+ *
+ * What breaks it (sabotage-witnessed, /grade-tests wave 61, 8fw3g1-slk-*): the
+ * thread/broadcast arg mapping, the provenance stamp (pinned on success AND
+ * pinned ABSENT after an `{ok:false}` reply, on a run of its own because the
+ * stamp dedups per connection), the API-error passthrough, the egress firewall
+ * mapping, and the no-connection short-circuit (the stub must receive NOTHING).
  */
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from '../src/index.js';
@@ -16,11 +22,13 @@ import { __resetConnectionsStore, upsertOAuthConnection } from '../src/features/
 describe('Slack egress adapter (ADR 0024 §4 Phase 3)', () => {
   let slackApi: http.Server;
   let storage: Storage;
-  let received: { auth?: string; body?: Record<string, unknown> };
+  let received: { auth?: string; body?: Record<string, unknown> } = {};
+  let savedAllowPrivate: string | undefined;
   let nextResponse: Record<string, unknown> = { ok: true, ts: '1700000000.000100', channel: 'C123' };
 
   beforeAll(async () => {
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
+    savedAllowPrivate = process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE;
     process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE = 'true'; // allow loopback egress in test
     const app = await createApp({ port: 18945, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
     storage = app.locals.storage;
@@ -39,16 +47,22 @@ describe('Slack egress adapter (ADR 0024 §4 Phase 3)', () => {
     process.env.OPENWOP_SLACK_API_BASE = `http://127.0.0.1:${(slackApi.address() as AddressInfo).port}`;
 
     await upsertOAuthConnection({ tenantId: 'tslack', provider: 'slack', userId: 'u1', tokens: { accessToken: 'xoxb-TESTTOKEN', tokenType: 'Bearer', scopes: ['chat:write'] } });
-    await storage.insertRun({ runId: 'run-slack', workflowId: 'w', tenantId: 'tslack', status: 'pending', inputs: null, metadata: {}, configurable: {}, createdAt: 'x', updatedAt: 'x' });
+    for (const runId of ['run-slack', 'run-slack-err']) {
+      await storage.insertRun({ runId, workflowId: 'w', tenantId: 'tslack', status: 'pending', inputs: null, metadata: {}, configurable: {}, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' });
+    }
   });
+  beforeEach(() => { received = {}; });
 
   afterAll(async () => {
     delete process.env.OPENWOP_SLACK_API_BASE;
+    if (savedAllowPrivate === undefined) delete process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE; else process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE = savedAllowPrivate;
     await new Promise<void>((r) => slackApi.close(() => r()));
   });
 
-  const adapter = (actingUserId?: string): ReturnType<typeof makeSlackAdapter> =>
-    makeSlackAdapter({ storage, tenantId: 'tslack', runId: 'run-slack', ...(actingUserId ? { actingUserId } : {}), orgId: 'tslack' });
+  const adapter = (actingUserId?: string, runId = 'run-slack'): ReturnType<typeof makeSlackAdapter> =>
+    makeSlackAdapter({ storage, tenantId: 'tslack', runId, ...(actingUserId ? { actingUserId } : {}), orgId: 'tslack' });
+  const uses = async (runId: string): Promise<Array<{ provider?: string }> | undefined> =>
+    ((await storage.getRun(runId))?.metadata as { connectionUse?: Array<{ provider?: string }> } | undefined)?.connectionUse;
 
   it('posts with the acting user’s token, maps args, and stamps provenance', async () => {
     nextResponse = { ok: true, ts: '1700000000.000100', channel: 'C123' };
@@ -56,14 +70,18 @@ describe('Slack egress adapter (ADR 0024 §4 Phase 3)', () => {
     expect(out).toEqual({ ok: true, ts: '1700000000.000100', channel: 'C123' });
     expect(received.auth).toBe('Bearer xoxb-TESTTOKEN');
     expect(received.body).toMatchObject({ channel: 'C123', text: 'hello', thread_ts: '111.222', reply_broadcast: true });
-    const meta = (await storage.getRun('run-slack'))?.metadata as Record<string, unknown> | undefined;
-    expect((meta?.connectionUse as Array<{ provider?: string }> | undefined)?.[0]?.provider).toBe('slack');
+    const stamped = await uses('run-slack');
+    expect(stamped).toHaveLength(1);
+    expect(stamped![0]!.provider).toBe('slack');
   });
 
   it('surfaces a Slack API error (HTTP 200 {ok:false})', async () => {
     nextResponse = { ok: false, error: 'channel_not_found' };
-    const out = await adapter('u1').postMessage({ channel: 'CNOPE', text: 'x' });
+    const out = await adapter('u1', 'run-slack-err').postMessage({ channel: 'CNOPE', text: 'x' });
     expect(out).toEqual({ ok: false, error: 'channel_not_found' });
+    expect(received.body).toMatchObject({ channel: 'CNOPE' }); // it really reached Slack
+    // "stamp on success only": a refused post leaves no provenance on its run.
+    expect(await uses('run-slack-err')).toBeUndefined();
   });
 
   it('gracefully no-ops (never throws) when the acting user has no Slack connection', async () => {
@@ -71,6 +89,7 @@ describe('Slack egress adapter (ADR 0024 §4 Phase 3)', () => {
     expect(noUser).toEqual({ ok: false, error: 'slack_not_connected' });
     const otherUser = await adapter('u-without-slack').postMessage({ channel: 'C1', text: 'x' });
     expect(otherUser).toEqual({ ok: false, error: 'slack_not_connected' });
+    expect(received, 'no request reached the Slack API').toEqual({});
   });
 
   it('fails closed (as an envelope, not a throw) over a private non-https base in the production posture', async () => {

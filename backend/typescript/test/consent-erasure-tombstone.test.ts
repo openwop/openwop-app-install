@@ -108,7 +108,9 @@ describe('CONS-1 — erasure must not re-consent the subject', () => {
     await deleteSubject(T, 'erased-one');
     // The cure must be PER-SUBJECT. A deny-by-default cure would turn these
     // false and silently change the tenant's chosen posture.
-    for (const c of FLIPPED) expect(await isAllowed(T, 'bystander', c), `bystander ${c}`).toBe(true);
+    // ADR 0955 D3: `marketing.sms` is strict explicit opt-in, so an opt-out policy default
+    // never permits it — for the bystander too. That is the tenant's posture, not the tombstone.
+    for (const c of FLIPPED) expect(await isAllowed(T, 'bystander', c), `bystander ${c}`).toBe(c !== 'marketing.sms');
     expect(await isErasureTombstoned(T, 'bystander')).toBe(false);
     expect(await isErasureTombstoned(T, 'erased-one')).toBe(true);
     // …and the tombstone is TENANT-scoped: the same key in another tenant is clean.

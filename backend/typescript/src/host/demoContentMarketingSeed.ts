@@ -22,10 +22,12 @@ import { listContacts } from '../features/crm/contactsService.js';
 import { ensureBrand, listBrands, deleteBrand } from '../features/brand/brandService.js';
 import { createPage, listPages, deletePage, transitionPage, setScheduledPublish } from '../features/cms/cmsService.js';
 import { updateEntityType } from '../features/entities/entitiesService.js';
-import { createExperiment, listExperiments } from '../features/cms/pageExperimentsService.js';
+import { CMS_PAGE_SURFACE, createExperiment, listExperiments } from '../features/cms/pageExperimentsService.js';
+import { deleteExperimentRow, listExperimentRows } from './experiments/store.js';
 import { queueContentApproval } from '../features/cms/contentApproval.js';
 import { createForm, listForms, deleteForm, setFormStatus, recordSubmission } from '../features/forms/formsService.js';
 import { createTemplate, listTemplates, deleteTemplate, createCampaign, listCampaigns, deleteCampaign } from '../features/email/emailService.js';
+import { indexEngagementEvent, unindexEngagementEvent } from '../features/email/engagementService.js';
 import { createPersona, listPersonas, deletePersona } from '../features/campaign-brief/personaService.js';
 import { createBrief, listBriefs, deleteBrief, setKernel, updateBrief } from '../features/campaign-brief/briefService.js';
 import { finalizeFromBrief, listCampaigns as listOrchCampaigns, deleteCampaign as deleteOrchCampaign } from '../features/campaign-orchestration/campaignService.js';
@@ -213,7 +215,9 @@ export async function seedDemoContentMarketing(tenantId: string): Promise<{ crea
       if (c.sent && contacts.length) {
         for (let e = 0; e < 20; e += 1) {
           const kind = e % 3 === 0 ? 'clicked' : e % 5 === 0 ? 'unsubscribed' : 'opened';
-          await engagementStore.put({ id: `demo-cm-${ns}-${c.slug}-${e}`, tenantId, campaignId, contactId: contacts[e % contacts.length]!, kind, at: new Date(nowMs - (e % 30) * 86400_000).toISOString() });
+          const ev = { id: `demo-cm-${ns}-${c.slug}-${e}`, tenantId, campaignId, contactId: contacts[e % contacts.length]!, kind, at: new Date(nowMs - (e % 30) * 86400_000).toISOString() } as const;
+          await engagementStore.put(ev);
+          await indexEngagementEvent(ev); // ADR 0955 P0 — the per-contact index copy
         }
       }
     }
@@ -300,13 +304,17 @@ export async function clearDemoContentMarketing(tenantId: string): Promise<{ cle
   // Email (campaigns + engagement + templates).
   const demoCampaignIds = new Set<string>();
   for (const c of (await listCampaigns(tenantId, orgId)).filter((x) => x.createdBy === ACTOR)) { demoCampaignIds.add(c.campaignId); if (await deleteCampaign(tenantId, orgId, c.campaignId)) cleared += 1; }
-  for (const e of (await engagementStore.listForTenantIndexed(tenantId)).filter((x) => x.id.startsWith('demo-cm-'))) { await engagementStore.delete(e.id); }
+  // ADR 0955 P0 — deleted by the row's real key (`${tenant}::${id}`; a bare id matched nothing)
+  // and its per-contact index copy with it.
+  for (const e of (await engagementStore.listForTenantIndexed(tenantId)).filter((x) => x.id.startsWith('demo-cm-'))) { await engagementStore.delete(`${e.tenantId}::${e.id}`); await unindexEngagementEvent(e); }
   for (const t of (await listTemplates(tenantId, orgId)).filter((x) => x.createdBy === ACTOR)) { if (await deleteTemplate(tenantId, orgId, t.templateId)) cleared += 1; }
   // Forms.
   for (const f of (await listForms(tenantId, orgId)).filter((x) => x.createdBy === ACTOR)) { if (await deleteForm(tenantId, orgId, f.formId)) cleared += 1; }
-  // CMS experiments (no per-row delete API → direct store, scoped to demo pages)
-  // then pages.
+  // CMS experiments (direct store, so a running one goes too; scoped to demo
+  // pages) then pages. ADR 0949 P1a: the engine store is the record and the
+  // legacy collection its rollback mirror, so both are cleared.
   const demoPageIds = new Set((await listPages(tenantId, orgId)).filter((x) => x.createdBy === ACTOR).map((p) => p.pageId));
+  for (const e of (await listExperimentRows(tenantId, orgId, { kind: CMS_PAGE_SURFACE })).filter((x) => demoPageIds.has(x.surface.ref))) { await deleteExperimentRow(tenantId, orgId, e.experimentId); }
   for (const e of (await experimentStore.listForTenantIndexed(tenantId)).filter((x) => demoPageIds.has(x.pageId))) { await experimentStore.delete(e.experimentId); }
   for (const p of (await listPages(tenantId, orgId)).filter((x) => x.createdBy === ACTOR)) { if (await deletePage(tenantId, orgId, p.pageId)) cleared += 1; }
   // Brand.

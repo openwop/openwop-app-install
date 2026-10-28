@@ -19,9 +19,10 @@
  */
 
 import { Button } from '../../ui/Button.js';
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useMemo, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
-import { searchChatConversations, type ChatSessionHeader, type ConversationSearchHit } from '../../client/chatSessionsClient.js';
+import type { ChatSessionHeader } from '../../client/chatSessionsClient.js';
+import { MessageSearchResults } from './MessageSearchResults.js';
 import {
   groupConversations,
   isUnread,
@@ -149,23 +150,14 @@ export function ConversationsRail({
   const needsYouIds = useMemo(() => new Set(needsYou.map((c) => c.sessionId)), [needsYou]);
   const headingId = 'conversations-rail-heading';
 
-  // ADR 0112 — server-side message FULL-TEXT search, layered over the client-side
-  // title filter above. Debounced; degrades silently to titles-only when the
-  // `conversation-search` toggle is off (the route 404s → `searchChatConversations`
-  // returns []). Only message hits (a snippet, `messageId`) are shown here — title
-  // matches are already covered by the client filter.
-  const [messageHits, setMessageHits] = useState<readonly ConversationSearchHit[]>([]);
-  useEffect(() => {
-    const q = query.trim();
-    if (q.length < 2) { setMessageHits([]); return; }
-    let cancelled = false;
-    const handle = setTimeout(() => {
-      void searchChatConversations(q).then((hits) => {
-        if (!cancelled) setMessageHits(hits.filter((h) => h.messageId));
-      });
-    }, 250);
-    return () => { cancelled = true; clearTimeout(handle); };
-  }, [query]);
+  // ADR 0112 / ADR 0997 D5 — the server's MESSAGE matches sit under the client-side
+  // title filter (`MessageSearchResults` owns the request and its states). It needs
+  // to know whether the title filter found anything, to say "no matches" only when
+  // neither did.
+  const titleMatches = useMemo(
+    () => (query.trim() ? SECTION_ORDER.reduce((n, sec) => n + grouped[sec].length, 0) : 0),
+    [grouped, query],
+  );
 
   // grade-ux CHATUX-11 — a failed rename/delete used to go to the console only, so
   // the row simply snapped back (or stayed) with no word to the user.
@@ -262,28 +254,9 @@ export function ConversationsRail({
         />
       </div>
 
-      {/* ADR 0112 — message full-text matches (snippets), distinct from the
-          title filter above. Self-hides when there are none (toggle off / no
-          content hits). Clicking opens that conversation. */}
-      {query.trim().length >= 2 && messageHits.length > 0 && (
-        <section aria-label={t('messageMatches')} className="u-border-b">
-          <h3 className="muted sesshist-group-head">{t('messageMatches')}</h3>
-          <ul className="u-list-none u-m-0 u-p-1-5 u-flex u-flex-col u-gap-1">
-            {messageHits.map((h) => (
-              <li
-                key={`${h.conversationId}:${h.messageId ?? 'title'}`}
-                className="session-row sesshist-row"
-              >
-                {/* DECK-2: real <button> body — the last role="button" li of the refactored family. */}
-                <button type="button" className="sesshist-row-open" onClick={() => selectWithPulse(h.conversationId)}>
-                <div className="sesshist-row-title u-truncate" title={h.title}>{h.title || t('untitledConversation')}</div>
-                <div className="muted u-fs-11 u-truncate">{h.snippet}</div>
-              </button>
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
+      {/* ADR 0112 / ADR 0997 D5 — message matches (snippets), distinct from the
+          title filter above, with loading, error, no-matches and a live count. */}
+      <MessageSearchResults query={query} titleMatches={titleMatches} onOpen={selectWithPulse} />
 
       <div className="u-flex-1 u-overflow-y-auto u-pad-4x0">
         {actionError && (

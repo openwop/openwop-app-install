@@ -11,7 +11,8 @@
  * `byok/secretResolver`, tenant resolved from the stored config (never the
  * request) — via core `byok`, not the Slack module.
  *
- * Providers: sendgrid (ECDSA-signed Event Webhook) + postmark (HTTP Basic). Only
+ * Providers: sendgrid (ECDSA-signed Event Webhook) + postmark (HTTP Basic) + ses
+ * (an SNS-signed notification pinned to the operator's topic, ADR 0994 D4). Only
  * HARD bounces + complaints suppress; soft/deferred/transient are ignored
  * (suppressing a transient failure would wrongly kill deliverability).
  */
@@ -23,14 +24,37 @@ import { setSecret, resolveSecret, removeSecret } from '../../byok/secretResolve
 import { registerCredentialRefConsumer } from '../../host/credentialRefRegistry.js';
 import { createLogger } from '../../observability/logger.js';
 import { addSuppression, normalizeEmail } from '../crm/suppressionService.js';
+import { recordBounceSignal } from '../crm/senderHealth.js';
 import { OWNED_REF_PREFIXES } from '../../byok/refNamespaces.js';
 import { OpenwopError } from '../../types.js';
+import { guardedEgressFetch } from '../../host/webhookEgressGuard.js';
+import { isSnsUrl, verifySnsMessage, type SnsCertFetcher } from './snsVerify.js';
 
 const log = createLogger('email.bounceWebhooks');
 
-export type BounceProvider = 'sendgrid' | 'postmark';
+export type BounceProvider = 'sendgrid' | 'postmark' | 'ses';
 export function isBounceProvider(v: string): v is BounceProvider {
-  return v === 'sendgrid' || v === 'postmark';
+  return v === 'sendgrid' || v === 'postmark' || v === 'ses';
+}
+
+// ── SES over SNS (ADR 0994 D4) ───────────────────────────────────────────────
+// The two outbound calls an SNS message can cause: fetching AWS's signing
+// certificate, and confirming a subscription. Both go through the SSRF-pinned,
+// no-redirect guarded fetch, and both are only ever made to an
+// `https://sns.<region>.amazonaws.com` URL (checked by the caller).
+const SNS_FETCH_TIMEOUT_MS = 5_000;
+async function snsGet(url: string): Promise<string> {
+  const res = await guardedEgressFetch(url, { method: 'GET', signal: AbortSignal.timeout(SNS_FETCH_TIMEOUT_MS) });
+  if (!res.ok) throw new Error(`sns_http_${res.status}`);
+  return res.text();
+}
+let snsTransport: { fetchCert: SnsCertFetcher; confirm: (subscribeUrl: string) => Promise<void> } = {
+  fetchCert: snsGet,
+  confirm: async (u) => { await snsGet(u); },
+};
+/** Test seam: replace the SNS certificate fetch and subscription confirmation. */
+export function __setSnsTransportForTest(t: typeof snsTransport | null): void {
+  snsTransport = t ?? { fetchCert: snsGet, confirm: async (u) => { await snsGet(u); } };
 }
 
 /** The most events a single signed batch may carry — bounds work on the public
@@ -267,6 +291,40 @@ function classifyPostmarkEvents(body: unknown): BounceSignal[] {
   return out;
 }
 
+/** SES event JSON (the SNS `Message`). Both shapes SES publishes are read: the
+ *  identity notification (`notificationType`) and configuration-set event
+ *  publishing (`eventType`). Permanent bounces and complaints suppress;
+ *  Transient/Undetermined bounces escalate; Delivery resets the streak. */
+function classifySesEvent(message: unknown): BounceSignal[] {
+  if (!message || typeof message !== 'object') return [];
+  const m = message as Record<string, unknown>;
+  const type = typeof m.notificationType === 'string' ? m.notificationType : (typeof m.eventType === 'string' ? m.eventType : '');
+  const recipients = (list: unknown): string[] =>
+    (Array.isArray(list) ? list : [])
+      .map((r) => (r && typeof r === 'object' && typeof (r as Record<string, unknown>).emailAddress === 'string' ? (r as Record<string, string>).emailAddress : ''))
+      .filter((e): e is string => e !== '');
+  const out: BounceSignal[] = [];
+  if (type === 'Bounce') {
+    const b = (m.bounce && typeof m.bounce === 'object' ? m.bounce : {}) as Record<string, unknown>;
+    const bounceType = typeof b.bounceType === 'string' ? b.bounceType : '';
+    const sub = typeof b.bounceSubType === 'string' ? `:${b.bounceSubType}` : '';
+    for (const email of recipients(b.bouncedRecipients)) {
+      if (bounceType === 'Permanent') out.push({ email, kind: 'suppress', reason: 'bounced', note: `ses:Permanent${sub}` });
+      else out.push({ email, kind: 'soft', note: `ses:${bounceType || 'Undetermined'}${sub}` });
+    }
+  } else if (type === 'Complaint') {
+    const c = (m.complaint && typeof m.complaint === 'object' ? m.complaint : {}) as Record<string, unknown>;
+    const fb = typeof c.complaintFeedbackType === 'string' ? `:${c.complaintFeedbackType}` : '';
+    for (const email of recipients(c.complainedRecipients)) out.push({ email, kind: 'suppress', reason: 'complaint', note: `ses:Complaint${fb}` });
+  } else if (type === 'Delivery') {
+    const d = (m.delivery && typeof m.delivery === 'object' ? m.delivery : {}) as Record<string, unknown>;
+    for (const email of (Array.isArray(d.recipients) ? d.recipients : [])) {
+      if (typeof email === 'string' && email) out.push({ email, kind: 'success' });
+    }
+  }
+  return out;
+}
+
 /** The hard-suppress subset — preserved for callers/tests that only care about
  *  immediate suppression intents. */
 export function parseSendgridEvents(body: unknown): SuppressIntent[] {
@@ -274,6 +332,9 @@ export function parseSendgridEvents(body: unknown): SuppressIntent[] {
 }
 export function parsePostmarkEvents(body: unknown): SuppressIntent[] {
   return classifyPostmarkEvents(body).filter(onlySuppress).map(({ email, reason, note }) => ({ email, reason, note }));
+}
+export function parseSesEvent(message: unknown): SuppressIntent[] {
+  return classifySesEvent(message).filter(onlySuppress).map(({ email, reason, note }) => ({ email, reason, note }));
 }
 
 export type IngestOutcome =
@@ -302,7 +363,9 @@ export async function ingestBounceWebhook(input: {
   const secret = await resolveSecret(secretRef(input.webhookId), { tenantId: config.tenantId });
   if (secret === null) { log.warn('bounce webhook secret unavailable', { webhookId: input.webhookId }); return { status: 'unauthorized' }; }
 
-  // Verify BEFORE parsing (bad/absent signature → no work).
+  // Verify BEFORE parsing (bad/absent signature → no work). For SES the signed unit
+  // is the SNS envelope, so its event JSON is only parsed once that verifies.
+  let sesEvent: unknown;
   // ADR 0655 D7 (EMWF-15) — EXHAUSTIVE dispatch: a third `BounceProvider` member is a
   // compile error here, not a silent fall-through to Postmark's HTTP-Basic check.
   switch (config.provider) {
@@ -316,6 +379,28 @@ export async function ingestBounceWebhook(input: {
       if (!v.ok) { log.warn('bounce webhook rejected', { webhookId: input.webhookId, provider: 'postmark', reason: v.reason }); return { status: 'unauthorized' }; }
       break;
     }
+    case 'ses': {
+      // ADR 0994 D4 — the stored secret is the SNS topic ARN the operator subscribed.
+      const v = await verifySnsMessage({ body: input.body, expectedTopicArn: secret, now: input.now, fetchCert: snsTransport.fetchCert });
+      if (!v.ok) { log.warn('bounce webhook rejected', { webhookId: input.webhookId, provider: 'ses', reason: v.reason }); return { status: 'unauthorized' }; }
+      const msg = v.message;
+      if (msg.Type === 'SubscriptionConfirmation') {
+        // The only state change a subscription message can cause, and only for the
+        // pinned topic. A failed confirm answers 503 so SNS redelivers it.
+        if (!isSnsUrl(msg.SubscribeURL)) { log.warn('bounce webhook rejected', { webhookId: input.webhookId, provider: 'ses', reason: 'bad_subscribe_url' }); return { status: 'unauthorized' }; }
+        try { await snsTransport.confirm(msg.SubscribeURL!); }
+        catch (e) {
+          log.warn('ses subscription confirmation failed', { webhookId: input.webhookId, error: e instanceof Error ? e.message : String(e) });
+          return { status: 'ok', suppressed: 0, escalated: 0, failed: 1 };
+        }
+        log.info('ses subscription confirmed', { webhookId: input.webhookId, topicArn: msg.TopicArn });
+        return { status: 'ok', suppressed: 0, escalated: 0, failed: 0 };
+      }
+      if (msg.Type !== 'Notification') return { status: 'ok', suppressed: 0, escalated: 0, failed: 0 }; // UnsubscribeConfirmation: nothing to do
+      try { sesEvent = JSON.parse(msg.Message ?? ''); }
+      catch { log.warn('bounce webhook rejected', { webhookId: input.webhookId, provider: 'ses', reason: 'bad_message_json' }); return { status: 'ok', suppressed: 0, escalated: 0, failed: 0 }; }
+      break;
+    }
     default: {
       const never: never = config.provider;
       log.warn('bounce webhook rejected', { webhookId: input.webhookId, provider: String(never), reason: 'unknown_provider' });
@@ -326,7 +411,10 @@ export async function ingestBounceWebhook(input: {
   // Cap the batch to bound work on the public endpoint.
   if (Array.isArray(input.body) && input.body.length > MAX_BATCH_EVENTS) return { status: 'too_large' };
 
-  const signals = config.provider === 'sendgrid' ? classifySendgridEvents(input.body) : classifyPostmarkEvents(input.body);
+  const signals = config.provider === 'sendgrid' ? classifySendgridEvents(input.body)
+    : config.provider === 'ses' ? classifySesEvent(sesEvent)
+    : classifyPostmarkEvents(input.body);
+  if (signals.length > MAX_BATCH_EVENTS) return { status: 'too_large' };
   const threshold = softBounceThreshold();
   const at = new Date(input.now).toISOString();
   let suppressed = 0;
@@ -338,6 +426,9 @@ export async function ingestBounceWebhook(input: {
     try {
       if (sig.kind === 'suppress') {
         await addSuppression(config.tenantId, email, sig.reason, `webhook:${config.provider}`, sig.note);
+        // ADR 0955 D7 — the sending client's breaker (webhook configs are per org). Counted once
+        // per (org, day, reason, address), so a redelivered batch is idempotent here too.
+        if (sig.reason === 'bounced' || sig.reason === 'complaint') await recordBounceSignal(config.tenantId, config.orgId, sig.reason, email, new Date(input.now));
         await resetSoftBounce(config.tenantId, email); // a hard signal supersedes the soft streak
         suppressed += 1;
       } else if (sig.kind === 'success') {

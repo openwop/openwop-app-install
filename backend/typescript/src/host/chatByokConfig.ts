@@ -30,6 +30,7 @@ import { listSecretRefs, resolveSecret, type SecretScope } from '../byok/secretR
 import { registerCredentialRefConsumer } from './credentialRefRegistry.js';
 import { createLogger } from '../observability/logger.js';
 import { managedProviderIdFromRef, managedUnderlyingProvider } from '../providers/managedProvider.js';
+import { listSelectableProviderIds } from '../providers/catalog.js';
 import { COPILOT_PROVIDER_ID, copilotSubscriptionConfigured } from '../aiProviders/copilotSubscription.js';
 import { resolveSubscriptionCredential, subscriptionCredentialRef } from '../byok/subscriptionCredential.js';
 
@@ -134,6 +135,12 @@ export async function setChatByokConfig(
   }
   if (typeof input.credentialRef !== 'string' || !REF_PATTERN.test(input.credentialRef)) {
     throw new OpenwopError('validation_error', 'credentialRef MUST match [a-zA-Z0-9_.-:]{1,128}.', 400, { field: 'credentialRef' });
+  }
+  // ADR 0990 D6 — a hidden provider (MiniMax) backs the free tier and is never a
+  // user's own key. It is legal here only as the managed rewrite above produced it,
+  // i.e. bound to a `managed:` ref; with a stored ref it is refused.
+  if (!isManagedRef(input.credentialRef) && !listSelectableProviderIds().includes(input.provider)) {
+    throw new OpenwopError('validation_error', `provider ${input.provider} is not available with your own key; use one of: ${listSelectableProviderIds().join(', ')}.`, 400, { field: 'provider', reason: 'provider_not_byok' });
   }
   if (!isManagedRef(input.credentialRef)) {
     const refs = await listSecretRefs(scope);

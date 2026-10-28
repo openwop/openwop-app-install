@@ -8,6 +8,8 @@
  *     (name-for-name, modulo the #578 wire sanitization);
  *  2. every DEFAULT_ON_AGENT_TOOL_IDS baseline tool is offered over voice;
  *  3. the '_decls' synthetic tenant resolves the same defs a real tenant does.
+ *
+ * Witnessed (8f W4): vt-baseline-dropped, vt-decl-filtered, vt-synthetic-tenant.
  */
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -56,13 +58,19 @@ describe('voice-offered tool SET == chat-compiled tool SET (XCH-VOICE-1)', () =>
 
 describe("the '_decls' synthetic tenant resolves like a real tenant (XCH-VOICE-3)", () => {
   it('builtin defs are tenant-independent for the offered set', () => {
+    // A regression TRIPWIRE: today `resolveTool` ignores the scope entirely
+    // (`host/agentToolProvider.ts` createAgentToolProvider), so this holds by
+    // construction until someone makes resolution tenant-aware.
     const synthetic = createAgentToolProvider({ tenantId: '_decls' });
     const real = createAgentToolProvider({ tenantId: 'default' });
+    let resolved = 0;
     for (const id of builtinAgentToolIds()) {
       const a = synthetic.resolveTool(id);
       const b = real.resolveTool(id);
-      expect(!!a, `synthetic '_decls' must resolve ${id}`).toBe(!!b);
-      if (a && b) expect(a.name).toBe(b.name);
+      expect(a?.name, `synthetic '_decls' must resolve ${id} exactly as a real tenant does`).toBe(b?.name);
+      if (b) resolved += 1;
     }
+    // Non-vacuity: two providers that both resolved nothing would agree trivially.
+    expect(resolved).toBeGreaterThanOrEqual(DEFAULT_ON_AGENT_TOOL_IDS.length);
   });
 });

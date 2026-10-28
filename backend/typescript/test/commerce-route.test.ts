@@ -222,7 +222,7 @@ describe('commerce — cart + multi-currency + webhook (deferred P1/P3)', () => 
 
 describe('commerce — transactional email seam (deferred P6)', () => {
   it('sends only with a recipient + a wired transport (else honest no-op)', async () => {
-    const { sendTransactionalEmail, setTransactionalEmailTransport, __resetTransactionalEmail } = await import('../src/features/commerce/transactionalEmail.js');
+    const { sendTransactionalEmail, setTransactionalEmailTransport, __resetTransactionalEmail } = await import('../src/host/transactionalEmail.js');
     __resetTransactionalEmail();
     expect(await sendTransactionalEmail({ to: 'not-an-email', subject: 's', text: 't' })).toEqual({ sent: false, reason: 'no_recipient' });
     expect(await sendTransactionalEmail({ to: 'a@b.com', subject: 's', text: 't' })).toEqual({ sent: false, reason: 'no_transport' });

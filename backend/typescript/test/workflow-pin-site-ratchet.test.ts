@@ -549,6 +549,7 @@ function scanRegistrationSites(): { sites: Map<string, Site>; valueRefs: string[
  */
 const SANCTIONED_ORIGINS = new Map<string, string>([
   ['routes/workflows.ts', 'Request body (POST/PUT /workflows) and `expandChain` (from-chain, incl. co-registered sub-chains). Every lane pairs with `recordOwnership`. ADR 0770 D2/D5 moved every lane to the awaited `registerWorkflowDurable` / the compare-and-swap `registerWorkflowIfUnchanged` (the aliased `reRegisterWorkflow` promote lane is gone), and co-registered sub-chain children now commit through `commitSubChainChild`.'],
+  ['host/chainInstantiation.ts', 'ADR 0959 P0 — the from-chain lane, extracted verbatim from routes/workflows.ts so the campaign-playbooks install shares it: `expandChain` / `coRegisterSubChains` output, committed through `registerWorkflowDurable` (parent) and `commitSubChainChild` (`registerWorkflowIfUnchanged`, children), each paired with `recordRevision` + `recordOwnership`. Callers pass a chain OBJECT (the registry\'s, or a playbook version row\'s), never a definition literal.'],
   ['host/workflowComposeTool.ts', 'The agent-composition pipeline (model-authored draft → validate → persist), `registerWorkflowDurable` + `recordOwnership`.'],
   ['host/seedWorkflows.ts', '`expandChain(chain, { deferred: true })` over loaded chain packs; each seeded id is `recordOwnership`-ed to the tenant.'],
   ['host/demoWalkthroughsSeed.ts', 'Re-registers definitions already produced by the seeder lane and records ownership (the archive/unarchive lifecycle flip).'],
@@ -634,7 +635,7 @@ const PIN_SITE_CEILING = 1;
  * scanner cannot follow. Exact-match: a new one is red until it states its supplier.
  */
 const INDIRECT_REGISTRATION_SEAMS = new Map<string, string>([
-  ['host/workflowChainPackLoader.ts', '`SubChainDeps.register: (def: WorkflowDefinition) => void` (RFC 0133 sub-chain co-registration). The ONLY supplier today is the from-chain handler in `routes/workflows.ts`, whose closure STAGES each child (ADR 0770 D3) and commits it through `commitSubChainChild` — `registerWorkflowDurable` + `recordOwnership` — so the lane is sanctioned. It is ledgered because the scanner sees `deps.register(...)`, not `registerWorkflow(...)`: a second supplier that skipped ownership would be invisible here.'],
+  ['host/workflowChainPackLoader.ts', '`SubChainDeps.register: (def: WorkflowDefinition) => void` (RFC 0133 sub-chain co-registration). The ONLY supplier today is `instantiateOwnedChain` in `host/chainInstantiation.ts` (the from-chain lane, ADR 0959 P0), whose closure STAGES each child (ADR 0770 D3) and commits it through `commitSubChainChild` — `registerWorkflowDurable` + `recordOwnership` — so the lane is sanctioned. It is ledgered because the scanner sees `deps.register(...)`, not `registerWorkflow(...)`: a second supplier that skipped ownership would be invisible here.'],
 ]);
 
 /**

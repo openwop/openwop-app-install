@@ -18,6 +18,10 @@
  * existed. That is the SAME failure the original probe had. So each case asserts
  * the PII is PRESENT first; a wrong row shape fails loudly there instead of
  * passing silently here.
+ *
+ * TST-BQR-17. Red when the anon-surface-write redactor drops `capturedEmail`
+ * from its text fields or stops matching the subject by its principal
+ * (`idFields`).
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync } from 'node:fs';

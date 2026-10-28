@@ -1,6 +1,6 @@
 # ADR 0924 — Campaign ops: version-bound approval and the client approver portal
 
-Status: Accepted — P0 implemented (change-set PR); P1 client portal pending
+Status: Accepted — P0 implemented (change-set PR); P1 client portal implemented (client-portal PR); P2 pending
 
 Program: agency campaign operations (ADRs 0921–0928). PRD features **F6**
 (version-bound approval) and **F2** (client approver role and portal). Depends on
@@ -142,6 +142,22 @@ The demo slice uses `agency`. New clients default to `agency` until a client
 approver is added.
 
 ### D5 — Client approver portal (F2): per-approver capability token
+
+> **CORRECTED 2026-10-26 (ADR 0958 P1).** The approver record and the link are
+> no longer this feature's own stores. An approver is an ADR 0958 link-only
+> `client-stakeholder` collaborator, and each link decides through a
+> system-minted `decide` grant on the change set (resourceId
+> `${changeSetId}:${grantId}`), so revoking the grant or the approver darkens
+> the link at its next use. Every check below is unchanged and still runs; the
+> API and the page keep their shape. Pre-0958 rows are adopted with their ids.
+
+> **CORRECTED 2026-10-19 (ADR 0941 § "Corrections requested in other ADRs", accepted
+> by a0):** the bespoke token store below would be a third home for a link-shaped
+> capability, which ADR 0448 D3 forbids. As built, each link is a **sharing
+> `campaign_approval` resolver** link (the `sign_request` shape). The approver
+> record is shaped as ADR 0958's `ExternalCollaborator` of kind
+> `client-stakeholder`, so 0958 P0 adopts it with one migration. The decide-time
+> checks (D2) and the page semantics below are unchanged. See "As built — P1".
 
 Modelled on CRM e-sign, not on the interrupt token lane (whose holder set is
 tenant-wide).
@@ -288,8 +304,96 @@ expressible scope today; that is a follow-up `comments:write` scope in
 - [ ] No `/architect` pass has been run on this ADR. The public portal (P1)
       also needs a `/code-review` security pass before it ships.
 
+## As built — P1 corrections (2026-10-19)
+
+1. **The link is a sharing resolver, not a token store** (ADR 0448 D3; ADR 0958 D3).
+   `features/campaign-ops/portal.ts` owns the approver record
+   (`campaign-ops:client-approver`, kind `client-stakeholder`, mode `link-only`) and
+   a link record per (change set, approver) (`campaign-ops:approval-link`). The token
+   itself is a `sharing:link` row of type `campaign_approval`, resourceId
+   `${changeSetId}:${approverId}`, minted on the visitor lane, 7 days. The package
+   renders in the sharing viewer (`/shared/:token`), so the page adds nothing to the
+   entry bundle. The decision is the one public route,
+   `POST /v1/host/openwop-app/public-campaign-approval/:token/decision`.
+2. **Links are minted when the operator asks, not when review opens.** The raw link
+   can be shown only once, and the operator is the one who sends it (no email in
+   v1), so "Send to client" on the in-review card mints a link per active approver
+   and shows each once. Sending again replaces that pair's earlier link.
+3. **Who the change is written under.** A client approver has no authority to write
+   a page, so the approved change is written under the agency member who **sent**
+   the link (recorded on the link record). ~~Execution takes its writer from the
+   execute run's person (`orgScopeSubject`, which the decide handler sets to the
+   writer), not from `decidedBy`.~~ (Superseded by 11: the writer is recorded at the
+   decision and read from the approval.) That member's own authority is re-checked at every
+   write: an editor's link cannot publish a live page (`not_authorized`). This
+   generalizes as-built correction 4 above.
+4. **The approval row names the approver record, never an email:**
+   `decidedBy = client-approver:<approverId>`. The email stays on the approver
+   record, which the agency can remove. This replaces D5's
+   `{kind, approverId, email, tokenId}`.
+5. **Under the `client` policy an agency member cannot approve** (403
+   `client_approval_required`), but may still reject. Setting the policy needs the
+   portal toggle and at least one active approver; the last active approver of a
+   `client` client cannot be removed (409 `last_client_approver`).
+6. **Every use re-checks** (ADR 0887): both toggles (`campaign-ops` and
+   `campaign-ops-client-portal`), the client `active` on the `client` policy, the
+   approver `active`, the link record, and the change set `in_review`. Revoking an
+   approver also deletes their links at once, so a test that only revokes cannot
+   witness the per-use check; the test writes a revoked record with a surviving
+   link to do so.
+7. **Refusals are the sharing lane's own 404, byte for byte** (unknown, expired,
+   revoked, wrong hash, decided by someone else, portal off). The first draft used
+   its own message, which would have told a holder "valid link, wrong hash" from "no
+   such link"; the test compares the bodies. A dead link's package read throws the
+   same 404 rather than returning null, because null is sharing's `resource-gone`
+   ("the content was deleted"), which is false here.
+8. **Limits (ADR 0934):** the decision takes the per-IP counter (60 per 10 min) and
+   the per-link counter (10 per 10 min), failing closed. The package read takes a
+   per-link counter (120 per 10 min), failing open.
+9. **`client_and_agency` is not built** (P2). ADR 0942 D9 will compile it as one vote
+   from EACH party; a bare `requiredApprovals: 2` (as D4 above says) would let two
+   agency votes pass with no client, and must not be built.
+10. **Toggle:** `campaign-ops-client-portal` is a sub-toggle (`extraToggleDefaults`,
+    default off, tenant), so it needs no seed acknowledgement of its own.
+11. **Security review (2026-10-19) — the sender holds the link, so a client
+    approval must never be weaker than an agency one.** The review found that the
+    member who sends a link can open it and approve as the client, and that the
+    member who proposed a change could do exactly that with their own change.
+    Fixed:
+    - **Sending needs agency approver standing** (`agencyStandInRefusal`):
+      `approvals:respond` and `workspace:write` on the client org, and not the
+      proposer while someone else could approve (the CMS rule, sole-approver
+      escape kept). Re-checked when the client decides; a sender who lost it makes
+      the link dead (409 `package_stale` to the client: "the agency will send a
+      new link").
+    - **Members cannot mint approval links** through the generic sharing route
+      (`SYSTEM_MINT_ONLY` in `sharingService.ts`): only the visitor lane, from
+      `sendApprovalLinks`. Before this, a member who could read approver ids could
+      mint a working decision link that wrote under the sender's authority.
+    - **The writer is fixed at the decision**, in `campaign-ops:client-decision`,
+      and execution reads it from the approval (`writerOf`), never from the run.
+      This supersedes correction 3's "from the execute run's person": a fork
+      re-stamps the run's person, so a fork could have written as the forker.
+
+    **Residual, accepted for v1:** a member who may approve for the agency and
+    sends a link can still open it. That is no more than the authority they
+    already hold under the `agency` policy, and the audit names both the link's
+    sender and the approver record. Emailing the link (P2) so no member sees it is
+    the real fix.
+12. **Open items from the review, not fixed here:**
+    - an expired link answers sharing's 410 `expired` before the per-use checks,
+      not D5's uniform 404 (it only tells a token holder that the token existed);
+    - the approver's own email and name have no erasure path besides an agency
+      admin removing them, and the approval row's client comment (`note`) is not
+      a redactor text field;
+    - `sign_request` and `booking_manage` links can also be minted on the member
+      lane; the same `SYSTEM_MINT_ONLY` rule probably applies (CRM's to decide).
+
+
 ## Implementation record
 
 | Phase | Commit / PR | Tests |
 |---|---|---|
 | P0 | campaign-ops change-set PR (follows #5015) | `test/campaign-ops-approval-execution.test.ts` |
+| P1 | campaign-ops client-portal PR (follows #5022 and #5026) | `test/campaign-ops-client-portal.test.ts` (10, sabotage ×9); frontend `operationsPage.test.tsx`, `publicApprovalView.test.tsx` |
+| P1 on ADR 0958 | `feat/0958-p1` (ADR 0958 P1) | the approver and link moved onto ADR 0958 grants; `test/adr0958-p1-link-only.test.ts` (8) |

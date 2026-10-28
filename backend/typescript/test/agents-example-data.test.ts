@@ -11,20 +11,35 @@
  *   - scheduler jobs are durable + tenant-scoped + roster-filterable, and a
  *     :trigger on a workflow-bearing job starts a real run
  *   - PATCH /host/openwop-app/agents/:id edits a user-authored agent's instructions
+ *
+ * Order-independent: the first seed runs in `beforeAll` (its response is asserted
+ * in case 1, never in the hook), the cold-registry case re-hydrates what it
+ * drops, and the heal case never picks the board the heartbeat case uses.
+ *
+ * TST-BNA-1. Red when: `OPENWOP_DEMO_SEED_ENABLED=false` stops skipping, heal no
+ * longer restores a missing board or a deleted schedule (deleted in the MINTED
+ * `<tenant>:<rosterId>:<slug>` id shape), or a persona PATCH is accepted.
  */
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
+import { __setMockArchiveGuardForTest } from '../src/host/heartbeatService.js';
 import { toWireRunId } from '../src/host/v2Ids.js';
 import { getAgentRegistry } from '../src/executor/agentRegistry.js';
 
 let server: http.Server;
 let BASE: string;
 const TOKEN = 'dev-token';
+/** The FIRST seed's response, taken in beforeAll and asserted in case 1. */
+let firstSeed: { status: number; body: { seeded: boolean; agents: number; domains: string[] } };
+const SEED_DOMAINS = ['user-agents', 'roster', 'workflows', 'boards', 'cards', 'schedules', 'org-chart'];
 
 beforeAll(async () => {
+  // ADR 0963 D8 — the seeded twins are all mock archive; this file tests the
+  // loop's mechanics over them, so the archive guard is off here (and pinned elsewhere).
+  __setMockArchiveGuardForTest(false);
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   const app = await createApp({
     port: 0,
@@ -36,9 +51,13 @@ beforeAll(async () => {
   await new Promise<void>((res) => {
     server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
   });
+  // Every case below reads the seeded tenant; seeding here (not in case 1)
+  // keeps the file order-independent. No assertions in the hook.
+  firstSeed = await api('/host/openwop-app/example-data/seed', { method: 'POST', body: '{}' });
 });
 
 afterAll(async () => {
+  __setMockArchiveGuardForTest(true);
   await new Promise<void>((res) => server.close(() => res()));
 });
 
@@ -66,11 +85,11 @@ interface RosterEntry {
 
 describe('agents-demo backend foundations', () => {
   it('seeds the 10 canonical work-twins (incl. the Chief of Staff) and is idempotent', async () => {
-    const first = await api<{ seeded: boolean; agents: number; domains: string[] }>('/host/openwop-app/example-data/seed', { method: 'POST', body: '{}' });
+    const first = firstSeed;
     expect(first.status).toBe(200);
     expect(first.body.seeded).toBe(true);
     expect(first.body.agents).toBe(10); // 8 twins + Iris + Executive Operations (ADR 0032)
-    expect(first.body.domains).toEqual(['user-agents', 'roster', 'workflows', 'boards', 'cards', 'schedules', 'org-chart']);
+    expect(first.body.domains).toEqual(SEED_DOMAINS);
 
     const roster = await api<{ roster: RosterEntry[] }>('/host/openwop-app/roster');
     expect(roster.body.roster.length).toBe(10);
@@ -92,7 +111,7 @@ describe('agents-demo backend foundations', () => {
     // Re-seed is a no-op (does not clobber the existing roster).
     const second = await api<{ seeded: boolean; domains: string[] }>('/host/openwop-app/example-data/seed', { method: 'POST', body: '{}' });
     expect(second.body.seeded).toBe(false);
-    expect(second.body.domains).toEqual(['user-agents', 'roster', 'workflows', 'boards', 'cards', 'schedules', 'org-chart']);
+    expect(second.body.domains).toEqual(SEED_DOMAINS);
     const rosterAgain = await api<{ roster: RosterEntry[] }>('/host/openwop-app/roster');
     expect(rosterAgain.body.roster.length).toBe(10);
   });
@@ -113,7 +132,8 @@ describe('agents-demo backend foundations', () => {
       expect(personas).toContain(name);
     }
     // The roster↔inventory link: the persona's inventory agentId is the
-    // deterministic `user.<tenant>.<slug>` the roster entry's agentRef points at.
+    // deterministic, persona-scoped `user.<slug>` the roster entry's agentRef
+    // points at (ADR 0379 P2 — the tenant lives in the row, not the id).
     const idris = inv.body.agents.find((a) => a.persona === 'Idris')!;
     expect(idris.agentId).toBe('user.idris');
     expect(idris.modelClass).toBe('chat');
@@ -151,6 +171,20 @@ describe('agents-demo backend foundations', () => {
     expect(idrisBoard.cards.length).toBeGreaterThan(0);
   });
 
+  // ADR 0963 D8 — with the guard ON (production), a seeded twin's Check now takes
+  // nothing: every card it has names a Work-Twin mock archive (ADR 0939).
+  it('with the archive guard on, a seeded twin picks nothing and says why', async () => {
+    __setMockArchiveGuardForTest(true);
+    try {
+      const roster = await api<{ roster: RosterEntry[] }>('/host/openwop-app/roster');
+      const idris = roster.body.roster.find((r) => r.roleKey === 'it-service-desk')!;
+      const checked = await api<{ picked: boolean; reason?: string }>(`/host/openwop-app/roster/${idris.rosterId}/check`, { method: 'POST', body: '{}' });
+      expect(checked.body).toMatchObject({ picked: false, reason: 'mock_archive' });
+    } finally {
+      __setMockArchiveGuardForTest(false);
+    }
+  });
+
   it('heartbeat check claims a To Do card, starts a run, and moves it to Working', async () => {
     const roster = await api<{ roster: RosterEntry[] }>('/host/openwop-app/roster');
     // Idris (IT Service Desk) is `guided`, and its first To Do card is routine
@@ -176,15 +210,14 @@ describe('agents-demo backend foundations', () => {
     // (tmpl.it.incident-triage → mock-ai draft steps) must execute to a terminal
     // `completed` state, not just be created. Dispatch is async (setImmediate),
     // so poll until terminal.
-    let status = 'pending';
-    for (let i = 0; i < 50 && status !== 'completed' && status !== 'failed'; i++) {
-      // The heartbeat answers the bare run id; a major-2 run read takes it bound (`dev-token` acts in `default`).
-      const run = await api<{ status: string }>(`/runs/${encodeURIComponent(toWireRunId(checked.body.runId, 'default'))}`);
+    // The heartbeat answers the bare run id; a major-2 run read takes it bound (`dev-token` acts in `default`).
+    const runPath = `/runs/${encodeURIComponent(toWireRunId(checked.body.runId, 'default'))}`;
+    const status = await vi.waitFor(async () => {
+      const run = await api<{ status: string }>(runPath);
       expect(run.status).toBe(200);
-      status = run.body.status;
-      if (status === 'completed' || status === 'failed') break;
-      await new Promise((r) => setTimeout(r, 20));
-    }
+      expect(['completed', 'failed']).toContain(run.body.status);
+      return run.body.status;
+    }, { timeout: 10_000, interval: 20 });
     expect(status).toBe('completed');
 
     // The card moved out of To Do (into Working).
@@ -251,17 +284,22 @@ describe('agents-demo backend foundations', () => {
     expect(patched.body.systemPrompt).toBe('You are Edith. Updated instructions.');
 
     // persona is immutable.
-    const rejected = await api<{ error: string }>(`/host/openwop-app/agents/${created.body.agentId}`, {
+    const rejected = await api<{ error: string; message: string }>(`/host/openwop-app/agents/${created.body.agentId}`, {
       method: 'PATCH',
       body: JSON.stringify({ persona: 'Renamed' }),
     });
     expect(rejected.status).toBe(400);
+    expect(rejected.body.error).toBe('validation_error');
+    expect(rejected.body.message).toContain('`persona` is immutable');
+    const after = await api<{ persona: string; systemPrompt?: string }>(`/host/openwop-app/agents/${created.body.agentId}`);
+    expect(after.status).toBe(200);
+    expect(after.body.persona).toBe('Edith');
   });
 
   it('skips demo seeding entirely when OPENWOP_DEMO_SEED_ENABLED=false (white-label)', async () => {
     // The toggle is read per-call, so a branded deployment can ship a clean
     // tenant with no demo personas. Early-return shape is `agents: 0`, distinct
-    // from the idempotent no-op (`seeded:false, agents:6`).
+    // from the idempotent no-op (`seeded:false, agents:10`).
     process.env.OPENWOP_DEMO_SEED_ENABLED = 'false';
     try {
       const res = await api<{ seeded: boolean; agents: number }>('/host/openwop-app/example-data/seed', {
@@ -282,21 +320,30 @@ describe('agents-demo backend foundations', () => {
     // user-agent rows (written by the seed in the first test) intact. Runs last;
     // vitest isolates module state per file, so this reset can't leak into other
     // suites.
-    getAgentRegistry()._resetForTest();
-    expect(getAgentRegistry().get('user.idris', 'default')).toBeNull(); // cold: not in-process
+    // Every user agent the tenant can see now, so the `finally` can put the
+    // registry back exactly (other cases read it; shuffle may run them after).
+    const inv = await api<{ agents: Array<{ agentId: string; packName: string }> }>('/agents');
+    const userAgentIds = inv.body.agents.filter((a) => a.packName === 'user:default').map((a) => a.agentId);
+    try {
+      getAgentRegistry()._resetForTest();
+      expect(getAgentRegistry().get('user.idris', 'default')).toBeNull(); // cold: not in-process
 
-    // resolve() falls through to the agent-pack resolver, which now hydrates a
-    // user/seeded agent from storage on a miss — so the chat-responder dispatch
-    // and the by-id inventory routes route correctly on any instance.
-    // ADR 0379 P2 — user agents live under the (tenant, agentId) registry key,
-    // so the read-through carries the tenant (as every production caller does).
-    const hydrated = await getAgentRegistry().resolve('user.idris', 'default');
-    expect(hydrated?.persona).toBe('Idris');
-    expect(hydrated?.ownerTenant).toBe('default'); // tenant-scoping preserved
-    // Now cached in-process (last-write-wins register).
-    expect(getAgentRegistry().get('user.idris', 'default')?.persona).toBe('Idris');
-    // A tenant-less lookup deliberately sees pack agents only.
-    expect(getAgentRegistry().get('user.idris')).toBeNull();
+      // resolve() falls through to the agent-pack resolver, which now hydrates a
+      // user/seeded agent from storage on a miss — so the chat-responder dispatch
+      // and the by-id inventory routes route correctly on any instance.
+      // ADR 0379 P2 — user agents live under the (tenant, agentId) registry key,
+      // so the read-through carries the tenant (as every production caller does).
+      const hydrated = await getAgentRegistry().resolve('user.idris', 'default');
+      expect(hydrated?.persona).toBe('Idris');
+      expect(hydrated?.ownerTenant).toBe('default'); // tenant-scoping preserved
+      // Now cached in-process (last-write-wins register).
+      expect(getAgentRegistry().get('user.idris', 'default')?.persona).toBe('Idris');
+      // A tenant-less lookup deliberately sees pack agents only.
+      expect(getAgentRegistry().get('user.idris')).toBeNull();
+    } finally {
+      // Re-hydrate what the reset dropped (pack agents re-resolve on demand).
+      for (const id of userAgentIds) await getAgentRegistry().resolve(id, 'default');
+    }
   });
 });
 
@@ -307,27 +354,32 @@ describe('demo seed heal mode — restores missing surfaces (live bug 2026-06-04
   // so "Load demo data" could never bring the boards back.
   it('plain re-seed does NOT resurrect a deleted board; heal:true restores it with cards', async () => {
     const { listBoardsWithCards, deleteBoard } = await import('../src/host/kanbanService.js');
-    const { deleteJob, getJob } = await import('../src/host/schedulingService.js');
+    const { deleteJob, getJob, listJobsByRoster } = await import('../src/host/schedulingService.js');
+    const { listRoster } = await import('../src/host/rosterService.js');
 
-    // Baseline from the suite's earlier seeding: every agent has a board.
+    // Baseline from the beforeAll seed: every agent has a board. Never pick the
+    // IT Service Desk (Idris) board — the heartbeat case claims its card.
+    const idrisId = (await listRoster('default')).find((r) => r.roleKey === 'it-service-desk')?.rosterId;
     const before = await listBoardsWithCards('default');
-    expect(before.length).toBeGreaterThan(0);
-    const victim = before[0];
-    expect(victim.rosterId).toBeTruthy();
-    expect(await deleteBoard(victim.id)).toBe(true);
-    // Also lose one schedule job for the same roster member, when present.
-    const lostJobIds: string[] = [];
-    for (const suffix of ['daily', 'hourly', 'weekly', 'standup', 'digest', 'triage', 'report', 'sync']) {
-      const id = `${victim.rosterId}:${suffix}`;
-      if (await getJob(id)) { await deleteJob(id); lostJobIds.push(id); }
-    }
+    const victim = before.find((b) => b.rosterId && b.rosterId !== idrisId);
+    expect(victim, 'a seeded board other than Idris\'s').toBeDefined();
+    const victimRoster = victim!.rosterId!;
+    expect(await deleteBoard(victim!.id)).toBe(true);
+    // Also lose one schedule job for the same member, in the id shape the seed MINTS.
+    const jobs = await listJobsByRoster('default', victimRoster);
+    const lost = jobs.find((j) => j.jobId.startsWith(`default:${victimRoster}:`));
+    expect(lost, 'positive control: the member has a minted schedule to lose').toBeDefined();
+    expect(await deleteJob(lost!.jobId)).toBe(true);
+    expect(await getJob(lost!.jobId)).toBeNull();
+    const lostJobIds = [lost!.jobId];
 
     // Silent auto-seed shape (no heal): the board MUST stay gone — the auto
     // path must never resurrect a deliberate deletion.
     const plain = await api<{ seeded: boolean; healed?: unknown }>('/host/openwop-app/example-data/seed', { method: 'POST', body: '{}' });
     expect(plain.status).toBe(200);
     expect(plain.body.healed).toBeUndefined();
-    expect((await listBoardsWithCards('default')).some((b) => b.rosterId === victim.rosterId)).toBe(false);
+    expect((await listBoardsWithCards('default')).some((b) => b.rosterId === victimRoster)).toBe(false);
+    expect(await getJob(lost!.jobId)).toBeNull();
 
     // Explicit heal: the board comes back, WITH its sample cards.
     const heal = await api<{ seeded: boolean; healed: { boards: number; schedules: number; profiles: number; prunedLegacy: number; orgChart: boolean } }>(
@@ -336,9 +388,9 @@ describe('demo seed heal mode — restores missing surfaces (live bug 2026-06-04
     );
     expect(heal.status).toBe(200);
     expect(heal.body.healed.boards).toBe(1);
-    expect(heal.body.healed.schedules).toBe(lostJobIds.length);
+    expect(heal.body.healed.schedules).toBe(1);
     expect(heal.body.healed.prunedLegacy).toBe(0); // no legacy personas on a freshly-seeded tenant
-    const after = (await listBoardsWithCards('default')).find((b) => b.rosterId === victim.rosterId);
+    const after = (await listBoardsWithCards('default')).find((b) => b.rosterId === victimRoster);
     expect(after).toBeDefined();
     expect(after!.cards.length).toBeGreaterThan(0);
     for (const id of lostJobIds) expect(await getJob(id)).not.toBeNull();

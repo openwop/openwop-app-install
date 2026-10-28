@@ -12,6 +12,10 @@
  * Covers host/workforceService.ts §seedShowcaseWorkforces + routes/workforces.ts
  * §dashboardRuns + host/demoMode.ts. (The boot-seed lives in index.ts `main()`,
  * which tests don't run, so we seed the showcase directly here.)
+ *
+ * Sabotage-witnessed (grade-tests wave 64): falling back regardless of demo mode
+ * reds the OFF case (8fw5g5-wsf-gate); tagging showcase rows `tenant` reds the
+ * ON case (8fw5g5-wsf-tag).
  */
 
 import { afterAll, beforeAll, afterEach, describe, expect, it } from 'vitest';

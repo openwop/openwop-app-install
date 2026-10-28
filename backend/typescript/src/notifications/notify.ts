@@ -24,7 +24,7 @@ import { runNoticeAudience } from './runNoticeAudience.js';
 import { sanitizeFreeText } from '../byok/textRedaction.js';
 import { getNotificationEmitter } from './emitter.js';
 import { deliverApprovalEmail } from '../host/emailApprovalDelivery.js';
-import { resolveNotificationRecipients } from '../host/approverResolution.js';
+import { gateApproverRefs, resolveNotificationRecipients } from '../host/approverResolution.js';
 
 const KIND_LABEL: Record<InterruptRecord['kind'], string> = {
   approval: 'Approval needed',
@@ -99,15 +99,13 @@ export async function emitInterruptNotification(
     // "who is told" never drifts from "who may approve". Group/role expansion on
     // the interrupt path arrives with RFC 0104; today this targets the on-wire
     // `approverRefs` subjects (which == userIds for bound approvers, ADR 0003).
-    const data2 = (interrupt.data ?? {}) as { approverRefs?: unknown; approversList?: unknown; approverGroupRefs?: unknown; approverRoleRefs?: unknown };
-    const subjectRefs = (Array.isArray(data2.approverRefs) ? data2.approverRefs
-      : Array.isArray(data2.approversList) ? data2.approversList : []).filter((r): r is string => typeof r === 'string');
-    const groupRefs = Array.isArray(data2.approverGroupRefs) ? data2.approverGroupRefs.filter((r): r is string => typeof r === 'string') : [];
-    const roleRefs = Array.isArray(data2.approverRoleRefs) ? data2.approverRoleRefs.filter((r): r is string => typeof r === 'string') : [];
+    // ADR 0942 D7 — the one refs builder, so a gate with delegation off does not
+    // notify delegates who could not vote on it.
+    const gateRefs = gateApproverRefs(interrupt.data);
     const approverOrgId = (run.metadata as Record<string, unknown> | undefined)?.approverOrgId;
     const recipients = (interrupt.kind === 'approval' || interrupt.kind === 'cancellation')
       ? await resolveNotificationRecipients(
-          { approverRefs: subjectRefs, approverGroupRefs: groupRefs, approverRoleRefs: roleRefs },
+          gateRefs,
           { tenantId: run.tenantId, ...(typeof approverOrgId === 'string' ? { orgId: approverOrgId } : {}) },
         )
       : null;

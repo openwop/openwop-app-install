@@ -22,8 +22,7 @@ import { onWorkflowForked } from '../../host/workflowsRegistry.js';
 import { casRepoint, repointList } from '../../host/forkRepoint.js';
 import { notifyShareableKbSourceChanged } from '../../host/shareableKb.js';
 import { OpenwopError } from '../../types.js';
-import { cleanString, cleanOpaqueToken } from '../../host/boundedStrings.js';
-import { scrubSecretShaped } from '../../host/redactSecrets.js';
+import { cleanString, cleanOpaqueToken, refuseIfScrubbed } from '../../host/boundedStrings.js';
 import { ensureSubjectBoard, subjectBoardId, deleteBoard } from '../../host/kanbanService.js';
 import { clearSubjectNotes } from '../../host/subjectMemory.js';
 import { clearSubjectKnowledge, getSubjectKnowledge } from '../../host/subjectKnowledge.js';
@@ -161,10 +160,7 @@ const MAX_MILESTONES = 50;
  *  the caller keeps their text and decides. (`cleanString` itself is unchanged —
  *  it guards every other caller as defense-in-depth.) */
 function refuseSecretShaped(raw: unknown, field: string): void {
-  const trimmed = String(raw ?? '').trim();
-  if (trimmed && scrubSecretShaped(trimmed) !== trimmed) {
-    throw new OpenwopError('validation_error', `\`${field}\` contains a secret-shaped token (an API key, or a 40+ character unbroken blob such as a long hash). The server will not store it, and rewriting it silently would corrupt your text — remove or break up the token.`, 400, { field });
-  }
+  refuseIfScrubbed(raw, field, `\`${field}\` contains a secret-shaped token (an API key, or a 40+ character unbroken blob such as a long hash). The server will not store it, and rewriting it silently would corrupt your text — remove or break up the token.`);
 }
 
 /** Validate + cap a charter patch, dropping unknown/empty fields (full replace). */

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Behavioural tests for scripts/custom-domain-edge.sh (ADR 0906 P3).
+# Behavioural tests for scripts/custom-domain-edge.sh (ADR 0906 P3; repoint: ADR 0940 P2).
 #
 # Runs against a stub `gcloud` on PATH that keeps "resources" as files in a temp
 # dir. Touches nothing real; no GCP call can happen because the real gcloud is
@@ -109,5 +109,11 @@ check "host runs no gcloud" 0 "$(calls)"
 case "$out" in *"--domain=pages.example.com --type=PER_PROJECT_RECORD"*) ok "host prints a PER_PROJECT_RECORD DNS authorization" ;; *) bad "host output lacks PER_PROJECT_RECORD" ;; esac
 case "$out" in *"owp-cd-"*"-cert --domains=pages.example.com --dns-authorizations="*) ok "host certificate uses DNS authorization" ;; *) bad "host certificate lacks --dns-authorizations" ;; esac
 
-echo "  $pass passed, $fail failed"
+
+# Repoint now uses a fingerprint-conditional Compute PATCH. The controller's
+# transport-level fake enforces fingerprints, request-id deduplication, async
+# errors and ownership-sensitive rollback; no GCP call can escape the fake.
+python3 "$ROOT/scripts/test-custom-domain-repoint.py" || fail=$((fail+1))
+
+echo "  $pass base-edge checks passed, $fail failed (conditional repoint suite above)"
 [ "$fail" -eq 0 ]

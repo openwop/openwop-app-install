@@ -58,7 +58,14 @@ const NODE_PACK_ROOT = join(REPO, 'packs');
  * new chain shipped a node that cannot run — the exact production failure this
  * file exists to prevent.
  */
-const MISSING_CONFIG_CEILING = 42;
+const MISSING_CONFIG_CEILING = 50;
+// 42 → 50 (2026-10-20, ADR 0955 P5) — a DECLARED raise against "never raise", for the
+// shape this header's P5 note calls honest: the three new campaign-journeys blueprints
+// carry 4 `core.trigger.event.eventName` and 4 `email-send.from` as REQUIRED chain params
+// with no default (which event, which sender address), exactly like `welcome-series`,
+// which is already counted. A blank copy cannot send: every send sits behind a sign-off
+// gate and the builder's preflight asks for both. The count is of nodes, so a new chain
+// of this shape cannot avoid it; lowering it needs the builder-side completion state.
 
 /** typeId → required config keys, read from each node pack's configSchema. */
 function requiredConfigKeyMap(): Map<string, string[]> {

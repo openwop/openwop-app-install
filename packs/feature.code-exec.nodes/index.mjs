@@ -36,6 +36,25 @@ function inputs(ctx) {
   };
 }
 
+import { createHash } from 'node:crypto';
+
+const STDIN_PREVIEW_CHARS = 2_000;
+
+/** ADR 0995 D1 — the approval is bound to WHAT it approved. On resume the node re-reads its
+ *  inputs, and an unpinned run resolves its definition at head, so the code could have changed
+ *  since the gate was raised. A resume key derived from the content makes a changed program miss
+ *  the seeded resolution and ask again, instead of running under an approval of different code. */
+function approvalKey(language, code, stdin) {
+  return `code-exec:${createHash('sha256').update([language, stdin ?? '', code].join('\u0000')).digest('hex').slice(0, 32)}`;
+}
+
+/** interrupt.md §approval — the canonical resume value is `{ action }`; `accept` is the wire
+ *  spelling of `approve` (the equivalence `resumeActionSpelling` admits on the route). */
+function isApproved(decision) {
+  const action = decision && typeof decision === 'object' ? decision.action : undefined;
+  return action === 'approve' || action === 'accept';
+}
+
 export async function run(ctx) {
   if (typeof ctx.runSandboxedCode !== 'function') {
     throw Object.assign(
@@ -47,22 +66,42 @@ export async function run(ctx) {
   if (!code) {
     throw Object.assign(new Error('`code` is required'), { code: 'validation_error' });
   }
-  // ADR 0114 Phase 3 — HITL approval BEFORE execution. Code execution is
-  // high-blast-radius, so it suspends for a human decision (interrupt.md). On a
-  // host with no interrupt primitive the gate is skipped. A declined approval
-  // returns a refused-but-successful node outcome (no execution), never silently
-  // runs. This per-exec approval is the load-bearing safety control now that the
-  // in-process WASI runtime is on by default (ADR 0146).
-  if (typeof ctx.suspend === 'function') {
-    const decision = await ctx.suspend({
-      reason: 'approval',
-      kind: 'code-exec',
-      prompt: { title: 'Run code?', body: `Approve running this ${language} snippet (${code.length} chars) in the sandbox.` },
-    });
-    const approved = decision?.decision === 'approved' || decision?.approved === true;
-    if (!approved) {
-      return { status: 'success', outputs: { exitCode: -1, stdout: '', stderr: 'execution declined by approver', timedOut: false, files: [], declined: true } };
-    }
+  // ADR 0114 Phase 3 — HITL approval BEFORE execution. Code execution is high-blast-radius, so it
+  // suspends for a human decision (interrupt.md). A declined approval returns a refused-but-
+  // successful node outcome (no execution), never silently runs.
+  //
+  // CORRECTED (ADR 0995 D1/D2) — this gate could not be passed. It read `{decision:'approved'}` /
+  // `{approved:true}`, a shape no resolver produces: both approval cards resolve with the
+  // interrupt.md canonical `{action:'approve'}`, so every real approval came back "declined". The
+  // prompt was an object (`{title, body}`) where every card and the wire projector read a
+  // string, and it named the language and size but never showed the code. And a host with no
+  // `ctx.suspend` ran the code unapproved; it now refuses.
+  if (typeof ctx.suspend !== 'function') {
+    throw Object.assign(
+      new Error('host does not expose ctx.suspend — code execution needs a human approval and this host cannot ask for one (ADR 0995 D1).'),
+      { code: 'capability_not_provided', capability: 'interrupt' },
+    );
+  }
+  const decision = await ctx.suspend({
+    reason: 'approval',
+    kind: 'code-exec',
+    resumeKey: approvalKey(language, code, stdin),
+    title: 'Run code?',
+    prompt: `Run this ${language} code in the sandbox?`,
+    actions: ['approve', 'reject'],
+    // ADR 0995 D2 — the exact source the runner receives, so the approver sees what they approve.
+    // Rendered as text only by `GateEvidence`; never reaches the wire (the approval projector
+    // builds a closed ApprovalData).
+    codeExec: {
+      language,
+      code,
+      ...(typeof stdin === 'string' && stdin.length > 0
+        ? { stdinPreview: stdin.slice(0, STDIN_PREVIEW_CHARS), stdinLength: stdin.length }
+        : {}),
+    },
+  });
+  if (!isApproved(decision)) {
+    return { status: 'success', outputs: { exitCode: -1, stdout: '', stderr: 'execution declined by approver', timedOut: false, files: [], declined: true } };
   }
   const r = await ctx.runSandboxedCode({ language, code, stdin, timeoutMs });
   const result = {

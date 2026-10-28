@@ -22,10 +22,11 @@
  * asserts the HONEST FAILURE contract instead of forcing completion: every
  * chain runs every upstream read node for REAL (proving the real CRM/
  * analytics/connector wiring), then fails cleanly at its first AI node with
- * `error.code === 'provider_not_supported'` — the canonical, reproducible
- * "this node genuinely cannot run without a configured provider" contract,
- * pinned here so a future regression (e.g. a default leaking through, or the
- * error code silently changing) is caught.
+ * `error.code === 'openwop-app.byok_required'` (it was `provider_not_supported`
+ * until the P3 correction below — that code pinned the missing-provider bug) —
+ * the reproducible "this node cannot run without a credential" contract. The
+ * managed-provider key is cleared in `beforeAll`, so no case can reach a live
+ * provider.
  *
  * BUGS FOUND + FIXED AT THE ROOT (`examples/workflow-chain-packs/exec-ops/
  * pack.json`):
@@ -99,7 +100,12 @@ import { recordEvent } from '../src/features/analytics/analyticsService.js';
 let BASE: string;
 let server: http.Server;
 
+let savedManagedKey: string | undefined;
 beforeAll(async () => {
+  // The cases assert the NO-credential failure (`byok_required`): clear the
+  // managed-provider key here so they never depend on — or reach — a live provider.
+  savedManagedKey = process.env.MINIMAX_API_KEY;
+  delete process.env.MINIMAX_API_KEY;
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
   process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
@@ -113,13 +119,20 @@ beforeAll(async () => {
   const analytics = getToggleDefault('analytics');
   if (analytics) await saveConfig({ ...analytics, status: 'on' }, 'test');
 });
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
+afterAll(async () => {
+  if (savedManagedKey === undefined) delete process.env.MINIMAX_API_KEY;
+  else process.env.MINIMAX_API_KEY = savedManagedKey;
+  await new Promise<void>((res) => server.close(() => res()));
+});
 
-interface Res<T = any> { status: number; body: T }
-interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res> }
+interface Res<T> { status: number; body: T }
+interface Client {
+  get: <T = unknown>(p: string) => Promise<Res<T>>;
+  post: <T = unknown>(p: string, b?: unknown) => Promise<Res<T>>;
+}
 function client(): Client {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T,>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
@@ -128,9 +141,9 @@ function client(): Client {
     const sc = getSetCookies(res.headers);
     for (const c of sc as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
     const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
+    return { status: res.status, body: out as T };
   };
-  return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b) };
+  return { get: <T,>(p: string) => call<T>('GET', p), post: <T,>(p: string, b?: unknown) => call<T>('POST', p, b) };
 }
 
 let n = 0;
@@ -139,30 +152,33 @@ async function ownerOrg(): Promise<{ owner: Client; orgId: string; tenantId: str
   const owner = client();
   const r = await owner.post('/host/openwop-app/test/login', { email: `execops-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   return { owner, orgId: org.body.orgId, tenantId };
 }
 const c = (orgId: string, suffix = ''): string => `/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}${suffix}`;
 
 interface RunSnapshot { status: string; error?: { code: string; message: string } }
+const POLL_ATTEMPTS = 80;
+/** Poll until the run settles; THROWS (naming the run and the poll count) if it
+ *  never does, so a case cannot go on to read a half-written debug bundle. */
 async function pollRun(owner: Client, runId: string): Promise<RunSnapshot> {
   let snap: RunSnapshot = { status: 'pending' };
-  for (let i = 0; i < 80; i++) {
-    const r = await owner.get(`/runs/${encodeURIComponent(runId)}`);
+  for (let i = 0; i < POLL_ATTEMPTS; i++) {
+    const r = await owner.get<RunSnapshot>(`/runs/${encodeURIComponent(runId)}`);
     expect(r.status, JSON.stringify(r.body)).toBe(200);
-    snap = r.body as RunSnapshot;
-    if (snap.status === 'completed' || snap.status === 'failed' || snap.status === 'cancelled' || snap.status.startsWith('waiting')) break;
+    snap = r.body;
+    if (snap.status === 'completed' || snap.status === 'failed' || snap.status === 'cancelled' || snap.status.startsWith('waiting')) return snap;
     await new Promise((res) => setTimeout(res, 25));
   }
-  return snap;
+  throw new Error(`run ${runId} did not settle after ${POLL_ATTEMPTS} polls (last status ${snap.status})`);
 }
 
 interface BundleEvent { type?: string; nodeId?: string; payload?: Record<string, unknown> }
 async function bundleEvents(owner: Client, runId: string): Promise<BundleEvent[]> {
-  const b = await owner.get(`/runs/${encodeURIComponent(runId)}/debug-bundle`);
+  const b = await owner.get<{ events?: BundleEvent[] }>(`/runs/${encodeURIComponent(runId)}/debug-bundle`);
   expect(b.status, JSON.stringify(b.body)).toBe(200);
-  return (b.body.events as BundleEvent[]) ?? [];
+  return b.body.events ?? [];
 }
 function completedOutputs(events: BundleEvent[], nodeSuffix: string): Record<string, unknown> {
   const ev = events.find((e) => e.type === 'node.completed' && e.nodeId?.endsWith(`_${nodeSuffix}`));
@@ -187,9 +203,9 @@ describe('exec-ops.daily-briefing — real reads, honest missing-credential fail
     const expanded = expandChain(found!.chain, { params });
     registerWorkflow(expanded);
 
-    const create = await owner.post('/runs', { workflowId: expanded.workflowId, inputs: params });
+    const create = await owner.post<{ runId: string }>('/runs', { workflowId: expanded.workflowId, inputs: params });
     expect(create.status, JSON.stringify(create.body)).toBe(201);
-    const runId = create.body.runId as string;
+    const runId = create.body.runId;
 
     const snap = await pollRun(owner, runId);
     expect(snap.status).toBe('failed');
@@ -210,6 +226,9 @@ describe('exec-ops.daily-briefing — real reads, honest missing-credential fail
     // WF-ANL-2 — CONTENT, not truthiness: `{}` is truthy, so the old
     // `.toBeTruthy()` passed over `summarize(tenantId, '')`. Asserted the way
     // the CRM siblings above are.
+    // Content of the summary, NOT its config lane: inputs carry orgId here, so a
+    // node reading only ctx.inputs passes this (measured, 8fw5g5-eoe-inputsonly).
+    // The config lane is the WF-ANL-1 case below.
     const metrics = completedOutputs(events, 'metrics').summary as { total: number; byType: Record<string, number>; topPaths: { path: string }[] };
     expect(metrics.total).toBe(1);
     expect(metrics.byType.pageview).toBe(1);
@@ -246,10 +265,10 @@ describe('WF-ANL-1 — RFC 0013 Path A: the org must reach the analytics node th
     expect(found).toBeTruthy();
     const expanded = expandChain(found!.chain, { params: { orgId, focusAreas: 'pipeline risk' } });
     registerWorkflow(expanded);
-    const create = await owner.post('/runs', { workflowId: expanded.workflowId, inputs: {} });
+    const create = await owner.post<{ runId: string }>('/runs', { workflowId: expanded.workflowId, inputs: {} });
     expect(create.status, JSON.stringify(create.body)).toBe(201);
 
-    const runId = create.body.runId as string;
+    const runId = create.body.runId;
     await pollRun(owner, runId);
     const events = await bundleEvents(owner, runId);
     // CONTROL: the CRM node reads the same frozen config and sees the deal.
@@ -273,10 +292,10 @@ describe('WF-ANL-1 — RFC 0013 Path A: the org must reach the analytics node th
     expect(found).toBeTruthy();
     const expanded = expandChain(found!.chain, { params: { period: '2026-06', audience: 'the board', orgId } });
     registerWorkflow(expanded);
-    const create = await owner.post('/runs', { workflowId: expanded.workflowId, inputs: {} });
+    const create = await owner.post<{ runId: string }>('/runs', { workflowId: expanded.workflowId, inputs: {} });
     expect(create.status, JSON.stringify(create.body)).toBe(201);
 
-    const runId = create.body.runId as string;
+    const runId = create.body.runId;
     await pollRun(owner, runId);
     const events = await bundleEvents(owner, runId);
     const kpis = completedOutputs(events, 'kpis').summary as { total: number; byType: Record<string, number> };
@@ -288,9 +307,9 @@ describe('WF-ANL-1 — RFC 0013 Path A: the org must reach the analytics node th
 describe('exec-ops.meeting-prep — real reads, honest missing-credential failure', () => {
   it('reads the real attendee company + degrades the calendar read gracefully (no Connection configured), then fails cleanly at the AI node', async () => {
     const { owner, orgId } = await ownerOrg();
-    const company = await owner.post(c(orgId, '/companies'), { name: 'Northwind' });
+    const company = await owner.post<{ companyId: string }>(c(orgId, '/companies'), { name: 'Northwind' });
     expect(company.status, JSON.stringify(company.body)).toBe(201);
-    const companyId = company.body.companyId as string;
+    const companyId = company.body.companyId;
 
     const found = getChain('exec-ops.meeting-prep');
     expect(found, 'exec-ops.meeting-prep chain must be loaded at boot').toBeTruthy();
@@ -298,9 +317,9 @@ describe('exec-ops.meeting-prep — real reads, honest missing-credential failur
     const expanded = expandChain(found!.chain, { params });
     registerWorkflow(expanded);
 
-    const create = await owner.post('/runs', { workflowId: expanded.workflowId, inputs: params });
+    const create = await owner.post<{ runId: string }>('/runs', { workflowId: expanded.workflowId, inputs: params });
     expect(create.status, JSON.stringify(create.body)).toBe(201);
-    const runId = create.body.runId as string;
+    const runId = create.body.runId;
 
     const snap = await pollRun(owner, runId);
     expect(snap.status).toBe('failed');
@@ -332,9 +351,9 @@ describe('exec-ops.board-update — real reads, honest missing-credential failur
     const expanded = expandChain(found!.chain, { params });
     registerWorkflow(expanded);
 
-    const create = await owner.post('/runs', { workflowId: expanded.workflowId, inputs: params });
+    const create = await owner.post<{ runId: string }>('/runs', { workflowId: expanded.workflowId, inputs: params });
     expect(create.status, JSON.stringify(create.body)).toBe(201);
-    const runId = create.body.runId as string;
+    const runId = create.body.runId;
 
     const snap = await pollRun(owner, runId);
     expect(snap.status).toBe('failed');
@@ -344,6 +363,9 @@ describe('exec-ops.board-update — real reads, honest missing-credential failur
     // BUG-2 fix proof again, for board-update's own `pipeline` node.
     expect((completedOutputs(events, 'pipeline').deals as unknown[]).length).toBe(1);
     // WF-ANL-2 — same vacuity, same fix, on board-update's own analytics node.
+    // NOT the config-lane witness: this run is created WITH `inputs: params`, so
+    // `orgId` also reaches the node through ctx.inputs. The config lane is held by
+    // the WF-ANL-1 board-update case above (8fw5g5-eoe-kpisbind). Twin by design.
     const kpis = completedOutputs(events, 'kpis').summary as { total: number; byType: Record<string, number> };
     expect(kpis.total).toBe(1);
     expect(kpis.byType.conversion).toBe(1);

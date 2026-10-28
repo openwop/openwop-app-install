@@ -19,7 +19,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { RUN_DISPATCH_LEASE_MS, RUN_DURATION_CEILING_MS } from '../src/executor/executor.js';
+import { RUN_DISPATCH_LEASE_MS, RUN_DURATION_CEILING_MS, RUN_LEASE_HEARTBEAT_MS } from '../src/executor/executor.js';
 import {
   GRACE_MS,
   OUTBOX_LEASE_MS,
@@ -114,5 +114,11 @@ describe('RFC 0158 §B.5 — the bound is derived from the mechanism', () => {
     // never be reclaimed — but liveness is now demonstrated on its own, much
     // shorter interval.
     expect(RUN_DISPATCH_LEASE_MS).toBeGreaterThan(RUN_DURATION_CEILING_MS);
+    // The SEPARATE half of the title: liveness is demonstrated on the heartbeat
+    // (ADR 0585 P0), an interval far shorter than both the duration ceiling and the
+    // lease. Using the duration as the liveness interval (§B.3's MUST NOT) would
+    // make these equal.
+    expect(RUN_LEASE_HEARTBEAT_MS).toBeLessThan(RUN_DURATION_CEILING_MS);
+    expect(RUN_LEASE_HEARTBEAT_MS).toBeLessThan(RUN_DISPATCH_LEASE_MS);
   });
 });

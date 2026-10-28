@@ -31,6 +31,7 @@ export function AgentBoardPanel({ boardId, persona, avatarUrl, roleTheme, workfl
   const [board, setBoard] = useState<KanbanBoard | null>(null);
   const [cards, setCards] = useState<KanbanCard[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [upNextBump, setUpNextBump] = useState(0);
   const [notice, setNotice] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
@@ -121,9 +122,19 @@ export function AgentBoardPanel({ boardId, persona, avatarUrl, roleTheme, workfl
   const onEditCard = async (cardId: string, patch: CardPatch) => {
     try {
       await patchCard(cardId, patch);
+      // ADR 0963 — an edit can release a held card; Up next must re-read too.
+      setUpNextBump((n) => n + 1);
       await refresh();
       onChanged?.();
     } catch (err) {
+      // ADR 0963 — a conditional note write lost to a newer change (the loop
+      // re-held the card): reload and say so, never a raw status line.
+      if ((err as { status?: unknown }).status === 409) {
+        await refresh();
+        setUpNextBump((n) => n + 1);
+        setError(t('kanban:cardChangedReload'));
+        return;
+      }
       setError(err instanceof Error ? err.message : String(err));
     }
   };
@@ -153,7 +164,7 @@ export function AgentBoardPanel({ boardId, persona, avatarUrl, roleTheme, workfl
           do next; the board below is what a human arranges. Renders nothing when
           ranked selection is off for this workspace. */}
       <div className="u-mb-2">
-        <AgentUpNextPanel boardId={boardId} refreshSignal={refreshSignal} />
+        <AgentUpNextPanel boardId={boardId} refreshSignal={(refreshSignal ?? 0) + upNextBump} />
       </div>
       {readOnly ? <Notice variant="info">{t('boardReadOnly')}</Notice> : null}
       <KanbanBoardView

@@ -8,6 +8,7 @@
  */
 
 import { authedHeaders, config, fetchOpts } from '../../client/config.js';
+import type { PendingApproval } from '../../agents/approvalsClient.js';
 
 export const BASE = '/host/openwop-app/reviews';
 
@@ -94,6 +95,7 @@ export interface ReviewRequest {
   /** ADR 0862 — an assistant action's card fields + the hash the approve MUST echo as
    *  `expectedContentHash`. Lockstep with the backend `host/reviewProjection.ts` block. */
   assistantAction?: { actionId: string; kind: string; contentHash: string; payload: Record<string, unknown> };
+  emailSend?: NonNullable<PendingApproval['emailSend']>;
   /** ADR 0778 D10 correction — what an open interrupt's answer form needs, so a
    *  typed (`requiresValue`) review is answered on the card. A closed allowlist
    *  per kind (lockstep with backend `interruptAnswerForm`); absent for a kind

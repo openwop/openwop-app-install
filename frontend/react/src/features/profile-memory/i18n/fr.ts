@@ -21,7 +21,11 @@ export const messages = {
 
   // Consentement à l’extraction automatique (ADR 0120)
   consentLabel: 'Apprendre automatiquement des faits durables à partir de mes discussions',
-  consentHint: 'Lorsque c’est activé, votre assistant peut enregistrer les faits durables qu’il apprend pendant les discussions. Les faits appris figurent ci-dessous, marqués « Apprise automatiquement », et vous pouvez les supprimer. Désactiver cette option arrête l’apprentissage futur, mais ne supprime pas ce qui a déjà été appris. Désactivé par défaut.',
+  consentHint: 'Lorsque c’est activé, chaque fois que vous démarrez une nouvelle discussion, votre assistant relit celle que vous venez de quitter et enregistre les faits durables que vous avez indiqués sur vous-même. Il ne lit que vos propres messages, et seulement les discussions de votre espace de travail personnel. Les faits appris figurent ci-dessous, marqués « Apprise automatiquement », et les assistants les traitent comme non vérifiés. En supprimer un empêche aussi qu’il soit appris de nouveau dans les mêmes termes. Désactiver cette option arrête l’apprentissage futur, mais ne supprime pas ce qui a déjà été appris. Désactivé par défaut.',
+  consentUnavailable: 'Apprendre des discussions nécessite un espace de travail personnel, et ce compte n’en a pas.',
+  consentSignIn: 'Connectez-vous pour que votre assistant apprenne des faits durables à partir de vos discussions.',
+  consentTurnOff: 'Désactiver',
+  removeLearnedConfirmBody: 'Supprimer ce fait appris ? Il ne sera plus rappelé, et il ne sera pas appris de nouveau dans les mêmes termes.',
   erasureScopeNote: 'La suppression des données de votre compte efface votre mémoire personnelle. Elle n’atteint pas ce qu’un agent partagé de l’espace de travail retient de vos échanges avec lui — cette mémoire appartient à l’espace de travail. Demandez à un administrateur d’effacer la mémoire de l’agent depuis son onglet Mémoire.',
   consentError: 'Impossible de mettre à jour le paramètre d’apprentissage de la mémoire.',
   consentLoadFailed: 'Impossible de savoir si l’apprentissage de mémoire est activé. Il peut être ACTIVÉ — ceci ne confirme pas qu’il est désactivé.',

@@ -10,6 +10,10 @@
  *     unexplained one becomes a possible decision linked to the pull request;
  *   - a stranger gets 404; the workspace's daily budget stops it (429);
  *   - `github-read` is read-only, adapterOnly, host-pinned, with no consumer nodes.
+ *
+ * TST-BWD-6 (grade-tests w62): each refusal asserts its code. Red when the URL pattern
+ * admits `http:` or a `..` repository, when the daily budget is ignored, or when the
+ * `github-read` manifest is pinned to any host but api.github.com.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -48,16 +52,19 @@ function client() {
   const call = async (method: string, path: string, body?: unknown) => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]!; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) as any };
+    const payload = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    return { status: res.status, body: (payload ?? {}) as Reply };
   };
   return { post: (p: string, b?: unknown) => call('POST', p, b) };
 }
+/** The response fields these legs read. */
+interface Reply { error?: string; message?: string; orgId?: string; id?: string; pullRequest?: string; findings?: number; unexplained?: number }
 async function setup() {
   const tenantId = `org:prd-${Date.now()}-${n++}`;
   const owner = client();
   await owner.post('/host/openwop-app/test/login', { email: `prd-${n++}@acme.test`, tenantId });
-  const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'PrCo' })).body.orgId as string;
-  const proj = (await owner.post('/host/openwop-app/projects', { orgId, name: 'Launch' })).body as { id: string };
+  const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'PrCo' })).body.orgId!;
+  const proj = { id: (await owner.post('/host/openwop-app/projects', { orgId, name: 'Launch' })).body.id! };
   const L = `/host/openwop-app/team-ledger/projects/${proj.id}`;
   expect((await owner.post(L)).status).toBe(201);
   await owner.post(`${L}/write`, { patch: { outOfScope: ['US launch'] }, why: 'EU first', baseVersion: 1 });
@@ -75,13 +82,15 @@ describe('ADR 0855 P5 — pull-request drift', () => {
       expect(parsePullRequestUrl(bad), String(bad)).toBeNull();
     }
     const s = await setup();
-    expect((await s.owner.post(`${s.L}/drift/pull-request`, { url: 'https://gitlab.com/a/b/-/merge_requests/1' })).status).toBe(400);
+    const r = await s.owner.post(`${s.L}/drift/pull-request`, { url: 'https://gitlab.com/a/b/-/merge_requests/1' });
+    expect([r.status, r.body.error]).toEqual([400, 'validation_error']);
   });
 
   it('no GitHub (read) connection ⇒ 424 from the real reader, never a 500', async () => {
     const s = await setup();
     const r = await s.owner.post(`${s.L}/drift/pull-request`, { url: PR });
     expect(r.status, JSON.stringify(r.body)).toBe(424);
+    expect(r.body.error).toBe('credential_unavailable');
     expect(String(r.body.message)).toContain('GitHub (read)');
   });
 
@@ -111,9 +120,11 @@ describe('ADR 0855 P5 — pull-request drift', () => {
     stub();
     const stranger = client();
     await stranger.post('/host/openwop-app/test/login', { email: `prd-x-${n++}@acme.test` });
-    expect((await stranger.post(`${s.L}/drift/pull-request`, { url: PR })).status).toBe(404);
+    const foreign = await stranger.post(`${s.L}/drift/pull-request`, { url: PR });
+    expect([foreign.status, foreign.body.error]).toEqual([404, 'not_found']);
     process.env.OPENWOP_DRIFT_CHECK_DAILY_CAP = '0';
-    expect((await s.owner.post(`${s.L}/drift/pull-request`, { url: PR })).status).toBe(429);
+    const spent = await s.owner.post(`${s.L}/drift/pull-request`, { url: PR });
+    expect([spent.status, spent.body.error]).toEqual([429, 'rate_limited']);
     expect(ai.calls).toHaveLength(0);
   });
 

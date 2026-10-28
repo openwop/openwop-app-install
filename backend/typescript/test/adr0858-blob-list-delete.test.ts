@@ -8,6 +8,15 @@
  * isolation of list (another tenant's identical key never appears), and delete
  * removing the object. Plus the replay guard: `delete` is a write, so a replay
  * reaching it fails closed exactly as `put` does.
+ *
+ * Tracker TST-BFA-1. Red when: a truncated S3 page without a token, an error
+ * document or an unsafe size is accepted (`s3Blob.ts` parseListObjectsV2); XML
+ * entities are not decoded; the memory blob bucket is keyed by a constant
+ * tenant; the memory cursor stops excluding seen keys; the s3 object key drops
+ * the tenant root; the `assertEffectAllowed` guard on `delete` is removed.
+ * The s3 list's tenant filter is a double guard (the prefix pins the tenant
+ * root AND the entries are re-filtered by it); the shared root is probed at
+ * its source, the object key.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { mkdtempSync } from 'node:fs';
@@ -41,8 +50,8 @@ const xmlEscape = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').
 /** A path-style fake S3: object PUT/GET/HEAD/DELETE plus ListObjectsV2 on the bucket. */
 function makeFakeS3() {
   const store = new Map<string, Buffer>(); // object key (decoded, under the bucket) → body
-  const fetchFn = (async (url: string | URL, init: RequestInit = {}) => {
-    const u = new URL(String(url));
+  const fetchFn: typeof fetch = async (input, init = {}) => {
+    const u = new URL(input instanceof Request ? input.url : String(input));
     const method = (init.method ?? 'GET').toUpperCase();
     const [, bucket, ...rest] = u.pathname.split('/');
     expect(bucket).toBe('test-bucket');
@@ -62,12 +71,16 @@ function makeFakeS3() {
       return new Response(body, { status: 200 });
     }
     const key = rest.map(decodeURIComponent).join('/');
-    if (method === 'PUT') { store.set(key, Buffer.from(init.body as Buffer)); return new Response(null, { status: 200 }); }
+    if (method === 'PUT') {
+      if (!(init.body instanceof Uint8Array)) throw new Error('fake S3: PUT body must be bytes');
+      store.set(key, Buffer.from(init.body));
+      return new Response(null, { status: 200 });
+    }
     if (method === 'DELETE') { store.delete(key); return new Response(null, { status: 204 }); }
     const body = store.get(key);
     if (!body) return new Response(null, { status: 404 });
     return new Response(method === 'HEAD' ? null : body, { status: 200 });
-  }) as unknown as typeof fetch;
+  };
   return { store, fetchFn };
 }
 

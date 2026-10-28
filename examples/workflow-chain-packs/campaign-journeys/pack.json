@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.workflows.campaign-journeys",
-  "version": "1.2.1",
+  "version": "1.3.1",
   "kind": "workflow-chain",
   "description": "Contact-level lifecycle journeys as RFC 0013 chains on the ONE engine (ADR 0222 / campaign gap plan C6) — NOT a journey engine. Trigger with an ADR 0208 host-event binding (e.g. host.crm.contact.created → Welcome Series), guard with the enrollment + eligibility verbs (one run per contact per journey; every send behind consent + suppression), wait with core.flow.wait, send with the existing email node, log with the CRM activity verb. Enrollment state is the run itself — monitor in Runs, reset re-enrollment via the campaign-journeys API.",
   "author": "openwop",
@@ -16,13 +16,16 @@
   "chains": [
     {
       "chainId": "campaign-journeys.welcome-series",
-      "version": "1.0.1",
+      "version": "1.0.4",
       "label": "Welcome Series (2-step)",
       "description": "New contact → welcome email → wait a day → follow-up email. ONE sign-off gate covers BOTH sends, and covering both is structural rather than a promise: the welcome send is reachable ONLY through `recheck`, which runs solely on the gate's `truthy approved` edge, so a rejection skips the welcome, which skips the wait, the re-check and the follow-up in turn (WF-EM-3 — the follow-up deliberately carries no second gate; a day-later interrupt would strand the run and contradict the hands-off operation this gate advertises). The RECIPIENT ADDRESS never rides the gate: the approver SEES it (`gate1.email` is the gate's read-only artifact), but the address BOUND to the send comes from `recheck` — a second `feature.campaign-journeys.nodes.eligibility` evaluation downstream of the approval — so an approver cannot redirect the mail by editing the artifact, and consent + suppression are re-evaluated at the moment of approval rather than whenever the gate was raised. The day-2 re-check is that same compliance gate one wait later: it FAILS on revoked consent or a suppression added during the wait, and a failed upstream blocks the follow-up. Bind it to host.crm.contact.created (the contact rides the event payload), or run it manually with a contactId. The enrollment guard makes redelivered events harmless; every send passes consent + suppression first.",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["triggerEventName", "senderEmail"],
+        "required": [
+          "triggerEventName",
+          "senderEmail"
+        ],
         "properties": {
           "contactId": {
             "type": "string",
@@ -48,8 +51,14 @@
             "default": "A few favorite starting points, one day in.",
             "description": "Body of the day-2 email."
           },
-          "triggerEventName": { "type": "string", "description": "Host event name that starts this workflow (e.g. `crm.deal.won`)." },
-          "senderEmail": { "type": "string", "description": "Verified sender address these emails are sent from." }
+          "triggerEventName": {
+            "type": "string",
+            "description": "Host event name that starts this workflow. MUST match the `events.md` §Types grammar: two or three kebab-case segments under a registered org, never `openwop.`-prefixed (e.g. `example.deal.won`)."
+          },
+          "senderEmail": {
+            "type": "string",
+            "description": "Verified sender address these emails are sent from."
+          }
         }
       },
       "capabilities": [
@@ -72,7 +81,7 @@
           },
           {
             "id": "enroll",
-            "typeId": "feature.campaign-journeys.nodes.enroll@1.0.0",
+            "typeId": "feature.campaign-journeys.nodes.enroll@1.1.0",
             "name": "Enrollment guard",
             "position": {
               "x": 220,
@@ -86,7 +95,7 @@
           },
           {
             "id": "gate1",
-            "typeId": "feature.campaign-journeys.nodes.eligibility@1.0.0",
+            "typeId": "feature.campaign-journeys.nodes.channel-eligibility@1.1.0",
             "name": "Eligibility (consent + suppression)",
             "position": {
               "x": 440,
@@ -94,7 +103,8 @@
             },
             "config": {},
             "inputs": {
-              "contactId": "{{params.contactId}}"
+              "contactId": "{{params.contactId}}",
+              "channel": "email"
             }
           },
           {
@@ -109,13 +119,16 @@
               "title": "Start the welcome series for this contact?",
               "prompt": "Two emails will be sent (welcome now, follow-up in a day) to the address shown. Rejecting stops BOTH — the follow-up is downstream of the welcome, so it is never reached. The address is shown for REVIEW ONLY: it is re-resolved from the contact after approval, so editing it here changes nothing. Approval policies can auto-clear this gate for hands-off operation.",
               "artifactType": "email.recipient",
-              "actions": ["approve", "reject"]
+              "actions": [
+                "approve",
+                "reject"
+              ]
             },
             "inputs": {}
           },
           {
             "id": "recheck",
-            "typeId": "feature.campaign-journeys.nodes.eligibility@1.0.0",
+            "typeId": "feature.campaign-journeys.nodes.channel-eligibility@1.1.0",
             "name": "Re-check eligibility, resolve the address",
             "position": {
               "x": 660,
@@ -123,7 +136,9 @@
             },
             "config": {},
             "inputs": {
-              "contactId": "{{params.contactId}}"
+              "contactId": "{{params.contactId}}",
+              "channel": "email",
+              "stopOnSuppressed": true
             }
           },
           {
@@ -169,7 +184,7 @@
           },
           {
             "id": "gate2",
-            "typeId": "feature.campaign-journeys.nodes.eligibility@1.0.0",
+            "typeId": "feature.campaign-journeys.nodes.channel-eligibility@1.1.0",
             "name": "Re-check eligibility",
             "position": {
               "x": 1100,
@@ -177,7 +192,9 @@
             },
             "config": {},
             "inputs": {
-              "contactId": "{{params.contactId}}"
+              "contactId": "{{params.contactId}}",
+              "channel": "email",
+              "stopOnSuppressed": true
             }
           },
           {
@@ -195,6 +212,28 @@
               "subject": "{{params.followUpSubject}}",
               "text": "{{params.followUpBody}}"
             }
+          },
+          {
+            "id": "stopped-recheck",
+            "typeId": "core.flow.noop@1.0.0",
+            "name": "Stopped — the contact unsubscribed",
+            "position": {
+              "x": 880,
+              "y": 80
+            },
+            "config": {},
+            "inputs": {}
+          },
+          {
+            "id": "stopped-gate2",
+            "typeId": "core.flow.noop@1.0.0",
+            "name": "Stopped — the contact unsubscribed",
+            "position": {
+              "x": 1320,
+              "y": 160
+            },
+            "config": {},
+            "inputs": {}
           }
         ],
         "edges": [
@@ -213,16 +252,26 @@
           {
             "from": "signoff",
             "to": "recheck",
-            "condition": { "type": "truthy", "left": "approved" }
+            "condition": {
+              "type": "truthy",
+              "left": "approved"
+            }
           },
           {
             "from": "recheck.email",
-            "to": "welcome.to"
+            "to": "welcome.to",
+            "condition": {
+              "type": "truthy",
+              "left": "eligible"
+            }
           },
           {
             "from": "signoff",
             "to": "series-declined",
-            "condition": { "type": "falsy", "left": "approved" }
+            "condition": {
+              "type": "falsy",
+              "left": "approved"
+            }
           },
           {
             "from": "welcome",
@@ -234,7 +283,29 @@
           },
           {
             "from": "gate2.email",
-            "to": "followup.to"
+            "to": "followup.to",
+            "condition": {
+              "type": "truthy",
+              "left": "eligible"
+            }
+          },
+          {
+            "from": "recheck",
+            "to": "stopped-recheck",
+            "condition": {
+              "type": "equals",
+              "left": "stopped",
+              "right": "suppressed"
+            }
+          },
+          {
+            "from": "gate2",
+            "to": "stopped-gate2",
+            "condition": {
+              "type": "equals",
+              "left": "stopped",
+              "right": "suppressed"
+            }
           }
         ]
       },
@@ -247,13 +318,17 @@
     },
     {
       "chainId": "campaign-journeys.re-engage-contact",
-      "version": "1.0.1",
+      "version": "1.0.3",
       "label": "Re-engage a Contact",
       "description": "One quiet contact → human sign-off → re-engagement email + a CRM follow-up task. The RECIPIENT ADDRESS never rides the gate: the approver sees `gate.email` as a read-only artifact, but the address bound to the send comes from `recheck`, a second eligibility evaluation downstream of the approval — so an approver cannot redirect the mail by editing the artifact, and consent + suppression are re-evaluated at the moment of approval. Rejecting skips `recheck`, which skips the send and the task in turn. Run it manually, from the Strategist in chat, or bind it to an event carrying a contactId. Segment-wide sweeps are the recorded follow-on (they need per-member fan-out).",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["contactId", "orgId", "senderEmail"],
+        "required": [
+          "contactId",
+          "orgId",
+          "senderEmail"
+        ],
         "properties": {
           "contactId": {
             "type": "string",
@@ -273,7 +348,10 @@
             "default": "It has been a while — here is what changed since your last visit.",
             "description": "Re-engagement body."
           },
-          "senderEmail": { "type": "string", "description": "Verified sender address these emails are sent from." }
+          "senderEmail": {
+            "type": "string",
+            "description": "Verified sender address these emails are sent from."
+          }
         }
       },
       "capabilities": [
@@ -283,7 +361,7 @@
         "nodes": [
           {
             "id": "enroll",
-            "typeId": "feature.campaign-journeys.nodes.enroll@1.0.0",
+            "typeId": "feature.campaign-journeys.nodes.enroll@1.1.0",
             "name": "Enrollment guard",
             "position": {
               "x": 0,
@@ -297,7 +375,7 @@
           },
           {
             "id": "gate",
-            "typeId": "feature.campaign-journeys.nodes.eligibility@1.0.0",
+            "typeId": "feature.campaign-journeys.nodes.channel-eligibility@1.1.0",
             "name": "Eligibility (consent + suppression)",
             "position": {
               "x": 220,
@@ -305,7 +383,9 @@
             },
             "config": {},
             "inputs": {
-              "contactId": "{{params.contactId}}"
+              "contactId": "{{params.contactId}}",
+              "channel": "email",
+              "orgId": "{{params.orgId}}"
             }
           },
           {
@@ -320,13 +400,16 @@
               "title": "Re-engage this contact?",
               "prompt": "A re-engagement email will be sent to the address shown. Rejecting sends nothing and creates no follow-up task. The address is shown for REVIEW ONLY: it is re-resolved from the contact after approval, so editing it here changes nothing.",
               "artifactType": "email.recipient",
-              "actions": ["approve", "reject"]
+              "actions": [
+                "approve",
+                "reject"
+              ]
             },
             "inputs": {}
           },
           {
             "id": "recheck",
-            "typeId": "feature.campaign-journeys.nodes.eligibility@1.0.0",
+            "typeId": "feature.campaign-journeys.nodes.channel-eligibility@1.1.0",
             "name": "Re-check eligibility, resolve the address",
             "position": {
               "x": 660,
@@ -334,7 +417,10 @@
             },
             "config": {},
             "inputs": {
-              "contactId": "{{params.contactId}}"
+              "contactId": "{{params.contactId}}",
+              "channel": "email",
+              "orgId": "{{params.orgId}}",
+              "stopOnSuppressed": true
             }
           },
           {
@@ -377,6 +463,17 @@
               "orgId": "{{params.orgId}}"
             },
             "inputs": {}
+          },
+          {
+            "id": "stopped-recheck",
+            "typeId": "core.flow.noop@1.0.0",
+            "name": "Stopped — the contact unsubscribed",
+            "position": {
+              "x": 880,
+              "y": 80
+            },
+            "config": {},
+            "inputs": {}
           }
         ],
         "edges": [
@@ -391,20 +488,39 @@
           {
             "from": "signoff",
             "to": "recheck",
-            "condition": { "type": "truthy", "left": "approved" }
+            "condition": {
+              "type": "truthy",
+              "left": "approved"
+            }
           },
           {
             "from": "recheck.email",
-            "to": "send.to"
+            "to": "send.to",
+            "condition": {
+              "type": "truthy",
+              "left": "eligible"
+            }
           },
           {
             "from": "signoff",
             "to": "gate-reject",
-            "condition": { "type": "falsy", "left": "approved" }
+            "condition": {
+              "type": "falsy",
+              "left": "approved"
+            }
           },
           {
             "from": "send",
             "to": "task"
+          },
+          {
+            "from": "recheck",
+            "to": "stopped-recheck",
+            "condition": {
+              "type": "equals",
+              "left": "stopped",
+              "right": "suppressed"
+            }
           }
         ]
       },
@@ -519,6 +635,944 @@
         "dispatched": {
           "type": "number",
           "description": "The number of per-member re-engage children fanned out (0 for an empty segment)."
+        }
+      }
+    },
+    {
+      "chainId": "campaign-journeys.welcome-email-sms",
+      "version": "1.0.0",
+      "label": "Welcome Series — email, then SMS (per client)",
+      "description": "ADR 0955 blueprint. New contact → welcome email → a day later, a text at the contact's best time inside the client's send window. Every send is reachable only through the gate's `truthy approved` branch, and every email's address is bound from a downstream eligibility check on its `truthy eligible` edge (never from the gate's review artifact), so a rejection sends nothing and a contact who opts out or is suppressed during a wait is not mailed. The SMS step runs the per-client SMS checks itself (the client's own opt-in, STOP, quiet hours, the client's own number; ADR 0955 Q7/D4) and waits for the window; a contact who never opted in to this client's texts ends the run there with a typed `not_eligible`, after the email. Instantiate one copy per client (`orgId`).",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "triggerEventName",
+          "senderEmail",
+          "orgId"
+        ],
+        "properties": {
+          "contactId": {
+            "type": "string",
+            "description": "The contact to enroll (omit when event-triggered — it rides the trigger payload)."
+          },
+          "orgId": {
+            "type": "string",
+            "description": "The client this journey runs for (ADR 0955 D1). Required once the workspace has clients."
+          },
+          "triggerEventName": {
+            "type": "string",
+            "description": "Host event name that starts this journey."
+          },
+          "senderEmail": {
+            "type": "string",
+            "description": "Verified sender address the emails are sent from."
+          },
+          "welcomeSubject": {
+            "type": "string",
+            "default": "Welcome!",
+            "description": "Subject of the welcome email."
+          },
+          "welcomeBody": {
+            "type": "string",
+            "default": "Thanks for joining us — here is what to expect.",
+            "description": "Body of the welcome email."
+          },
+          "smsText": {
+            "type": "string",
+            "default": "Thanks for signing up! Reply STOP to opt out.",
+            "description": "The text, sent a day later. Must say how to opt out (the word STOP)."
+          }
+        }
+      },
+      "capabilities": [
+        "side-effectful"
+      ],
+      "dag": {
+        "nodes": [
+          {
+            "id": "trigger",
+            "typeId": "core.trigger.event@1.0.0",
+            "name": "Contact event",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "config": {
+              "eventName": "{{params.triggerEventName}}"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "enroll",
+            "typeId": "feature.campaign-journeys.nodes.enroll@1.1.0",
+            "name": "Enrollment guard",
+            "position": {
+              "x": 220,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "journeyId": "welcome-email-sms",
+              "contactId": "{{params.contactId}}",
+              "orgId": "{{params.orgId}}"
+            }
+          },
+          {
+            "id": "gate1",
+            "typeId": "feature.campaign-journeys.nodes.channel-eligibility@1.1.0",
+            "name": "Eligibility (consent + suppression)",
+            "position": {
+              "x": 440,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "contactId": "{{params.contactId}}",
+              "orgId": "{{params.orgId}}",
+              "channel": "email"
+            }
+          },
+          {
+            "id": "signoff",
+            "typeId": "core.chat.approvalGate@1.1.0",
+            "name": "Approve the journey",
+            "position": {
+              "x": 660,
+              "y": 0
+            },
+            "config": {
+              "title": "Start this welcome series?",
+              "prompt": "A welcome email now, then a text tomorrow at the contact's best time inside the client's send window. The address is shown for REVIEW ONLY: it is re-resolved after approval. Rejecting sends nothing.",
+              "artifactType": "email.recipient",
+              "actions": [
+                "approve",
+                "reject"
+              ]
+            },
+            "inputs": {}
+          },
+          {
+            "id": "recheck",
+            "typeId": "feature.campaign-journeys.nodes.channel-eligibility@1.1.0",
+            "name": "Re-check eligibility, resolve the address",
+            "position": {
+              "x": 880,
+              "y": -80
+            },
+            "config": {},
+            "inputs": {
+              "contactId": "{{params.contactId}}",
+              "orgId": "{{params.orgId}}",
+              "channel": "email",
+              "stopOnSuppressed": true
+            }
+          },
+          {
+            "id": "declined",
+            "typeId": "core.flow.noop@1.0.0",
+            "name": "Declined — nothing sent",
+            "position": {
+              "x": 880,
+              "y": 160
+            },
+            "config": {},
+            "inputs": {}
+          },
+          {
+            "id": "welcome",
+            "typeId": "core.openwop.integration.email-send@1.0.0",
+            "name": "Welcome email",
+            "position": {
+              "x": 1100,
+              "y": -80
+            },
+            "config": {
+              "from": "{{params.senderEmail}}"
+            },
+            "inputs": {
+              "subject": "{{params.welcomeSubject}}",
+              "text": "{{params.welcomeBody}}"
+            }
+          },
+          {
+            "id": "wait",
+            "typeId": "core.flow.wait@1.0.0",
+            "name": "Wait one day",
+            "position": {
+              "x": 1320,
+              "y": -80
+            },
+            "config": {
+              "mode": "duration",
+              "seconds": 86400
+            },
+            "inputs": {}
+          },
+          {
+            "id": "sendtime",
+            "typeId": "feature.campaign-journeys.nodes.send-time@1.0.0",
+            "name": "Best time to text",
+            "position": {
+              "x": 1540,
+              "y": -80
+            },
+            "config": {},
+            "inputs": {
+              "contactId": "{{params.contactId}}",
+              "orgId": "{{params.orgId}}",
+              "channel": "sms"
+            }
+          },
+          {
+            "id": "sms",
+            "typeId": "feature.campaign-journeys.nodes.send-sms@1.1.0",
+            "name": "Welcome text",
+            "position": {
+              "x": 1760,
+              "y": -80
+            },
+            "config": {},
+            "inputs": {
+              "contactId": "{{params.contactId}}",
+              "orgId": "{{params.orgId}}",
+              "text": "{{params.smsText}}"
+            }
+          },
+          {
+            "id": "stopped-recheck",
+            "typeId": "core.flow.noop@1.0.0",
+            "name": "Stopped — the contact unsubscribed",
+            "position": {
+              "x": 1100,
+              "y": 80
+            },
+            "config": {},
+            "inputs": {}
+          }
+        ],
+        "edges": [
+          {
+            "from": "trigger",
+            "to": "enroll"
+          },
+          {
+            "from": "enroll",
+            "to": "gate1"
+          },
+          {
+            "from": "gate1.email",
+            "to": "signoff.artifact"
+          },
+          {
+            "from": "signoff",
+            "to": "recheck",
+            "condition": {
+              "type": "truthy",
+              "left": "approved"
+            }
+          },
+          {
+            "from": "signoff",
+            "to": "declined",
+            "condition": {
+              "type": "falsy",
+              "left": "approved"
+            }
+          },
+          {
+            "from": "recheck.email",
+            "to": "welcome.to",
+            "condition": {
+              "type": "truthy",
+              "left": "eligible"
+            }
+          },
+          {
+            "from": "welcome",
+            "to": "wait"
+          },
+          {
+            "from": "wait",
+            "to": "sendtime"
+          },
+          {
+            "from": "sendtime",
+            "to": "sms"
+          },
+          {
+            "from": "recheck",
+            "to": "stopped-recheck",
+            "condition": {
+              "type": "equals",
+              "left": "stopped",
+              "right": "suppressed"
+            }
+          }
+        ]
+      },
+      "outputs": {
+        "contactId": {
+          "type": "string",
+          "description": "The enrolled contact."
+        }
+      }
+    },
+    {
+      "chainId": "campaign-journeys.post-webinar",
+      "version": "1.0.0",
+      "label": "Post-webinar follow-up (per client)",
+      "description": "ADR 0955 blueprint. Attended the webinar → a thank-you email → two days later, a follow-up. Every send is reachable only through the gate's `truthy approved` branch, and every email's address is bound from a downstream eligibility check on its `truthy eligible` edge (never from the gate's review artifact), so a rejection sends nothing and a contact who opts out or is suppressed during a wait is not mailed. Bind it to the webinar-attended event; instantiate one copy per client (`orgId`).",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "triggerEventName",
+          "senderEmail",
+          "orgId"
+        ],
+        "properties": {
+          "contactId": {
+            "type": "string",
+            "description": "The contact to enroll (omit when event-triggered — it rides the trigger payload)."
+          },
+          "orgId": {
+            "type": "string",
+            "description": "The client this journey runs for (ADR 0955 D1). Required once the workspace has clients."
+          },
+          "triggerEventName": {
+            "type": "string",
+            "description": "Host event name that starts this journey."
+          },
+          "senderEmail": {
+            "type": "string",
+            "description": "Verified sender address the emails are sent from."
+          },
+          "thankYouSubject": {
+            "type": "string",
+            "default": "Thanks for joining the webinar",
+            "description": "Subject of the thank-you email."
+          },
+          "thankYouBody": {
+            "type": "string",
+            "default": "Thanks for attending — the recording and slides are on their way.",
+            "description": "Body of the thank-you email."
+          },
+          "followUpSubject": {
+            "type": "string",
+            "default": "A next step after the webinar",
+            "description": "Subject of the follow-up."
+          },
+          "followUpBody": {
+            "type": "string",
+            "default": "If the webinar raised questions, reply here and we will help.",
+            "description": "Body of the follow-up."
+          }
+        }
+      },
+      "capabilities": [
+        "side-effectful"
+      ],
+      "dag": {
+        "nodes": [
+          {
+            "id": "trigger",
+            "typeId": "core.trigger.event@1.0.0",
+            "name": "Contact event",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "config": {
+              "eventName": "{{params.triggerEventName}}"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "enroll",
+            "typeId": "feature.campaign-journeys.nodes.enroll@1.1.0",
+            "name": "Enrollment guard",
+            "position": {
+              "x": 220,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "journeyId": "post-webinar",
+              "contactId": "{{params.contactId}}",
+              "orgId": "{{params.orgId}}"
+            }
+          },
+          {
+            "id": "gate1",
+            "typeId": "feature.campaign-journeys.nodes.channel-eligibility@1.1.0",
+            "name": "Eligibility (consent + suppression)",
+            "position": {
+              "x": 440,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "contactId": "{{params.contactId}}",
+              "orgId": "{{params.orgId}}",
+              "channel": "email"
+            }
+          },
+          {
+            "id": "signoff",
+            "typeId": "core.chat.approvalGate@1.1.0",
+            "name": "Approve the journey",
+            "position": {
+              "x": 660,
+              "y": 0
+            },
+            "config": {
+              "title": "Send the post-webinar follow-up?",
+              "prompt": "A thank-you email now and a follow-up in two days. The address is shown for REVIEW ONLY. Rejecting sends nothing.",
+              "artifactType": "email.recipient",
+              "actions": [
+                "approve",
+                "reject"
+              ]
+            },
+            "inputs": {}
+          },
+          {
+            "id": "recheck",
+            "typeId": "feature.campaign-journeys.nodes.channel-eligibility@1.1.0",
+            "name": "Re-check eligibility, resolve the address",
+            "position": {
+              "x": 880,
+              "y": -80
+            },
+            "config": {},
+            "inputs": {
+              "contactId": "{{params.contactId}}",
+              "orgId": "{{params.orgId}}",
+              "channel": "email",
+              "stopOnSuppressed": true
+            }
+          },
+          {
+            "id": "declined",
+            "typeId": "core.flow.noop@1.0.0",
+            "name": "Declined — nothing sent",
+            "position": {
+              "x": 880,
+              "y": 160
+            },
+            "config": {},
+            "inputs": {}
+          },
+          {
+            "id": "thanks",
+            "typeId": "core.openwop.integration.email-send@1.0.0",
+            "name": "Thank-you email",
+            "position": {
+              "x": 1100,
+              "y": -80
+            },
+            "config": {
+              "from": "{{params.senderEmail}}"
+            },
+            "inputs": {
+              "subject": "{{params.thankYouSubject}}",
+              "text": "{{params.thankYouBody}}"
+            }
+          },
+          {
+            "id": "wait1",
+            "typeId": "core.flow.wait@1.0.0",
+            "name": "Wait one day",
+            "position": {
+              "x": 1320,
+              "y": -80
+            },
+            "config": {
+              "mode": "duration",
+              "seconds": 86400
+            },
+            "inputs": {}
+          },
+          {
+            "id": "wait2",
+            "typeId": "core.flow.wait@1.0.0",
+            "name": "Wait another day",
+            "position": {
+              "x": 1540,
+              "y": -80
+            },
+            "config": {
+              "mode": "duration",
+              "seconds": 86400
+            },
+            "inputs": {}
+          },
+          {
+            "id": "gate2",
+            "typeId": "feature.campaign-journeys.nodes.channel-eligibility@1.1.0",
+            "name": "Re-check eligibility",
+            "position": {
+              "x": 1760,
+              "y": -80
+            },
+            "config": {},
+            "inputs": {
+              "contactId": "{{params.contactId}}",
+              "orgId": "{{params.orgId}}",
+              "channel": "email",
+              "stopOnSuppressed": true
+            }
+          },
+          {
+            "id": "followup",
+            "typeId": "core.openwop.integration.email-send@1.0.0",
+            "name": "Follow-up email",
+            "position": {
+              "x": 1980,
+              "y": -80
+            },
+            "config": {
+              "from": "{{params.senderEmail}}"
+            },
+            "inputs": {
+              "subject": "{{params.followUpSubject}}",
+              "text": "{{params.followUpBody}}"
+            }
+          },
+          {
+            "id": "stopped-recheck",
+            "typeId": "core.flow.noop@1.0.0",
+            "name": "Stopped — the contact unsubscribed",
+            "position": {
+              "x": 1100,
+              "y": 80
+            },
+            "config": {},
+            "inputs": {}
+          },
+          {
+            "id": "stopped-gate2",
+            "typeId": "core.flow.noop@1.0.0",
+            "name": "Stopped — the contact unsubscribed",
+            "position": {
+              "x": 1980,
+              "y": 80
+            },
+            "config": {},
+            "inputs": {}
+          }
+        ],
+        "edges": [
+          {
+            "from": "trigger",
+            "to": "enroll"
+          },
+          {
+            "from": "enroll",
+            "to": "gate1"
+          },
+          {
+            "from": "gate1.email",
+            "to": "signoff.artifact"
+          },
+          {
+            "from": "signoff",
+            "to": "recheck",
+            "condition": {
+              "type": "truthy",
+              "left": "approved"
+            }
+          },
+          {
+            "from": "signoff",
+            "to": "declined",
+            "condition": {
+              "type": "falsy",
+              "left": "approved"
+            }
+          },
+          {
+            "from": "recheck.email",
+            "to": "thanks.to",
+            "condition": {
+              "type": "truthy",
+              "left": "eligible"
+            }
+          },
+          {
+            "from": "thanks",
+            "to": "wait1"
+          },
+          {
+            "from": "wait1",
+            "to": "wait2"
+          },
+          {
+            "from": "wait2",
+            "to": "gate2"
+          },
+          {
+            "from": "gate2.email",
+            "to": "followup.to",
+            "condition": {
+              "type": "truthy",
+              "left": "eligible"
+            }
+          },
+          {
+            "from": "recheck",
+            "to": "stopped-recheck",
+            "condition": {
+              "type": "equals",
+              "left": "stopped",
+              "right": "suppressed"
+            }
+          },
+          {
+            "from": "gate2",
+            "to": "stopped-gate2",
+            "condition": {
+              "type": "equals",
+              "left": "stopped",
+              "right": "suppressed"
+            }
+          }
+        ]
+      },
+      "outputs": {
+        "contactId": {
+          "type": "string",
+          "description": "The enrolled contact."
+        }
+      }
+    },
+    {
+      "chainId": "campaign-journeys.abandoned-signup",
+      "version": "1.0.0",
+      "label": "Abandoned sign-up reminder (per client)",
+      "description": "ADR 0955 blueprint. Started signing up but did not finish → an hour later a reminder → a day later a last reminder. Every send is reachable only through the gate's `truthy approved` branch, and every email's address is bound from a downstream eligibility check on its `truthy eligible` edge (never from the gate's review artifact), so a rejection sends nothing and a contact who opts out or is suppressed during a wait is not mailed. Bind it to the sign-up-started event, and stop it when the sign-up completes (the enrollment guard keeps a re-fired event from sending twice). Instantiate one copy per client (`orgId`).",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "triggerEventName",
+          "senderEmail",
+          "orgId"
+        ],
+        "properties": {
+          "contactId": {
+            "type": "string",
+            "description": "The contact to enroll (omit when event-triggered — it rides the trigger payload)."
+          },
+          "orgId": {
+            "type": "string",
+            "description": "The client this journey runs for (ADR 0955 D1). Required once the workspace has clients."
+          },
+          "triggerEventName": {
+            "type": "string",
+            "description": "Host event name that starts this journey."
+          },
+          "senderEmail": {
+            "type": "string",
+            "description": "Verified sender address the emails are sent from."
+          },
+          "reminderSubject": {
+            "type": "string",
+            "default": "Finish signing up",
+            "description": "Subject of the first reminder."
+          },
+          "reminderBody": {
+            "type": "string",
+            "default": "You are one step away — pick up where you left off.",
+            "description": "Body of the first reminder."
+          },
+          "lastSubject": {
+            "type": "string",
+            "default": "Still interested?",
+            "description": "Subject of the last reminder."
+          },
+          "lastBody": {
+            "type": "string",
+            "default": "Your sign-up is saved. Finish it whenever you are ready.",
+            "description": "Body of the last reminder."
+          }
+        }
+      },
+      "capabilities": [
+        "side-effectful"
+      ],
+      "dag": {
+        "nodes": [
+          {
+            "id": "trigger",
+            "typeId": "core.trigger.event@1.0.0",
+            "name": "Contact event",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "config": {
+              "eventName": "{{params.triggerEventName}}"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "grace",
+            "typeId": "core.flow.wait@1.0.0",
+            "name": "Wait one hour",
+            "position": {
+              "x": 220,
+              "y": 0
+            },
+            "config": {
+              "mode": "duration",
+              "seconds": 3600
+            },
+            "inputs": {}
+          },
+          {
+            "id": "enroll",
+            "typeId": "feature.campaign-journeys.nodes.enroll@1.1.0",
+            "name": "Enrollment guard",
+            "position": {
+              "x": 440,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "journeyId": "abandoned-signup",
+              "contactId": "{{params.contactId}}",
+              "orgId": "{{params.orgId}}"
+            }
+          },
+          {
+            "id": "gate1",
+            "typeId": "feature.campaign-journeys.nodes.channel-eligibility@1.1.0",
+            "name": "Eligibility (consent + suppression)",
+            "position": {
+              "x": 660,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "contactId": "{{params.contactId}}",
+              "orgId": "{{params.orgId}}",
+              "channel": "email"
+            }
+          },
+          {
+            "id": "signoff",
+            "typeId": "core.chat.approvalGate@1.1.0",
+            "name": "Approve the journey",
+            "position": {
+              "x": 880,
+              "y": 0
+            },
+            "config": {
+              "title": "Send the sign-up reminders?",
+              "prompt": "A reminder now and a last one tomorrow. The address is shown for REVIEW ONLY. Rejecting sends nothing.",
+              "artifactType": "email.recipient",
+              "actions": [
+                "approve",
+                "reject"
+              ]
+            },
+            "inputs": {}
+          },
+          {
+            "id": "recheck",
+            "typeId": "feature.campaign-journeys.nodes.channel-eligibility@1.1.0",
+            "name": "Re-check eligibility, resolve the address",
+            "position": {
+              "x": 1100,
+              "y": -80
+            },
+            "config": {},
+            "inputs": {
+              "contactId": "{{params.contactId}}",
+              "orgId": "{{params.orgId}}",
+              "channel": "email",
+              "stopOnSuppressed": true
+            }
+          },
+          {
+            "id": "declined",
+            "typeId": "core.flow.noop@1.0.0",
+            "name": "Declined — nothing sent",
+            "position": {
+              "x": 1100,
+              "y": 160
+            },
+            "config": {},
+            "inputs": {}
+          },
+          {
+            "id": "reminder",
+            "typeId": "core.openwop.integration.email-send@1.0.0",
+            "name": "Reminder email",
+            "position": {
+              "x": 1320,
+              "y": -80
+            },
+            "config": {
+              "from": "{{params.senderEmail}}"
+            },
+            "inputs": {
+              "subject": "{{params.reminderSubject}}",
+              "text": "{{params.reminderBody}}"
+            }
+          },
+          {
+            "id": "wait",
+            "typeId": "core.flow.wait@1.0.0",
+            "name": "Wait one day",
+            "position": {
+              "x": 1540,
+              "y": -80
+            },
+            "config": {
+              "mode": "duration",
+              "seconds": 86400
+            },
+            "inputs": {}
+          },
+          {
+            "id": "gate2",
+            "typeId": "feature.campaign-journeys.nodes.channel-eligibility@1.1.0",
+            "name": "Re-check eligibility",
+            "position": {
+              "x": 1760,
+              "y": -80
+            },
+            "config": {},
+            "inputs": {
+              "contactId": "{{params.contactId}}",
+              "orgId": "{{params.orgId}}",
+              "channel": "email",
+              "stopOnSuppressed": true
+            }
+          },
+          {
+            "id": "last",
+            "typeId": "core.openwop.integration.email-send@1.0.0",
+            "name": "Last reminder",
+            "position": {
+              "x": 1980,
+              "y": -80
+            },
+            "config": {
+              "from": "{{params.senderEmail}}"
+            },
+            "inputs": {
+              "subject": "{{params.lastSubject}}",
+              "text": "{{params.lastBody}}"
+            }
+          },
+          {
+            "id": "stopped-recheck",
+            "typeId": "core.flow.noop@1.0.0",
+            "name": "Stopped — the contact unsubscribed",
+            "position": {
+              "x": 1320,
+              "y": 80
+            },
+            "config": {},
+            "inputs": {}
+          },
+          {
+            "id": "stopped-gate2",
+            "typeId": "core.flow.noop@1.0.0",
+            "name": "Stopped — the contact unsubscribed",
+            "position": {
+              "x": 1980,
+              "y": 80
+            },
+            "config": {},
+            "inputs": {}
+          }
+        ],
+        "edges": [
+          {
+            "from": "trigger",
+            "to": "grace"
+          },
+          {
+            "from": "grace",
+            "to": "enroll"
+          },
+          {
+            "from": "enroll",
+            "to": "gate1"
+          },
+          {
+            "from": "gate1.email",
+            "to": "signoff.artifact"
+          },
+          {
+            "from": "signoff",
+            "to": "recheck",
+            "condition": {
+              "type": "truthy",
+              "left": "approved"
+            }
+          },
+          {
+            "from": "signoff",
+            "to": "declined",
+            "condition": {
+              "type": "falsy",
+              "left": "approved"
+            }
+          },
+          {
+            "from": "recheck.email",
+            "to": "reminder.to",
+            "condition": {
+              "type": "truthy",
+              "left": "eligible"
+            }
+          },
+          {
+            "from": "reminder",
+            "to": "wait"
+          },
+          {
+            "from": "wait",
+            "to": "gate2"
+          },
+          {
+            "from": "gate2.email",
+            "to": "last.to",
+            "condition": {
+              "type": "truthy",
+              "left": "eligible"
+            }
+          },
+          {
+            "from": "recheck",
+            "to": "stopped-recheck",
+            "condition": {
+              "type": "equals",
+              "left": "stopped",
+              "right": "suppressed"
+            }
+          },
+          {
+            "from": "gate2",
+            "to": "stopped-gate2",
+            "condition": {
+              "type": "equals",
+              "left": "stopped",
+              "right": "suppressed"
+            }
+          }
+        ]
+      },
+      "outputs": {
+        "contactId": {
+          "type": "string",
+          "description": "The enrolled contact."
         }
       }
     }

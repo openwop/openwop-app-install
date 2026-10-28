@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.workflows.release-comms",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "kind": "workflow-chain",
   "description": "Release-comms chains (RFC 0013): ship-day communications — customer-facing release notes from a raw changelog, and an internal launch announcement. Every external/team send is human-gated. Replay-deterministic.",
   "author": "openwop",
@@ -14,7 +14,7 @@
   "chains": [
     {
       "chainId": "release.notes-from-changelog",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "label": "Changelog → Customer Release Notes",
       "description": "Turns a raw changelog into friendly, customer-facing release notes grouped by theme — reviewed by a human before it's treated as published copy.",
       "parameters": {
@@ -29,7 +29,7 @@
           },
           "provider": { "type": "string", "description": "AI provider id for this chain's model-calling nodes. Set it to fix a provider into those nodes when the workflow is created. Leave it unset and each run uses the run's chosen provider, else the workspace's AI setting, else the host's catalog default (ADR 0903); whichever is chosen is recorded on the run, so a replay or fork uses the same one. The workspace needs a key for the provider that runs." },
           "model": { "type": "string", "description": "Model id for this chain's model-calling nodes. Must be offered by the provider in the host catalog. Leave it unset to use the provider's model from the same choice (ADR 0903)." },
-          "triggerEventName": { "type": "string", "description": "Host event name that starts this workflow (e.g. `crm.deal.won`)." }
+          "triggerEventName": { "type": "string", "description": "Host event name that starts this workflow. MUST match the `events.md` §Types grammar: two or three kebab-case segments under a registered org, never `openwop.`-prefixed (e.g. `example.deal.won`)." }
         }
       },
       "capabilities": [],
@@ -97,7 +97,7 @@
     },
     {
       "chainId": "release.internal-announce",
-      "version": "1.2.0",
+      "version": "1.2.1",
       "label": "Release → Internal Launch Note",
       "description": "Drafts a crisp internal launch announcement (what shipped, who it's for, talking points) and posts it to the team channel after a human approves.",
       "parameters": {
@@ -112,7 +112,7 @@
           },
           "provider": { "type": "string", "description": "AI provider id for this chain's model-calling nodes. Set it to fix a provider into those nodes when the workflow is created. Leave it unset and each run uses the run's chosen provider, else the workspace's AI setting, else the host's catalog default (ADR 0903); whichever is chosen is recorded on the run, so a replay or fork uses the same one. The workspace needs a key for the provider that runs." },
           "model": { "type": "string", "description": "Model id for this chain's model-calling nodes. Must be offered by the provider in the host catalog. Leave it unset to use the provider's model from the same choice (ADR 0903)." },
-          "triggerEventName": { "type": "string", "description": "Host event name that starts this workflow (e.g. `crm.deal.won`)." },
+          "triggerEventName": { "type": "string", "description": "Host event name that starts this workflow. MUST match the `events.md` §Types grammar: two or three kebab-case segments under a registered org, never `openwop.`-prefixed (e.g. `example.deal.won`)." },
           "slackChannel": { "type": "string", "description": "Slack channel these messages post to (e.g. `#ops`)." }
         }
       },

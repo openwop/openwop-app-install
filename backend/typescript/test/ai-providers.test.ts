@@ -1,26 +1,31 @@
 /**
- * AI providers host-surface smoke tests.
+ * AI providers host surface (TST-BNM-3).
  *
  * Verifies:
- *   1. Discovery advertises a spec-shaped `aiProviders` block
- *      (capabilities.md:126-163 — `supported`, `byok`, `policies.modes`,
- *      `byok ⊆ supported`, `policies.modes` includes `optional`).
- *   2. Each of the four policy modes (`disabled` / `optional` /
- *      `required` / `restricted`) produces the canonical
- *      `aiProviders` error code from `host-capabilities.md:141-154`
- *      when violated.
- *   3. The secret-leak invariant: after a run that resolves a BYOK
- *      credential, the cleartext value MUST NOT appear in any event
- *      payload (per `SECURITY/threat-model-secret-leakage.md`).
- *   4. Provider tool-calling returns `toolCalls[]` shape compatible
- *      with the `core.openwop.ai` toolCalling pack expectations.
+ *   1. The v2 discovery family record is spec-shaped and names every BYOK
+ *      provider under `apiKey` (v2 has no `byok` / `policies` projection yet).
+ *   2. Each policy mode (`disabled` / `required` / `restricted`) and each
+ *      credential failure produces the canonical `aiProviders` error code from
+ *      `host-capabilities.md:141-154`; an ABSENT provider is `invalid_request`.
+ *   3. A provider failure keeps the upstream body OUT of the error message (it
+ *      reaches only `details.upstreamMessage`), so a provider-side credential
+ *      echo cannot ride `node.failure.error.message`. (The run-event cleartext
+ *      check lives in agent-dispatch-live-real.test.ts "SR-1".)
+ *   4. The semantic request digest fills defaults before hashing (an omitted
+ *      `maxTokens` equals the 4096 default), and provider tool-calling returns
+ *      the `toolCalls[]` shape the `core.openwop.ai` toolCalling pack expects.
+ *   5. Plain-reply streaming is opt-in (ADR 0079 Phase 4).
+ *
+ * Red when: an absent provider reaches `provider_not_supported`, a `required`
+ * policy's credential failure is not re-coded `provider_policy_denied`, deltas
+ * stream without `stream:true`, or the digest stops defaulting `maxTokens`.
  */
 
 import { describe, expect, it, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
-import { createAiProvidersAdapter, AiProviderError, advertisedByokProviders } from '../src/aiProviders/aiProvidersHost.js';
+import { createAiProvidersAdapter, AiProviderError, advertisedByokProviders, __lastInvocationCacheKeyForTests } from '../src/aiProviders/aiProvidersHost.js';
 import { programMock, resetMockPrograms } from '../src/providers/dispatchMock.js';
 import type { AiProviderPolicy, ProviderPolicyResolver } from '../src/host/index.js';
 
@@ -93,21 +98,19 @@ describe('aiProviders: error codes are canonical per host-capabilities.md:141-15
     await expect(
       adapter.callAI({
         // provider deliberately omitted — the shape a node with empty config sends
-        model: 'foo',
-        messages: [{ role: 'user', content: 'hi' }],
-      } as unknown as Parameters<typeof adapter.callAI>[0]),
-    ).rejects.toMatchObject({ code: 'invalid_request' });
+        ...noProviderRequest(),
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_request', details: { field: 'provider' } });
   });
 
   it('the absent-provider message names the REAL fault, not a fake provider', async () => {
     const adapter = createAiProvidersAdapter(buildScope({ secrets: {} }));
-    await expect(
-      adapter.callAI({ model: 'foo', messages: [{ role: 'user', content: 'hi' }] } as unknown as Parameters<typeof adapter.callAI>[0]),
-    ).rejects.toThrow(/No AI provider is configured/);
+    const err = await adapter.callAI(noProviderRequest()).then(() => null, (e: unknown) => e);
+    expect(err).toBeInstanceOf(AiProviderError);
+    const message = (err as AiProviderError).message;
+    expect(message).toMatch(/No AI provider is configured/);
     // The old message must not come back: it named a provider called "undefined".
-    await expect(
-      adapter.callAI({ model: 'foo', messages: [{ role: 'user', content: 'hi' }] } as unknown as Parameters<typeof adapter.callAI>[0]),
-    ).rejects.not.toThrow(/Provider "undefined"/);
+    expect(message).not.toMatch(/Provider "undefined"/);
   });
 
   it('provider_policy_denied for disabled provider', async () => {
@@ -127,7 +130,7 @@ describe('aiProviders: error codes are canonical per host-capabilities.md:141-15
 
   // capabilities.md "Wire-format error": EVERY policy refusal carries the
   // advertised `policies.errorCode`; the cause rides `details.reason`.
-  it('provider_policy_denied (reason model_not_allowed) for restricted mode with empty allowlist (fail-closed)', async () => {
+  it('restricted + EMPTY allowlist: provider_policy_denied (reason model_not_allowed, fail-closed)', async () => {
     const scope = buildScope({
       secrets: { anthropic: 'sk-test' },
       policies: [{ provider: 'anthropic', mode: 'restricted', allowedModels: [] }],
@@ -142,7 +145,7 @@ describe('aiProviders: error codes are canonical per host-capabilities.md:141-15
     ).rejects.toMatchObject({ code: 'provider_policy_denied', details: { reason: 'model_not_allowed', allowed: [] } });
   });
 
-  it('provider_policy_denied (reason model_not_allowed) for restricted miss with wildcard allowlist', async () => {
+  it('restricted + wildcard MISS: provider_policy_denied (reason model_not_allowed)', async () => {
     const scope = buildScope({
       secrets: { anthropic: 'sk-test' },
       policies: [{ provider: 'anthropic', mode: 'restricted', allowedModels: ['claude-3-5-sonnet-*'] }],
@@ -240,18 +243,13 @@ describe('aiProviders: error codes are canonical per host-capabilities.md:141-15
   it('tool-calling now supported for openai (A3): routes to the OpenAI round', async () => {
     const scope = buildScope({ secrets: { openai: 'sk-test' } });
     const adapter = createAiProvidersAdapter(scope);
+    const urls: string[] = [];
     vi.stubGlobal('fetch', (url: string) => {
-      expect(url).toContain('api.openai.com');
-      return Promise.resolve({
-        ok: true,
-        status: 200,
-        json: () =>
-          Promise.resolve({
-            choices: [{ message: { content: '', tool_calls: [{ id: 'tc1', type: 'function', function: { name: 'foo', arguments: '{}' } }] }, finish_reason: 'tool_calls' }],
-            usage: { prompt_tokens: 1, completion_tokens: 1 },
-          }),
-        text: () => Promise.resolve(''),
-      } as Response);
+      urls.push(url);
+      return Promise.resolve(new Response(JSON.stringify({
+        choices: [{ message: { content: '', tool_calls: [{ id: 'tc1', type: 'function', function: { name: 'foo', arguments: '{}' } }] }, finish_reason: 'tool_calls' }],
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+      }), { status: 200, headers: { 'content-type': 'application/json' } }));
     });
     try {
       const res = await adapter.callAIWithTools({
@@ -261,6 +259,8 @@ describe('aiProviders: error codes are canonical per host-capabilities.md:141-15
         tools: [{ name: 'foo', description: 'd', inputSchema: { type: 'object' } }],
       });
       expect(res.toolCalls).toEqual([{ id: 'tc1', name: 'foo', input: {} }]);
+      expect(urls.every((u) => u.startsWith('https://api.openai.com/'))).toBe(true);
+      expect(urls.length).toBeGreaterThan(0);
     } finally {
       vi.unstubAllGlobals();
     }
@@ -268,31 +268,51 @@ describe('aiProviders: error codes are canonical per host-capabilities.md:141-15
 });
 
 describe('aiProviders: error details surface upstream message via details, not main message', () => {
-  it('AiProviderError details.upstreamMessage is the truncation slot', () => {
-    // Synthetic — verifies the error shape contract directly.
-    const e = new AiProviderError('internal_error', 'safe-public-message', {
-      provider: 'anthropic',
-      upstreamMessage: 'sensitive-upstream-body',
-    });
-    expect(e.message).toBe('safe-public-message');
-    expect(e.code).toBe('internal_error');
-    expect(e.details.upstreamMessage).toBe('sensitive-upstream-body');
+  it('AiProviderError details.upstreamMessage is the truncation slot', async () => {
+    // Real path: a provider 5xx whose body echoes something sensitive. The
+    // canonical message is fixed; the body reaches details.upstreamMessage only.
+    const adapter = createAiProvidersAdapter(buildScope({ secrets: { anthropic: 'sk-test' } }));
+    vi.stubGlobal('fetch', () => Promise.resolve(new Response('sensitive-upstream-body', { status: 503 })));
+    let err: unknown;
+    try {
+      err = await adapter
+        .callAI({ provider: 'anthropic', model: 'claude-3-5-sonnet-latest', messages: [{ role: 'user', content: 'hi' }] })
+        .then(() => null, (e: unknown) => e);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(err).toBeInstanceOf(AiProviderError);
+    const e = err as AiProviderError;
+    expect(e.code).toBe('provider_unavailable');
+    expect(e.message).toBe('Provider 5xx.');
+    expect(e.message).not.toContain('sensitive-upstream-body');
+    expect(String(e.details.upstreamMessage)).toContain('sensitive-upstream-body');
   });
 });
 
 describe('aiProviders: cache key canonicalization', () => {
+  afterEach(() => resetMockPrograms());
+
   it('omitted maxTokens collides with default-filled maxTokens', async () => {
-    // Same scope used twice; canonical providerKey should produce a
-    // cache hit on the second call when only `maxTokens` differs
-    // between `undefined` and the dispatcher's default (4096).
-    // We can't actually exercise the dispatch network call here, but
-    // we DO verify the adapter constructs without throwing — the
-    // canonicalization defaults live in computeProviderKey input
-    // shape and are unit-tested by replay invariants in the
-    // conformance suite when hosts advertise aiProviders.
-    const scope = buildScope({ secrets: { anthropic: 'sk-test' } });
-    const adapter = createAiProvidersAdapter(scope);
-    expect(typeof adapter.callAI).toBe('function');
+    // The semantic request digest (RFC 0150 §C) is over the EFFECTIVE request:
+    // defaults are filled before hashing, so omitting `maxTokens` and passing
+    // the 4096 default yield the SAME providerKey; a different value does not.
+    const keyFor = async (nodeId: string, maxTokens?: number): Promise<string> => {
+      programMock(nodeId, [{ content: 'ok' }]);
+      const scope = { ...buildScope({ secrets: {} }), nodeId };
+      await createAiProvidersAdapter(scope).callAI({
+        provider: 'mock', model: 'mock-1', messages: [{ role: 'user', content: 'same request' }],
+        ...(maxTokens !== undefined ? { maxTokens } : {}),
+      });
+      const key = __lastInvocationCacheKeyForTests();
+      expect(key?.nodeId).toBe(nodeId);
+      return key!.providerKey;
+    };
+    const omitted = await keyFor('ck-omitted');
+    const defaulted = await keyFor('ck-4096', 4096);
+    const other = await keyFor('ck-1024', 1024);
+    expect(omitted).toBe(defaulted);
+    expect(other, 'positive control: maxTokens IS in the digest').not.toBe(omitted);
   });
 });
 
@@ -351,6 +371,12 @@ describe('aiProviders: ADR 0079 §Phase 4 — plain callAI streams output.chunk'
     expect(res.content).toBe('no stream here');
   });
 });
+
+/** A callAI request with NO `provider` — the shape a node with `config: {}`
+ *  sends. Built from untyped JSON (its real origin), so no cast is needed. */
+function noProviderRequest(): Parameters<ReturnType<typeof createAiProvidersAdapter>['callAI']>[0] {
+  return JSON.parse('{"model":"foo","messages":[{"role":"user","content":"hi"}]}');
+}
 
 function buildScope(opts: {
   secrets: Record<string, string>;

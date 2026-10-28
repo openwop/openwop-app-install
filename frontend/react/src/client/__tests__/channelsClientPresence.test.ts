@@ -133,7 +133,15 @@ describe('ADR 0897 — bounded close', () => {
   });
 
   it('a REconnected message stream refreshes once (a message in the gap sent no frame); the first connect does not', async () => {
-    const fetchMock = fetchReturning(() => new Response(sseBody(''), { status: 200 }));
+    // Exercise minimum jitter: two immediately closed streams could reconnect
+    // twice within this test's 1 s advance. Keep the second stream alive so
+    // the callback assertion measures exactly one reconnect (ADR 0897).
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    let connections = 0;
+    const fetchMock = fetchReturning(() => new Response(
+      ++connections === 1 ? sseBody('') : new ReadableStream<Uint8Array>(),
+      { status: 200 },
+    ));
     vi.stubGlobal('fetch', fetchMock);
     const onMessage = vi.fn();
     const unsub = subscribeChannelMessages('c1', onMessage);

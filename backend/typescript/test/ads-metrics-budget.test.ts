@@ -8,6 +8,10 @@
  * The adapter HTTP paths (Meta /insights + POST; Google googleAds:search +
  * campaignBudgets:mutate) mirror the publishAd broker pattern and are exercised by
  * the env-gated ads-adapter-{meta,google} suites.
+ *
+ * Tracker TST-BKU-5. Red when the budget node applies by default or without an
+ * account, a failed read stops being a typed failure, `platform_unsupported` is
+ * dropped, or ad-metrics reads without an account — each sabotage-witnessed (w65).
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { ensureNodesRegistered } from '../src/bootstrap/nodes.js';
@@ -63,7 +67,7 @@ describe('ADR 0186 slice 4a/4b — ad-metrics + ad-budget-update nodes', () => {
     });
     expect(outputsOf(await metricsNode().execute(mk('no_connection')))).toMatchObject({ connected: false });
     expect(outputsOf(await metricsNode().execute(mk('unsupported')))).toMatchObject({ connected: false, reason: 'platform_unsupported' });
-    expect((await metricsNode().execute(mk('failed'))).status).toBe('failure');
+    expect(await metricsNode().execute(mk('failed'))).toMatchObject({ status: 'failure', error: { code: 'ad_metrics_failed' } });
   });
 
   it('ad-budget-update: recommends (applied:false) BY DEFAULT — dryRun on, no platform call', async () => {
@@ -97,6 +101,6 @@ describe('ADR 0186 slice 4a/4b — ad-metrics + ad-budget-update nodes', () => {
     });
     expect(outputsOf(await budgetNode().execute(mk('no_connection')))).toMatchObject({ applied: false });
     expect(outputsOf(await budgetNode().execute(mk('unsupported')))).toMatchObject({ applied: false, reason: 'platform_unsupported' });
-    expect((await budgetNode().execute(mk('failed'))).status).toBe('failure');
+    expect(await budgetNode().execute(mk('failed'))).toMatchObject({ status: 'failure', error: { code: 'ad_budget_update_failed' } });
   });
 });

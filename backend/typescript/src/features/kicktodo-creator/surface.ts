@@ -69,6 +69,28 @@ export function frameResearchQuestions(topic: string, audience: string): string[
   ];
 }
 
+/**
+ * ADR 0975 D3 — the web-search query for a challenge, built from the SAME
+ * candidate fields the questions are, deterministic and model-free like them.
+ *
+ * The chain used to search `{{params.topic}}` verbatim. A short title is a poor
+ * query: "The Daily Walk" returned only Bible-reading plans of that name on
+ * kicktodo.com (2026-10-25), the claim extractor correctly found nothing to
+ * support, and the run failed. The transformation (what the participant changes)
+ * names the subject; the audience is the fallback when there is none. Capped, at
+ * a word boundary, so a long brief stays a query.
+ */
+export const SEARCH_QUERY_MAX = 240;
+export function frameSearchQuery(topic: string, audience: string, transformation: string): string {
+  const t = topic.trim();
+  const context = (transformation.trim() || audience.trim()).replace(/\s+/g, ' ');
+  const head = context ? `${t}: ${context}` : t;
+  const tail = ' — research evidence and practical guidance';
+  const room = SEARCH_QUERY_MAX - tail.length;
+  const clipped = head.length <= room ? head : head.slice(0, head.lastIndexOf(' ', room) > 0 ? head.lastIndexOf(' ', room) : room);
+  return `${clipped}${tail}`;
+}
+
 /** ADR 0901 (DEC-1) — the run-principal spec per method (`surfaceBinding.ts`).
  *  Every creator route is `requireKicktodoManage`, so every method that reads or
  *  writes a candidate asks the SAME manage predicate. No host job runs the
@@ -122,6 +144,7 @@ export function buildKicktodoCreatorSurface(scope: BundleScope): FeatureSurface 
     getCandidate: async (args) => ({ candidate: await getCandidate(tenant, surfaceStr(args.candidateId)) }),
     frameResearch: async (args) => ({
       questions: frameResearchQuestions(surfaceStr(args.topic), surfaceStr(args.audience)),
+      searchQuery: frameSearchQuery(surfaceStr(args.topic), surfaceStr(args.audience), surfaceStr(args.transformation)),
     }),
     normalizeSource: async (args) => {
       const url = surfaceStr(args.url);

@@ -65,3 +65,17 @@ export async function visitorAnalyticsAllowed(tenantId: string, sessionKey: stri
   if (sessionKey && await isErasureTombstoned(tenantId, sessionKey)) return false;
   return isAllowed(tenantId, ctx.tokenSubject, 'analytics', { visitor });
 }
+
+/**
+ * ADR 0951 D1 — whether a session may be RECORDED for this visitor.
+ * `analytics.replay` is strict (`STRICT_EXPLICIT_OPT_IN`), so only a recorded
+ * explicit `true` permits — and a record exists only under the `visitor:`
+ * subject a consent token names. No token ⇒ no record ⇒ refused, in every
+ * region and whatever the tenant's default mode. A tombstoned `sessionKey`
+ * stays refused, exactly as for analytics.
+ */
+export async function visitorReplayAllowed(tenantId: string, sessionKey: string, ctx: VisitorConsentContext): Promise<boolean> {
+  if (ctx.tokenSubject === undefined) return false;
+  if (sessionKey && await isErasureTombstoned(tenantId, sessionKey)) return false;
+  return isAllowed(tenantId, ctx.tokenSubject, 'analytics.replay', { visitor: { region: ctx.region } });
+}

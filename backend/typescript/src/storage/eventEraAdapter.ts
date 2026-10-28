@@ -209,9 +209,9 @@ export function withEventEra(inner: Storage): Storage {
     // ADR 0754 — the caller names the v1 type; the row is stored in its run's era
     // vocabulary (the same translation `appendEvent` applies), and is returned
     // under the caller's name — `getArtifact` reads it as a v1 payload.
-    async findFirstEventByPayload(runId, type, payloadKey, payloadValue) {
+    async findFirstEventByPayload(runId, type, payloadKey, payloadValue, opts) {
       const era = await eraFor(inner, runId);
-      const row = await inner.findFirstEventByPayload(runId, toStorageVocabulary(type, era), payloadKey, payloadValue);
+      const row = await inner.findFirstEventByPayload(runId, toStorageVocabulary(type, era), payloadKey, payloadValue, opts);
       return row ? { ...row, type } : null;
     },
 

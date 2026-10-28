@@ -1,9 +1,9 @@
 /**
  * ADR 0534 P5 — the work-selection read client.
  *
- * One read. There is no write client and there should not be one: weights are
- * edited through Priority Matrix's existing criteria-set editor, not a second
- * editor here (ADR 0534 matrix row 10).
+ * One read. There is no write client and there should not be one. The weights
+ * are a server-side constant with no editor (ADR 0963 D7 corrects ADR 0534's
+ * claim that Priority Matrix's criteria-set editor edits them).
  */
 import { authedHeaders, config, fetchOpts } from '../client/config.js';
 
@@ -16,6 +16,13 @@ export interface RankReason {
    *  re-derive the vocabulary from ids. */
   criterion: string;
   value: number;
+}
+
+/** ADR 0963 D3 — a To Do card the agent will not pick until a person clears the
+ *  note on it (its last run was stopped or failed). Never ranked. */
+export interface HeldCard {
+  cardId: string;
+  title: string;
 }
 
 export interface RankedCard {
@@ -39,7 +46,7 @@ export type RankingResult =
   | { kind: 'disabled' }
   /** The read failed. Distinct from `disabled` so a broken route is not invisible. */
   | { kind: 'error' }
-  | { kind: 'ok'; ranked: RankedCard[] };
+  | { kind: 'ok'; ranked: RankedCard[]; held: HeldCard[] };
 
 export async function getBoardRanking(boardId: string): Promise<RankingResult> {
   let res: Response;
@@ -57,8 +64,8 @@ export async function getBoardRanking(boardId: string): Promise<RankingResult> {
   if (res.status === 404) return { kind: 'disabled' };
   if (!res.ok) return { kind: 'error' };
   try {
-    const body = (await res.json()) as { ranked?: RankedCard[] };
-    return { kind: 'ok', ranked: body.ranked ?? [] };
+    const body = (await res.json()) as { ranked?: RankedCard[]; held?: HeldCard[] };
+    return { kind: 'ok', ranked: body.ranked ?? [], held: body.held ?? [] };
   } catch {
     return { kind: 'error' };
   }

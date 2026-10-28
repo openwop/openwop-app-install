@@ -193,6 +193,24 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# ADR 0991 — the cross-machine release bus: a `certify` lease and start/end
+# events. D9: a cut LOADS the backend, so it takes the service's run: target and
+# queues (bounded, fail-open) behind a live deploy to that same service, and a
+# deploy queues behind it. Acquired BEFORE the cut lock and before the serving
+# commit is read: a cut that waited must label its bundles with what serves
+# AFTER the wait. When deploy.sh runs this (--publish-evidence) it exports its
+# own id as OPENWOP_RELEASE_BUS_PARENT, so the cut does not queue behind its
+# parent. The EXIT hook chains onto `cleanup` without changing the exit status.
+if [ -f "$ROOT/scripts/lib/release-bus.sh" ]; then
+  # shellcheck source=lib/release-bus.sh
+  . "$ROOT/scripts/lib/release-bus.sh"
+  CUT_TARGET="$(release_bus_targets backend)"
+  cut_bus_end() {
+    printf '{"kind":"certify","phase":"end","exit":%s,"commit":"%s","result":"%s"}' "$1" "${COMMIT:-}" "$([ "$1" -eq 0 ] && echo PUBLISHED || echo "FAILED rc=$1")"
+  }
+  release_bus_acquire_hold "certify-$(hostname -s 2>/dev/null || hostname)-$$" certify cut_bus_end ${CUT_TARGET:+--targets "$CUT_TARGET"}
+fi
+
 # ── 0. the cut lock: one cut at a time, across every session and machine ────
 # Taken before the first request to the host: the harm is two concurrent load
 # tests, not only last-write-wins in the bucket. A lock past its expiresAt
@@ -243,6 +261,12 @@ if [ "$COMMIT" != "$TIP" ] && [ "$ALLOW_ANY_COMMIT" -eq 0 ]; then
   die "the serving commit ${COMMIT:0:12} is not origin/$DEPLOY_BRANCH's tip ${TIP:0:12}. Evidence is published for what is SERVING; if that is really what you want, pass --allow-any-commit."
 fi
 echo "serving: ${COMMIT:0:12}  (origin/$DEPLOY_BRANCH ${TIP:0:12})"
+
+# ADR 0991 — the start event, now that the commit is known (the lease was
+# acquired before the cut lock, above).
+if declare -F release_bus >/dev/null; then
+  release_bus publish "{\"kind\":\"certify\",\"phase\":\"start\",\"commit\":\"$COMMIT\",\"targets\":\"${CUT_TARGET:-}\"}"
+fi
 
 # The commit is read ONCE, above, and every bundle is labelled with it. So it must
 # still be the serving commit when each major's suite has finished, and again just
@@ -382,18 +406,19 @@ case "$code" in
 esac
 
 # The low-scope Subject (0200.challenge-403-scope, the approvals:respond leg of
-# interrupt-auth-required-resume): a SHORT-LIVED `runs:read`-only owk_ key, minted
+# interrupt-auth-required-resume, RFC 0249's unscoped apply): a SHORT-LIVED owk_
+# key holding `runs:read`, `proposals:read` and `proposals:write` (ADR 0972 D10), minted
 # through the production developer-keys route in the conformance key's own tenant,
 # revoked in `cleanup`. Never printed.
 EXPIRES="$(node -e 'process.stdout.write(new Date(Date.now()+2*3600e3).toISOString())')"
 if curl -sS --max-time 20 -X POST -H "Authorization: Bearer $OPENWOP_API_KEY" -H 'content-type: application/json' \
-     -d "{\"name\":\"conformance low-scope (runs:read, evidence cut)\",\"scopes\":[\"runs:read\"],\"expiresAt\":\"$EXPIRES\"}" \
+     -d "{\"name\":\"conformance low-scope (runs:read, proposals:read/write, evidence cut)\",\"scopes\":[\"runs:read\",\"proposals:read\",\"proposals:write\"],\"expiresAt\":\"$EXPIRES\"}" \
      "$BASE/api/host/openwop-app/developer-keys" > "$WORK/lowscope.json" \
    && LOW_SCOPE_KEY_ID="$(node -e 'const j=JSON.parse(require("fs").readFileSync(0,"utf8"));process.stdout.write((j.key&&j.key.keyId)||"")' < "$WORK/lowscope.json")" \
    && [ -n "$LOW_SCOPE_KEY_ID" ]; then
   OPENWOP_TEST_LOW_SCOPE_KEY="$(node -e 'const j=JSON.parse(require("fs").readFileSync(0,"utf8"));process.stdout.write(j.token||"")' < "$WORK/lowscope.json")"
   export OPENWOP_TEST_LOW_SCOPE_KEY
-  echo "low-scope key: minted (runs:read, expires $EXPIRES)"
+  echo "low-scope key: minted (runs:read, proposals:read/write, expires $EXPIRES)"
 else
   echo "note: could not mint a low-scope key — its legs will record blocked"
 fi

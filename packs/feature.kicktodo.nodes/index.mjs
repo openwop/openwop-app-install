@@ -103,8 +103,8 @@ function ensureCreator(ctx) {
 export async function researchFrame(ctx) {
   const k = ensureCreator(ctx);
   const i = ctx.inputs ?? {};
-  const out = await k.frameResearch({ topic: str(i.topic), audience: str(i.audience) });
-  return { status: 'success', outputs: { questions: out.questions } };
+  const out = await k.frameResearch({ topic: str(i.topic), audience: str(i.audience), transformation: str(i.transformation) });
+  return { status: 'success', outputs: { questions: out.questions, ...(typeof out.searchQuery === 'string' && out.searchQuery ? { searchQuery: out.searchQuery } : {}) } }; // ADR 0975 D3
 }
 
 export async function sourceNormalize(ctx) {

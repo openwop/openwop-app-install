@@ -3,7 +3,9 @@
  *   - runSubscriptionCycle is IDEMPOTENT per invoiceId (/architect finding 1): a
  *     re-delivered invoice.paid never places a second period order; a NEW invoice does;
  *   - the billing→commerce seam fires the registered hook (billing never imports commerce);
- *   - getProductSubscriptionByStripeId is tenant-scoped.
+ *   - getProductSubscriptionByStripeId answers null for an id no tenant holds
+ *     (its TENANT-SCOPING twin, with a real Stripe id in one tenant, lives in
+ *     subscription-bridge-integration since grade-tests wave 61).
  * The matched-sub → live Stripe subscription path is exercised only with a real key
  * (demo-mode default), so this covers the deterministic host logic.
  */
@@ -37,16 +39,28 @@ describe('MERCH-E recurrence', () => {
   it('the billing seam fires the registered hook (billing never imports commerce)', async () => {
     const seen: { stripeSubscriptionId: string; invoiceId: string }[] = [];
     setSubscriptionInvoiceHook(async (e) => { seen.push({ stripeSubscriptionId: e.stripeSubscriptionId, invoiceId: e.invoiceId }); });
-    await fireSubscriptionInvoicePaid({ tenantId: T, stripeSubscriptionId: 'sub_123', invoiceId: 'inv_9' });
-    expect(seen).toEqual([{ stripeSubscriptionId: 'sub_123', invoiceId: 'inv_9' }]);
-    // an empty stripe subscription id (a plan-only invoice) is a no-op, not a fire.
-    seen.length = 0;
-    await fireSubscriptionInvoicePaid({ tenantId: T, stripeSubscriptionId: '', invoiceId: 'inv_x' });
-    expect(seen).toHaveLength(0);
-    setSubscriptionInvoiceHook(null);
+    try {
+      await fireSubscriptionInvoicePaid({ tenantId: T, stripeSubscriptionId: 'sub_123', invoiceId: 'inv_9' });
+      expect(seen).toEqual([{ stripeSubscriptionId: 'sub_123', invoiceId: 'inv_9' }]);
+      // an empty stripe subscription id (a plan-only invoice) is a no-op, not a fire.
+      seen.length = 0;
+      await fireSubscriptionInvoicePaid({ tenantId: T, stripeSubscriptionId: '', invoiceId: 'inv_x' });
+      expect(seen).toHaveLength(0);
+    } finally {
+      setSubscriptionInvoiceHook(null); // restored even when an assertion above fails
+    }
   });
 
-  it('getProductSubscriptionByStripeId is tenant-scoped', async () => {
+  // RETITLED (wave 61, protected file keeps the case): it was "…is tenant-scoped",
+  // but both ids exist in NO tenant, so it proved null-on-missing, never
+  // isolation. The isolation twin is subscription-bridge-integration's
+  // `getProductSubscriptionByStripeId('other-tenant', 'sub_test')` (8fw3g2-sr2-tenant-r2).
+  // A demo subscription (no Stripe id) is present here so "unknown id" is
+  // asked of a non-empty tenant.
+  it('getProductSubscriptionByStripeId answers null for a Stripe id no subscription carries', async () => {
+    const p = await subProduct();
+    const { subscription } = await subscribeToProduct({ tenantId: T, orgId: ORG, createdBy: 'u', productId: p.productId, interval: 'monthly' });
+    expect(subscription.stripeSubscriptionId).toBeUndefined(); // demo mode: none minted
     expect(await getProductSubscriptionByStripeId(T, 'sub_nope')).toBeNull();
     expect(await getProductSubscriptionByStripeId('other-tenant', 'sub_anything')).toBeNull();
   });

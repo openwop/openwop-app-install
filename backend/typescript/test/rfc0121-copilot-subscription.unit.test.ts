@@ -2,6 +2,11 @@
  * ADR 0757 — GitHub Copilot, the RFC 0121 cleared `subscription` provider.
  * Unit coverage for the §B.9 gate, the loopback-only token egress, the OAuth
  * connect flow's state/principal binding and least scope, and the dispatch arm.
+ *
+ * The callback's binding check (`byok/copilotOAuth.ts` completeCopilotAuthorization)
+ * compares the principal AND the personal tenant; each half has its own case
+ * below, so dropping either one alone goes red (probes 8fw2g1-cp-principal-only-r2
+ * and 8fw2g1-cp-tenant-only-r2).
  */
 
 import { describe, expect, it, beforeAll, afterEach, vi } from 'vitest';
@@ -16,7 +21,13 @@ vi.mock('../src/host/webhookEgressGuard.js', async (orig) => {
     ...actual,
     guardedEgressFetch: vi.fn(async (url: string, init: { body?: string }) => {
       egress.calls.push({ url, body: String(init?.body ?? '') });
-      return { ok: egress.reply.status < 400, status: egress.reply.status, json: async () => egress.reply.json };
+      // A partial Response: completeCopilotAuthorization reads only ok/status/json.
+      const reply: Pick<Response, 'ok' | 'status' | 'json'> = {
+        ok: egress.reply.status < 400,
+        status: egress.reply.status,
+        json: async () => egress.reply.json,
+      };
+      return reply;
     }),
   };
 });
@@ -52,7 +63,7 @@ afterEach(async () => {
   egress.reply = { status: 200, json: { access_token: 'gho_TESTTOKEN123' } };
   await __resetCopilotPendingAuth();
   // clearAllSecrets() lists host-global refs only; tenant-scoped rows are removed explicitly.
-  for (const tenantId of ['user:abc', 'user:evil']) await removeSecret('subscription:github.copilot', { tenantId });
+  for (const tenantId of ['user:abc', 'user:evil', 'user:other']) await removeSecret('subscription:github.copilot', { tenantId });
   await clearAllSecrets();
 });
 
@@ -157,20 +168,34 @@ describe('OAuth connect flow — least scope, single-use state, principal-bound'
   it('a DIFFERENT principal completing the callback stores nothing (login-CSRF)', async () => {
     configure();
     const state = new URL((await beginCopilotAuthorization({ ...who, reqOrigin: ORIGIN })).authorizeUrl).searchParams.get('state')!;
-    const out = await completeCopilotAuthorization({ state, code: 'c1', error: undefined, principalId: 'attacker', personalTenant: 'user:evil', reqOrigin: ORIGIN });
-    expect(out).toMatchObject({ ok: false, reason: 'principal_mismatch' });
+    // SAME personal tenant, different principal: only the principal half refuses.
+    const out = await completeCopilotAuthorization({ state, code: 'c1', error: undefined, principalId: 'u-2', personalTenant: 'user:abc', reqOrigin: ORIGIN });
+    expect(out).toEqual({ ok: false, returnTo: '/keys', reason: 'principal_mismatch' });
     expect(egress.calls).toHaveLength(0);
     expect(await resolveSecret('subscription:github.copilot', { tenantId: 'user:abc' })).toBeNull();
-    expect(await resolveSecret('subscription:github.copilot', { tenantId: 'user:evil' })).toBeNull();
+  });
+
+  it('the SAME principal completing from a different personal tenant stores nothing', async () => {
+    configure();
+    const state = new URL((await beginCopilotAuthorization({ ...who, reqOrigin: ORIGIN })).authorizeUrl).searchParams.get('state')!;
+    // Same principal, different tenant: only the tenant half refuses.
+    const out = await completeCopilotAuthorization({ state, code: 'c1', error: undefined, principalId: 'u-1', personalTenant: 'user:other', reqOrigin: ORIGIN });
+    expect(out).toEqual({ ok: false, returnTo: '/keys', reason: 'principal_mismatch' });
+    expect(egress.calls).toHaveLength(0);
+    expect(await resolveSecret('subscription:github.copilot', { tenantId: 'user:abc' })).toBeNull();
+    expect(await resolveSecret('subscription:github.copilot', { tenantId: 'user:other' })).toBeNull();
   });
 
   it('an expired state, a denied consent and a refused exchange each store nothing', async () => {
     configure();
     const mint = async (): Promise<string> => new URL((await beginCopilotAuthorization({ ...who, reqOrigin: ORIGIN })).authorizeUrl).searchParams.get('state')!;
     expect(await completeCopilotAuthorization({ state: await mint(), code: 'c', error: undefined, ...who, reqOrigin: ORIGIN, now: Date.now() + 11 * 60_000 })).toMatchObject({ ok: false, reason: 'invalid_state' });
+    expect(egress.calls).toHaveLength(0); // expired: nothing exchanged
     expect(await completeCopilotAuthorization({ state: await mint(), code: undefined, error: 'access_denied', ...who, reqOrigin: ORIGIN })).toMatchObject({ ok: false, reason: 'denied' });
+    expect(egress.calls).toHaveLength(0); // denied: nothing exchanged
     egress.reply = { status: 400, json: { error: 'bad_verification_code' } };
     expect(await completeCopilotAuthorization({ state: await mint(), code: 'c', error: undefined, ...who, reqOrigin: ORIGIN })).toMatchObject({ ok: false, reason: 'exchange_failed' });
+    expect(egress.calls).toHaveLength(1); // refused: exchanged once, stored nothing
     expect(await resolveSecret('subscription:github.copilot', { tenantId: 'user:abc' })).toBeNull();
   });
 });

@@ -168,4 +168,12 @@ export const messages = {
   quotaMixedTitle: 'Ce total additionne des quotas en devises différentes : il est affiché sans symbole.',
   currencyRequired: 'Choisissez une devise — un montant sans devise ne peut pas être comparé aux affaires.',
   currencyNone: "Aucune devise",
+  // ADR 0954 D5 — lead-routing rules.
+  targetLeads: "Prospects (attribution des prospects)",
+  ruleTarget_contact: "Prospect",
+  field_band: "Note du prospect",
+  field_source: "Origine du prospect",
+  field_stage: "Étape du cycle de vie",
+  field_company: "Nom de l’entreprise",
+  field_score: "Score du prospect",
 } as const;

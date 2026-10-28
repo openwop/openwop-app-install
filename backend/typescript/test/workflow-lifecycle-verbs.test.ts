@@ -2,6 +2,14 @@
  * ADR 0369 Phase 2 — lifecycle verbs at the HTTP boundary (authz/IDOR is only
  * observable here): archive/unarchive/promote + the DELETE runs-reference
  * guard + the promote "run it once first" gate (OQ5 decision).
+ *
+ * Sabotage-witnessed (wave 64, probes 8fw5g1-lv-*): the owner fence on every verb
+ * (incl. DELETE), the archived-row filter, the runs-reference delete guard.
+ * DOUBLE GUARD (named): promote refuses an untested draft twice — first the
+ * completed-run index (`hasRunForWorkflow`), then a scan of recent runs for a
+ * non-debug completed one. Either alone refuses a draft with no runs, so dropping one
+ * stays green (8fw5g1-lv-untested-first, vacuous by design); 8fw5g1-lv-untested-both-r2
+ * drops BOTH and turns the untested leg red.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -50,7 +58,9 @@ const wfDef = (workflowId: string, transient = false) => ({
 async function runToCompletion(c: Client, workflowId: string): Promise<void> {
   const create = await c.post('/runs', { workflowId, inputs: {} });
   expect(create.status, JSON.stringify(create.body)).toBe(201);
-  const runId = create.body.runId as string;
+  await awaitCompleted(c, create.body.runId as string);
+}
+async function awaitCompleted(c: Client, runId: string): Promise<void> {
   for (let i = 0; i < 60; i++) {
     const r = await c.get(`/runs/${runId}`);
     const status = r.body.status as string;
@@ -58,7 +68,7 @@ async function runToCompletion(c: Client, workflowId: string): Promise<void> {
     if (status === 'failed' || status === 'cancelled') throw new Error(`run ${status}: ${JSON.stringify(r.body)}`);
     await new Promise((res) => setTimeout(res, 100));
   }
-  throw new Error('run never completed');
+  throw new Error(`run ${runId} never completed after 60 polls`);
 }
 
 describe('workflow lifecycle verbs (ADR 0369 P2)', () => {
@@ -96,6 +106,10 @@ describe('workflow lifecycle verbs (ADR 0369 P2)', () => {
     const fresh = `lc-del-fresh-${Date.now()}`;
     expect((await c.post(WF, wfDef(fresh))).status).toBe(201);
     expect((await c.del(`${WF}/${fresh}`)).status).toBe(200);
+    // Read back: the deleted workflow is gone; the referenced one stays.
+    const left = ((await c.get(`${WF}?includeArchived=true`)).body.workflows as Array<{ workflowId: string }>).map((w) => w.workflowId);
+    expect(left).not.toContain(fresh);
+    expect(left).toContain(ran);
   });
 
   it('promote refuses an untested draft (409 workflow_untested), succeeds after ONE completed run, and RE-PUBLISHES a saved workflow', async () => {
@@ -112,6 +126,7 @@ describe('workflow lifecycle verbs (ADR 0369 P2)', () => {
     const untested = await c.post(`${WF}/${id}/promote`);
     expect(untested.status).toBe(409);
     expect((untested.body as { details?: { reason?: string } }).details?.reason).toBe('workflow_untested');
+
 
     await runToCompletion(c, id); // transient defs are runnable (review runs)
     const promoted = await c.post(`${WF}/${id}/promote`);
@@ -138,8 +153,18 @@ describe('workflow lifecycle verbs (ADR 0369 P2)', () => {
 
     const stranger = client();
     await signup(stranger);
+    const NOT_FOUND = { error: 'not_found', message: 'workflow not found' };
     for (const verb of ['archive', 'unarchive', 'promote']) {
-      expect((await stranger.post(`${WF}/${id}/${verb}`)).status).toBe(404);
+      const r = await stranger.post(`${WF}/${id}/${verb}`);
+      expect(r.status, verb).toBe(404);
+      expect(r.body, verb).toMatchObject(NOT_FOUND);
     }
+    const del = await stranger.del(`${WF}/${id}`);
+    expect(del.status).toBe(404);
+    expect(del.body).toMatchObject(NOT_FOUND);
+    // …and none of the stranger's attempts touched the owner's workflow.
+    const mine = ((await owner.get(WF)).body.workflows as Array<{ workflowId: string; archivedAt?: string }>).find((w) => w.workflowId === id);
+    expect(mine, 'still listed (not deleted, not archived)').toBeTruthy();
+    expect(mine?.archivedAt).toBeUndefined();
   });
 });

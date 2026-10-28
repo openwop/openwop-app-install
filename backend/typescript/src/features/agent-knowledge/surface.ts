@@ -29,6 +29,7 @@
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { surfaceStr as str, surfaceOptStr as optStr, type FeatureSurface } from '../../host/featureSurfaces.js';
 import { retrieveForAgent, ingestDocToBoundCollection } from './service.js';
+import type { SubjectCaller } from '../../host/subjectAccess.js';
 
 export function buildAgentKnowledgeSurface(scope: BundleScope): FeatureSurface {
   const tenantId = scope.tenantId;
@@ -47,20 +48,25 @@ export function buildAgentKnowledgeSurface(scope: BundleScope): FeatureSurface {
      *  nothing in your knowledge base". `[]` on the happy path, so a chain that
      *  ignores it is unaffected. */
     retrieve: async (args) => {
-      // No caller (ADR 0643 R3/R4 Blocker 2 classification): this is the RUN lane,
-      // where the binding is read as the owner-scoped grant it is — the HTTP reads
-      // re-resolve the reader; a run has no reader to re-resolve.
-      //
-      // ADR 0664 D6 — this said "the FOUR HTTP reads". There were FIVE:
-      // `routes/agents.ts:327` (agent dispatch) holds `req.userId` and passed no
-      // caller, on a different router, which is how the count stayed wrong. Fixed
-      // there; the claim here is no longer a number that can silently drift.
-      //
-      // ADR 0664 AGKM-10 (recorded, NOT fixed here) — `args.agentId` is
-      // caller-supplied and un-gated, so a workflow author can name ANY roster
-      // agent and read its bound corpora into a run output. That is wider than
-      // R3's "the people who use the agent" premise; see the ADR.
-      const res = await retrieveForAgent(tenantId, str(args.agentId), str(args.query));
+      // ADR 0979 D3 (closes ADR 0664 AGKM-10) — this read used to pass NO caller,
+      // i.e. read every bound corpus pre-authorized, so a workflow author could
+      // name any roster agent and pull its project-bound corpora into a run
+      // output that the HTTP preview (which re-resolves the reader) refuses them.
+      // It now reads AS someone:
+      //   - the run's acting user (what the HTTP preview and the agent runner
+      //     node resolve on a run with an actor);
+      //   - else the member who caused an actorless run, read ONLY by the org
+      //     membership floor (ADR 0832), never as a subject that grants;
+      //   - else nobody: a subject-bound corpus is refused.
+      // NOT parity with `agentRunnerNode`'s actorless arm, deliberately: that is
+      // an agent turn, where ADR 0664 decided a binding is an owner-scoped grant
+      // to whoever uses the agent. This node is an author reading corpora into an
+      // output. The agent's `agent:<id>` notes are unchanged: any
+      // `workspace:read` member reads those through the HTTP `agent:` arm.
+      const caller: SubjectCaller = scope.actingUserId
+        ? { subject: scope.actingUserId }
+        : scope.orgScopeSubject ? { orgScopeSubject: scope.orgScopeSubject } : {};
+      const res = await retrieveForAgent(tenantId, str(args.agentId), str(args.query), caller);
       // WF-AKM-3 — `unavailable` distinguishes "capability off" / "nothing bound"
       // from an empty corpus. A missing agent never reaches here: it throws.
       // Omitted on the happy path, so a chain that ignores it is unaffected.

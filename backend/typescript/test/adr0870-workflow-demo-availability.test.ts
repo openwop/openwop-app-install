@@ -17,6 +17,13 @@
  *      REAL template reads as demo is witness 2's job.
  *   2. ROUTE: the HTTP surface on a real app boot (default posture), including
  *      the tenant-filtered catalog read and the no-oracle answer for unknowns.
+ *      The tenant filter is driven by a cookie session in tenant A (the
+ *      `dev-token` bearer is a wildcard operator, which the filter exempts).
+ *
+ * Tracker TST-BFC-3. Red when: the walk skips sub-workflow children; a demo
+ * workflow is runnable without its mock node; ids are not de-duplicated; the
+ * mock-AI node registers in the auth posture; an unknown id reads runnable; the
+ * route drops its foreign-owner check.
  */
 
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -39,8 +46,8 @@ const POSTURE_DEFS: Record<string, WorkflowDefinition> = {
       { nodeId: 'draft', typeId: MOCK_AI_TYPE_ID },
       { nodeId: 'call', typeId: 'core.subWorkflow', config: { workflowId: 'posture.child' } },
     ],
-  } as WorkflowDefinition,
-  'posture.child': { workflowId: 'posture.child', nodes: [{ nodeId: 'ai', typeId: MOCK_AI_TYPE_ID }] } as WorkflowDefinition,
+  },
+  'posture.child': { workflowId: 'posture.child', nodes: [{ nodeId: 'ai', typeId: MOCK_AI_TYPE_ID }] },
 };
 
 interface Row { workflowId: string; known: boolean; demo: boolean; runnable: boolean; reason?: string }
@@ -77,19 +84,43 @@ describe.each([
 describe('availability route (real app boot, default posture)', () => {
   let server: http.Server | undefined;
   let base = '';
+  const ROUTE_ENV = ['OPENWOP_STORAGE_DSN', 'OPENWOP_AUTH_DISABLE_COOKIES', 'OPENWOP_SESSION_SECRET', 'OPENWOP_TEST_AUTH_ENABLED'] as const;
+  const routeEnvSaved = new Map(ROUTE_ENV.map((k) => [k, process.env[k]]));
+  let registerWorkflow: (def: WorkflowDefinition) => void;
+  let recordOwnership: (tenantId: string, workflowId: string, meta: { nodeCount: number }) => Promise<void>;
   beforeAll(async () => {
     vi.resetModules();
     delete process.env.OPENWOP_DEPLOY_POSTURE;
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
-    process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
+    // Cookie sessions on, so a tenant-scoped (non-wildcard) caller exists.
+    delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
+    process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
+    process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
     const { createApp } = await import('../src/index.js');
+    ({ registerWorkflow } = await import('../src/host/workflowsRegistry.js'));
+    ({ recordOwnership } = await import('../src/host/workflowOwnership.js'));
     const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
     await new Promise<void>((res) => {
       const s = app.listen(0, '127.0.0.1', () => { base = `http://127.0.0.1:${(s.address() as AddressInfo).port}`; res(); });
       server = s;
     });
   }, 120_000);
-  afterAll(async () => { if (server) await new Promise<void>((res) => server!.close(() => res())); });
+  afterAll(async () => {
+    if (server) await new Promise<void>((res) => server!.close(() => res()));
+    for (const [k, v] of routeEnvSaved) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  });
+
+  /** A cookie session for a fresh user in `tenantId` (a tenant-scoped caller). */
+  async function sessionIn(tenantId: string): Promise<string> {
+    const r = await fetch(`${base}/host/openwop-app/test/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: `avail-${tenantId}-${Math.random().toString(36).slice(2)}@acme.test`, tenantId }),
+    });
+    expect(r.status, await r.clone().text()).toBe(201);
+    const cookie = r.headers.getSetCookie().map((c) => /(__session=[^;]+)/.exec(c)?.[1]).find(Boolean);
+    expect(cookie, 'the login set a session cookie').toBeTruthy();
+    return cookie!;
+  }
 
   async function availability(ids: string[]): Promise<{ status: number; rows: Row[] }> {
     const r = await fetch(`${base}/host/openwop-app/workflows/availability?ids=${ids.map(encodeURIComponent).join(',')}`, {
@@ -117,6 +148,23 @@ describe('availability route (real app boot, default posture)', () => {
     ]);
   });
 
+  it('a workflow owned by another tenant answers known:false (no oracle); the same shape owned by the caller is known', async () => {
+    const suffix = Math.random().toString(36).slice(2, 10);
+    const foreignId = `wf.avail.foreign.${suffix}`;
+    const ownId = `wf.avail.own.${suffix}`;
+    for (const workflowId of [foreignId, ownId]) registerWorkflow({ workflowId, nodes: [{ nodeId: 'ai', typeId: MOCK_AI_TYPE_ID }] });
+    await recordOwnership('avail-tenant-b', foreignId, { nodeCount: 1 });
+    await recordOwnership('avail-tenant-a', ownId, { nodeCount: 1 });
+    const cookie = await sessionIn('avail-tenant-a');
+    const r = await fetch(`${base}/host/openwop-app/workflows/availability?ids=${foreignId},${ownId}`, { headers: { cookie } });
+    expect(r.status).toBe(200);
+    const body = (await r.json()) as { availability?: Row[] };
+    expect(body.availability).toEqual([
+      { workflowId: foreignId, known: false, demo: false, runnable: false },
+      { workflowId: ownId, known: true, demo: true, runnable: true },
+    ]);
+  });
+
   it('an empty ids param answers an empty list', async () => {
     const r = await fetch(`${base}/host/openwop-app/workflows/availability`, { headers: { authorization: 'Bearer dev-token' } });
     expect(r.status).toBe(200);
@@ -126,9 +174,9 @@ describe('availability route (real app boot, default posture)', () => {
 
 describe('assessWorkflowAvailability (pure)', () => {
   const defs: Record<string, WorkflowDefinition> = {
-    parent: { workflowId: 'parent', nodes: [{ nodeId: 'call', typeId: 'core.subWorkflow', config: { workflowId: 'child' } }] } as WorkflowDefinition,
-    child: { workflowId: 'child', nodes: [{ nodeId: 'ai', typeId: MOCK_AI_TYPE_ID }] } as WorkflowDefinition,
-    loop: { workflowId: 'loop', nodes: [{ nodeId: 'self', typeId: 'core.subWorkflow', config: { workflowId: 'loop' } }] } as WorkflowDefinition,
+    parent: { workflowId: 'parent', nodes: [{ nodeId: 'call', typeId: 'core.subWorkflow', config: { workflowId: 'child' } }] },
+    child: { workflowId: 'child', nodes: [{ nodeId: 'ai', typeId: MOCK_AI_TYPE_ID }] },
+    loop: { workflowId: 'loop', nodes: [{ nodeId: 'self', typeId: 'core.subWorkflow', config: { workflowId: 'loop' } }] },
   };
   const read = async (id: string) => defs[id] ?? null;
 

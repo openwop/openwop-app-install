@@ -14,9 +14,15 @@
  *     host:billing:manage, an admin is served (positive control);
  *   - the packKey resolves the RIGHT price server-side — proven by fulfilment:
  *     completing the session credits exactly that pack's tokens;
- *   - an unknown packKey is a 404 and opens no session.
+ *   - an unknown packKey, or a raw price id used as one, is the route's own 404.
  *
  * Authority legs use the ADR 0554 §P3 harness (see adr0821-ai-credit-meter-route).
+ * Tracker: TST-BNC-3.
+ *
+ * Red when (wave 60 probes w60g4-pack-*): an unpriced pack gets a priceDisplay;
+ * packs are not smallest-first; the checkout response echoes a price id; a raw
+ * price id is accepted as a key; the session is opened on another pack's price;
+ * an editor may buy; the read ignores the billing toggle.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -38,7 +44,8 @@ const DISPLAY = {
   // big has NO display → listed, but unpriced.
   price_not_a_pack: { price: '$999' },
 };
-const ENV_KEYS = ['OPENWOP_TEST_AUTH_ENABLED', 'OPENWOP_BILLING_TOKENS_PER_CREDIT', 'OPENWOP_BILLING_TOKEN_PACK_PRICES', 'OPENWOP_BILLING_TOKEN_PACK_DISPLAY'];
+const ENV_KEYS = ['OPENWOP_STORAGE_DSN', 'OPENWOP_SESSION_SECRET', 'OPENWOP_AUTH_DISABLE_COOKIES', 'OPENWOP_TEST_AUTH_ENABLED', 'OPENWOP_BILLING_TOKENS_PER_CREDIT', 'OPENWOP_BILLING_TOKEN_PACK_PRICES', 'OPENWOP_BILLING_TOKEN_PACK_DISPLAY'];
+const savedEnv: Record<string, string | undefined> = {};
 let server: http.Server;
 let BASE = '';
 let WS = '';
@@ -59,6 +66,7 @@ interface Pack { packKey: string; credits: number; tokens: number; priceDisplay?
 const packsOf = async (cookie: string): Promise<Pack[]> => ((await (await get(`${B}/token-packs`, cookie)).json()) as { packs: Pack[] }).packs;
 
 beforeAll(async () => {
+  for (const k of ENV_KEYS) savedEnv[k] = process.env[k];
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
   process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
@@ -77,7 +85,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  for (const k of ENV_KEYS) delete process.env[k];
+  for (const k of ENV_KEYS) { const v = savedEnv[k]; if (v === undefined) delete process.env[k]; else process.env[k] = v; }
   await new Promise<void>((res) => server.close(() => res()));
 });
 
@@ -121,7 +129,8 @@ describe('GET billing/token-packs', () => {
     await saveConfig({ ...d, status: 'off' }, 'test');
     try {
       const res = await get(`${B}/token-packs`, await login(ADMIN, WS));
-      expect(res.status).toBeGreaterThanOrEqual(400);
+      expect(res.status).toBe(404);
+      expect(await res.json()).toMatchObject({ error: 'not_found', message: 'Billing is not enabled for this tenant.' });
     } finally {
       await saveConfig({ ...d, status: 'on' }, 'test');
     }
@@ -151,7 +160,10 @@ describe('POST billing/token-packs/:packKey/checkout', () => {
 
   it('an unknown packKey is a 404 (and a raw price id is NOT accepted as a key)', async () => {
     const cookie = await login(ADMIN, WS);
-    expect((await buy('pack_0000000000000000', cookie)).status).toBe(404);
-    expect((await buy('price_pack_small_secret', cookie)).status).toBe(404);
+    for (const key of ['pack_0000000000000000', 'price_pack_small_secret']) {
+      const res = await buy(key, cookie);
+      expect(res.status, key).toBe(404);
+      expect(await res.json(), key).toMatchObject({ error: 'not_found', message: 'This credit pack is not for sale.' });
+    }
   });
 });

@@ -11,10 +11,12 @@
  *  - WB-SP-4: the pack sync node maps a surface error to a node FAILURE.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import type { WebinarAdapter } from '../src/features/webinars/host/webinarAdapter.js';
 
-const listAttendance = vi.fn();
+// Typed against the REAL adapter method, so every page fixture below is checked by tsc.
+const listAttendance = vi.hoisted(() => vi.fn<WebinarAdapter['listAttendance']>());
 vi.mock('../src/features/webinars/host/webinarAdapter.js', () => ({
-  makeWebinarAdapter: () => ({ listAttendance: (...a: unknown[]) => listAttendance(...a) }),
+  makeWebinarAdapter: () => ({ listAttendance: (webinarId: string, cursor?: string) => listAttendance(webinarId, cursor) }),
 }));
 
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
@@ -25,6 +27,8 @@ import { enqueuePendingPush, listPendingPushes, deletePendingPush, pendingPushCo
 import { __resetCrmStore } from '../src/features/crm/contactsService.js';
 import { __resetCrmEntities } from '../src/features/crm/crmEntitiesService.js';
 import type { MarketingEvent } from '../src/features/webinars/entities/marketingEvent.js';
+import type { BrokeredEgressDeps } from '../src/host/brokeredEgress.js';
+import type { Storage } from '../src/storage/storage.js';
 import { nodes as webinarNodes } from '../../../packs/feature.webinars.nodes/index.mjs';
 
 const T = 't-sync';
@@ -33,10 +37,13 @@ const EVENT: MarketingEvent = {
   eventId: `${T}:zoom:900`, tenantId: T, orgId: ORG, provider: 'zoom', providerEventId: '900',
   title: 'Launch call', createdAt: '2026-08-01T00:00:00.000Z', updatedAt: '2026-08-01T00:00:00.000Z',
 };
-const deps = { storage: null as never, tenantId: T, runId: 'test', orgId: ORG } as never;
+let storage: Storage;
+/** Real deps shape: the adapter is mocked, so `storage` is never used for egress here. */
+const deps = (): BrokeredEgressDeps => ({ storage, tenantId: T, runId: 'test', orgId: ORG });
 
 beforeEach(async () => {
-  initHostExtPersistence(await openStorage('memory://'));
+  storage = await openStorage('memory://');
+  initHostExtPersistence(storage);
   await __resetCrmStore();
   await __resetCrmEntities();
   listAttendance.mockReset();
@@ -52,7 +59,7 @@ describe('R2 WB-SP-1/5/8 — sync truth', () => {
       .mockResolvedValueOnce({ ok: true, value: { rows: [{ email: 'alice@x.test' }], nextCursor: 'p2' } })
       .mockResolvedValueOnce({ ok: false, error: 'zoom_500' });
 
-    const out = await syncEvent(deps, T, ORG, EVENT);
+    const out = await syncEvent(deps(), T, ORG, EVENT);
     expect(out.outcome).toBe('synced');
     if (out.outcome !== 'synced') return;
     expect(out.attendees).toBe(1); // the partial ingest is kept
@@ -64,11 +71,11 @@ describe('R2 WB-SP-1/5/8 — sync truth', () => {
 
   it('an ERROR sync releases the cooldown — the immediate retry RUNS instead of reporting "recently synced"', async () => {
     listAttendance.mockResolvedValueOnce({ ok: false, error: 'no_connection' });
-    const first = await syncEvent(deps, T, ORG, EVENT);
+    const first = await syncEvent(deps(), T, ORG, EVENT);
     expect(first.outcome).toBe('error');
     // The old code kept the claim: this retry returned 'cooldown'.
     listAttendance.mockResolvedValueOnce({ ok: true, value: { rows: [{ email: 'alice@x.test' }] } });
-    const retry = await syncEvent(deps, T, ORG, EVENT);
+    const retry = await syncEvent(deps(), T, ORG, EVENT);
     expect(retry.outcome).toBe('synced');
   });
 
@@ -77,7 +84,7 @@ describe('R2 WB-SP-1/5/8 — sync truth', () => {
       { email: 'alice@x.test', joinTime: '2026-08-01T10:00:00Z' },
       { email: 'ALICE@x.test', joinTime: '2026-08-01T10:20:00Z' }, // rejoin, case-shifted
     ] } });
-    const out = await syncEvent(deps, T, ORG, EVENT);
+    const out = await syncEvent(deps(), T, ORG, EVENT);
     expect(out.outcome).toBe('synced');
     if (out.outcome === 'synced') expect(out.attendees).toBe(1);
   });
@@ -119,7 +126,9 @@ describe('R2 WB-SP-4 — the pack sync node maps errors', () => {
 describe('R2 review fold-in — the pending-push lifecycle (a raw-email store must not outlive the person)', () => {
   it('the subject eraser deletes queued rows for the erased email', async () => {
     const { eraseSubjectPendingPushes } = await import('../src/features/webinars/pendingPush.js');
-    await enqueuePendingPush({ tenantId: T, orgId: ORG, eventId: EVENT.eventId, providerEventId: '900', email: 'gone@x.test', name: 'Gone' });
+    // Queued with different CASE than the erasure names it: the eraser must match the
+    // person, not the byte spelling (a case-sensitive match would leave the raw email).
+    await enqueuePendingPush({ tenantId: T, orgId: ORG, eventId: EVENT.eventId, providerEventId: '900', email: 'Gone@X.test', name: 'Gone' });
     await enqueuePendingPush({ tenantId: T, orgId: ORG, eventId: EVENT.eventId, providerEventId: '900', email: 'stays@x.test' });
     await eraseSubjectPendingPushes(T, 'gone@x.test');
     const left = await listPendingPushes(T, ORG, EVENT.eventId);
@@ -131,7 +140,7 @@ describe('R2 review fold-in — the pending-push lifecycle (a raw-email store mu
     listAttendance
       .mockResolvedValueOnce({ ok: true, value: { rows: [{ email: 'alice@x.test' }], nextCursor: 'p2' } })
       .mockResolvedValueOnce({ ok: false, error: 'zoom_500' });
-    const out = await syncEvent(deps, T, ORG, EVENT);
+    const out = await syncEvent(deps(), T, ORG, EVENT);
     expect(out.outcome).toBe('synced');
     if (out.outcome === 'synced') expect(out.partial).toBe(true);
   });

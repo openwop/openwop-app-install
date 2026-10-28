@@ -16,6 +16,14 @@
  *
  * Three hand-rolled near-copies of one predicate is the drift `isDeniedWebhookHost`
  * was extracted to prevent, one arm later.
+ *
+ * Tracker TST-BG3-11. Red when: the shared https arm is dropped (A2A push, federation
+ * and the ordering case), A2A push honours the dev flag, federation stops normalising
+ * to the origin or stops honouring the flag, a dispatcher site is added without a
+ * DISPATCHER_SITES entry or removed with one left behind, an ADR 0606/0607 site stops
+ * calling `assertEgressSchemeAllowed(`, or the dev flag runs ahead of the protocol arm.
+ * The ordering describe overlaps adr0606-webhook-https-scheme on purpose (both are
+ * SSRF-protected; dedupe only on a human ask).
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
@@ -188,7 +196,8 @@ describe('ADR 0607 ratchet — every guarded-dispatcher site is classified', () 
   it('finds the dispatcher sites at all (non-vacuity floor)', () => {
     // Without this, a broken walk would make every assertion below pass on an
     // empty set — the ratchet would report green having enumerated nothing.
-    expect(sites.length).toBeGreaterThanOrEqual(15);
+    // Measured 17 on ab2aff6e8 (/grade-tests w58); equals DISPATCHER_SITES' size.
+    expect(sites.length).toBeGreaterThanOrEqual(17);
   });
 
   it('no UNCLASSIFIED egress site — a new one must declare which arm covers it', () => {

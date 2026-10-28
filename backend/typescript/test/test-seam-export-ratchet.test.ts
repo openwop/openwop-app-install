@@ -56,11 +56,17 @@ function walk(dir: string, out: string[] = []): string[] {
 const TEST_SEAM_DECL =
   /^\s*export\s+(?:async\s+)?(?:function|const|let|var|class|type|interface|enum)\s+(_[A-Za-z0-9_]*|[A-Za-z0-9_]*ForTest(?:s|ing)?)\b/;
 
-// Measured on the ADR 0734 sweep commit. Floors sit on the DENOMINATOR: a glob that stops
-// matching, or a detector that stops recognising the shape, must red rather than pass an
-// empty assertion. (The `workflow-pin-site-ratchet.test.ts:646` idiom.)
-const MIN_SRC_FILES = 1650; // measured 1741
-const MIN_TEST_SEAM_EXPORTS = 300; // measured 321 once the single-underscore spelling was included
+// Floors sit on the DENOMINATOR: a glob that stops matching, or a detector that stops
+// recognising the shape, must red rather than pass an empty assertion. (The
+// `workflow-pin-site-ratchet.test.ts:646` idiom.) RE-MEASURED 2026-10-23 on 0151a8bb2
+// (grade-tests wave 61): 2074 src files, 373 seam declarations, `__test` in 13 files.
+// The old floors (1650 / 300, "measured 1741 / 321" at the ADR 0734 sweep) sat 20% under
+// the truth, so a walk that silently lost a fifth of src/ passed. Each floor is the
+// measured value − 1 (never a multiple of 10); a change that deletes files or seams lowers
+// the floor in the same commit, to its own measured value − 1.
+const MIN_SRC_FILES = 2073;
+const MIN_TEST_SEAM_EXPORTS = 372;
+const MIN_TEST_DECLARING_FILES = 13; // the exact `__test` count; a 14th raises it
 
 describe('ADR 0734 — every test-only export in src/ has a reader', () => {
   const srcFiles = walk(SRC);
@@ -140,11 +146,11 @@ describe('ADR 0734 — every test-only export in src/ has a reader', () => {
   });
 
   it('a DUPLICATED declaration name cannot be held alive by its own siblings', () => {
-    // `__test` is declared in 11 src files. Every one must be inspected on its own, and
+    // `__test` is declared in 13 src files (11 at ADR 0734). Every one must be inspected on its own, and
     // a sibling declaration must not count as a reader. This is the review sabotage:
     // appending a dead `export const __test` used to leave the ratchet 4/4 green.
     const testEntries = [...decls.keys()].filter((k) => k.endsWith('#__test'));
-    expect(testEntries.length).toBeGreaterThanOrEqual(11);
+    expect(testEntries.length).toBeGreaterThanOrEqual(MIN_TEST_DECLARING_FILES);
     // And each must be judged on its OWN importers, not on the name's popularity.
     const goals = [...decls.values()].find((d) => d.sym === '__test' && d.file.endsWith('goalsService.ts'));
     expect(goals).toBeDefined();

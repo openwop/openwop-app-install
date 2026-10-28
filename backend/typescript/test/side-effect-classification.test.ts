@@ -16,11 +16,24 @@
  * `create-task`, …) whose classification is a genuine open ADR 0341 question —
  * a gate that needs a 7-deep allowlist on day one is not a gate. "Calls the
  * notification emitter" is mechanically true and has no judgement in it.
+ *
+ * TWO SOURCES (named, /grade-tests wave 61): `isSideEffectingNode` is the union
+ * of the DERIVED manifest set `MANIFEST_FAST_PATH_SERVED` (ADR 0572 P3) and the
+ * hand-written `SIDE_EFFECTING_TYPE_PATTERNS` regexes. For a typeId in BOTH, a
+ * single-source sabotage is masked by design: deleting the session-reminder
+ * regex stayed green (8fw3g1-sec-reminder, vacuous) because the node is also
+ * served. The host-surface case therefore also asserts the served-set
+ * membership directly (8fw3g1-sec-reminder-served-r2); the regex half stays an
+ * honest ceiling while the node is served (the pattern list is unexported).
+ * What else breaks it: the notify classification (#2871), the integration family
+ * regex (held alone by `feature.whatsapp.nodes.send`, which is not served), a
+ * blanket `true`, the explicit module flag (8fw3g1-sec-*).
  */
 import { describe, expect, it } from 'vitest';
 import { readFileSync, existsSync, globSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { isSideEffectingNode } from '../src/executor/sideEffects.js';
+import { MANIFEST_FAST_PATH_SERVED } from '../src/executor/sideEffectFloor.generated.js';
 
 const REPO = join(import.meta.dirname, '..', '..', '..');
 
@@ -33,11 +46,22 @@ describe('the classifier covers the families it claims', () => {
     // `feature.kicktodo.nodes.session-reminder` delivers a cohort session reminder
     // via `features/kicktodo-accountability/sessionService.ts`, which imports
     // `getNotificationEmitter`. Its own pack `.mjs` is clean, so the seam scan
-    // below is structurally blind to it — it needs an explicit entry, and this
-    // assertion is the only thing holding that entry in place.
+    // below is structurally blind to it.
+    //
+    // CORRECTED (wave 61): this used to say the explicit regex was "the only
+    // thing holding that entry in place". It is not: the pack's manifest now
+    // declares the node side-effecting, so it is ALSO in the derived served set,
+    // and deleting the regex stayed green. Both sources are asserted here.
     expect(isSideEffectingNode('feature.kicktodo.nodes.session-reminder')).toBe(true);
+    expect(MANIFEST_FAST_PATH_SERVED.has('feature.kicktodo.nodes.session-reminder'), 'the manifest declaration no longer reaches the served set').toBe(true);
+    // The explicit regex stays as the second source (it holds the entry if the
+    // generated floor ever lags the pack). It is unexported, so with the node
+    // served its deletion cannot show here: an honest double-guard ceiling.
   });
 
+  // Of these six, only `feature.whatsapp.nodes.send` is absent from the served
+  // set, so it is the one that witnesses its regex alone; the rest are held by
+  // both sources (see the header).
   it('still classifies the retired push node and the rest of the integration family', () => {
     for (const typeId of [
       'core.openwop.integration.notification-push',

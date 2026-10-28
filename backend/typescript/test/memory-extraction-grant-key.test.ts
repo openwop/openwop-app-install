@@ -1,95 +1,110 @@
 /**
- * ADR 0666 D1 — the auto-extraction consent grant must be readable by the lane it gates.
+ * ADR 0666 D1, re-keyed by ADR 0982 D2 — the grant the consent ROUTE files is the grant the lane
+ * reads, and the notes land where the Personal Memory route lists them.
  *
- * BORN RED. The grant was written at `${tenant}:${callerSubject}` = `${tenant}:user:<hash>`
- * and read at `${tenant}:user:${actingUserId}` = `${tenant}:user:user:<hash>`, because
- * `User.userId` is itself `user:<sha256>` and the read added a second prefix. The getter is an
- * exact point-get, so the lookup could never recover: ADR 0120's lane had never written in
- * production.
+ * History. ADR 0666 found the lane read `user:user:<hash>` while the route filed `user:<hash>`, so
+ * nothing had ever been written. ADR 0982 then found the route keyed on `callerSubject` in the
+ * ACTIVE tenant while Personal Memory lists `(home tenant, canonical User.userId)`: an unbound
+ * `oidc:` session or a shared-workspace chat wrote notes no list shows. Both doors now resolve the
+ * person through `resolveCallerUser` and key on the canonical id in the home tenant. Prod had 0
+ * grant rows on 2026-10-26, so the re-key strands nothing.
  *
- * WHY THIS FILE EXISTS ALONGSIDE `memory-extraction-binding.test.ts`: that suite is green over a
- * BARE subject id (`'alice'`), for which the two keys coincide. No production caller can produce
- * a bare id — every one passes a `User.userId`. So the existing suite could not see this defect
- * by construction. These legs use the REAL id shape, minted by the real `userIdFor`.
+ * These legs go through the REAL route (an OIDC caller as the auth middleware stamps one) and the
+ * REAL lane, never a hand-filed key, so a key-form drift on either side reds them.
  *
- * Witnessed (wave 12 probes): doubling `user:` in `extractionBinding.ts` (the original defect)
- * reds BORN RED; moving the note scope reds BORN RED; `isExtractionGranted` honouring a revoked
- * row reds FAIL-CLOSED; a subject-tolerant grant read reds ANOTHER person; dropping the `user:`
- * prefix in `userIdFor` reds the anti-vacuity case.
+ * Witnessed (row 57 sabotage, see the PR): keying the route on `callerSubject`, keying the lane
+ * on `actingUserId`, or moving the note scope each red BORN RED; honouring a revoked grant reds
+ * FAIL-CLOSED; a subject-tolerant grant read reds ANOTHER person.
  */
-import { describe, expect, it, beforeAll } from 'vitest';
+import { describe, expect, it, beforeAll, afterAll } from 'vitest';
+import express from 'express';
+import type { Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openStorage } from '../src/storage/index.js';
 import { initInMemorySurfaces } from '../src/host/inMemorySurfaces.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
+import { registerMemoryExtractRoutes } from '../src/features/memory-auto-extract/routes.js';
 import { setExtractionGrant, getExtractionGrant } from '../src/features/memory-auto-extract/grantService.js';
 import { extractConversationMemory } from '../src/features/memory-auto-extract/extractionBinding.js';
 import { countSubjectNotes, listSubjectNotes } from '../src/host/subjectMemory.js';
 import { personSubject } from '../src/host/subject.js';
-import { userIdFor } from '../src/features/users/usersService.js';
+import type { ExtractorResult } from '../src/features/memory-auto-extract/memoryExtractor.js';
+import { personalChat } from './helpers/personalChatRun.js';
 
-const T = 'tGrantKey';
-// The REAL production id shape — `user:<32 hex>`, minted by the same helper `createUser` uses.
-const REAL_USER_ID = userIdFor(T, 'oidc:sub-abc');
-const CLOSED_USER_ID = userIdFor(T, 'oidc:sub-closed');
-const OTHER_TARGET_ID = userIdFor(T, 'oidc:sub-target');
+const facts = (...f: string[]) => async (): Promise<ExtractorResult> => ({ status: 'ok', facts: f.map((fact) => ({ fact, category: 'other' as const })), rejected: 0 });
 
+let server: Server; let base = '';
 beforeAll(async () => {
-  initInMemorySurfaces({ dataDir: mkdtempSync(join(tmpdir(), 'openwop-adr0666-')) });
+  initInMemorySurfaces({ dataDir: mkdtempSync(join(tmpdir(), 'openwop-adr0982-key-')) });
   initHostExtPersistence(await openStorage('memory://'));
+  const app = express();
+  // An OIDC caller as the auth middleware stamps one: principal + personal tenant, optionally an
+  // ACTIVE shared workspace (`x-active`), and no `userId` (an unbound session).
+  app.use((req, _res, next) => {
+    const sub = req.header('x-sub') ?? 'none';
+    (req as { principal?: unknown }).principal = { principalId: `oidc:${sub}`, tenants: ['*'], token: 't' };
+    const home = req.header('x-home') ?? `user:${sub}-home`;
+    (req as { personalTenant?: string }).personalTenant = home;
+    (req as { tenantId?: string }).tenantId = req.header('x-active') ?? home;
+    next();
+  });
+  registerMemoryExtractRoutes({ app } as never);
+  app.use((err: { httpStatus?: number }, _req: unknown, res: express.Response, _next: unknown) => { res.status(err.httpStatus ?? 500).json({}); });
+  server = await new Promise<Server>((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
+  base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/host/openwop-app/profiles/me/memory-extraction`;
 });
+afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
 
-describe('ADR 0666 D1 — the grant the consent route files is the grant the lane reads', () => {
-  it('the id shape this test depends on is the real one (anti-vacuity)', () => {
-    // If `userIdFor` ever stopped prefixing, every leg below would pass for the wrong reason.
-    expect(REAL_USER_ID.startsWith('user:'), REAL_USER_ID).toBe(true);
-    expect(REAL_USER_ID.slice('user:'.length)).toMatch(/^[0-9a-f]{32}$/);
+describe('ADR 0982 D2 — the route files the grant where the lane reads it', () => {
+  it('BORN RED — opted in from a SHARED workspace, an unbound session\'s chat lands in the listable scope', async () => {
+    const p = await personalChat('gk-born');
+    const put = await fetch(base, { method: 'PUT', headers: { 'x-sub': 'gk-born', 'x-active': 'ws:team-1' } });
+    expect(put.status).toBe(200);
+    expect(await put.json()).toMatchObject({ granted: true, available: true });
+    // Filed on the HOME tenant + canonical id, not on the active workspace or the principal.
+    expect(await getExtractionGrant(p.home, p.userId)).toMatchObject({ granted: true });
+    expect(await getExtractionGrant('ws:team-1', p.principal)).toBeNull();
+
+    // The chat is stamped with the unbound principal, as `POST /runs` stamps it before a bind.
+    const r = await extractConversationMemory(await p.run({ acting: p.principal }), ['I keep bees'], facts('Keeps bees'));
+    expect(r).toMatchObject({ status: 'written', written: 1 });
+    const listed = await listSubjectNotes(p.home, personSubject(p.userId));
+    expect(listed.map((n) => n.content)).toEqual(['Keeps bees']);
+    expect(await countSubjectNotes(p.home, personSubject(p.principal))).toBe(0);
   });
 
-  it('BORN RED — a grant filed the way the route files it authorizes extraction', async () => {
-    // Exactly what `PUT /profiles/me/memory-extraction` does: the subject is `callerSubject(req)`,
-    // which for a signed-in user IS `User.userId`. No hand-built prefix anywhere.
-    await setExtractionGrant(T, REAL_USER_ID, true, REAL_USER_ID);
-    expect(await getExtractionGrant(T, REAL_USER_ID), 'precondition: the row is filed').toBeTruthy();
+  it('GET reports the grant the lane reads; DELETE revokes it', async () => {
+    const p = await personalChat('gk-get');
+    await fetch(base, { method: 'PUT', headers: { 'x-sub': 'gk-get' } });
+    expect(await (await fetch(base, { headers: { 'x-sub': 'gk-get' } })).json()).toMatchObject({ granted: true, available: true });
+    expect((await fetch(base, { method: 'DELETE', headers: { 'x-sub': 'gk-get' } })).status).toBe(204);
+    expect(await getExtractionGrant(p.home, p.userId)).toMatchObject({ granted: false });
+  });
 
-    const r = await extractConversationMemory(
-      T, REAL_USER_ID, 'I work in Berlin and I keep bees',
-      async () => ['lives in Berlin', 'keeps bees'],
-    );
-
-    expect(r.extracted, 'the consent gate must SEE the grant the route filed').toBe(2);
-    expect(await countSubjectNotes(T, personSubject(REAL_USER_ID))).toBe(2);
-    // The other half of D1: fixing the grant key must not move the note scope. The person's own
-    // route lists `selfSubject(user.userId)`, i.e. `personSubject(User.userId)` — so the notes
-    // must be LISTABLE there, with their content. (Folded in from the former separate case
-    // `the notes land where the person can LIST them`, wave 12 — same sabotages red this one.)
-    const listed = await listSubjectNotes(T, personSubject(REAL_USER_ID));
-    expect(listed.map((n) => n.content).sort()).toEqual(['keeps bees', 'lives in Berlin']);
+  it('an account with no personal workspace is told so: GET available:false, PUT refused 409, DELETE allowed', async () => {
+    // A SAML-style deployment tenant as the home tenant: it can never extract (ADR 0982 D1/D2).
+    const headers = { 'x-sub': 'gk-saml', 'x-home': 'host-saml' };
+    expect(await (await fetch(base, { headers })).json()).toMatchObject({ granted: false, available: false });
+    expect((await fetch(base, { method: 'PUT', headers })).status).toBe(409);
+    expect((await fetch(base, { method: 'DELETE', headers })).status).toBe(204);
   });
 
   it('still FAIL-CLOSED with no grant, and with a revoked one', async () => {
-    // The property that made the defect harmless must survive the fix.
-    const r1 = await extractConversationMemory(T, CLOSED_USER_ID, 'x', async () => ['should not land']);
-    expect(r1.extracted).toBe(0);
-    expect(r1.skipped).toBe('no-consent');
-    expect(await countSubjectNotes(T, personSubject(CLOSED_USER_ID))).toBe(0);
-
-    await setExtractionGrant(T, CLOSED_USER_ID, false, CLOSED_USER_ID);
-    const r2 = await extractConversationMemory(T, CLOSED_USER_ID, 'x', async () => ['should not land']);
-    expect(r2.extracted).toBe(0);
-    expect(r2.skipped).toBe('no-consent');
-    expect(await countSubjectNotes(T, personSubject(CLOSED_USER_ID))).toBe(0);
+    const p = await personalChat('gk-closed');
+    expect(await extractConversationMemory(await p.run(), ['x'], facts('should not land'))).toEqual({ status: 'skipped', reason: 'no-consent' });
+    await setExtractionGrant(p.home, p.userId, false, p.userId);
+    expect(await extractConversationMemory(await p.run(), ['x'], facts('should not land'))).toEqual({ status: 'skipped', reason: 'no-consent' });
+    expect(await countSubjectNotes(p.home, personSubject(p.userId))).toBe(0);
   });
 
   it('a grant for ANOTHER person does not authorize this one', async () => {
-    // The read is exact, not form-tolerant; this pins that it is also not subject-tolerant.
-    const other = userIdFor(T, 'oidc:sub-xyz');
-    await setExtractionGrant(T, other, true, other);
-    const r = await extractConversationMemory(T, OTHER_TARGET_ID, 'x', async () => ['should not land']);
-    expect(r.extracted).toBe(0);
-    expect(r.skipped).toBe('no-consent');
-    expect(await countSubjectNotes(T, personSubject(OTHER_TARGET_ID))).toBe(0);
+    const p = await personalChat('gk-target');
+    const other = await personalChat('gk-other');
+    await setExtractionGrant(p.home, other.userId, true, other.userId);
+    expect(await extractConversationMemory(await p.run(), ['x'], facts('should not land'))).toEqual({ status: 'skipped', reason: 'no-consent' });
+    expect(await countSubjectNotes(p.home, personSubject(p.userId))).toBe(0);
   });
 });

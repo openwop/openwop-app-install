@@ -14,10 +14,19 @@
  * 401 + `sign_in_required` so the FE can prompt for sign-in before
  * any work is done.
  *
- * Three checks:
- *   1. Anon caller + managed workflow → 401 sign_in_required, NO run row created.
+ * Five cases:
+ *   1. Anon caller + explicit `managed:*` workflow → 401 sign_in_required, and
+ *      NO run row (read back from the caller's own run list, with a positive
+ *      control: a non-managed run created by the same cookie IS listed).
  *   2. Anon caller + non-managed workflow → run still creates (no false positive).
- *   3. Signed-in (`user:*`) caller + managed workflow → run creates (gate is anon-only).
+ *   3. Anon caller + chat-responder with NO credentialRef (implicit managed
+ *      default) → 401, no run row.
+ *   4. Anon caller + chat-responder with an explicit BYOK ref → run creates.
+ *   5. Signed-in (`user:*`) caller + managed workflow → run creates (gate is anon-only).
+ *
+ * Breaks it (round-1 probes, witnessed): the explicit `managed:` match
+ * (8fw2g2-rma-explicit), the implicit chat-responder default (rma-implicit),
+ * the BYOK opt-out (rma-byok), the anon-only tenant test (rma-anon).
  */
 
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
@@ -73,6 +82,14 @@ async function mintAnonCookie(): Promise<string> {
   return cookie!;
 }
 
+/** The workflowIds of every run the caller can list (its own tenant's). */
+async function listedWorkflowIds(cookie: string): Promise<string[]> {
+  const res = await fetch(`${BASE}/runs?limit=100`, { headers: { cookie } });
+  expect(res.status).toBe(200);
+  const body = (await res.json()) as { runs: Array<{ workflowId: string }> };
+  return body.runs.map((r) => r.workflowId);
+}
+
 async function registerWorkflow(workflowId: string, nodes: object[], cookie?: string): Promise<void> {
   const headers: Record<string, string> = { 'content-type': 'application/json' };
   if (cookie) headers.cookie = cookie;
@@ -110,6 +127,19 @@ describe('POST /v1/runs — managed-credentialRef × anon-tenant preflight', () 
     const body = (await res.json()) as { error: string; message: string };
     expect(body.error).toBe('openwop-app.sign_in_required');
     expect(body.message).toMatch(/sign in/i);
+
+    // NO run row was created. Positive control: a non-managed run by the SAME
+    // cookie is listed, so an empty answer is not a broken list read.
+    await registerWorkflow('wf-preflight-control', [{ nodeId: 'shout', typeId: 'local.openwop-app.uppercase' }], cookie);
+    const control = await fetch(`${BASE}/runs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie },
+      body: JSON.stringify({ workflowId: 'wf-preflight-control', inputs: { text: 'hi' } }),
+    });
+    expect(control.status).toBe(201);
+    const listed = await listedWorkflowIds(cookie);
+    expect(listed).toContain('wf-preflight-control');
+    expect(listed).not.toContain('wf-managed-preflight');
   });
 
   it('does not affect anon caller when workflow has no managed credentialRef', async () => {
@@ -126,6 +156,7 @@ describe('POST /v1/runs — managed-credentialRef × anon-tenant preflight', () 
       body: JSON.stringify({ workflowId: 'wf-non-managed', inputs: { text: 'hello' } }),
     });
     expect(res.status).toBe(201);
+    expect(await listedWorkflowIds(cookie)).toContain('wf-non-managed');
   });
 
   it('rejects anon caller when chat-responder typeId implicitly defaults to managed (no explicit credentialRef)', async () => {
@@ -158,6 +189,7 @@ describe('POST /v1/runs — managed-credentialRef × anon-tenant preflight', () 
     const body = (await res.json()) as { error: string; message: string };
     expect(body.error).toBe('openwop-app.sign_in_required');
     expect(body.message).toMatch(/sign in/i);
+    expect(await listedWorkflowIds(cookie)).not.toContain('wf-chat-implicit-managed');
   });
 
   it('does NOT reject anon caller when chat-responder has an explicit BYOK credentialRef', async () => {

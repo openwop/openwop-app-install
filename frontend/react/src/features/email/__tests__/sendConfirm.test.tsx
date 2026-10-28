@@ -26,11 +26,14 @@ const confirmFn = vi.fn();
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 vi.mock('../emailClient.js', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
+  // ADR 0955 D7 — the page's sending-health card (a healthy sender).
+  getSendingHealth: async () => ({ state: null, window: { sent: 0, hardBounces: 0, complaints: 0 }, thresholds: { minSends: 500, complaintRate: 0.001, hardBounceRate: 0.02 }, canResume: false }),
   listCampaigns: (...a: Parameters<typeof EC.listCampaigns>) => listCampaigns(...a),
   listTemplates: (...a: Parameters<typeof EC.listTemplates>) => listTemplates(...a),
   sendCampaign: (...a: Parameters<typeof EC.sendCampaign>) => sendCampaign(...a),
   listSends: async () => [],
   listSegments: async () => [],
+  listTopics: async () => ({ topics: [], max: 20 }),
   getEmailSettings: async (): Promise<EmailSettings> => ({ senderAddress: 'news@acme.test', configured: true }),
   getProviderStatus: async (): Promise<ProviderStatus> => ({ providers: [], defaultProvider: null, senderAddress: 'news@acme.test' }),
   listOrgs: async () => [{ orgId: 'org:1', name: 'Acme' }],

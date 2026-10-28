@@ -1,6 +1,8 @@
 # ADR 0953 — Social publishing and scheduling
 
-Status: Proposed
+Status: Accepted (2026-10-20, Campaign Studio build order). P0 is built: the post store, its CAS state machine,
+the routes and erasure. Nothing publishes yet; every platform stays `unsupported` until David's vendor apps exist
+and pass sandbox verification. See § Implementation record.
 
 **Date:** 2026-10-19
 **Program:** Campaign Studio (ADRs 0941–0962), Tier 2. Plan: the program brief
@@ -278,6 +280,27 @@ sends it into the gate). Neither has a publish tool. Each reads before it writes
 | P6 | X, TikTok, YouTube (each after its app audit; `app_not_audited` until then) | no private-only post reported as published |
 | P7 | D8 metrics sync + dashboard tile; D9 platform disclosure flags | null-vs-zero honesty test; disclosure mechanism recorded |
 | P8 | `registerCalendarSource` consumers (0952, 0955, CMS) | entries render, deep-link to owners |
+
+## Implementation record
+
+| Phase | Part | PR | Commit | What landed |
+|---|---|---|---|---|
+| P0 | Feature skeleton, `SocialPost` store + CAS state machine, routes, erasure | (this PR) | (this PR) | New feature `social-publishing` (toggle OFF, tenant; recommends `campaign-channels`, `campaign-orchestration` and `media`). Seed coverage: acknowledged demo-data-free. Subject-eraser manifest +1. `features/social-publishing/postService.ts`: `DurableCollection('social:post')` keyed `tenant::org::postId`, every write a `compareAndSwap` on the read row. An edit to platform account, text, link or media (or the connection) changes `contentHash`, drops the approval and returns the post to `draft`; a schedule-only edit keeps the approval, which binds content, not time. `expectedVersion` makes a stale editor a 409. Text over the platform's documented limit (counted in characters, not UTF-16 units), a non-http(s) link, a schedule in the past or beyond 366 days, and more than 10 media are refused at save. A caption the secret scrub would alter is refused rather than saved altered, so a post can never go out with text its author did not write. Published / publishing posts cannot be edited, canceled or deleted; only draft and canceled posts are deletable. 2,000 posts per org cap. Routes `…/social/orgs/:orgId/posts` (list, create draft, get, patch, cancel, delete): read is `workspace:read`, every write `workspace:write`; a caller who cannot read the org gets the same 404 as a missing org. No publish route. Erasure keeps the post and tombstones `createdBy` and `approval.decidedBy`, tenant-scoped. Tests: `social-publishing-posts.test.ts` (6). Sabotage witnesses each turn it red: keeping the approval on a content edit, dropping the version compare, answering 403 to an outsider, counting UTF-16 units, deleting a published post, letting a viewer draft. |
+
+Recovery correction (2026-10-21): the original eraser ignored a lost row CAS,
+which could report success while a concurrent edit kept the person's ids. It
+now re-reads and retries from the winning row, retaining edits and cancellations,
+and throws on sustained contention so the erasure fan-out reports an incomplete
+feature. Two deterministic storage-boundary witnesses cover retry and exhaustion;
+their execution and the canonical gate are pending the serialized release slot.
+
+> **Implementation notes (P0):**
+> - `connectionId` is stored but not yet checked against the client org; P1 (the adapter) must refuse a
+>   connection that is not pinned to the post's org (ADR 0921 D4) before any send.
+> - `aiDisclosure.aiGenerated` can only be turned ON by a person until P3 derives it from the 0945 provenance stamp.
+> - Media ids are shape-checked only; P1 resolves them against the org's media library.
+> - `dependsOn: ['campaign-channels']` (matrix row 2) is declared as `recommends` until P3: ADR 0439's parity test refuses a
+>   dependency no code imports, and the first import is the D6 handoff.
 
 ## Alternatives weighed
 

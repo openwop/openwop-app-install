@@ -11,10 +11,19 @@
  *
  * What replaces them is the test that was IMPOSSIBLE before — write, close the
  * database, reopen it, and read the file back.
+ *
+ * Expected etags are LITERALS (sha256 of the content, first 16 hex, computed
+ * independently with `shasum -a 256`), never `workspaceEtag` itself.
+ *
+ * Sabotage that turns it red (wave 64 probes, witnessed): the DSN durability
+ * class (8fw5g2-wsd-durability-class), a non-file sqlite DSN (-wsd-file-dsn), a
+ * random or version-free etag (-wsd-etag-random, -wsd-etag-version), the write
+ * not using the derived etag (-wsd-etagfor), and the tenant term dropped from
+ * the get / list query (-wsd-wct-get, -wsd-wct-list).
  */
 
-import { describe, expect, it } from 'vitest';
-import { mkdtemp } from 'node:fs/promises';
+import { afterEach, describe, expect, it } from 'vitest';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openStorage, storageDurability } from '../src/storage/index.js';
@@ -27,6 +36,17 @@ import {
 
 const T = 'durability-tenant';
 const W = 'durability-ws';
+
+const tmpDirs: string[] = [];
+/** A file-backed sqlite DSN in a temp dir removed after the case. */
+async function fileDsn(prefix: string): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), prefix));
+  tmpDirs.push(dir);
+  return `sqlite://${join(dir, 'ws.db')}`;
+}
+afterEach(async () => {
+  for (const d of tmpDirs.splice(0)) await rm(d, { recursive: true, force: true });
+});
 
 describe('ADR 0551 — storage durability is derived from the DSN, not the adapter', () => {
   it('classifies every supported DSN form', () => {
@@ -47,8 +67,7 @@ describe('ADR 0551 P0 — the workspace survives a restart', () => {
     // The assertion the module-`Map` implementation could never pass. Two
     // Storage instances over one file stand in for "the process restarted" /
     // "a second Cloud Run instance served the read".
-    const dir = await mkdtemp(join(tmpdir(), 'ws-durable-'));
-    const dsn = `sqlite://${join(dir, 'ws.db')}`;
+    const dsn = await fileDsn('ws-durable-');
 
     const before = await openStorage(dsn);
     const put = await putWorkspaceFile(before, T, W, 'DIRECTIVES.md', { content: 'be helpful' });
@@ -67,8 +86,7 @@ describe('ADR 0551 P0 — the workspace survives a restart', () => {
   });
 
   it('If-Match written before a restart still matches after it', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'ws-durable-cas-'));
-    const dsn = `sqlite://${join(dir, 'ws.db')}`;
+    const dsn = await fileDsn('ws-durable-cas-');
 
     const before = await openStorage(dsn);
     const first = await putWorkspaceFile(before, T, W, 'A.md', { content: 'v1' });
@@ -93,6 +111,7 @@ describe('ADR 0551 P0 — the etag is content-derived, not random', () => {
     // never satisfy the replay-determinism guarantee the run-start workspace
     // snapshot carries: identical content produced a different etag on every
     // write, so the snapshot was not reproducible by construction.
+    expect(workspaceEtag(1, 'hello')).toBe('"1-2cf24dba5fb0a30e"');
     expect(workspaceEtag(1, 'hello')).toBe(workspaceEtag(1, 'hello'));
   });
 
@@ -112,23 +131,35 @@ describe('ADR 0551 P0 — the etag is content-derived, not random', () => {
     const s = await openStorage(':memory:');
     const put = await putWorkspaceFile(s, T, W, 'E.md', { content: 'body' });
     if (!put.ok) throw new Error('expected the write to succeed');
-    expect(put.file.etag).toBe(workspaceEtag(1, 'body'));
+    expect(put.file.etag).toBe('"1-230d8358dc8e8890"');
+    await s.close?.();
   });
 });
 
 describe('ADR 0551 P0 — WCT-1 isolation is now a database key, not a Map lookup', () => {
+  // Twin of workspace.test.ts › "RFC 0059 §E — WCT-1 cross-owner isolation" ›
+  // "a file under {tenant-a, ws-a} is invisible to other owners" for the
+  // in-process read. What only THIS case asserts (wave 64, ruling 8): the
+  // isolation holds AFTER the durability path — written, closed, and read back
+  // through a REOPENED file database, where the owner triple must be in the key.
   it('one owner cannot read or list another owner’s file', async () => {
     // The protocol-tier SECURITY invariant (`workspace-cross-tenant-isolation`)
     // held before too — keys already carried the owner triple — but it held in
     // process memory. It is now structural in the primary key, so it survives
     // the restart along with the data.
-    const s = await openStorage(':memory:');
-    await putWorkspaceFile(s, 'tenant-a', 'ws-a', 'SECRET.md', { content: 'A-only' });
+    const dsn = await fileDsn('ws-durable-wct-');
+    const before = await openStorage(dsn);
+    await putWorkspaceFile(before, 'tenant-a', 'ws-a', 'SECRET.md', { content: 'A-only' });
+    await before.close?.();
 
+    const s = await openStorage(dsn);
     expect(await getWorkspaceFile(s, 'tenant-b', 'ws-a', 'SECRET.md')).toBeNull();
     expect(await getWorkspaceFile(s, 'tenant-a', 'ws-b', 'SECRET.md')).toBeNull();
     expect(await listWorkspaceFiles(s, 'tenant-b', 'ws-a')).toHaveLength(0);
     expect(await listWorkspaceFiles(s, 'tenant-a', 'ws-b')).toHaveLength(0);
+    // Positive controls, after the reopen: the owner still reads AND lists it.
     expect((await getWorkspaceFile(s, 'tenant-a', 'ws-a', 'SECRET.md'))?.content).toBe('A-only');
+    expect((await listWorkspaceFiles(s, 'tenant-a', 'ws-a')).map((f) => f.path)).toEqual(['SECRET.md']);
+    await s.close?.();
   });
 });

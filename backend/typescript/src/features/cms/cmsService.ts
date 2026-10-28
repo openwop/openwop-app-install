@@ -14,7 +14,7 @@ import { OpenwopError } from '../../types.js';
 // Same-feature sibling (cms/). Used only inside `deletePage` (call-time), so the
 // pageExperiments→cms import cycle stays runtime-safe — never referenced at module init.
 import { listExperiments, deleteExperiment, erasePageExperimentSubject, findRunningExperiment } from './pageExperimentsService.js';
-import { cleanOpaqueToken, cleanString, cleanTagList, optionalCleanString, safeUrl } from '../../host/boundedStrings.js';
+import { cleanContent, cleanOpaqueToken, cleanString, cleanTagList, contentUrl, optionalCleanContent, optionalCleanString } from '../../host/boundedStrings.js';
 import { uniqueSlug, slugify } from '../../host/slug.js';
 import { LOCALE_RE, negotiateLocale, resolveSection } from '../../host/i18n/index.js';
 import { registerFieldKindValidator } from '../../host/customFields/index.js';
@@ -139,13 +139,13 @@ function defined(o: Record<string, unknown>): Record<string, unknown> {
 function cleanHeroPlan(v: unknown): Record<string, unknown> | undefined {
   const p = asObject(v);
   if (!p) return undefined;
-  const t = (x: unknown): string | undefined => optionalCleanString(x, MAX.planText);
+  const t = (x: unknown): string | undefined => optionalCleanContent(x, MAX.planText, 'plan');
   const lines = (Array.isArray(p.lines) ? p.lines : []).slice(0, MAX.planLines).map((l) => {
     const ll = asObject(l) ?? {};
-    return defined({ label: t(ll.label), text: optionalCleanString(ll.text, MAX.planLine) });
+    return defined({ label: t(ll.label), text: optionalCleanContent(ll.text, MAX.planLine, 'text') });
   }).filter((l) => l.text !== undefined || l.label !== undefined);
   const chips = (Array.isArray(p.chips) ? p.chips : []).slice(0, MAX.planChips)
-    .map((c) => (typeof c === 'string' ? cleanString(c, MAX.planText) : ''))
+    .map((c) => (typeof c === 'string' ? cleanContent(c, MAX.planText, 'chips') : ''))
     .filter((c) => c.length > 0);
   const out = defined({
     eyebrow: t(p.eyebrow),
@@ -174,10 +174,10 @@ function cleanHeroPlan(v: unknown): Record<string, unknown> | undefined {
 function cleanChat(v: unknown): Record<string, unknown> | undefined {
   const c = asObject(v);
   if (!c) return undefined;
-  const t = (x: unknown): string | undefined => optionalCleanString(x, MAX.chatText);
+  const t = (x: unknown): string | undefined => optionalCleanContent(x, MAX.chatText, 'chat');
   const messages = (Array.isArray(c.messages) ? c.messages : []).slice(0, MAX.chatMessages).map((m) => {
     const mm = asObject(m) ?? {};
-    return { from: pickEnum(CHAT_FROM, mm.from), text: typeof mm.text === 'string' ? cleanString(mm.text, MAX.chatMessage) : '' };
+    return { from: pickEnum(CHAT_FROM, mm.from), text: typeof mm.text === 'string' ? cleanContent(mm.text, MAX.chatMessage, 'text') : '' };
   }).filter((m): m is { from: typeof CHAT_FROM[number]; text: string } => m.from !== undefined && m.text.length > 0);
   const pr = asObject(c.proposal);
   const proposal = pr
@@ -251,10 +251,30 @@ export interface Section {
   sourceDigest?: Record<string, string>;
 }
 
+/** ADR 0950: content pointer and phase move in the same primary-row CAS.
+ * The immutable baseline lives in the existing page-version owner. */
+export interface PagePromotionReceipt {
+  winnerRef: string | null;
+  baselineRef: string | null;
+  restoreRef: string;
+  baselinePublished: boolean;
+  ownedVersion: number;
+  ownedStatus: PageStatus;
+  phase: 'prepared' | 'restored' | 'submitted' | 'finalized' | 'rolling_back' | 'rollback_restored' | 'rollback_submitted' | 'rolled_back' | 'superseded';
+  pendingApproval?: boolean;
+}
+export interface PagePromotionGuard {
+  experimentId: string;
+  from: PagePromotionReceipt['phase'];
+  to: PagePromotionReceipt['phase'];
+  pendingApproval?: boolean;
+}
+
 export interface Page {
   pageId: string;
   tenantId: string;
   orgId: string;
+  promotionReceipts?: Record<string, PagePromotionReceipt>;
   title: string;
   slug: string;
   status: PageStatus;
@@ -538,14 +558,13 @@ function safeLink(v: unknown, max: number): string {
   // ADR 0920 D6 — a same-page fragment (`#section-id`), returned unchanged. The
   // grammar is closed (letter first, then [A-Za-z0-9_-], ≤ 80 after `#`), so a
   // bare `#`, `#a b`, `#<x>` and `#javascript:…` all fall through and are refused.
-  // Tested on the RAW trimmed string, before the secret-shape scrub: that scrub
-  // redacts any 40+-char `[A-Za-z0-9_-]` run, which is exactly what a long
-  // heading anchor is (`headingSlug` ids run to 64 chars).
   if (typeof v === 'string' && isFragmentHref(v.trim())) return v.trim();
-  const s = (optionalCleanString(v, max) ?? '').trim();
+  // A published link is CONTENT: never rewritten (a signed or long-slug URL
+  // survives byte for byte), and a credential in it is a typed refusal.
+  const s = (optionalCleanContent(v, max, 'link') ?? '').trim();
   if (isInternalHref(s)) return s;
   if (s.startsWith('/')) return ''; // a `/…` that is not a safe internal path is never an external URL either
-  const u = safeUrl(v, max);
+  const u = contentUrl(v, max, 'link');
   return /^(https?:|mailto:)/i.test(u) ? u : '';
 }
 
@@ -575,7 +594,7 @@ function httpsMediaUrl(v: unknown, field: string, partial: boolean, hosts?: Read
   };
   if (typeof v !== 'string') return reject('must be a URL string.');
   if (v.trim().length > MAX.url) return reject(`must be at most ${MAX.url} characters.`);
-  const u = safeUrl(v, MAX.url);
+  const u = contentUrl(v, MAX.url, `video.${field}`);
   let parsed: URL;
   try { parsed = new URL(u); } catch { return reject('must be an absolute https:// URL.'); }
   if (parsed.protocol !== 'https:' || !/^https:\/\//i.test(u)) return reject('must be an absolute https:// URL.');
@@ -594,7 +613,7 @@ function httpsMediaUrl(v: unknown, field: string, partial: boolean, hosts?: Read
 function buildSectionData(type: SectionType, d: Record<string, unknown>, partial: boolean): Record<string, unknown> {
   // Optional `eyebrow`/`heading` shared by the marketing blocks (ADR 0027).
   const opt = (k: 'eyebrow' | 'heading' | 'lede', max: number): Record<string, string> => {
-    const v = optionalCleanString(d[k], max);
+    const v = optionalCleanContent(d[k], max, k);
     return v ? { [k]: v } : {};
   };
   const has = (k: string): boolean => d[k] !== undefined;
@@ -610,25 +629,25 @@ function buildSectionData(type: SectionType, d: Record<string, unknown>, partial
   };
   switch (type) {
     case 'hero': {
-      const heading = cleanString(d.heading, MAX.heading);
+      const heading = cleanContent(d.heading, MAX.heading, 'heading');
       if (!partial && !heading) throw new OpenwopError('validation_error', 'hero.heading is required.', 400, {});
-      const cta1 = optionalCleanString(d.ctaLabel, MAX.label);
-      const cta2 = optionalCleanString(d.ctaLabel2, MAX.label);
+      const cta1 = optionalCleanContent(d.ctaLabel, MAX.label, 'ctaLabel');
+      const cta2 = optionalCleanContent(d.ctaLabel2, MAX.label, 'ctaLabel2');
       const visual = HERO_VISUALS.includes(d.visual as typeof HERO_VISUALS[number])
         ? (d.visual as typeof HERO_VISUALS[number])
         : undefined;
       // ADR 0920 D3 — the example plan card, fine print, and the 2nd-CTA icon.
       const plan = cleanHeroPlan(d.plan);
-      const note = optionalCleanString(d.note, MAX.heroNote);
+      const note = optionalCleanContent(d.note, MAX.heroNote, 'note');
       const ctaIcon2 = pickEnum(HERO_CTA_ICONS, d.ctaIcon2);
       return {
         ...opt('eyebrow', MAX.eyebrow),
         ...(heading ? { heading } : {}),
-        ...(optionalCleanString(d.subheading, MAX.text) ? { subheading: optionalCleanString(d.subheading, MAX.text) } : {}),
+        ...(optionalCleanContent(d.subheading, MAX.text, 'subheading') ? { subheading: optionalCleanContent(d.subheading, MAX.text, 'subheading') } : {}),
         // Opaque media REFERENCE — charset-validated, NOT secret-scrubbed
         // (cleanString redacts 40+-char blobs, destroying serve tokens; ADR 0206).
         ...(cleanOpaqueToken(d.imageToken, MAX.token) ? { imageToken: cleanOpaqueToken(d.imageToken, MAX.token) } : {}),
-        ...(optionalCleanString(d.alt, MAX.alt) ? { alt: optionalCleanString(d.alt, MAX.alt) } : {}),
+        ...(optionalCleanContent(d.alt, MAX.alt, 'alt') ? { alt: optionalCleanContent(d.alt, MAX.alt, 'alt') } : {}),
         ...(visual ? { visual } : {}),
         ...(cta1 ? { ctaLabel: cta1, ctaUrl: safeLink(d.ctaUrl, MAX.url) } : {}),
         ...(cta2 ? { ctaLabel2: cta2, ctaUrl2: safeLink(d.ctaUrl2, MAX.url) } : {}),
@@ -741,7 +760,7 @@ function buildSectionData(type: SectionType, d: Record<string, unknown>, partial
       return {
         ...opt('eyebrow', MAX.eyebrow),
         ...opt('heading', MAX.heading),
-        ...(!partial || has('text') ? { text: cleanString(d.text, MAX.markdown) } : {}),
+        ...(!partial || has('text') ? { text: cleanContent(d.text, MAX.markdown, 'text') } : {}),
         ...tone(),
         ...headStyle(),
         ...(rtVisual ? { visual: rtVisual } : {}),
@@ -754,18 +773,18 @@ function buildSectionData(type: SectionType, d: Record<string, unknown>, partial
       if (!partial && !token) throw new OpenwopError('validation_error', 'image.token is required.', 400, {});
       return {
         ...(token ? { token } : {}),
-        ...(optionalCleanString(d.alt, MAX.alt) ? { alt: optionalCleanString(d.alt, MAX.alt) } : {}),
-        ...(optionalCleanString(d.caption, MAX.caption) ? { caption: optionalCleanString(d.caption, MAX.caption) } : {}),
+        ...(optionalCleanContent(d.alt, MAX.alt, 'alt') ? { alt: optionalCleanContent(d.alt, MAX.alt, 'alt') } : {}),
+        ...(optionalCleanContent(d.caption, MAX.caption, 'caption') ? { caption: optionalCleanContent(d.caption, MAX.caption, 'caption') } : {}),
       };
     }
     case 'cta': {
-      const label = cleanString(d.label, MAX.label);
+      const label = cleanContent(d.label, MAX.label, 'label');
       if (!partial && !label) throw new OpenwopError('validation_error', 'cta.label is required.', 400, {});
       const align = pickEnum(CTA_ALIGNS, d.align); // ADR 0920 D6
       return {
         ...opt('eyebrow', MAX.eyebrow),
         ...opt('heading', MAX.heading),
-        ...(optionalCleanString(d.subheading, MAX.text) ? { subheading: optionalCleanString(d.subheading, MAX.text) } : {}),
+        ...(optionalCleanContent(d.subheading, MAX.text, 'subheading') ? { subheading: optionalCleanContent(d.subheading, MAX.text, 'subheading') } : {}),
         ...(label ? { label } : {}),
         ...(!partial || has('url') ? { url: safeLink(d.url, MAX.url) } : {}),
         ...tone(),
@@ -777,7 +796,7 @@ function buildSectionData(type: SectionType, d: Record<string, unknown>, partial
       const layout = COLUMN_LAYOUTS.includes(d.layout as typeof COLUMN_LAYOUTS[number]) ? (d.layout as string) : 'cards';
       const mapped = cols.slice(0, MAX.columns).map((c) => {
         const cc = c as { title?: unknown; text?: unknown; href?: unknown; icon?: unknown; optional?: unknown; eyebrow?: unknown; progress?: unknown; badge?: unknown; future?: unknown; art?: unknown; items?: unknown };
-        const title = optionalCleanString(cc.title, MAX.label);
+        const title = optionalCleanContent(cc.title, MAX.label, 'title');
         // Optional per-card link target → the whole card renders as a link
         // (cards layout, #414). `safeLink` guards open-redirect / non-http(s).
         const href = safeLink(cc.href, MAX.url);
@@ -787,18 +806,18 @@ function buildSectionData(type: SectionType, d: Record<string, unknown>, partial
         const icon = optionalCleanString(cc.icon, MAX.slug);
         // ADR 0920 D4 — per-item label line, progress bar, badge, "not yet"
         // card, drawing, and `list` rows (name + right-aligned length).
-        const itemEyebrow = optionalCleanString(cc.eyebrow, MAX.eyebrow);
+        const itemEyebrow = optionalCleanContent(cc.eyebrow, MAX.eyebrow, 'eyebrow');
         const progress = unitFraction(cc.progress);
-        const badge = optionalCleanString(cc.badge, MAX.badge);
+        const badge = optionalCleanContent(cc.badge, MAX.badge, 'badge');
         const art = pickEnum(COLUMN_ART, cc.art);
         const items = (Array.isArray(cc.items) ? cc.items : []).slice(0, MAX.listItems).map((it) => {
           const ii = asObject(it) ?? {};
-          const meta = optionalCleanString(ii.meta, MAX.itemMeta);
-          return { label: typeof ii.label === 'string' ? cleanString(ii.label, MAX.label) : '', ...(meta ? { meta } : {}) };
+          const meta = optionalCleanContent(ii.meta, MAX.itemMeta, 'meta');
+          return { label: typeof ii.label === 'string' ? cleanContent(ii.label, MAX.label, 'label') : '', ...(meta ? { meta } : {}) };
         }).filter((it) => it.label.length > 0);
         return {
           ...(title ? { title } : {}),
-          text: cleanString(cc.text, MAX.text),
+          text: cleanContent(cc.text, MAX.text, 'text'),
           ...(href ? { href } : {}),
           ...(icon ? { icon } : {}),
           ...(cc.optional === true ? { optional: true } : {}),
@@ -810,7 +829,7 @@ function buildSectionData(type: SectionType, d: Record<string, unknown>, partial
           ...(items.length > 0 ? { items } : {}),
         };
       });
-      const colNote = optionalCleanString(d.note, MAX.sectionNote);
+      const colNote = optionalCleanContent(d.note, MAX.sectionNote, 'note');
       const numbers = pickEnum(STEP_NUMBERS, d.numbers);
       return {
         ...opt('eyebrow', MAX.eyebrow),
@@ -833,11 +852,11 @@ function buildSectionData(type: SectionType, d: Record<string, unknown>, partial
       const tiers = Array.isArray(d.tiers)
         ? [...new Set((d.tiers as unknown[]).filter((t): t is typeof PRICING_TIER_IDS[number] => PRICING_TIER_IDS.includes(t as typeof PRICING_TIER_IDS[number])))]
         : [];
-      const ctaLabel = optionalCleanString(d.ctaLabel, MAX.label);
+      const ctaLabel = optionalCleanContent(d.ctaLabel, MAX.label, 'ctaLabel');
       return {
         ...opt('eyebrow', MAX.eyebrow),
         ...opt('heading', MAX.heading),
-        ...(optionalCleanString(d.blurb, MAX.text) ? { blurb: optionalCleanString(d.blurb, MAX.text) } : {}),
+        ...(optionalCleanContent(d.blurb, MAX.text, 'blurb') ? { blurb: optionalCleanContent(d.blurb, MAX.text, 'blurb') } : {}),
         ...(tiers.length > 0 ? { tiers } : {}),
         ...(ctaLabel ? { ctaLabel, ctaUrl: safeLink(d.ctaUrl, MAX.url) } : {}),
         // ADR 0820 §7 — where an UNPRICED plan's "Contact us" goes (same link guard).
@@ -854,7 +873,7 @@ function buildSectionData(type: SectionType, d: Record<string, unknown>, partial
       // (our own column); `legend`/`note` carry the key + a dated methodology line.
       const rawCols = Array.isArray(d.columns) ? d.columns : [];
       const columns = rawCols.slice(0, MAX.compareCols)
-        .map((c) => cleanString(c, MAX.label))
+        .map((c) => cleanContent(c, MAX.label, 'columns'))
         .filter((c) => c.length > 0);
       if (!partial && columns.length === 0) {
         throw new OpenwopError('validation_error', 'comparison.columns needs at least one column header.', 400, {});
@@ -866,16 +885,16 @@ function buildSectionData(type: SectionType, d: Record<string, unknown>, partial
           .slice(0, MAX.compareCols)
           // Non-string cells coerce to empty (never "[object Object]"): cells are
           // short authored status tokens, not arbitrary data.
-          .map((x) => (typeof x === 'string' ? cleanString(x, MAX.cell) : ''));
-        return { label: cleanString(rr.label, MAX.label), cells };
+          .map((x) => (typeof x === 'string' ? cleanContent(x, MAX.cell, 'cell') : ''));
+        return { label: cleanContent(rr.label, MAX.label, 'label'), cells };
       }).filter((r) => r.label.length > 0);
       if (!partial && rows.length === 0) {
         throw new OpenwopError('validation_error', 'comparison.rows needs at least one capability row.', 400, {});
       }
       const hcRaw = typeof d.highlightColumn === 'number' && Number.isFinite(d.highlightColumn) ? Math.floor(d.highlightColumn) : undefined;
       const highlightColumn = hcRaw !== undefined && hcRaw >= 0 && hcRaw < columns.length ? hcRaw : undefined;
-      const legend = optionalCleanString(d.legend, MAX.text);
-      const note = optionalCleanString(d.note, MAX.text);
+      const legend = optionalCleanContent(d.legend, MAX.text, 'legend');
+      const note = optionalCleanContent(d.note, MAX.text, 'note');
       return {
         ...opt('eyebrow', MAX.eyebrow),
         ...opt('heading', MAX.heading),
@@ -900,8 +919,8 @@ function buildSectionData(type: SectionType, d: Record<string, unknown>, partial
         // Non-string fields coerce to empty (never "[object Object]") — the
         // comparison-cell rule.
         return {
-          q: typeof ii.q === 'string' ? cleanString(ii.q, MAX.heading) : '',
-          a: typeof ii.a === 'string' ? cleanString(ii.a, MAX.answer) : '',
+          q: typeof ii.q === 'string' ? cleanContent(ii.q, MAX.heading, 'q') : '',
+          a: typeof ii.a === 'string' ? cleanContent(ii.a, MAX.answer, 'a') : '',
         };
       }).filter((it) => it.q.length > 0 && it.a.length > 0);
       if (!partial && items.length === 0) {
@@ -924,11 +943,11 @@ function buildSectionData(type: SectionType, d: Record<string, unknown>, partial
       const rawItems = Array.isArray(d.items) ? d.items : [];
       const items = rawItems.slice(0, MAX.quoteItems).map((it) => {
         const ii = it as { quote?: unknown; name?: unknown; role?: unknown };
-        const name = typeof ii.name === 'string' ? optionalCleanString(ii.name, MAX.label) : undefined;
-        const role = typeof ii.role === 'string' ? optionalCleanString(ii.role, MAX.label) : undefined;
+        const name = typeof ii.name === 'string' ? optionalCleanContent(ii.name, MAX.label, 'name') : undefined;
+        const role = typeof ii.role === 'string' ? optionalCleanContent(ii.role, MAX.label, 'role') : undefined;
         return {
           // Non-string quote coerces to empty (never "[object Object]").
-          quote: typeof ii.quote === 'string' ? cleanString(ii.quote, MAX.quote) : '',
+          quote: typeof ii.quote === 'string' ? cleanContent(ii.quote, MAX.quote, 'quote') : '',
           ...(name ? { name } : {}),
           ...(role ? { role } : {}),
         };
@@ -953,8 +972,8 @@ function buildSectionData(type: SectionType, d: Record<string, unknown>, partial
       const poster = httpsMediaUrl(d.poster, 'poster', partial);
       const captions = httpsMediaUrl(d.captions, 'captions', partial);
       const youtubeUrl = httpsMediaUrl(d.youtubeUrl, 'youtubeUrl', partial, YOUTUBE_HOSTS);
-      const title = optionalCleanString(d.title, MAX.title);
-      const description = optionalCleanString(d.description, MAX.videoDescription);
+      const title = optionalCleanContent(d.title, MAX.title, 'title');
+      const description = optionalCleanContent(d.description, MAX.videoDescription, 'description');
       const lengthRaw = typeof d.length === 'string' ? d.length.trim() : '';
       const length = VIDEO_LENGTH_RE.test(lengthRaw) ? lengthRaw : undefined;
       const uploadRaw = typeof d.uploadDate === 'string' ? d.uploadDate.trim() : '';
@@ -1000,7 +1019,7 @@ function buildSectionData(type: SectionType, d: Record<string, unknown>, partial
         if (!FIELDS_KEY_RE.test(k)) {
           throw new OpenwopError('validation_error', `Field name \`${k.slice(0, 80)}\` is not allowed (letters, digits and _, starting with a letter).`, 400, { field: k.slice(0, 80) });
         }
-        if (typeof v === 'string') out[k] = cleanString(v, MAX.text);
+        if (typeof v === 'string') out[k] = cleanContent(v, MAX.text, `fields.${k}`);
         else if (typeof v === 'number' && Number.isFinite(v)) out[k] = v;
         else if (typeof v === 'boolean') out[k] = v;
         else {
@@ -1365,7 +1384,7 @@ export async function createPage(input: { tenantId: string; orgId: string; title
   if (existing.length >= MAX.perOrgPages) {
     throw new OpenwopError('validation_error', `This org has the maximum ${MAX.perOrgPages} pages.`, 409, { max: MAX.perOrgPages });
   }
-  const title = cleanString(input.title, MAX.title, 'Untitled page');
+  const title = cleanContent(input.title, MAX.title, 'title', 'Untitled page');
   const taken = new Set(existing.map((p) => p.slug));
   const slug = uniqueSlug(input.slug ? slugify(input.slug) : title, taken, 'page');
   const ts = nowIso();
@@ -1451,7 +1470,7 @@ export async function updatePage(
   else if (facets.authorId !== undefined) next.authorId = facets.authorId;
   if (patch.category === null) delete next.category;
   else if (facets.category !== undefined) next.category = facets.category;
-  if (patch.title !== undefined) next.title = cleanString(patch.title, MAX.title, p.title);
+  if (patch.title !== undefined) next.title = cleanContent(patch.title, MAX.title, 'title', p.title);
   if (patch.slug !== undefined) {
     const desired = slugify(patch.slug);
     const taken = await slugSet(tenantId, orgId, pageId);
@@ -1780,7 +1799,7 @@ export async function deletePage(
       await redirects.delete(r.redirectId);
     }
     for (const e of await listExperiments(tenantId, orgId, pageId)) {
-      await deleteExperiment(tenantId, orgId, pageId, e.experimentId, 'system');
+      await deleteExperiment(tenantId, orgId, pageId, e.experimentId, 'system', { pageCascade: true });
     }
   } catch (err) {
     log.warn('cms page child cascade failed', { pageId, error: err instanceof Error ? err.message : String(err) });
@@ -1876,6 +1895,8 @@ export interface PageVersion {
    * any unreviewed row. A person adopts it with Restore, which lands in draft.
    */
   origin?: 'publish' | 'submit' | 'seed';
+  /** Internal original-content capture. No approval/publish claim; hidden from editor history. */
+  promotionBaseline?: { experimentId: string; wasPublished: boolean };
   /** Monotonic snapshot sequence — a stable newest-first tiebreaker for snapshots
    *  taken in the same millisecond. */
   seq: number;
@@ -1914,7 +1935,7 @@ async function snapshotPage(page: Page, publishedBy: string, origin: 'publish' |
   const newest = (await versions.list())
     // ADR 0836 D4 — page ids are per tenant: without the tenant/org filter, tenant
     // B's publish of a same-id page deduped against (and PROMOTED) tenant A's row.
-    .filter((x) => x.tenantId === page.tenantId && x.orgId === page.orgId && x.pageId === page.pageId && x.origin !== 'seed') // ADR 0817: an offer, not a capture
+    .filter((x) => x.tenantId === page.tenantId && x.orgId === page.orgId && x.pageId === page.pageId && x.origin !== 'seed' && !x.promotionBaseline) // ADR 0817: an offer, not a capture
     .sort(byNewest)[0];
   if (newest && newest.version === page.version) {
     // ADR 0593 §C3 (CMSA-11) — dedupe, but PROMOTE. `transitionPage` never
@@ -1949,7 +1970,7 @@ async function snapshotPage(page: Page, publishedBy: string, origin: 'publish' |
   await versions.put(v);
   // Cap history per page (drop the oldest beyond MAX_VERSIONS).
   const mine = (await versions.list()).filter((x) => x.tenantId === page.tenantId && x.orgId === page.orgId && x.pageId === page.pageId).sort(byNewest);
-  for (const old of mine.slice(MAX_VERSIONS)) await versions.delete(old.versionId);
+  for (const old of mine.filter((row) => !row.promotionBaseline).slice(MAX_VERSIONS)) await versions.delete(old.versionId);
 }
 
 /**
@@ -1987,13 +2008,13 @@ export async function offerSeedVersion(
     seq: ++versionSeq,
   };
   await versions.put(v);
-  for (const old of [v, ...mine].slice(MAX_VERSIONS)) await versions.delete(old.versionId);
+  for (const old of [v, ...mine].filter((row) => !row.promotionBaseline).slice(MAX_VERSIONS)) await versions.delete(old.versionId);
   return v;
 }
 
 export async function listVersions(tenantId: string, orgId: string, pageId: string): Promise<PageVersion[]> {
   return (await versions.list())
-    .filter((v) => v.tenantId === tenantId && v.orgId === orgId && v.pageId === pageId)
+    .filter((v) => v.tenantId === tenantId && v.orgId === orgId && v.pageId === pageId && !v.promotionBaseline)
     .sort(byNewest); // newest first — createdAt primary (restart-safe), seq tiebreaker
 }
 
@@ -2002,6 +2023,97 @@ export async function listVersions(tenantId: string, orgId: string, pageId: stri
 export async function getVersion(tenantId: string, orgId: string, pageId: string, versionId: string): Promise<PageVersion | null> {
   const v = await versions.get(versionId);
   return v && v.tenantId === tenantId && v.orgId === orgId && v.pageId === pageId ? v : null;
+}
+
+/** Closed receipts can never publish again, so their capture no longer needs
+ * retention. An interrupted cleanup retries on the next receipt reconciliation. */
+async function discardClosedPromotionBaselines(page: Page): Promise<void> {
+  for (const receipt of Object.values(page.promotionReceipts ?? {})) {
+    if (receipt.phase === 'rolled_back' || receipt.phase === 'superseded') await versions.delete(receipt.restoreRef);
+  }
+}
+
+/** Only host promotion code supplies this option; route bodies never do. */
+function applyPromotionGuard(page: Page, next: Page, guard: PagePromotionGuard | undefined): void {
+  if (!guard) return;
+  const receipt = page.promotionReceipts?.[guard.experimentId];
+  const approved = receipt?.pendingApproval && receipt.ownedStatus === 'in_review' && page.status === 'published';
+  if (!receipt || receipt.phase !== guard.from || receipt.ownedVersion !== page.version
+    || (receipt.ownedStatus !== page.status && !approved)) {
+    throw new OpenwopError('conflict', 'The promotion or its page changed before this write.', 409, { reason: 'promotion_changed' });
+  }
+  next.promotionReceipts = { ...page.promotionReceipts, [guard.experimentId]: { ...receipt,
+    phase: guard.to, ownedVersion: next.version, ownedStatus: next.status, ...(guard.pendingApproval === undefined ? {} : { pendingApproval: guard.pendingApproval }) } };
+}
+
+/** Pin the original content before changing it. A failed page CAS never lets a
+ * retry replace this immutable capture with content it did not originally see. */
+export async function preparePagePromotion(
+  tenantId: string, orgId: string, pageId: string, experimentId: string, winnerRef: string | null, actor: string,
+  operation: 'finalize' | 'rollback',
+): Promise<Page> {
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const page = await getPage(tenantId, orgId, pageId);
+    if (!page) throw new OpenwopError('not_found', 'Page not found.', 404, {});
+    const existing = page.promotionReceipts?.[experimentId];
+    if (existing) {
+      if (existing.winnerRef !== winnerRef) throw new OpenwopError('conflict', 'The promotion names another winner.', 409, { reason: 'promotion_mismatch' });
+      // A restore's primary commit can precede a failed usage-index update.
+      if (['restored', 'rollback_restored', 'rolled_back'].includes(existing.phase) && existing.ownedVersion === page.version) await syncPageUsage(page);
+      await discardClosedPromotionBaselines(page);
+      if (operation === 'finalize' && ['rolling_back', 'rollback_restored', 'rollback_submitted', 'rolled_back', 'superseded'].includes(existing.phase)) {
+        throw new OpenwopError('conflict', 'The promotion has been closed.', 409, { reason: 'promotion_rolled_back' });
+      }
+      return page;
+    }
+    const restoreRef = `pver:${createHash('sha256').update(JSON.stringify([tenantId, orgId, pageId, experimentId])).digest('hex')}`;
+    const capsule: PageVersion = { versionId: restoreRef, tenantId, orgId, pageId, version: page.version,
+      snapshot: { title: page.title, slug: page.slug, sections: page.sections }, publishedBy: actor, publishedAt: nowIso(), seq: ++versionSeq,
+      promotionBaseline: { experimentId, wasPublished: page.status === 'published' } };
+    await versions.putIfAbsent(capsule);
+    const original = await getVersion(tenantId, orgId, pageId, restoreRef);
+    if (!original || original.version !== page.version || original.promotionBaseline?.wasPublished !== (page.status === 'published')
+      || JSON.stringify(original.snapshot) !== JSON.stringify(capsule.snapshot)) {
+      throw new OpenwopError('conflict', 'The page changed before its promotion could be prepared.', 409, { reason: 'promotion_changed' });
+    }
+    const baselineRef = page.status === 'published'
+      ? (await listVersions(tenantId, orgId, pageId)).find((v) => v.origin === 'publish' && v.version === page.version)?.versionId ?? null : null;
+    const receipts = { ...page.promotionReceipts };
+    for (const [id, prior] of Object.entries(receipts)) {
+      if (prior.phase !== 'rolled_back' && prior.phase !== 'superseded') {
+        if (prior.phase !== 'finalized' && prior.ownedVersion === page.version) {
+          throw new OpenwopError('conflict', 'Another promotion is changing this page.', 409, { reason: 'promotion_in_progress' });
+        }
+        receipts[id] = { ...prior, phase: 'superseded' };
+      }
+    }
+    const receipt: PagePromotionReceipt = { winnerRef, baselineRef, restoreRef, baselinePublished: page.status === 'published',
+      ownedVersion: page.version, ownedStatus: page.status, phase: operation === 'rollback' ? 'rolled_back' : 'prepared' };
+    try {
+      await casPage(page, { ...page, promotionReceipts: { ...receipts, [experimentId]: receipt } });
+    } catch (err) {
+      if (err instanceof OpenwopError && err.httpStatus === 409) continue;
+      throw err;
+    }
+    const prepared = await getPage(tenantId, orgId, pageId);
+    if (!prepared) throw new OpenwopError('not_found', 'Page not found.', 404, {});
+    await discardClosedPromotionBaselines(prepared);
+    return prepared;
+  }
+  throw new OpenwopError('conflict', 'The page keeps changing. Retry the promotion.', 409, { reason: 'promotion_changed' });
+}
+
+/** Advance evidence only; restore/transition advance it atomically with content. */
+export async function advancePagePromotion(
+  tenantId: string, orgId: string, pageId: string, guard: PagePromotionGuard,
+): Promise<Page> {
+  const page = await getPage(tenantId, orgId, pageId);
+  if (!page) throw new OpenwopError('not_found', 'Page not found.', 404, {});
+  const next = { ...page };
+  applyPromotionGuard(page, next, guard);
+  await casPage(page, next);
+  await discardClosedPromotionBaselines(next);
+  return next;
 }
 
 /** Restore a past version's content into the page's DRAFT (does not publish). */
@@ -2024,7 +2136,7 @@ export async function restoreVersion(
   // the page never leaves the public surface from a reader's point of view, and a
   // fire-and-forget `unpublished` racing the `published` could evict a live docs
   // page from the KB.
-  opts?: { expectedVersion?: number; republishing?: boolean },
+  opts?: { expectedVersion?: number; republishing?: boolean; promotion?: PagePromotionGuard },
 ): Promise<Page | null> {
   const p = await getPage(tenantId, orgId, pageId);
   if (!p) return null;
@@ -2047,6 +2159,7 @@ export async function restoreVersion(
   delete next.scheduledPublishAt;
   delete next.scheduledPublishVersion;
   delete next.scheduledUnpublishAt;
+  applyPromotionGuard(p, next, opts?.promotion);
   await casPage(p, next);
   if (p.scheduledPublishAt) await dropMarker(scheduledMarkers, tenantId, orgId, pageId);
   if (p.scheduledUnpublishAt) await dropMarker(scheduledUnpublishMarkers, tenantId, orgId, pageId);
@@ -2237,7 +2350,7 @@ export async function transitionPage(
   // PATCH landing in the window used to publish unseen content under the
   // reviewer's name. Optional on purpose — every other transition lane
   // (submit/reject/publish/unpublish/archive, the sweep, promote) is unchanged.
-  opts?: { expectedVersion?: number },
+  opts?: { expectedVersion?: number; promotion?: PagePromotionGuard },
 ): Promise<Page | null> {
   const p = await getPage(tenantId, orgId, pageId);
   if (!p) return null;
@@ -2282,6 +2395,7 @@ export async function transitionPage(
     // the next sweep read (the same discipline as the publish lane).
     delete next.scheduledUnpublishAt;
   }
+  applyPromotionGuard(p, next, opts?.promotion);
   await casPage(p, next);
   // ADR 0836 D1 — the snapshot is written only once the transition landed. It
   // used to run first, so a lost race could still promote the submit row's

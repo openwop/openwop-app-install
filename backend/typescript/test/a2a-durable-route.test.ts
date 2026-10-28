@@ -1,10 +1,18 @@
 /**
- * ADR 0035 / RFC 0100 — the durable A2A leg over HTTP. Boots the real app with
- * OPENWOP_A2A_SERVER_ENABLED + OPENWOP_A2A_DURABLE_TASKS and asserts:
- *   - the `a2a` capability slot advertises durableTasks/push = true, streaming
- *     = false (decoupled onto OPENWOP_A2A_STREAMING; advertised only WHEN wired);
- *   - message/send persists a Task that tasks/get returns after "disconnect";
- *   - tasks/resubscribe re-attaches a status-update event.
+ * ADR 0035 / RFC 0100 / ADR 0552 P2 — the durable A2A leg over HTTP. Boots the
+ * real app with OPENWOP_A2A_SERVER_ENABLED + OPENWOP_A2A_DURABLE_TASKS and
+ * asserts the ROUTE wiring (the mechanism is `a2a-durable-tasks.test.ts`):
+ *   - the card GET's shape follows `A2A-Version` (header-less and `0.3` → the
+ *     0.3 card, `1.0` → the 1.0 card);
+ *   - the durable seams are mounted at the spec-canonical `/host/sample` alias;
+ *   - the route hands `durableTasks` to the 0.3 codec, so message/send persists a
+ *     Task that tasks/get returns after "disconnect" and resubscribe re-attaches.
+ * (ADR 0812 P3c-0 deleted the v1-discovery `a2a` slot leg.)
+ *
+ * Tracker TST-BG1-4. Red when (probe-witnessed, wave 58): `cardVersionFor`
+ * stops mapping header-less to 0.3; the card route serves the wrong era; the
+ * route passes `durableTasks: false`; the `/host/sample/a2a/tasks/start` alias
+ * is unmounted.
  */
 
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
@@ -15,11 +23,14 @@ import { fileURLToPath } from 'node:url';
 import { createApp } from '../src/index.js';
 import { toWireRunId } from '../src/host/v2Ids.js';
 import { loadAgentsFromManifest } from '../src/packs/agentLoader.js';
+import { getAgentRegistry } from '../src/executor/agentRegistry.js';
 
 let BASE: string;
 const H = { authorization: 'Bearer dev-token', 'content-type': 'application/json' };
 let A2A_URL: string;
-const REPO_ROOT = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..', '..', '..', '..');
+// test/ → backend/typescript → backend → repo root. (Wave 58: this used FIVE
+// `..`, which resolved outside the repo, so the load below was a silent no-op.)
+const REPO_ROOT = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..', '..');
 const SUPERVISOR = 'core.openwop.agents.supervisor.default';
 
 let server: http.Server;
@@ -112,6 +123,8 @@ describe('ADR 0035 / RFC 0100 — durable A2A server over HTTP', () => {
   });
 
   it('message/send persists a Task; tasks/get returns it after disconnect', async () => {
+    // Fixture guard: every leg below dispatches to this agent.
+    expect(getAgentRegistry().has(SUPERVISOR), `${SUPERVISOR} is not registered`).toBe(true);
     const sendBody = await (await rpc('message/send', { agentId: SUPERVISOR, message: { parts: [{ kind: 'text', text: 'begin' }] } })).json() as {
       result?: { kind?: string; id?: string };
     };

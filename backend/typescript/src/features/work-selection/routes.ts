@@ -2,12 +2,12 @@
  * ADR 0534 P5 — the work-selection read route (host-extension).
  *
  *   GET /v1/host/openwop-app/work-selection/boards/:boardId/ranking
- *     → { ranked: [{ cardId, title, rank, score, why: [...] }] }
+ *     → { ranked: [{ cardId, title, rank, score, why: [...] }], held: [{ cardId, title }] }
  *
  * Read-only, like the surface and the agent tool it shares a predicate with.
- * There is no write route: selection is host policy, and weights are edited
- * through Priority Matrix's existing criteria-set editor rather than a second
- * editor here (ADR 0534 matrix row 10).
+ * There is no write route: selection is host policy. The weights are a code
+ * constant (`compiler.ts`) with no editor — ADR 0963 D7 corrects ADR 0534's
+ * claim that Priority Matrix's criteria-set editor edits them.
  *
  * Non-normative host-extension namespace — never touches the OpenWOP wire, so
  * no RFC.
@@ -34,8 +34,7 @@ export function registerWorkSelectionRoutes(deps: RouteDeps): void {
       // request principal, never from a parameter. The caller is the RBAC
       // subject every other door hands the seam (#4496): an anonymous session
       // has no `userId`, and the seam refuses an absent caller.
-      const ranked = await readBoardRanking(req.tenantId, req.params.boardId ?? '', Date.now(), callerSubject(req));
-      res.json({ ranked });
+      res.json(await readBoardRanking(req.tenantId, req.params.boardId ?? '', Date.now(), callerSubject(req)));
     } catch (err) {
       next(err);
     }

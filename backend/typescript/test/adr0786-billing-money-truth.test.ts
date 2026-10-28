@@ -11,6 +11,24 @@
  * Authority legs use the ADR 0554 §P3 harness (see adr0711-byok-operator-gate):
  * `sharedWorkspace: true`, membership in the workspace-root org, created BEFORE
  * login — otherwise the personal short-circuit makes every 403 unfalsifiable.
+ *
+ * Tracker: TST-BMT-1..12. Red when (sabotage-witnessed, wave 60): the checkout
+ * row stops naming the tenant; a session can be credited twice; the paid check
+ * reads the payload instead of Stripe; a metadata fallback is credited without
+ * matching what Stripe sold; a row/metadata tenant mismatch is applied; a live
+ * session loses its tenant metadata or a second customer is created; the event
+ * lease never expires or never protects; the route answers 2xx for an in-flight
+ * claim; a legacy processed row is reprocessed; a failed apply keeps its claim;
+ * a displaced holder marks the event done; a non-entitled status grants a bundle;
+ * an ended subscription resurrects; an unpaid event revokes a one-time grant; a
+ * product subscription or its invoice touches the plan row; the clover `parent`
+ * is ignored; a stale or incomplete subscription displaces the plan; the payload
+ * beats the fetched state; `cancel_at_period_end` is dropped; the plan row loses
+ * its CAS; the importer keeps `syncedAtMs`; a second plan is sold; a vanished or
+ * unpaid plan is reconciled wrongly; a repriced pack credits the new price; a
+ * dead customer is not replaced; only one `v1` is compared or a `v0` counts; the
+ * prepaid draw ignores cached reads or the subset clamp; an anon session or an
+ * editor may buy; the manage gate becomes a blanket denial.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -84,7 +102,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  for (const k of ['OPENWOP_TEST_AUTH_ENABLED', 'OPENWOP_BILLING_PLAN_PRICES', 'OPENWOP_BILLING_TOKEN_PACK_PRICES', 'OPENWOP_BILLING_BUNDLE_PRICES', 'OPENWOP_STRIPE_API_BASE']) delete process.env[k];
+  for (const k of ['OPENWOP_STORAGE_DSN', 'OPENWOP_SESSION_SECRET', 'OPENWOP_TEST_AUTH_ENABLED', 'OPENWOP_BILLING_PLAN_PRICES', 'OPENWOP_BILLING_TOKEN_PACK_PRICES', 'OPENWOP_BILLING_BUNDLE_PRICES', 'OPENWOP_STRIPE_API_BASE']) delete process.env[k];
   setSubscriptionInvoiceHook(null);
   await new Promise<void>((r) => server.close(() => r()));
   await new Promise<void>((r) => stripe.close(() => r()));
@@ -118,6 +136,7 @@ describe('fixture honesty', () => {
     const raw = JSON.stringify({ id: 'evt_unsigned', type: 'x', data: {} });
     const bad = await fetch(`${BASE}${B}/webhook`, { method: 'POST', headers: { 'content-type': 'application/json', 'stripe-signature': 't=1,v1=00' }, body: raw });
     expect(bad.status).toBe(401);
+    expect(await bad.json()).toMatchObject({ error: 'unauthorized', message: 'Stripe signature verification failed.' });
   });
 });
 
@@ -189,8 +208,9 @@ describe('D1 — a real token-pack purchase is credited exactly once', () => {
     for (const q of checkouts) {
       expect(q.get('customer')).toBe('cus_1');
       expect(q.get('metadata[tenantId]')).toBe('t-meta');
-      expect(q.get('metadata[priceId]')).toBeTruthy();
     }
+    expect(checkouts[0]!.get('metadata[priceId]')).toBe('price_pack');
+    expect(checkouts[1]!.get('metadata[priceId]')).toBe('price_crm');
     expect(checkouts[0]!.get('metadata[kind]')).toBe('token-pack');
     expect(checkouts[1]!.get('subscription_data[metadata][kind]')).toBe('bundle');
     expect((await getSubscription('t-meta')).stripeCustomerId).toBe('cus_1');
@@ -426,7 +446,7 @@ describe('grade-code fixes (BILLCD-1/2/4/5/9)', () => {
   });
   it('BILLCD-3: a failed apply RELEASES its claim — the retry is not told 409', async () => {
     await withKey(true);
-    // The fetch 500s (unmocked path → our mock 404s, so use a sub the mock serves then breaks).
+    // The fetch fails TRANSIENTLY (the Stripe base points at a closed port → connection refused → 500).
     subs.set('sub_flaky', { id: 'sub_flaky', status: 'active', metadata: { tenantId: 't-rel', kind: 'plan' }, items: { data: [{ price: { id: 'price_pro' } }] } });
     await setSecret('billing:stripe-key', 'sk_rejected_key_that_mock_ignores');
     const origBase = process.env.OPENWOP_STRIPE_API_BASE;
@@ -586,9 +606,11 @@ describe('D5 — buying and the portal are admin acts; anon never buys', () => {
   it('an ADMIN is admitted to every write (the gate is not a blanket denial)', async () => {
     await withKey(false);
     const admin = await login(ADMIN, WS);
+    // Keyless: each write answers its own success, never a refusal or an error.
+    const expected: Record<string, number> = { checkout: 201, 'bundle checkout': 201, portal: 200 };
     for (const [name, path, body] of WRITES) {
       const res = await call(path, admin, 'POST', body);
-      expect([401, 403], `${name} refused an admin`).not.toContain(res.status);
+      expect(res.status, `${name}: ${await res.clone().text()}`).toBe(expected[name]);
     }
   });
   it('a solo user in their own personal workspace is admitted (the short-circuit)', async () => {

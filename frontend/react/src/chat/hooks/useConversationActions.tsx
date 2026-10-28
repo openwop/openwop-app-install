@@ -15,6 +15,9 @@
  *   - `onExport(format)` — download the transcript as md/json (ADR 0119 Phase 5).
  *   - `onShare()` — mint + copy a public read-only link (ADR 0122), owner-only.
  *   - compare state: `compareOpen` + `openCompare()` / `closeCompare()` (ADR 0117 Phase 3).
+ *   - ADR 0992 D9 — archive state: a ChatGPT data export holds every conversation;
+ *     `archiveEntries` lists them for the surface's (lazy) picker, and
+ *     `onPickArchiveConversation(index)` imports the one chosen.
  *
  * The SURFACE supplies `refreshList` + `onOpenConversation` so the action lands in the
  * right place: the standalone passes `sessionsCollection.refresh` + `selectConversation`
@@ -25,9 +28,12 @@
 import { useCallback, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { branchConversation } from '../../client/chatSessionsClient.js';
-import { exportConversation, importConversation, detectImportFormat } from '../../client/chatExportClient.js';
+import {
+  exportConversation, importConversation, detectImportFormat, isChatGptArchive, listArchiveConversations,
+  fileDigest, ChatImportError, type ArchiveEntry, type ImportFailure,
+} from '../../client/chatExportClient.js';
 import { listOrgs } from '../../client/promptLibraryClient.js';
-import { toast } from '../../ui/toast.js';
+import { toast, dismiss } from '../../ui/toast.js';
 import { copyToClipboard } from '../../ui/copyToClipboard.js';
 
 export interface UseConversationActionsOptions {
@@ -54,6 +60,10 @@ export interface ConversationActions {
   compareOpen: boolean;
   openCompare: () => void;
   closeCompare: () => void;
+  /** ADR 0992 D9 — the open archive's conversations, or null when no picker is open. */
+  archiveEntries: ArchiveEntry[] | null;
+  onPickArchiveConversation: (index: number) => Promise<void>;
+  closeArchive: () => void;
 }
 
 export function useConversationActions({ sessionId, refreshList, onOpenConversation }: UseConversationActionsOptions): ConversationActions {
@@ -78,15 +88,66 @@ export function useConversationActions({ sessionId, refreshList, onOpenConversat
   }, [sessionId, refreshList, onOpenConversation]);
 
   // ADR 0119 — import a conversation from a supported export file → a NEW owned
-  // conversation, then open it. Best-effort: a bad/hostile file is rejected server-side.
-  const onImport = useCallback(async (file: File) => {
+  // conversation, then open it. ADR 0992 D9: the key is a digest of the file (plus
+  // the chosen conversation), so a retry opens the same conversation; the toast says
+  // what was imported, skipped or cut, and a failure says why.
+  const [archive, setArchive] = useState<{ data: unknown[]; entries: ArchiveEntry[]; digest: string | undefined } | null>(null);
+
+  const failureCopy = useCallback((f: ImportFailure): string => {
+    switch (f) {
+      case 'too_large': return t('importTooLarge');
+      case 'unsupported': return t('importUnsupported');
+      case 'empty': return t('importEmpty');
+      case 'not_json': return t('importNotJson');
+      case 'conflict': return t('importConflict');
+      default: return t('importFailed');
+    }
+  }, [t]);
+
+  const runImport = useCallback(async (data: unknown, key: string | undefined) => {
+    // grade-ux CX2UX-1 — a 10 MB import takes a while; say it is running until it settles.
+    const pending = toast.info(t('importInProgress'), 0);
     try {
-      const data: unknown = JSON.parse(await file.text());
-      const { sessionId: newId } = await importConversation(detectImportFormat(data), data);
+      const r = await importConversation(detectImportFormat(data), data, key);
+      dismiss(pending);
+      if (r.replayed) toast.info(t('importAlreadyImported'));
+      else {
+        const parts = [t('importDone', { count: r.imported })];
+        if (r.skipped > 0) parts.push(t('importSkipped', { count: r.skipped }));
+        if (r.truncated > 0) parts.push(t('importTruncated', { count: r.truncated }));
+        toast.success(parts.join(' · '));
+      }
       await refreshList();
-      void onOpenConversation(newId);
-    } catch { toast.error(t('importFailed')); }
-  }, [refreshList, onOpenConversation, t]);
+      void onOpenConversation(r.sessionId);
+    } catch (e) {
+      dismiss(pending);
+      toast.error(failureCopy(e instanceof ChatImportError ? e.failure : 'failed'));
+    }
+  }, [refreshList, onOpenConversation, t, failureCopy]);
+
+  const onImport = useCallback(async (file: File) => {
+    let text: string;
+    let data: unknown;
+    try {
+      text = await file.text();
+      data = JSON.parse(text) as unknown;
+    } catch { toast.error(failureCopy('not_json')); return; }
+    const digest = await fileDigest(text).catch(() => undefined);
+    if (isChatGptArchive(data)) {
+      if (data.length === 1) { await runImport(data[0], digest ? `${digest}:0` : undefined); return; }
+      setArchive({ data, entries: listArchiveConversations(data), digest });
+      return;
+    }
+    await runImport(data, digest);
+  }, [runImport, failureCopy]);
+
+  const onPickArchiveConversation = useCallback(async (index: number) => {
+    const open = archive;
+    setArchive(null);
+    if (!open || index < 0 || index >= open.data.length) return;
+    await runImport(open.data[index], open.digest ? `${open.digest}:${index}` : undefined);
+  }, [archive, runImport]);
+  const closeArchive = useCallback(() => setArchive(null), []);
 
   // ADR 0119 Phase 5 — download the conversation transcript in the chosen format.
   const onExport = useCallback(async (format: 'md' | 'json') => {
@@ -135,5 +196,8 @@ export function useConversationActions({ sessionId, refreshList, onOpenConversat
   const openCompare = useCallback(() => setCompareOpen(true), []);
   const closeCompare = useCallback(() => setCompareOpen(false), []);
 
-  return { onBranch, onBranchFrom, onImport, onExport, onShare, compareOpen, openCompare, closeCompare };
+  return {
+    onBranch, onBranchFrom, onImport, onExport, onShare, compareOpen, openCompare, closeCompare,
+    archiveEntries: archive?.entries ?? null, onPickArchiveConversation, closeArchive,
+  };
 }

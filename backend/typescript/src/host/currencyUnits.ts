@@ -10,14 +10,51 @@
  * ZERO_DECIMAL table remains separate deliberately (Stripe's list is Stripe's).
  */
 
+/** Permissive exponent for readers and display: the ISO 4217 table below, any
+ *  letter case, defaulting to 2 when the currency is absent or not listed. Never
+ *  `Intl` — see the table's docblock for why. */
 export function currencyExponent(currency: string | undefined): number {
   if (!currency || !/^[A-Za-z]{3}$/.test(currency)) return 2;
-  try {
-    return new Intl.NumberFormat('en', { style: 'currency', currency: currency.toUpperCase() })
-      .resolvedOptions().maximumFractionDigits ?? 2;
-  } catch {
-    return 2;
-  }
+  return ISO_4217_MINOR_UNITS.get(currency.toUpperCase()) ?? 2;
+}
+
+/**
+ * ISO 4217 minor units for every currency a money writer accepts.
+ *
+ * A FIXED TABLE, not `Intl`, on purpose. `Intl.NumberFormat(…).resolvedOptions()
+ * .maximumFractionDigits` is CLDR's DISPLAY precision, which drifts by ICU release:
+ * MEASURED on Node v22.23.4 (ICU 78.3, CLDR 48 — the prod image) it returns 0 for
+ * HUF, COP, IDR, PKR and eleven more whose ISO exponent is 2, and 0 for IQD (ISO 3),
+ * while older ICU returned 0 for TWD. A writer that reads it converts the same stored
+ * minor units differently on different runtimes — HUF budgets went to Meta 100× too
+ * large (main red at aa357c36f, after #5175).
+ *
+ * Membership: the codes this runtime's ICU recognised when the table was written,
+ * minus XDR and XSU (not national currencies; ISO minor unit N.A.), plus VED (ISO
+ * active, absent from that ICU). Withdrawn codes ICU still accepts (CUC, HRK, SLL,
+ * ZWL) keep their ISO exponent so an existing account is not newly refused.
+ */
+const ISO_4217_ZERO = 'BIF CLP DJF GNF ISK JPY KMF KRW PYG RWF UGX VND VUV XAF XOF XPF';
+const ISO_4217_THREE = 'BHD IQD JOD KWD LYD OMR TND';
+const ISO_4217_TWO =
+  'AED AFN ALL AMD ANG AOA ARS AUD AWG AZN BAM BBD BDT BGN BMD BND BOB BRL BSD BTN BWP BYN BZD CAD CDF CHF CNY COP CRC CUC '
+  + 'CUP CVE CZK DKK DOP DZD EGP ERN ETB EUR FJD FKP GBP GEL GHS GIP GMD GTQ GYD HKD HNL HRK HTG HUF IDR ILS INR IRR JMD KES '
+  + 'KGS KHR KPW KYD KZT LAK LBP LKR LRD LSL MAD MDL MGA MKD MMK MNT MOP MRU MUR MVR MWK MXN MYR MZN NAD NGN NIO NOK NPR NZD '
+  + 'PAB PEN PGK PHP PKR PLN QAR RON RSD RUB SAR SBD SCR SDG SEK SGD SHP SLE SLL SOS SRD SSP STN SVC SYP SZL THB TJS TMT TOP '
+  + 'TRY TTD TWD TZS UAH USD UYU UZS VED VES WST XCD XCG YER ZAR ZMW ZWG ZWL';
+
+export const ISO_4217_MINOR_UNITS: ReadonlyMap<string, number> = new Map([
+  ...ISO_4217_ZERO.split(' ').map((c) => [c, 0] as const),
+  ...ISO_4217_TWO.split(' ').map((c) => [c, 2] as const),
+  ...ISO_4217_THREE.split(' ').map((c) => [c, 3] as const),
+]);
+
+/** Money writers require a recognized, canonical currency and never guess its
+ * precision: the ISO 4217 table above, `null` for anything not in it (never a
+ * default). Keep the permissive display helper above for its existing callers. */
+export function strictCurrencyExponent(currency: string | undefined): number | null {
+  if (!currency || !/^[A-Z]{3}$/.test(currency)) return null;
+  return ISO_4217_MINOR_UNITS.get(currency) ?? null;
 }
 
 /** Stored ISO minor units → major units, per the currency's own exponent. */

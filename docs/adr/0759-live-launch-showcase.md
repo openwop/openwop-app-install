@@ -22,6 +22,12 @@ The risk is replacing a trivial demo with a wall of AI prose. Countermeasure: re
 
 The first live smoke exposed drift: MiniMax was supported by the real dispatcher and Keys connection, but omitted from both discovery's BYOK advertisement and the run-credential admission list. `advertisedProviderAuthModes()` now owns that list for both surfaces, including MiniMax's existing API-key mode. This changes an implementation capability advertisement, not the wire contract (RFC 0067 / RFC 0121 / ADR 0712). Tenant-scoped secret resolution and provider-name checks remain intact. The ADR 0712 HTTP tests pin discovery/admission parity and MiniMax acceptance; the live showcase exercises actual dispatch. No credential value enters a workflow, URL, or frontend.
 
+> **CORRECTED 2026-10-26 (ADR 0990 D6, David's decision): MiniMax is no longer a
+> user BYOK provider on any deploy.** It backs the free tier and is hidden from users,
+> so run admission refuses a tenant's MiniMax key and its auth modes carry no `apiKey`.
+> It stays in discovery's `providers[]`, which names the providers the host dispatches
+> to. The showcase now needs an Anthropic, OpenAI or Google key.
+
 ## Alternatives considered
 
 - A timed marketing animation would be easy but cannot demonstrate real execution or recovery: rejected.

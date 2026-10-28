@@ -14,6 +14,9 @@
  * v2 root key) and any of them would satisfy a bare status assertion. The
  * message + `details.field` assertions pin WHICH refusal fired, for the same
  * reason.
+ *
+ * Sabotage-witnessed (wave 64): dropping the guard (8fw5g1-wh14-refuse) and narrowing it
+ * to strings (wh14-null-arm) each turn their case red on both majors.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -87,7 +90,10 @@ describe.each(MAJORS)('WHD-14 — callbackUrl on run creation (major $major)', (
   it('a schema-invalid callbackUrl (null) is refused by the same arm, not silently dropped', async () => {
     const r = await send('POST', m.path, m.headers, { ...BODY, callbackUrl: null });
     expect(r.status, r.text.slice(0, 200)).toBe(400);
-    expect((r.json['details'] as Record<string, unknown> | undefined)?.['field']).toBe('callbackUrl');
+    const details = r.json['details'] as Record<string, unknown> | undefined;
+    expect(details?.['field']).toBe('callbackUrl');
+    // The SAME arm (not a schema refusal that also names the field).
+    expect(details?.['reason']).toBe('callback_delivery_not_supported');
   });
 
   it('the refusal does not strand an Idempotency-Key: the corrected retry is accepted', async () => {

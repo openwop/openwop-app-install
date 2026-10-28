@@ -6,6 +6,20 @@
  * `src/features/` is NOT caught by that build gate (recorded as `DATA-T2` in the
  * `/grade-data` pass). The erasure assertions below are therefore the only thing
  * standing between this store and the exact defect class ADR 0464 exists to kill.
+ *
+ * CORRECTED (grade-tests 8f W4, 2026-10-24): the paragraph above is stale.
+ * `test/subject-erasure-feature-stores.test.ts` now covers `src/features/**`
+ * structurally and names `tutorial-progress`. What this file still uniquely
+ * proves is that the eraser actually ERASES, and erases only the named subject
+ * in the named tenant.
+ *
+ * DOUBLE GUARD on every read: `listTutorialProgress` / the eraser both scan a
+ * tenant+subject KEY PREFIX and then re-filter on the `tenantId` / `userId`
+ * FIELDS. A sabotage of either half alone is vacuous by design, so the probes
+ * defeat both at once: tp-list-tenant, tp-list-member,
+ * tp-erase-overreach-subject, tp-erase-overreach-tenant. Also witnessed:
+ * tp-key-nondeterministic (idempotency), tp-erase-partial,
+ * tp-eraser-unregistered, tp-cap-count, tp-cap-len, tp-dedupe.
  */
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';

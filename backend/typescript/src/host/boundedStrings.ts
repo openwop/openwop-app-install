@@ -8,9 +8,14 @@
  * length — so a feature can't accidentally persist an unbounded or
  * secret-bearing value.
  */
-import { scrubSecretShaped } from './redactSecrets.js';
+import { findCredentialShape, scrubSecretShaped } from './redactSecrets.js';
+import { OpenwopError } from '../types.js';
 
-/** Trim + secret-scrub + cap to `max`; empty ⇒ `fallback`. */
+/** Trim + secret-scrub + cap to `max`; empty ⇒ `fallback`.
+ *
+ *  The LOG/LABEL lane: names, labels, notes, ids, model context. For text that
+ *  is published or sent to an audience, use `cleanContent` / `contentUrl`: this
+ *  scrub silently rewrites any 40+ character run, which corrupts content. */
 export function cleanString(raw: unknown, max: number, fallback = ''): string {
   const v = scrubSecretShaped(String(raw ?? '').trim()).slice(0, max);
   return v.length > 0 ? v : fallback;
@@ -20,6 +25,57 @@ export function cleanString(raw: unknown, max: number, fallback = ''): string {
 export function optionalCleanString(raw: unknown, max: number): string | undefined {
   const v = cleanString(raw, max);
   return v.length > 0 ? v : undefined;
+}
+
+/**
+ * The CONTENT lane: audience-facing text that is published or sent (page copy,
+ * product descriptions, captions, feed text, ad copy). Trimmed and capped, and
+ * NEVER rewritten: a credential-shaped token (`findCredentialShape`) is a typed
+ * refusal naming the field, so the author keeps their text and decides. Long
+ * opaque runs (hashes, slugs, tokens inside links) pass through byte for byte.
+ */
+export function cleanContent(raw: unknown, max: number, field: string, fallback = ''): string {
+  const v = String(raw ?? '').trim();
+  refuseCredential(v, field);
+  const capped = v.slice(0, max);
+  return capped.length > 0 ? capped : fallback;
+}
+
+/** Like `cleanContent` but `undefined` when empty. */
+export function optionalCleanContent(raw: unknown, max: number, field: string): string | undefined {
+  const v = cleanContent(raw, max, field);
+  return v.length > 0 ? v : undefined;
+}
+
+/** A published link: `safeUrl`'s scheme guard, no scrub (signed and long-path
+ *  URLs survive), and a credential-shaped token is a typed refusal. '' when the
+ *  scheme is dangerous or the value empty. */
+export function contentUrl(raw: unknown, max: number, field: string): string {
+  const url = cleanContent(raw, max, field);
+  if (!url) return '';
+  if (ANY_URL_SCHEME.test(url) && !SAFE_URL_SCHEME.test(url)) return '';
+  return url;
+}
+
+/** The typed refusal both content helpers share. Never echoes the token. */
+export function refuseCredential(text: string, field: string): void {
+  const kind = text ? findCredentialShape(text) : null;
+  if (kind) {
+    // An export path or custom-field name can itself be authored input. Do
+    // not echo a credential through the diagnostic's field label either.
+    const safeField = findCredentialShape(field) ? '(redacted field)' : field;
+    throw new OpenwopError('validation_error', `\`${safeField}\` contains what looks like a credential (${kind}). It will not be published or rewritten; remove it and save again.`, 400, { field: safeField, reason: 'secret_shaped', kind });
+  }
+}
+
+/** The STRICT internal lane (the projects charter / team ledger precedent): a
+ *  value the log scrub WOULD rewrite is a typed refusal instead of a silent
+ *  rewrite. Stricter than content: it refuses long opaque runs too. */
+export function refuseIfScrubbed(raw: unknown, field: string, message?: string): void {
+  const t = String(raw ?? '').trim();
+  if (t && scrubSecretShaped(t) !== t) {
+    throw new OpenwopError('validation_error', message ?? `\`${field}\` contains a secret-shaped token (an API key, or a 40+ character unbroken blob such as a long hash). It will not be stored or rewritten; remove or break up the token.`, 400, { field, reason: 'secret_shaped' });
+  }
 }
 
 /**

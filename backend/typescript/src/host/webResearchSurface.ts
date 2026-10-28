@@ -85,9 +85,14 @@ function extractTitle(html: string): string | undefined {
   return m ? m[1]!.trim().slice(0, 300) : undefined;
 }
 
-/** Strip scripts/styles + tags → collapsed readable text. */
-function extractReadableText(html: string): string {
+/** Strip scripts/styles + tags → collapsed readable text. ADR 0975 D10 — also
+ *  every C0/DEL control: a NUL in one fetched page made the whole Factory run's
+ *  event write fail (Postgres jsonb rejects `\u0000`), and no reader of page
+ *  text wants control characters. Exported for its test. */
+export function extractReadableText(html: string): string {
   return html
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, ' ')
     .replace(/<script[\s\S]*?<\/script>/gi, ' ')
     .replace(/<style[\s\S]*?<\/style>/gi, ' ')
     .replace(/<[^>]+>/g, ' ')

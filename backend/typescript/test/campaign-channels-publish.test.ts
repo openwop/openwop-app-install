@@ -19,7 +19,8 @@
  * the EMWF-10 shape ADR 0655 D7 fixed for the email node only.
  */
 import { describe, it, expect, beforeEach, beforeAll, afterAll } from 'vitest';
-import { nodes as nodePack, appendUtm } from '../../../packs/feature.campaign-channels.nodes/index.mjs';
+import { nodes as nodePack } from '../../../packs/feature.campaign-channels.nodes/index.mjs';
+import { buildTrackedUrl } from '../src/host/trackedUrl.js';
 import { openStorage } from '../src/storage/index.js';
 import type { Storage } from '../src/storage/storage.js';
 import { __resetHostExtPersistence, initHostExtPersistence } from '../src/host/hostExtPersistence.js';
@@ -242,15 +243,17 @@ describe('real email surface delegation — one draft template+campaign per step
 
 
 describe('publishAdVariants — platform + UTM safety (grade-code AUDIT-9/10)', () => {
-  it('appendUtm stamps a RELATIVE landing URL instead of dropping the utm params', () => {
-    const out = appendUtm('/pricing?ref=nl', { source: 'email', campaign: 'launch' }, 'brief-1');
+  // ADR 0956 D5 — the pack's appendUtm moved to the host (buildTrackedUrl); the
+  // same stamping rules are pinned here against the host helper.
+  it('buildTrackedUrl stamps a RELATIVE landing URL instead of dropping the utm params', () => {
+    const out = buildTrackedUrl('/pricing?ref=nl', { source: 'email', campaign: 'launch' }, { fallbackCampaign: 'brief-1' });
     expect(out.startsWith('/pricing')).toBe(true);
     expect(out).toContain('utm_campaign=launch');
     expect(out).toContain('utm_source=email');
     expect(out).toContain('ref=nl'); // existing param preserved
   });
-  it('appendUtm falls back to briefId for utm_campaign and preserves absolute URLs', () => {
-    const out = appendUtm('https://ex.com/x', {}, 'brief-9');
+  it('buildTrackedUrl falls back to the brief id for utm_campaign and preserves absolute URLs', () => {
+    const out = buildTrackedUrl('https://ex.com/x', {}, { fallbackCampaign: 'brief-9' });
     expect(out.startsWith('https://ex.com/x')).toBe(true);
     expect(out).toContain('utm_campaign=brief-9');
   });

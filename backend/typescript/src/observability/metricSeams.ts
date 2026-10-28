@@ -201,6 +201,17 @@ export function recordNodeDuration(input: {
 
 /* ── replay + effects ─────────────────────────────────────────────────────── */
 
+/**
+ * ADR 0988 D2 — a durable host event the replay log could not hold after the
+ * bounded retry. `published_full`: it fit NOTIFY and every instance got its body.
+ * `dead_lettered`: it did not fit, so it was kept as a dead-letter row instead of
+ * reaching one instance only. `lost`: the dead-letter write failed too.
+ */
+export type HostEventAppendFailedOutcome = 'published_full' | 'dead_lettered' | 'lost';
+export function recordHostEventAppendFailed(outcome: HostEventAppendFailedOutcome): void {
+  addCount('openwop.host_event.log.append_failed', 1, { outcome });
+}
+
 /** What the ADR 0341 fast path found in the source run for a side-effecting node. */
 export type ReplayServedOutcome = 'recorded-success' | 'recorded-failure' | 'source-missing';
 

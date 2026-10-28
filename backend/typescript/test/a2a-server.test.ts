@@ -1,6 +1,11 @@
 /**
- * A7 — real A2A server handler (RFC 0076). Discovery (agent/getCard) +
+ * A7 — real A2A server handler (RFC 0076, ADR 0035). Discovery (agent/getCard) +
  * message/send routed to a real manifest-agent dispatch + error mapping.
+ *
+ * Tracker TST-BG1-10. Red when (probe-witnessed, wave 58): agent/getCard stops
+ * returning the published card; an AgentNotFoundError maps to anything but
+ * -32001; the missing-agentId code changes; the dispatch outcome stops driving
+ * the task state.
  */
 
 import { afterEach, describe, expect, it } from 'vitest';
@@ -45,17 +50,20 @@ describe('A2A server (A7 / RFC 0076)', () => {
   it('maps an unknown agent to a JSON-RPC error', async () => {
     const res = await handleA2aRequest(send('message/send', { agentId: 'nope.absent', message: { parts: [] } }), { agentCard: CARD });
     expect(res.error?.code).toBe(-32001);
+    expect(res.error?.message).toBe("agent 'nope.absent' is not installed on this host");
   });
 
   it('rejects an unknown method and a missing agentId', async () => {
-    expect((await handleA2aRequest(send('frobnicate'), { agentCard: CARD })).error?.code).toBe(-32601);
-    expect((await handleA2aRequest(send('message/send', { message: { parts: [] } }), { agentCard: CARD })).error?.code).toBe(-32602);
+    const unknown = await handleA2aRequest(send('frobnicate'), { agentCard: CARD });
+    expect(unknown.error).toEqual({ code: -32601, message: 'method not found: frobnicate' });
+    const missing = await handleA2aRequest(send('message/send', { message: { parts: [] } }), { agentCard: CARD });
+    expect(missing.error).toEqual({ code: -32602, message: 'params.agentId is required' });
   });
 
   // ADR 0035 / RFC 0100 — back-compat: with NO task store (durableTasks absent),
   // tasks/get is still not-found (the synchronous core, today's behavior).
   it('keeps tasks/get not-found in the synchronous core (no regression)', async () => {
     const res = await handleA2aRequest(send('tasks/get', { id: 'a2a:peer.agent' }), { agentCard: CARD });
-    expect(res.error?.code).toBe(-32001);
+    expect(res.error).toEqual({ code: -32001, message: 'task not found (synchronous server keeps no task store)' });
   });
 });

@@ -10,11 +10,18 @@
  * accepted and ignored (AEV-4, WF-EV-9), and every refusal was English prose the
  * client could not localize (BE-2/AE-4). Each `it` names its finding.
  *
- * Sabotage-witnessed (each reverted, red, restored):
- *  - `putEvalSuite`/`lockEvalSuite` back to get-then-put ⇒ "lock and PUT race";
- *  - `updateEvalSuite` back to get-then-put ⇒ "concurrent promotes";
- *  - the `unlockEvalSuite` catch removed ⇒ "a refused insert";
- *  - the resume digest compare removed ⇒ both resume cases (NP-EVAL-5, WF-EV-8).
+ * (TST-BPA) Red when (each sabotage-witnessed, wave 65): the lock skips its digest
+ * compare ⇒ "a lock against content…"; `putEvalSuite` stops refusing a locked version or
+ * an existing one under `?create=true` ⇒ "?create=true…"; `updateEvalSuite` writes
+ * blind instead of CAS ⇒ "five parallel task appends…"; create stops releasing the lock
+ * it took, or releases one it did not take ⇒ "the draft stays editable…"; the mock 403,
+ * the `allowedModels` check, the baseline-status check or the errored-call refusal is
+ * skipped (their cases); resume skips the digest compare ⇒ both resume cases (NP-EVAL-5,
+ * WF-EV-8); the run's capture counter writes blind ⇒ EVD-6; the preview is not cut ⇒
+ * EVUX-7; the result cut is removed ⇒ "capture truncation" (which duplicates
+ * runner-lifecycle "m8"; kept because this file is protected).
+ * EVD-4 and EVD-6 rely on in-process async loops interleaving at their awaits; that
+ * was witnessed, not forced.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -32,6 +39,8 @@ import { AGENT_SUITE_KIND } from '../src/host/evals/agentEvalRun.js';
 import { resetRfc0244WireCache, resetRfc0245WireCache } from '../src/host/evals/evalCapability.js';
 import { maybeCaptureExecuteTool, setCaptureSetting } from '../src/host/evals/toolBoundary.js';
 import { OpenwopError, type RunRecord } from '../src/types.js';
+import type { BundleScope } from '../src/host/inMemorySurfaces.js';
+import type { ExecuteAgentTool } from '../src/host/agentDispatch.js';
 import type { Storage } from '../src/storage/storage.js';
 
 let server: Server; let base = '';
@@ -272,9 +281,10 @@ describe('promote — typed reasons (AE-4) and the errored-call stopgap (AEV-6)'
     await setCaptureSetting(TENANT, AGENT, true);
     const run = await send('POST', '/runs', { workflowId: 'conformance-noop', inputs: { q: 'x' } });
     const id = storedId(String(run.json['runId']));
-    const exec = await maybeCaptureExecuteTool(async (call) => (call.name === 'billing:refund' ? { content: '{"error":"upstream_down"}', isError: true } : { content: '{"ok":true}' }), { tenantId: TENANT, runId: id, agentId: AGENT });
-    await exec({ name: 'crm:lookup', input: {} } as Parameters<typeof exec>[0]);
-    await exec({ name: 'billing:refund', input: {} } as Parameters<typeof exec>[0]);
+    const failing: ExecuteAgentTool = async (call) => (call.name === 'billing:refund' ? { content: '{"error":"upstream_down"}', isError: true } : { content: '{"ok":true}' });
+    const exec = await maybeCaptureExecuteTool(failing, { tenantId: TENANT, runId: id, agentId: AGENT });
+    await exec({ name: 'crm:lookup', input: {} });
+    await exec({ name: 'billing:refund', input: {} });
     const errored = await send('POST', path, { fromRunId: String(run.json['runId']) });
     expect(errored.status, errored.text.slice(0, 300)).toBe(400);
     expect(details(errored)).toMatchObject({ field: 'fromRunId', reason: 'errored_call' });
@@ -350,9 +360,12 @@ describe('POST /runs {mode:"eval"} — refusals that used to be silent', () => {
 });
 
 describe('EVD-3 / M4 — the regression baseline', () => {
+  // Under major 2 the baseline rides the body ROOT (RFC 0251, ADR 0983 D1/D2).
+  const REG = { modes: ['golden', 'regression'] };
+  const compare = (baselineRunId: string) => ({ evalModes: ['golden', 'regression'], baselineRunId });
   it('a baseline that is not completed with a summary is refused; another suite\'s run is refused; a completed one yields a verdict', async () => {
-    await putEvalSuite(TENANT, golden('test.acme.evals.reg'));
-    const baseline = await send('POST', '/runs', { mode: 'eval', evalSuiteRef: 'test.acme.evals.reg@1.0.0', agentId: AGENT, configurable: mock() });
+    await putEvalSuite(TENANT, golden('test.acme.evals.reg', 'done', REG));
+    const baseline = await send('POST', '/runs', { mode: 'eval', evalSuiteRef: 'test.acme.evals.reg@1.0.0', agentId: AGENT, evalModes: ['golden'], configurable: mock() });
     expect(baseline.status, baseline.text.slice(0, 200)).toBe(201);
     const baseId = String(baseline.json['runId']);
     expect(await waitTerminal(baseId)).toBe('completed');
@@ -365,23 +378,34 @@ describe('EVD-3 / M4 — the regression baseline', () => {
       configurable: {}, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
     };
     await hostExtStorage().insertRun(failedRun);
-    const notDone = await send('POST', '/runs', { mode: 'eval', evalSuiteRef: 'test.acme.evals.reg@1.0.0', agentId: AGENT, configurable: { ...mock(), baselineRunId: failedId } });
+    const notDone = await send('POST', '/runs', { mode: 'eval', evalSuiteRef: 'test.acme.evals.reg@1.0.0', agentId: AGENT, ...compare(failedId), configurable: mock() });
     expect(notDone.status).toBe(400);
-    expect(details(notDone)).toMatchObject({ field: 'configurable.baselineRunId', reason: 'baseline_not_completed', params: { status: 'failed' } });
+    // ADR 0983 D3 — one uniform refusal (RFC 0251 §C): no status, no suite, no id.
+    expect(details(notDone)).toEqual({ field: 'baselineRunId', reason: 'baseline_unusable' });
+    expect(notDone.text).not.toContain(failedId);
 
-    await putEvalSuite(TENANT, golden('test.acme.evals.reg-other'));
-    const otherSuite = await send('POST', '/runs', { mode: 'eval', evalSuiteRef: 'test.acme.evals.reg-other@1.0.0', agentId: AGENT, configurable: { ...mock(), baselineRunId: baseId } });
+    await putEvalSuite(TENANT, golden('test.acme.evals.reg-other', 'done', REG));
+    const otherSuite = await send('POST', '/runs', { mode: 'eval', evalSuiteRef: 'test.acme.evals.reg-other@1.0.0', agentId: AGENT, ...compare(baseId), configurable: mock() });
     expect(otherSuite.status).toBe(400);
-    expect(details(otherSuite)).toMatchObject({ field: 'configurable.baselineRunId', reason: 'baseline_other_suite' });
+    expect(details(otherSuite)).toEqual({ field: 'baselineRunId', reason: 'baseline_unusable' });
+    expect(otherSuite.text).not.toContain(baseId);
 
-    const candidate = await send('POST', '/runs', { mode: 'eval', evalSuiteRef: 'test.acme.evals.reg@1.0.0', agentId: AGENT, configurable: { ...mock(), baselineRunId: baseId } });
+    // ADR 0983 D2 — the old v2 bypass is refused, pointing at the root property.
+    const viaConfigurable = await send('POST', '/runs', { mode: 'eval', evalSuiteRef: 'test.acme.evals.reg@1.0.0', agentId: AGENT, configurable: { ...mock(), baselineRunId: baseId } });
+    expect(viaConfigurable.status).toBe(400);
+    expect(details(viaConfigurable)).toMatchObject({ field: 'configurable.baselineRunId', reason: 'moved_to_root' });
+
+    const candidate = await send('POST', '/runs', { mode: 'eval', evalSuiteRef: 'test.acme.evals.reg@1.0.0', agentId: AGENT, ...compare(baseId), configurable: mock() });
     expect(candidate.status, candidate.text.slice(0, 200)).toBe(201);
     expect(await waitTerminal(String(candidate.json['runId']))).toBe('completed');
     const summary = await send('GET', `/runs/${String(candidate.json['runId'])}/eval-summary`);
     expect(summary.status).toBe(200);
-    const regression = (summary.json['regression'] ?? (summary.json as { regression?: unknown }).regression) as Record<string, unknown> | undefined;
+    const regression = summary.json['regression'] as Record<string, unknown> | undefined;
     expect(regression, summary.text.slice(0, 400)).toBeTruthy();
-    expect(typeof regression!['verdict']).toBe('string');
+    // The echo is the id the client sent (the v2 wire spelling).
+    expect(regression?.['baselineRunId']).toBe(baseId);
+    // Both runs pass their one task with score 1: one pair, no non-zero delta.
+    expect(regression).toMatchObject({ verdict: 'unchanged', pairedTaskCount: 1, scoreDelta: 0 });
   });
 });
 
@@ -427,6 +451,8 @@ describe('EVAL-10 — the history is agent-scoped and paged', () => {
     }
     expect(new Set(seen).size).toBe(seen.length);
     for (const id of ids) expect(seen).toContain(id);
+    // Newest first: the three runs this case made appear in reverse creation order.
+    expect(seen.filter((x) => ids.includes(x))).toEqual([...ids].reverse());
     expect((await send('GET', '/host/openwop-app/agent-evals/runs?cursor=garbage')).status).toBe(400);
     expect((await send('GET', '/host/openwop-app/agent-evals/runs?limit=0')).status).toBe(400);
   });
@@ -482,7 +508,7 @@ describe('EVD-7 — the run chat tool is idempotent per conversation run and car
       metadata: { owner }, configurable: {}, createdAt: now, updatedAt: now,
     };
     await hostExtStorage().insertRun(conversation);
-    const scope = { tenantId, actingUserId: 'u-7', personalTenant: tenantId, runId: conversation.runId } as never;
+    const scope: BundleScope = { tenantId, actingUserId: 'u-7', personalTenant: tenantId, runId: conversation.runId };
     const input = { suiteRef: 'test.acme.evals.chat@1.0.0', agentId: AGENT };
 
     const first = await tool.run(input, scope);
@@ -510,9 +536,10 @@ describe('EVD-6 — the per-run capture cap holds across concurrent wraps', () =
     const runId = `r-cap-concurrent-${Date.now()}`;
     // Both wraps start before either records: each used to seed `recorded` from the
     // same (empty) count and record a full 50 of its own.
-    const [a, b] = await Promise.all([0, 1].map(() => maybeCaptureExecuteTool(async () => ({ content: '{}' }), { tenantId: TENANT, runId, agentId: AGENT })));
+    const empty: ExecuteAgentTool = async () => ({ content: '{}' });
+    const [a, b] = await Promise.all([0, 1].map(() => maybeCaptureExecuteTool(empty, { tenantId: TENANT, runId, agentId: AGENT })));
     await Promise.all([a!, b!].map(async (exec) => {
-      for (let i = 0; i < MAX_CALLS_PER_RUN; i += 1) await exec({ name: 't', input: { i } } as Parameters<typeof exec>[0]);
+      for (let i = 0; i < MAX_CALLS_PER_RUN; i += 1) await exec({ name: 't', input: { i } });
     }));
     expect(await listRunBoundary(TENANT, runId)).toHaveLength(MAX_CALLS_PER_RUN);
   });
@@ -529,7 +556,7 @@ describe('WF-EV-10 — redrive names an eval run for what it is', () => {
     await hostExtStorage().insertRun(run);
     const r = await send('POST', '/host/openwop-app/runs/redrive', { runIds: [run.runId] });
     expect(r.status, r.text.slice(0, 300)).toBe(200);
-    expect(JSON.stringify(r.json)).toContain('eval_run_not_redrivable');
+    expect(r.json['results']).toEqual([{ runId: run.runId, error: 'eval_run_not_redrivable' }]);
   });
 });
 
@@ -537,12 +564,14 @@ describe('regressionReason — host-extension only, never the wire summary', () 
   it('the progress route and the history items carry metadata.eval.regressionReason; the wire eval-summary does not', async () => {
     const now = new Date().toISOString();
     const runId = `inconclusive-${Date.now()}`;
+    // The history lists runs of the suites the agent can resolve, so this case owns one.
+    await putEvalSuite(TENANT, golden('test.acme.evals.reg-reason'));
     const run: RunRecord = {
-      runId, workflowId: evalWorkflowId('test.acme.evals.reg@1.0.0'), tenantId: TENANT, status: 'completed', inputs: {},
+      runId, workflowId: evalWorkflowId('test.acme.evals.reg-reason@1.0.0'), tenantId: TENANT, status: 'completed', inputs: {},
       metadata: {
         mode: 'eval',
-        eval: { kind: AGENT_SUITE_KIND, suiteRef: 'test.acme.evals.reg@1.0.0', suiteSource: 'tenant', agentId: AGENT, baselineRunId: 'gone', regressionReason: 'baseline_unavailable' },
-        evalSummary: { suiteId: 'test.acme.evals.reg', passed: true, regression: { baselineRunId: 'gone', verdict: 'inconclusive', scoreDelta: 0, pairedTaskCount: 0 } },
+        eval: { kind: AGENT_SUITE_KIND, suiteRef: 'test.acme.evals.reg-reason@1.0.0', suiteSource: 'tenant', agentId: AGENT, baselineRunId: 'gone', regressionReason: 'baseline_unavailable' },
+        evalSummary: { suiteId: 'test.acme.evals.reg-reason', passed: true, regression: { baselineRunId: 'gone', verdict: 'inconclusive', scoreDelta: 0, pairedTaskCount: 0 } },
       },
       configurable: {}, createdAt: now, updatedAt: now,
     };
@@ -564,9 +593,10 @@ describe('EVUX-7 — the capture list says which lane and shows a redacted previ
     const { listCapturedRuns, PREVIEW_CHARS, eraseSubjectToolBoundary } = await import('../src/host/evals/toolBoundary.js');
     await setCaptureSetting(TENANT, AGENT, true);
     const runId = `r-preview-${Date.now()}`;
-    const exec = await maybeCaptureExecuteTool(async () => ({ content: '{}' }), { tenantId: TENANT, runId, agentId: AGENT, lane: 'chat' });
-    await exec({ name: 'crm:lookup', input: { email: 'quinn@example.com', apiKey: 'sk-ant-api03-SECRETSECRETSECRETSECRET', note: 'x'.repeat(300) } } as Parameters<typeof exec>[0]);
-    await exec({ name: 'crm:update', input: { id: 'c-9' } } as Parameters<typeof exec>[0]);
+    const empty: ExecuteAgentTool = async () => ({ content: '{}' });
+    const exec = await maybeCaptureExecuteTool(empty, { tenantId: TENANT, runId, agentId: AGENT, lane: 'chat' });
+    await exec({ name: 'crm:lookup', input: { email: 'quinn@example.com', apiKey: 'sk-ant-api03-SECRETSECRETSECRETSECRET', note: 'x'.repeat(300) } });
+    await exec({ name: 'crm:update', input: { id: 'c-9' } });
     const row = (await listCapturedRuns(TENANT, AGENT)).find((r) => r.runId === runId)!;
     expect(row).toMatchObject({ lane: 'chat', calls: 2 });
     expect(row.inputPreview!.startsWith('crm:lookup: ')).toBe(true);
@@ -612,8 +642,9 @@ describe('capture truncation — a recorded result is cut to MAX_RESULT_CHARS', 
     const { MAX_RESULT_CHARS, listRunBoundary } = await import('../src/host/evals/toolBoundary.js');
     await setCaptureSetting(TENANT, AGENT, true);
     const runId = `r-trunc-${Date.now()}`;
-    const exec = await maybeCaptureExecuteTool(async () => ({ content: 'y'.repeat(40_000) }), { tenantId: TENANT, runId, agentId: AGENT });
-    await exec({ name: 'docs:read', input: {} } as Parameters<typeof exec>[0]);
+    const big: ExecuteAgentTool = async () => ({ content: 'y'.repeat(40_000) });
+    const exec = await maybeCaptureExecuteTool(big, { tenantId: TENANT, runId, agentId: AGENT });
+    await exec({ name: 'docs:read', input: {} });
     const [row] = await listRunBoundary(TENANT, runId);
     expect(row!.result.length).toBe(MAX_RESULT_CHARS);
   });

@@ -74,6 +74,20 @@ transfers to `updateEntry` without modification, and was not applied there.**
 choice, it destroys rather than grants, and widening this ADR to cover it would
 relitigate a documented decision on no evidence. Recorded as an open question.
 
+> **CORRECTED 2026-10-27 (ADR 0993 D2): D1a's "every other field keeps org-scoped
+> write authority", D1b's 403 and D1c's negative leg are overturned, and so is the
+> decision not to gate `deleteEntry`.** The evidence this ADR said was missing turned
+> up in the chat lane. `/p-<slug>` sent a library prompt as the invoking member's
+> turn (ADR 0993 `PL2-3`). A member who could not read a private entry could
+> therefore repoint it, which decided what its owner sent. That is the same grant
+> D1 refused, made through a different field. A private entry is now its owner's on
+> every lane, with the read lane's uniform 404.
+>
+> D1b's argument that a 404 "would be a lie" held only while the edit lane was
+> unfiltered. Once a non-owner cannot reach the entry through any lane, a 403 is the
+> only thing that tells them it exists. Leg 4 of `prompt-visibility-authority.test.ts`
+> now pins the reverse.
+
 ## D2 (Improvement, `PLWF-3`, NEW) — a docblock claims a replay mechanism that does not exist
 
 `features/prompts/promptSurface.ts:9-10` states the surface is *"Reads only;

@@ -7,8 +7,11 @@
  * both carrying the SAME two defects (fixed below), so proving one proves
  * the pattern for both.
  *
- * MODE CHOSEN: a hand-rolled mini-scheduler (the `cms-chain-execution.
- * test.ts` precedent) — `diff`'s `core.ai.chatCompletion` config omits
+ * MODE CHOSEN: a mini-scheduler built from the REAL scheduler primitives
+ * (`buildGraph` / `freshSnapshot` / `evaluateTrigger` / `buildNodeInputs`,
+ * imported from `executor/scheduler.ts` — the knowledge-execution precedent;
+ * CORRECTED wave 64: it used to hand-roll `buildNodeInputs`' port rules, so a
+ * change to the real port semantics stayed green here) — `diff`'s `core.ai.chatCompletion` config omits
  * `provider`/`model` (an operator-configurable template), so only
  * `ctx.callAI` is faked; `fetch` (REAL SSRF-guarded HTTP to a local test
  * server), `seen`/`snapshot`/`remember` (REAL in-memory `ctx.storage.kv`,
@@ -44,6 +47,16 @@
  *    silently persisting `value: undefined` on every run. Retargeted to
  *    `diff.content`→`remember.value` so the digest text is what's actually
  *    stored.)
+ *
+ * > CORRECTED (wave 64, 2026-10-24): bug 2's "static `inputs` are stripped"
+ * > is no longer true. The executor now merges a node's declared `inputs`
+ * > over its edge inputs (ADR 0237), and so does this harness, so `config.key`
+ * > and `inputs.key` are a DOUBLE GUARD: removing only `config.key` stays
+ * > green (probe 8fw5g2-ct-seen-config-key-only, vacuous). The bug-2
+ * > discriminator is the shared-key sabotage (8fw5g2-ct-key-per-source) and
+ * > a wrong key on both copies (8fw5g2-ct-seen-key-wrong) or on the
+ * > `inputs` copy alone, which wins the merge (8fw5g2-ct-seen-inputs-key-wrong-r2).
+ * > The original text is kept below as the record of the defect.
  *
  * 2. A node's static, templated `inputs` field is DEAD: `expandChain`
  *    (`host/workflowChainPackLoader.ts`) preserves an authored node's
@@ -89,6 +102,7 @@ import { createApp } from '../src/index.js';
 import type { Storage } from '../src/storage/storage.js';
 import { getChain, expandChain, loadWorkflowChainPacks, _resetChainRegistryForTest } from '../src/host/workflowChainPackLoader.js';
 import { buildHostSurfaceBundle } from '../src/host/inMemorySurfaces.js';
+import { buildGraph, buildNodeInputs, evaluateTrigger, freshSnapshot, type SchedulerSnapshot } from '../src/executor/scheduler.js';
 import { makeNotificationAdapter } from '../src/host/notificationAdapter.js';
 import { buildNotificationsSurface } from '../src/features/notifications/surface.js';
 
@@ -101,6 +115,7 @@ let storage: Storage;
 let feedServer: http.Server;
 let feedPort: number;
 let feedHits = 0;
+const savedStorageDsn = process.env.OPENWOP_STORAGE_DSN;
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -133,26 +148,18 @@ beforeAll(async () => {
   await new Promise<void>((res) => feedServer.listen(0, '127.0.0.1', () => { feedPort = (feedServer.address() as AddressInfo).port; res(); }));
 });
 afterAll(async () => {
-  process.env.OPENWOP_HTTP_ALLOW_PRIVATE_RANGES = 'false';
   delete process.env.OPENWOP_HTTP_ALLOW_PRIVATE_RANGES;
+  if (savedStorageDsn === undefined) delete process.env.OPENWOP_STORAGE_DSN; else process.env.OPENWOP_STORAGE_DSN = savedStorageDsn;
   await new Promise<void>((res) => feedServer.close(() => res()));
 });
 
-/** Resolve `{{inputs.name}}` config tokens from the run params — mirrors
- *  the real executor's `interpolateRunInputs`. */
-function resolveConfig(config: Record<string, unknown> | undefined, params: Record<string, string>): Record<string, unknown> {
-  return Object.fromEntries(Object.entries(config ?? {}).map(([k, v]) => [
-    k,
-    typeof v === 'string' ? v.replace(/\{\{inputs\.([a-zA-Z0-9_]+)\}\}/g, (_m, name: string) => params[name] ?? '') : v,
-  ]));
-}
-
 interface CapturedAiCall { messages: Array<{ role: string; content: string }> }
 
-/** Walk the expanded definition with `buildNodeInputs` port semantics (the
- *  SAME resolution rules `csm-ops`/`exec-ops`'s execution tests document),
- *  driving the REAL node implementations against a REAL `ctx.storage`/
- *  `ctx.notification`/HTTP fetch, faking only `ctx.callAI`. */
+/** Walk the expanded definition with the REAL scheduler primitives
+ *  (`evaluateTrigger` readiness, `buildNodeInputs` ports), driving the REAL
+ *  node implementations against a REAL `ctx.storage`/`ctx.notification`/HTTP
+ *  fetch, faking only `ctx.callAI`. Config is frozen by `expandChain` (RFC
+ *  0013 Path A: no `{{params.*}}` survives), so it is passed as-is. */
 async function runChain(
   chainId: string,
   params: Record<string, string>,
@@ -162,7 +169,6 @@ async function runChain(
 ): Promise<Record<string, NodeResult>> {
   const chain = getChain(chainId)!.chain;
   const def = expandChain(chain, { params });
-  const outputs = new Map<string, Record<string, unknown>>();
   const results: Record<string, NodeResult> = {};
   const surfaceStorage = buildHostSurfaceBundle({ tenantId, runId }).storage;
   const notification = makeNotificationAdapter({ storage, tenantId, runId });
@@ -171,50 +177,50 @@ async function runChain(
     return { content: 'NEW ITEMS\n- New feature shipped (https://example.com/p/1)\n\nSEEN\nhttps://example.com/p/1' };
   };
 
-  for (const node of def.nodes) {
-    const incoming = (def.edges ?? []).filter((e) => e.targetNodeId === node.nodeId);
-    let ctxInputs: unknown = params;
-    if (incoming.length > 0) {
-      const inputs: Record<string, unknown> = {};
-      for (const e of incoming) {
-        const src = outputs.get(e.sourceNodeId) ?? {};
-        const sourcePort = e.sourceOutput ?? 'output';
-        const value = Object.prototype.hasOwnProperty.call(src, sourcePort) ? src[sourcePort] : src;
-        inputs[e.targetInput ?? 'input'] = value;
-      }
-      ctxInputs = Object.keys(inputs).length === 1 && 'input' in inputs ? inputs.input : inputs;
+  const graph = buildGraph(def);
+  const snapshot: SchedulerSnapshot = freshSnapshot(def);
+  const byId = new Map(def.nodes.map((nd) => [nd.nodeId, nd]));
+  let progressed = true;
+  while (progressed) {
+    progressed = false;
+    for (const nodeId of snapshot.order) {
+      const state = snapshot.nodeState.get(nodeId);
+      if (state !== 'pending' && state !== 'ready') continue;
+      const verdict = evaluateTrigger(nodeId, graph, snapshot);
+      if (verdict === 'wait') continue;
+      progressed = true;
+      if (verdict === 'skip') { snapshot.nodeState.set(nodeId, 'skipped'); continue; }
+      const node = byId.get(nodeId)!;
+      const inputsByPort = buildNodeInputs(nodeId, graph, snapshot, params);
+      // executor.ts — the single-`input` back-compat unwrap, verbatim in shape.
+      const baseInputs: unknown =
+        Object.keys(inputsByPort).length === 1 && 'input' in inputsByPort ? inputsByPort.input : inputsByPort;
+      // executor.ts (ADR 0237) — a node's DECLARED `inputs` (frozen by expandChain)
+      // win over the edge-derived ones on conflict.
+      const declared = node.inputs ?? {};
+      const ctxInputs: unknown = Object.keys(declared).length === 0
+        ? baseInputs
+        : baseInputs && typeof baseInputs === 'object' && !Array.isArray(baseInputs)
+          ? { ...Object.fromEntries(Object.entries(baseInputs)), ...declared }
+          : declared;
+      const impl = nodeImpls[node.typeId];
+      expect(impl, `node impl for ${node.typeId}`).toBeTruthy();
+      const result = await impl!({
+        runId, nodeId, tenantId,
+        inputs: ctxInputs,
+        config: node.config ?? {},
+        callAI,
+        storage: surfaceStorage,
+        notification,
+        // The chain now uses the in-app node (feature.notifications.nodes.notify)
+        // over the ONE emitter, not the device-push node it could never satisfy.
+        features: { notifications: buildNotificationsSurface({ tenantId, runId }) },
+        triggerData: params,
+      });
+      results[nodeId.slice(nodeId.lastIndexOf('_') + 1)] = result;
+      snapshot.nodeOutputs.set(nodeId, result.outputs ?? {});
+      snapshot.nodeState.set(nodeId, result.status === 'success' ? 'completed' : 'failed');
     }
-    // ADR 0237 — the REAL executor merges a node's DECLARED `inputs` OVER the
-    // edge-derived ones ("fixture wins on conflict"). This harness built inputs
-    // from edges only, so a node whose value is authored (not piped) saw nothing:
-    // the notify node reported `title_required` for a title the chain declares.
-    // Mirroring the executor keeps the harness honest rather than weakening the
-    // assertion to match a harness gap.
-    const declared = (node as unknown as { inputs?: Record<string, unknown> }).inputs;
-    if (declared && Object.keys(declared).length > 0) {
-      const base = (ctxInputs && typeof ctxInputs === 'object' && !Array.isArray(ctxInputs))
-        ? (ctxInputs as Record<string, unknown>) : {};
-      ctxInputs = { ...base, ...resolveConfig(declared, params) };
-    }
-    const impl = nodeImpls[node.typeId];
-    expect(impl, `node impl for ${node.typeId}`).toBeTruthy();
-    const ctx = {
-      runId, nodeId: node.nodeId, tenantId,
-      inputs: ctxInputs,
-      config: resolveConfig(node.config, params),
-      callAI,
-      storage: surfaceStorage,
-      notification,
-      // The chain now uses the in-app node (feature.notifications.nodes.notify)
-      // over the ONE emitter, not the device-push node it could never satisfy.
-      features: { notifications: buildNotificationsSurface({ tenantId, runId }) },
-      triggerData: params,
-    };
-    const result = await impl!(ctx);
-    const short = node.nodeId.slice(node.nodeId.lastIndexOf('_') + 1);
-    results[short] = result;
-    if (result.status !== 'success') break;
-    outputs.set(node.nodeId, result.outputs ?? {});
   }
   return results;
 }
@@ -224,6 +230,8 @@ describe('content.feed-watch — end-to-end execution (mini-scheduler, real fetc
     const feedUrl = `http://127.0.0.1:${feedPort}/feed.xml`;
     const params = { feedUrl };
     const tenantId = `org:contentchain-${Date.now()}`;
+    // The fetch counter is shared with the page-watch case; count THIS case's hits.
+    const hitsBefore = feedHits;
 
     const firstCalls: CapturedAiCall[] = [];
     const first = await runChain('content.feed-watch', params, tenantId, 'run:first', firstCalls);
@@ -249,7 +257,7 @@ describe('content.feed-watch — end-to-end execution (mini-scheduler, real fetc
     // DELIVERS (durable inbox row + SSE), so the honest assertion is an emission.
     expect(first.notify?.outputs).toMatchObject({ emitted: true, audience: 'tenant' });
 
-    expect(feedHits).toBe(1);
+    expect(feedHits - hitsBefore, 'the first run fetched the feed exactly once').toBe(1);
 
     // BUG 2 proof: a SECOND run with the SAME feedUrl, in the SAME tenant,
     // finds the FIRST run's persisted digest via the correctly-resolved key
@@ -273,6 +281,8 @@ describe('content.feed-watch — end-to-end execution (mini-scheduler, real fetc
     expect(other.diff?.status, JSON.stringify(other)).toBe('success');
     const otherParsed = JSON.parse(otherCalls[0]!.messages[0]!.content) as { seen?: { found?: boolean } };
     expect(otherParsed.seen?.found).toBe(false);
+    // Every run fetched (dedup is on the digest, never on skipping the fetch).
+    expect(feedHits - hitsBefore).toBe(3);
   });
 });
 

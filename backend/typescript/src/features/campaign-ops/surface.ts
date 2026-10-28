@@ -22,6 +22,10 @@ import { executeApprovedChangeSet } from './execution.js';
 import { getApproval } from '../../host/approvalService.js';
 import { getClient } from './clientService.js';
 import { adapterFor } from './adapters/registry.js';
+import { listAgentBindings } from './agentBindingService.js';
+import { listClientNotes, proposeClientNote } from './clientMemory.js';
+import { clientContextForRun } from './clientContext.js';
+import { mcpCampaignPerformance, mcpExplain, mcpGetCampaign, mcpListCampaigns, mcpPendingGates, mcpRequestChange, mcpRunStatus } from './externalRead.js';
 
 /** The run-metadata key a campaign-ops run is stamped with (host-namespaced). */
 export const CAMPAIGN_OPS_RUN_STAMP = 'openwop-app.campaignOps';
@@ -158,6 +162,56 @@ export function buildCampaignOpsSurface(scope: BundleScope): FeatureSurface {
       return { jobId: job.jobId, status: job.status, outcome: job.outcome ?? null };
     },
 
+    /** ADR 0943 D2 — the client's agent bindings, read only. What a run
+     *  ACTUALLY uses is the map frozen on it at start, not this live list. */
+    listAgentBindings: async (args) => {
+      const orgId = str(args.orgId);
+      await bindRunToClient(scope, orgId);
+      return {
+        bindings: (await listAgentBindings(tenantId, orgId)).map((b) => ({
+          bindingId: b.bindingId, pinnedAgentId: b.pinnedAgentId, agentId: b.agentId,
+          ...(b.workflowId ? { workflowId: b.workflowId } : {}),
+          ...(b.nodeId ? { nodeId: b.nodeId } : {}),
+          ...(b.model ? { model: { provider: b.model.provider, model: b.model.model } } : {}),
+        })),
+      };
+
+    },
+
+    /** ADR 0944 D4 — read before proposing: the client's curated notes. Bound to
+     *  the run's client like every op here (a run stamped A asking for B is
+     *  refused `wrong_client` before anything is read). */
+    listClientNotes: async (args) => {
+      const orgId = str(args.orgId);
+      await bindRunToClient(scope, orgId);
+      const notes = await listClientNotes(tenantId, orgId);
+      return { notes: notes.map((n) => ({ id: n.id, content: n.content, createdAt: n.createdAt })) };
+    },
+
+    /** ADR 0944 D5 — the run's frozen client context block (the same text its
+     *  agents receive). Bound to the run's client; a run with no client context,
+     *  or one whose client binding no longer holds, gets `available:false`. */
+    clientContext: async (args) => {
+      const orgId = str(args.orgId);
+      await bindRunToClient(scope, orgId);
+      const out = scope.runId ? await clientContextForRun(tenantId, scope.runId) : null;
+      if (!out || 'refused' in out || out.snapshot.orgId !== orgId) return { available: false };
+      return { available: true, block: out.snapshot.block, sources: out.snapshot.sources, omitted: out.snapshot.omitted };
+    },
+
+    /** ADR 0944 D4 — an agent never writes a trusted client fact: it proposes
+     *  one, and a person with write on the client decides it. */
+    proposeClientNote: async (args) => {
+      const orgId = str(args.orgId);
+      await bindRunToClient(scope, orgId);
+      if (!scope.runId) throw new OpenwopError('forbidden_scope', 'Only a run can propose a client note.', 403, { reason: 'no_run' });
+      const { proposal, created } = await proposeClientNote({
+        tenantId, orgId, content: args.content, rationale: args.rationale,
+        proposedBy: { runId: scope.runId, nodeId: optStr(args.nodeId) ?? 'unknown', ...(optStr(args.agentId) ? { agentId: optStr(args.agentId) } : {}) },
+      });
+      return { proposalId: proposal.proposalId, status: proposal.status, created };
+    },
+
     listAssets: async (args) => {
       const orgId = str(args.orgId);
       await bindRunToClient(scope, orgId);
@@ -171,5 +225,66 @@ export function buildCampaignOpsSurface(scope: BundleScope): FeatureSurface {
       const current = await adapterFor(asset.destination)?.read(asset, { tenantId });
       return { found: true, asset, current: current ?? null };
     },
+
+    /** ADR 0957 D2 `compute-snapshot`: run the definition's section sources for
+     *  the client and store a draft report. The run's id is recorded on it. */
+    computeReportSnapshot: async (args) => {
+      const orgId = str(args.orgId);
+      const person = await bindRunToClient(scope, orgId, 'workspace:write');
+      await requireClientReports(tenantId);
+      const { getDefinition, resolvePeriod, createReport } = await import('./reports/reportService.js');
+      const def = await getDefinition(tenantId, orgId, str(args.definitionId));
+      if (!def) throw new OpenwopError('not_found', 'Report definition not found.', 404, { definitionId: str(args.definitionId) });
+      // D2 — a scheduled run pins the version it started with; an edit since then
+      // is a typed failure, never a report of a definition nobody scheduled.
+      if (args.definitionVersion !== undefined && args.definitionVersion !== null && Number(args.definitionVersion) !== def.version) {
+        throw new OpenwopError('conflict', 'The report definition changed after this run was scheduled.', 409, { reason: 'report_definition_changed', pinned: Number(args.definitionVersion), current: def.version });
+      }
+      const period = resolvePeriod(def.period.kind, { start: optStr(args.periodStart), end: optStr(args.periodEnd) });
+      const report = await createReport(def, period, person, scope.runId ? { runId: scope.runId } : {});
+      return { reportId: report.reportId, snapshot: report.snapshot, snapshotHash: report.snapshotHash };
+    },
+    /** ADR 0957 D3 `report-snapshot-read`: a stored report's frozen numbers. */
+    readReportSnapshot: async (args) => {
+      const orgId = str(args.orgId);
+      await bindRunToClient(scope, orgId);
+      await requireClientReports(tenantId);
+      const { getReport } = await import('./reports/reportService.js');
+      const report = await getReport(tenantId, orgId, str(args.reportId));
+      if (!report) return { found: false };
+      return { found: true, reportId: report.reportId, periodStart: report.periodStart, periodEnd: report.periodEnd, snapshot: report.snapshot, snapshotHash: report.snapshotHash };
+    },
+    /** ADR 0957 D2 step 5 `publish-report`. Publishing must follow the ADR 0942
+     *  `report.publish` gate's approval of THIS snapshot. That gate cannot yet
+     *  freeze a policy for a client-bound run, so the node REFUSES (typed) until
+     *  it can: otherwise a hand-built workflow chaining compute-snapshot into
+     *  publish-report would publish numbers nobody reviewed. The CAS itself is
+     *  `reportService.publishReport`, which the gated chain will call. */
+    publishReport: async (args) => {
+      const orgId = str(args.orgId);
+      await bindRunToClient(scope, orgId, 'workspace:write');
+      await requireClientReports(tenantId);
+      throw new OpenwopError('conflict', 'Publishing a client report needs its review approval, which is not available yet.', 409, { reason: 'report_publish_unavailable', reportId: str(args.reportId) });
+    },
+    // ── ADR 0962 P1 — the external-agent read door (MCP tools). Each binds first
+    // (`externalRead.bindExternalRead`: access on THIS client, `externalAgents`,
+    // the client stamp). Aggregates and ids only.
+    mcpListCampaigns: async (args) => mcpListCampaigns(scope, str(args.clientId)),
+    mcpGetCampaign: async (args) => mcpGetCampaign(scope, str(args.clientId), str(args.campaignId)),
+    mcpCampaignPerformance: async (args) => mcpCampaignPerformance(scope, str(args.clientId), str(args.campaignId)),
+    mcpPendingGates: async (args) => mcpPendingGates(scope, str(args.clientId)),
+    mcpRunStatus: async (args) => mcpRunStatus(scope, str(args.clientId), str(args.runId)),
+    mcpExplain: async (args) => mcpExplain(scope, str(args.clientId), str(args.runId)),
+    // ADR 0962 P2 — a request: writes a request row and starts the governed chain.
+    mcpRequestChange: async (args) => mcpRequestChange(scope, {
+      clientId: str(args.clientId), text: args.text, assetIds: args.assetIds, ...(optStr(args.campaignId) ? { campaignId: optStr(args.campaignId)! } : {}),
+    }),
   };
+}
+
+/** The client-reports sub-toggle, checked on the tenant (ADR 0941 D5). */
+async function requireClientReports(tenantId: string): Promise<void> {
+  const { resolveOne } = await import('../../host/featureToggles/service.js');
+  const t = await resolveOne('campaign-ops.client-reports', { tenantId });
+  if (!t?.enabled) throw new OpenwopError('not_found', 'Client reports is not enabled for this tenant.', 404, { feature: 'campaign-ops.client-reports' });
 }

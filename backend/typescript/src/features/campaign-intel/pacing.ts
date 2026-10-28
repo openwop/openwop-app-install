@@ -18,6 +18,7 @@ import { listRecords } from '../campaign-connectors/performanceService.js';
 // Cross-feature READ (the documented precedent).
 import { listCampaigns } from '../campaign-orchestration/campaignService.js';
 import { minorToMajor } from '../../host/currencyUnits.js';
+import { alertActions } from './alertActions.js';
 
 const log = createLogger('campaign-intel.pacing');
 
@@ -128,6 +129,7 @@ export async function runPacingCheck(tenantId: string, orgId: string): Promise<P
     // so a retry can still alert.
     const claim: PacingMemo = { key, tenantId, campaignId: row.campaignId, band: row.band, at: new Date().toISOString() };
     if (!(await memos.compareAndSwap(prior, claim))) continue; // another run claimed this escalation
+    const actions = alertActions(row.band === 'over' ? 'pacing-over' : 'pacing-warning', { orgId, campaignId: row.campaignId });
     try {
       await getNotificationEmitter().emit({
         tenantId,
@@ -140,8 +142,10 @@ export async function runPacingCheck(tenantId: string, orgId: string): Promise<P
         // campaign-intel route is /campaign-intelligence, so tab=campaign-intelligence
         // (NOT campaign-intel, which useUrlTab silently falls back on). A FE test
         // (campaign-intel routes) pins this id so a route rename can't re-break it.
-        actionUrl: `/campaigns?tab=campaign-intelligence&org=${encodeURIComponent(orgId)}&campaign=${encodeURIComponent(row.campaignId)}`,
-        metadata: { campaignId: row.campaignId, band: row.band, spentPct: row.spentPct },
+        // ADR 0952 D4 — the alert carries its actions; the first is the link.
+        // The page stages it; the notification itself changes nothing.
+        actionUrl: actions[0]?.url ?? `/campaigns?tab=campaign-intelligence&org=${encodeURIComponent(orgId)}&campaign=${encodeURIComponent(row.campaignId)}`,
+        metadata: { campaignId: row.campaignId, band: row.band, spentPct: row.spentPct, actions },
       });
       alerted.push({ campaignId: row.campaignId, band: row.band });
     } catch (e) {

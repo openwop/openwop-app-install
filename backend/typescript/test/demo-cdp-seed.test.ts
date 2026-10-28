@@ -111,3 +111,22 @@ describe('demo-cdp seeder', () => {
     expect(third.created).toBeGreaterThan(2000);
   });
 });
+
+// ADR 0955 D1 — the demo provisions campaign-ops (with agency clients) AND campaign-journeys
+// into the same workspace. A client-less enroll is refused `client_required` there, so the
+// demo journey names the workspace root (the agency's house account).
+describe('demo-cdp seeder in a workspace that has clients', () => {
+  it('still enrolls the demo journey, and clears it', async () => {
+    const { createOrg } = await import('../src/host/accessControlService.js');
+    const { createClient } = await import('../src/features/campaign-ops/clientService.js');
+    const tenantId = 'demo-cdp-t-agency';
+    await seedDemoPeople(tenantId);
+    await seedDemoCrm(tenantId);
+    const org = (await createOrg({ tenantId, createdBy: 'seed', name: 'Client (synthetic)' })).orgId;
+    await createClient({ tenantId, orgId: org, name: 'Client (synthetic)', createdBy: 'seed' });
+    await seedDemoCdp(tenantId);
+    expect((await listEnrollments(tenantId, 'demo-cdp-welcome-series')).length).toBeGreaterThan(0);
+    await clearDemoCdp(tenantId);
+    expect(await listEnrollments(tenantId, 'demo-cdp-welcome-series')).toHaveLength(0);
+  });
+});

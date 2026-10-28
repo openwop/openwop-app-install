@@ -7,6 +7,11 @@
  * MODEL — the def IS `suspend-request`), `principal` on `approval.granted`,
  * `outcome` on `run.completed`, and omitted `typeId` / `interruptId`. Those were
  * a third of the wire-seam residue and none of them was a host feature.
+ *
+ * Tracker TST-BAA-3. Red when (sabotage-witnessed, wave 60): `node.started`
+ * loses `typeId`; `interrupt.resolved` loses `interruptId`. CEILING: a key the
+ * corpus def leaves OPEN (e.g. a top-level `outcome` on `run.completed`) is
+ * legal on the wire, so this file cannot see it — that is the schema's call.
  */
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -56,6 +61,9 @@ function validatorFor(defName: string) {
 }
 
 
+/** Measured on the fixed seed below (wave 60). */
+const EXPECTED_CHECKED = 2461;
+
 const BASE = {
   workforceId: 'workforce.finance.invoice-exception',
   tenantId: 'demo',
@@ -86,7 +94,8 @@ describe('workforce history fixture — every event validates on the major-2 wir
         if (!v(wire)) failures.push(`${e.type}: ${JSON.stringify((v as { errors?: unknown }).errors)} ← ${JSON.stringify(wire).slice(0, 200)}`);
       }
     }
-    expect(checked, 'non-vacuous: the fixture produced events with v2 defs').toBeGreaterThan(100);
+    // Fixed seed + fixed epoch ⇒ an exact count (measured), not a floor.
+    expect(checked, 'non-vacuous: the fixture produced events with v2 defs').toBe(EXPECTED_CHECKED);
     for (const t of ['run.started', 'node.started', 'node.suspended', 'interrupt.requested', 'interrupt.resolved', 'run.completed', 'run.failed', 'node.failed']) {
       expect(covered.has(t), `${t} must be exercised by the fixture`).toBe(true);
     }

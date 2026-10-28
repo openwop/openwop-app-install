@@ -7,6 +7,7 @@ export const messages = {
   lede: 'Planifiez, lancez, mesurez et optimisez vos campagnes marketing — briefs, orchestration, performance et intelligence au même endroit.',
   tablistLabel: 'Sections de Campaign Studio',
   'tab_campaign-ops': 'Opérations',
+  'tab_campaign-playbooks': 'Playbooks',
   'tab_campaign-brief': 'Briefs',
   tab_campaigns: 'Campagnes',
   'tab_campaign-performance': 'Performance',

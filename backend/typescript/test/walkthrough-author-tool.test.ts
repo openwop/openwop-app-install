@@ -1,7 +1,10 @@
 /**
  * ADR 0368 Phase 6c — the Tour Author register tool: enriched steps →
- * transient ui.tour.step/checkpoint DAG; validates; catalog-hidden; a bad
- * step errors and registers nothing.
+ * transient ui.walkthrough.step/checkpoint DAG (ADR 0376 renamed ui.tour.*);
+ * validates; catalog-hidden; a bad step errors and registers nothing; each
+ * refusal is asserted by its OWN message (an empty step list is also refused
+ * later by DAG validation, so `isError` alone could not tell the two apart —
+ * round-1 probe 8fw4g1-wa-empty).
  */
 import { describe, it, expect, beforeAll, afterEach } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -23,7 +26,7 @@ beforeAll(async () => {
   const storage = await openStorage('memory://');
   initHostExtPersistence(storage);
   ensureNodesRegistered();
-  registerWalkthroughNodes(); // the ui.tour.* node types must exist for validation
+  registerWalkthroughNodes(); // the ui.walkthrough.* node types must exist for validation
   createHostAdapterSuite({ storage });
   registerWalkthroughAuthorTool();
   const provider = createAgentToolProvider({ tenantId: TENANT, agentProfileId: 'agent-tour' });
@@ -34,7 +37,7 @@ afterEach(async () => { for (const id of registered.splice(0)) { deleteRegistere
 const parse = (r: { content: string }) => JSON.parse(r.content) as Record<string, unknown>;
 
 describe('walkthroughs.register-draft (ADR 0368 P6c)', () => {
-  it('enriched steps → a transient, catalog-hidden ui.tour.step/checkpoint DAG', async () => {
+  it('enriched steps → a transient, catalog-hidden ui.walkthrough.step/checkpoint DAG', async () => {
     const r = await runTool({
       name: 'Polished Flow',
       steps: [
@@ -56,6 +59,9 @@ describe('walkthroughs.register-draft (ADR 0368 P6c)', () => {
       .toEqual({ transient: true, generatedBy: 'agent:agent-tour' });
     expect(def.nodes.map((n) => n.typeId)).toEqual(['ui.walkthrough.step', 'ui.walkthrough.step', 'ui.walkthrough.checkpoint']);
     expect((def.nodes[1]!.config as { hitl?: boolean }).hitl).toBe(true);
+    expect((def.nodes[2]!.config as { expect?: string }).expect).toBe('campaign-studio.brief-exists');
+    // The DAG is the ordered chain s1 → s2 → s3.
+    expect(def.edges?.map((e) => [e.sourceNodeId, e.targetNodeId])).toEqual([['s1', 's2'], ['s2', 's3']]);
   });
 
   it('a step missing both actionId and checkpoint errors and registers nothing', async () => {
@@ -67,7 +73,11 @@ describe('walkthroughs.register-draft (ADR 0368 P6c)', () => {
   });
 
   it('empty steps / missing name are rejected', async () => {
-    expect((await runTool({ name: 'X', steps: [] })).isError).toBe(true);
-    expect((await runTool({ steps: [{ actionId: 'a.b.c' }] })).isError).toBe(true);
+    const empty = await runTool({ name: 'X', steps: [] });
+    expect(empty.isError).toBe(true);
+    expect(parse(empty).message).toBe('steps must be a non-empty array.');
+    const nameless = await runTool({ steps: [{ actionId: 'a.b.c' }] });
+    expect(nameless.isError).toBe(true);
+    expect(parse(nameless).message).toBe('name is required.');
   });
 });

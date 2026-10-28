@@ -7,6 +7,8 @@ export const messages = {
   // Default hero — the thesis, beside the run ledger (visual: 'run')
   heroHeading: 'Build multi-agent workflows you can watch, pause, and *rewind.*',
   heroSubheading: 'Sketch a workflow on a canvas or describe it in chat. Watch every decision stream in, answer when the run stops to ask, and replay any run from any step. It runs on OpenWOP, the open-source protocol for multi-agent workflow orchestration, so your agents and workflows can move to any host that implements it.',
+  /** Issue 5226 — the white-label fallback home's one call to action. */
+  neutralCtaLabel: 'Get started',
   heroCtaLabel: 'Start building — no sign-up',
   heroCtaLabel2: 'Read the protocol',
   heroEyebrow: 'The reference app for the OpenWOP protocol',
@@ -241,4 +243,13 @@ export const messages = {
   consentFooterLink: "Privacy choices",
   consentSavedOn: "Analytics turned on.",
   consentSavedOff: "Analytics turned off.",
+  consentBodyOptOut: "We count page views, page speed and which page versions you see, to improve this site, unless you turn it off. Session recording stays off unless you tick it.",
+  consentReplayLabel: "Also allow session recording.",
+  consentReplayHint: "Records how you move through pages to find what is hard to use. All text and form entries are hidden before anything leaves your browser, and payment, password and health fields are never recorded.",
+  consentReplayStateOn: "Session recording is on for you.",
+  consentReplayStateOff: "Session recording is off for you.",
+  consentReplayTurnOn: "Allow session recording",
+  consentReplayTurnOff: "Stop session recording",
+  consentReplaySavedOn: "Session recording turned on.",
+  consentReplaySavedOff: "Session recording turned off. Recordings of your visits are deleted.",
 } as const;

@@ -13,6 +13,9 @@
  * header is set after the parsers (no version on the error); leg 3 guards the
  * v1 mount; leg 4 proves the handler does not swallow a good body; leg 5 is
  * the size polarity (413, not 400 — a different type, a different code).
+ * Leg 2's ordering half (the version header set BEFORE the parsers) lives in
+ * app wiring and is witnessed only by leg 2 failing; no single-line sabotage
+ * isolates it.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';
@@ -30,7 +33,8 @@ afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); 
 
 async function post(path: string, raw: string, headers: Record<string, string> = {}) {
   const res = await fetch(`${base}${path}`, { method: 'POST', headers: { Authorization: 'Bearer dev-token', 'Content-Type': 'application/json', ...headers }, body: raw });
-  const text = await res.text(); let json: any; try { json = JSON.parse(text); } catch { json = undefined; }
+  const text = await res.text(); let json: { error?: string; message?: string; runId?: string } | undefined;
+  try { json = JSON.parse(text) as typeof json; } catch { json = undefined; }
   return { status: res.status, ver: res.headers.get('openwop-version'), type: res.headers.get('content-type') ?? '', json, text };
 }
 

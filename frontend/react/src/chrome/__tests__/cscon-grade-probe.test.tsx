@@ -35,7 +35,7 @@ describe('ADR 0200 campaign console — tier-AWARE projection (CSCC-1 closed by 
   it('CSCP-1: the campaigns tabs are all workspace-tier → projected for admin AND non-admin alike', () => {
     const asNonAdmin = visibleHubRoutes(FEATURES, allVisible, false, 'campaigns');
     const asAdmin = visibleHubRoutes(FEATURES, allVisible, true, 'campaigns');
-    expect(asNonAdmin).toHaveLength(5); // Operations (ADR 0926), Briefs, Campaigns, Performance, Intelligence (ADR 0200)
+    expect(asNonAdmin).toHaveLength(6); // Operations, Briefs, Campaigns, Performance, Intelligence, Playbooks (ADR 0959)
     expect(asNonAdmin.map(tabIdOf)).toEqual(asAdmin.map(tabIdOf)); // workspace tabs visible to everyone
     expect(asNonAdmin.map((t) => t.tier)).toEqual(asNonAdmin.map(() => 'workspace'));
   });

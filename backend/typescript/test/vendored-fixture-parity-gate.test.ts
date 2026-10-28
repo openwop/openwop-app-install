@@ -362,7 +362,11 @@ describe('sync-fixtures.sh vendors A NAMED TAG, never the corpus working tree', 
       const corpus = makeTagCorpus(join(dir, 'corpus'));
       const { code: status, out } = runSync(dir, [], corpus);
       expect(status, 'an untagged sync MUST refuse').toBe(1);
-      expect(out).toContain('--tag');
+      // The no-tag refusal's OWN message. `toContain('--tag')` alone was also
+      // satisfied by the next check's "tag  does not exist … fetch --tags"
+      // (8f W4 probe vf-untagged-allowed was vacuous for exactly that reason).
+      expect(out).toContain('error: no corpus tag. Pass --tag');
+      expect(out).not.toContain('does not exist');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

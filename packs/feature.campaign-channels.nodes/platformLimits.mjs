@@ -5,37 +5,33 @@
  * Flesch-style readability banding. All pure + deterministic (replay-safe).
  */
 
-/** The spec's per-platform ad copy caps (chars). */
-export const PLATFORM_LIMITS = {
-  google: { headline: 30, description: 90 },
-  meta: { headline: 40, description: 125 },
-  linkedin: { headline: 70, description: 150 },
-  tiktok: { headline: 40, description: 100 },
-};
+// ADR 0946 P1 (D3) — the caps and the near-duplicate check come from the ONE
+// host channel spec table (backend/typescript/src/host/contentRules/), via a
+// generated copy. Edit the table, then run scripts/gen-content-rules.mjs.
+// LIMITS are the platforms' published hard maxima: over them, copy is
+// regenerated and then truncated. RECOMMENDED lengths only warn: truncating
+// to a recommendation when the platform allows more is a silent quality loss.
+import {
+  PLATFORM_LIMITS, PLATFORM_RECOMMENDED, SOCIAL_LIMITS, SOCIAL_RECOMMENDED, AD_FIELD_SCHEMA_MAX, findNearDuplicates,
+} from './contentRules.generated.mjs';
 
-/** Social post body caps per platform. */
-export const SOCIAL_LIMITS = { linkedin: 3000, twitter: 280, x: 280, facebook: 5000, instagram: 2200 };
-
-/** The widest cap per ad field — injected as schema maxLength (the schema is
- *  per-channel while platformSets mix platforms; the EXACT per-platform check
- *  is validateAdVariants below). */
-export const AD_FIELD_SCHEMA_MAX = { headline: 70, description: 150, cta: 30 };
+export { PLATFORM_LIMITS, PLATFORM_RECOMMENDED, SOCIAL_LIMITS, SOCIAL_RECOMMENDED, AD_FIELD_SCHEMA_MAX, findNearDuplicates };
 
 const norm = (p) => String(p ?? '').trim().toLowerCase();
 
-/** Per-platform, per-field over-limit findings for an ad_variants draft.
+/** Per-platform, per-field over-HARD-limit findings for an ad_variants draft.
  *  Each finding carries the platform SET index (`set`) so a fixer targets the
  *  exact offending set by INDEX — duplicate same-platform sets, or a raw
  *  platform string that only `norm()` maps, must never mis-target (QA-CODE-1). */
-export function validateAdVariants(draft) {
+function adFindings(draft, table) {
   const findings = [];
   (Array.isArray(draft?.platformSets) ? draft.platformSets : []).forEach((set, si) => {
-    const limits = PLATFORM_LIMITS[norm(set.platform)];
+    const limits = table[norm(set.platform)];
     if (!limits) return;
     (Array.isArray(set.variants) ? set.variants : []).forEach((v, i) => {
       for (const field of ['headline', 'description']) {
         const text = typeof v?.[field] === 'string' ? v[field] : '';
-        if (text.length > limits[field]) {
+        if (typeof limits[field] === 'number' && text.length > limits[field]) {
           findings.push({ platform: norm(set.platform), set: si, index: i, field, length: text.length, limit: limits[field] });
         }
       }
@@ -44,15 +40,32 @@ export function validateAdVariants(draft) {
   return findings;
 }
 
-/** Per-platform over-limit findings for a social_posts draft. */
-export function validateSocialPosts(draft) {
+function postFindings(draft, table) {
   const findings = [];
   (Array.isArray(draft?.posts) ? draft.posts : []).forEach((p, i) => {
-    const limit = SOCIAL_LIMITS[norm(p?.platform)];
+    const limit = table[norm(p?.platform)];
     const text = typeof p?.content === 'string' ? p.content : '';
     if (limit && text.length > limit) findings.push({ platform: norm(p.platform), index: i, field: 'content', length: text.length, limit });
   });
   return findings;
+}
+
+export function validateAdVariants(draft) {
+  return adFindings(draft, PLATFORM_LIMITS);
+}
+
+/** Per-platform over-limit findings for a social_posts draft (hard caps). */
+export function validateSocialPosts(draft) {
+  return postFindings(draft, SOCIAL_LIMITS);
+}
+
+/** Over-RECOMMENDED findings (warn only; never regenerate or truncate). */
+export function adVariantRecommendations(draft) {
+  return adFindings(draft, PLATFORM_RECOMMENDED);
+}
+
+export function socialPostRecommendations(draft) {
+  return postFindings(draft, SOCIAL_RECOMMENDED);
 }
 
 /** Word-boundary truncation WITH a flag — the last resort after a regen. */
@@ -61,25 +74,6 @@ export function truncateAt(text, limit) {
   const cut = text.slice(0, limit);
   const lastSpace = cut.lastIndexOf(' ');
   return { text: (lastSpace > limit * 0.6 ? cut.slice(0, lastSpace) : cut).trimEnd(), truncated: true };
-}
-
-/** Deterministic near-duplicate detection: token-set Jaccard over lowercase
- *  word sets (pack-local stand-in for embedding cosine — same purpose, zero
- *  imports; ADR 0355 correction). Returns pairs above the threshold. */
-export function findNearDuplicates(texts, threshold = 0.8) {
-  const sets = texts.map((t) => new Set(String(t ?? '').toLowerCase().match(/[a-z0-9']+/g) ?? []));
-  const pairs = [];
-  for (let i = 0; i < sets.length; i++) {
-    for (let j = i + 1; j < sets.length; j++) {
-      const a = sets[i]; const b = sets[j];
-      if (a.size === 0 || b.size === 0) continue;
-      let inter = 0;
-      for (const w of a) if (b.has(w)) inter += 1;
-      const jaccard = inter / (a.size + b.size - inter);
-      if (jaccard >= threshold) pairs.push({ a: i, b: j, similarity: Math.round(jaccard * 100) / 100 });
-    }
-  }
-  return pairs;
 }
 
 /** Flesch-style reading-ease approximation banded to easy|standard|technical.

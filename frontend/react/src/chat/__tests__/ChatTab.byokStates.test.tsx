@@ -13,6 +13,7 @@
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
 
 import type { BYOKActiveConfig, UseBYOKConfigResult } from '../../byok/lib/useBYOKConfig.js';
 const useBYOKConfig = vi.fn<() => UseBYOKConfigResult>();
@@ -58,13 +59,13 @@ afterEach(cleanup);
 describe('ChatTab BYOK states (ADR 0517)', () => {
   it('ready → the chat', () => {
     state({ status: 'ready', isValid: true, config: GOOGLE });
-    render(<ChatTab />);
+    render(<MemoryRouter><ChatTab /></MemoryRouter>);
     expect(screen.getByTestId('chat')).toBeTruthy();
   });
 
   it('loading → the status card, never the wizard', () => {
     state({ status: 'loading', isLoading: true });
-    render(<ChatTab />);
+    render(<MemoryRouter><ChatTab /></MemoryRouter>);
     expect(screen.getByTestId('backend-status').getAttribute('data-error')).toBe('');
     expect(screen.queryByTestId('wizard')).toBeNull();
   });
@@ -73,7 +74,7 @@ describe('ChatTab BYOK states (ADR 0517)', () => {
     // An outage is not evidence that a key is missing. Prompting here is how a
     // user with a perfectly good key was talked into storing a second one.
     state({ status: 'error', error: 'backend unreachable' });
-    render(<ChatTab />);
+    render(<MemoryRouter><ChatTab /></MemoryRouter>);
     // …and the outage itself reaches the card (which shows it and goes "resting").
     expect(screen.getByTestId('backend-status').getAttribute('data-error')).toBe('backend unreachable');
     expect(screen.queryByTestId('wizard')).toBeNull();
@@ -82,15 +83,15 @@ describe('ChatTab BYOK states (ADR 0517)', () => {
   it('session-expired → the sign-in card, NEVER the key wizard', () => {
     // The reported bug, at the surface where the user met it.
     state({ status: 'session-expired' });
-    render(<ChatTab />);
+    render(<MemoryRouter><ChatTab /></MemoryRouter>);
     expect(screen.getByTestId('session-expired')).toBeTruthy();
     expect(screen.queryByTestId('wizard')).toBeNull();
   });
 
-  it('needs-key → the wizard, SEEDED with stored refs so it can offer an existing key', () => {
+  it('needs-key → the wizard, SEEDED with stored refs so it can offer an existing key', async () => {
     state({ status: 'needs-key', storedRefs: ['byok:google:1785358774187'] });
-    render(<ChatTab />);
-    const wizard = screen.getByTestId('wizard');
+    render(<MemoryRouter><ChatTab /></MemoryRouter>);
+    const wizard = await screen.findByTestId('wizard');
     expect(wizard).toBeTruthy();
     // Fix A depends on this prop actually arriving; without it the wizard is
     // blind to keys the workspace already has and mints another.

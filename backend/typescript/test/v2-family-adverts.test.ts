@@ -22,8 +22,17 @@ import { createApp } from '../src/index.js';
 import { EFFECT_SEAMS_PATH } from '../src/routes/effectSeams.js';
 import { INTERRUPT_TOKEN_ALGS } from '../src/host/interruptToken.js';
 
-let server: Server; let base = ''; let doc: Record<string, any> = {};
+/** The facets this file reads, typed; everything else stays `unknown`. */
+interface V2Root extends Record<string, unknown> {
+  replay?: { effectSeamsManifest?: string; modes?: string[] };
+  interrupt?: { tokenAlgs?: string[] };
+  packs?: { testMode?: unknown };
+}
+interface SchemaNode { $ref?: string; required?: string[] }
+let server: Server; let base = ''; let doc: V2Root = {};
 const AUTH = { Authorization: 'Bearer dev-token' };
+const fetchRoot = async (): Promise<V2Root> =>
+  await (await fetch(`${base}/.well-known/openwop`, { headers: { ...AUTH, 'OpenWOP-Version': '2' } })).json() as V2Root;
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -32,7 +41,7 @@ beforeAll(async () => {
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   server = await new Promise<Server>((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  doc = await (await fetch(`${base}/.well-known/openwop`, { headers: { ...AUTH, 'OpenWOP-Version': '2' } })).json() as Record<string, any>;
+  doc = await fetchRoot();
 });
 afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
 
@@ -90,7 +99,7 @@ describe('v2 capability root', () => {
     if (create.status !== 201) {
       // Not a silent pass: if the fixture is unavailable the biconditional is
       // untested, and saying so is better than a green that measured nothing.
-      throw new Error(`precondition: POST /v1/runs answered ${create.status}, so the fork leg could not be driven`);
+      throw new Error(`precondition: POST /runs answered ${create.status}, so the fork leg could not be driven`);
     }
     // NOT `/runs/{id}/events` — that endpoint is SSE, and `.json()` on it fails
     // parsing the stream's own `: open` heartbeat comment. Poll the run instead.
@@ -117,12 +126,12 @@ describe('v2 capability root', () => {
     // The literal in the schema is a const, but the point is that the ROUTE and
     // the CLAIM come from one source. Registering the manifest elsewhere while
     // still advertising the const would be the false claim this ties shut.
-    expect(doc.replay.effectSeamsManifest).toBe(EFFECT_SEAMS_PATH.replace(/^\/v1/, ''));
-    expect(doc.replay.modes).toEqual(['replay', 'branch']);
+    expect(doc.replay?.effectSeamsManifest).toBe(EFFECT_SEAMS_PATH.replace(/^\/v1/, ''));
+    expect(doc.replay?.modes).toEqual(['replay', 'branch']);
   });
 
   it('interrupt.tokenAlgs is the minter’s own array, not a literal', () => {
-    expect(doc.interrupt.tokenAlgs).toEqual([...INTERRUPT_TOKEN_ALGS]);
+    expect(doc.interrupt?.tokenAlgs).toEqual([...INTERRUPT_TOKEN_ALGS]);
   });
 
   it('the effect-seam manifest answers at the address the replay facet WILL name', async () => {
@@ -133,24 +142,38 @@ describe('v2 capability root', () => {
     expect(body.seams.length).toBeGreaterThan(0);
   });
 
-  it('packs.testMode is claimed only while the mirror is actually enabled', () => {
+  it('packs.testMode is claimed only while the mirror is actually enabled', async () => {
     expect(doc.packs).toBeDefined();
-    expect(doc.packs.testMode, 'the seam surface is on in this harness').toBeDefined();
+    expect(doc.packs?.testMode, 'the seam surface is on in this harness').toEqual({ isolated: true });
+    // …and the OFF half: the root is built per request, so with the seam flag off
+    // the facet is withdrawn while the family stays advertised.
+    const saved = process.env.OPENWOP_TEST_SEAM_ENABLED;
+    delete process.env.OPENWOP_TEST_SEAM_ENABLED;
+    try {
+      const off = await fetchRoot();
+      expect(off.packs, 'the packs family itself is still claimed').toBeDefined();
+      expect(off.packs?.testMode, 'testMode must not be claimed with the mirror off').toBeUndefined();
+    } finally {
+      if (saved === undefined) delete process.env.OPENWOP_TEST_SEAM_ENABLED; else process.env.OPENWOP_TEST_SEAM_ENABLED = saved;
+    }
   });
 
   it('every advertised family carries the facets its schema requires', async () => {
     const { join } = await import('node:path');
-    const schema = JSON.parse(readFileSync(join(process.cwd(), '..', '..', 'schemas', 'v2', 'capabilities.schema.json'), 'utf8')) as any;
+    const schema = JSON.parse(readFileSync(join(process.cwd(), '..', '..', 'schemas', 'v2', 'capabilities.schema.json'), 'utf8')) as { properties: Record<string, SchemaNode>; $defs?: Record<string, SchemaNode> };
     const defs = schema.$defs ?? {};
-    const res = (n: any, d = 0): any => { while (n && n.$ref && d < 8) { n = defs[String(n.$ref).split('/').pop()!]; d++; } return n; };
+    const res = (n: SchemaNode | undefined, d = 0): SchemaNode | undefined => { while (n && n.$ref && d < 8) { n = defs[String(n.$ref).split('/').pop()!]; d++; } return n; };
     let checked = 0;
     for (const fam of ['interrupt', 'webhooks', 'eventLog', 'packs', 'idempotency']) {
       const node = res(schema.properties[fam]);
-      for (const req of node.required ?? []) {
-        expect(doc[fam][req], `${fam}.${req} is REQUIRED by the schema`).toBeDefined();
+      const record = doc[fam] as Record<string, unknown> | undefined;
+      for (const req of node?.required ?? []) {
+        expect(record?.[req], `${fam}.${req} is REQUIRED by the schema`).toBeDefined();
         checked++;
       }
     }
-    expect(checked, 'the loop asserted nothing — the schema walk is broken').toBeGreaterThan(11);
+    // MEASURED 2026-10-23 against the vendored schema: 17 required facets across
+    // the five families (interrupt 4, webhooks 4, eventLog 3, packs 3, idempotency 3).
+    expect(checked, 'the schema walk lost required facets').toBeGreaterThanOrEqual(17);
   });
 });

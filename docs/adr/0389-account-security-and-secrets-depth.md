@@ -350,6 +350,14 @@ be exactly the parallel-surface smell 0396 exists to end.
 - **QR correction:** v1 ships manual base32 secret + copy + `otpauth://` deep link —
   **no QR-image encoder dependency**. Recorded as an honest trim; a QR image is a
   pure-frontend follow-up if wanted.
+  **Follow-up shipped 2026-10-23:** the panel now renders a scannable QR. The
+  `otpauth://` URI is encoded to a `data:` PNG in the browser by the lazily
+  imported `qrcode` package, which was already a dependency (CanvasPresentPage),
+  so no dependency is added. There is no QR service, image URL or request. The QR
+  lives only in component state, is dropped on finish, cancel and unmount, and a
+  generation guard stops a slow encode from an abandoned enrollment from painting
+  into the next one. The manual key and deep link stay as the fallback. The image
+  alt names the action, never the secret.
 - Tests: `test/mfa-session-claim.test.ts` (bearer claim → mark; bind persists;
   cookie-only keeps it; switch keeps it; no-claim ⇒ false; anon refused) +
   `SecurityPanel.test.tsx` (SSO notice / sign-in hint / enroll empty-state).
@@ -555,3 +563,37 @@ brokering through GCIP, so `AuthnContextClassRef` is directly readable — which
 `OPENWOP_SAML_ASSUME_MFA=false` remains a coherent eventual default (`ENG-3`). Any
 *future* design that assumes federated assurance is visible through Firebase should be
 abandoned at design time, not discovered at integration time.
+
+---
+
+## § Correction 2026-10-24 — one TOTP factor per account; the backup is a second DEVICE
+
+§ Correction 2026-07-19 item 4 adopted "second factor as recovery" as the primary
+self-service path, and the Security panel prompted every one-factor user to *"Add a second
+authenticator as backup."* **Identity Platform refuses that enrollment.** Measured on
+kicktodo-prod on 2026-10-23: an account with one TOTP factor that starts a second TOTP
+enrollment gets `auth/maximum-second-factor-count-exceeded` ("Too many TOTP based second
+factors enrolled for this account"). The panel was prompting for an action the platform
+cannot perform, and then showed the raw Firebase error.
+
+The second factor the platform does allow is SMS, and §1 already declined it (a NIST
+800-63B-4 Restricted Authenticator, metered per message). So on this stack a user has, in
+practice, **one** second factor.
+
+**Decision.**
+- **The self-service backup is the same TOTP secret on more than one device**, captured
+  at enrollment: a second phone, or a password manager that syncs. This is one
+  authenticator held twice, not two independent authenticators. It survives a lost
+  device, which is the case the 2026-07-19 decision was for. It does not satisfy §4.2.2's
+  "one code plus a single-factor authenticator" shape, and the ADR no longer claims it
+  does.
+- **The panel never offers an enrollment the platform refuses.** With a TOTP factor
+  enrolled, "Set up authenticator app" is replaced by a hint: to move it, remove it and
+  set it up again. The decision keys off `factorId === 'totp'`, not the factor count, so
+  a phone-only account can still add TOTP.
+- **Enrollment says it while the code is on screen.** That is the only moment the secret
+  can be copied to a second device.
+- **`auth/maximum-second-factor-count-exceeded` maps to plain copy** (`errMfaFactorLimit`)
+  for the race where a factor list read failed or went stale.
+- **The operator runbook stays the fallback** for losing every device, and the escalation
+  trigger for admin-mediated reset (item 4) is unchanged.

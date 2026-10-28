@@ -22,7 +22,7 @@ import type { Storage } from '../storage/storage.js';
 import type { InterruptRecord, RunRecord } from '../types.js';
 import { timeoutApprovalGateIfDue } from '../executor/approvalGateTimeout.js';
 import { mayViewApproval } from './approvalAudience.js';
-import { gateAclOf, isEligibleApprover, type ApproverRefs } from './approverResolution.js';
+import { gateAclOf, gateApproverRefs, isEligibleApprover, policyApproverRefs, type ApproverRefs } from './approverResolution.js';
 import type { EffectiveAccess } from './accessControlService.js';
 import { isTerminalRunStatus } from '@openwop/openwop';
 import { getApproval, listApprovals, getAssistantActionProjector, type PendingApproval, type ApprovalStatus } from './approvalService.js';
@@ -100,6 +100,8 @@ export interface ReviewRequest {
   nodeId?: string;
   interruptId?: string;
   approvalId?: string;
+  /** ADR 0905 — the same pinned send review the approval inbox displays. */
+  emailSend?: PendingApproval['emailSend'];
   /** ADR 0311 P2 — the chat conversation an approval traces back to (a filed
    *  todo's origin); the chat review strip filters on it. */
   conversationId?: string;
@@ -262,7 +264,7 @@ async function interruptCanDecide(it: InterruptRecord, run: RunRecord, ctx: Revi
   return memoEligible(
     memo,
     decider.reviewerRef,
-    { approverRefs: acl.subjects, approverGroupRefs: acl.groupRefs, approverRoleRefs: acl.roleRefs },
+    gateApproverRefs(it.data),
     { tenantId: run.tenantId, ...(typeof orgId === 'string' ? { orgId } : {}) },
   );
 }
@@ -278,11 +280,7 @@ async function approvalCanDecide(a: PendingApproval, ctx: ReviewAuthCtx, memo: R
   if (!decider) return undefined;
   const required = (a.policy as { requiredApprovals?: unknown } | undefined)?.requiredApprovals;
   if (!(typeof required === 'number' && required > 1)) return undefined;
-  const refs: ApproverRefs = {
-    ...(a.policy?.approverRefs ? { approverRefs: a.policy.approverRefs } : {}),
-    ...(a.policy?.approverGroupRefs ? { approverGroupRefs: a.policy.approverGroupRefs } : {}),
-    ...(a.policy?.approverRoleRefs ? { approverRoleRefs: a.policy.approverRoleRefs } : {}),
-  };
+  const refs: ApproverRefs = policyApproverRefs(a.policy);
   if (!gateAclOf(refs).declared) return undefined;
   const subject = ctx.subjectRef;
   if (!subject) return false;
@@ -724,6 +722,12 @@ export function approvalToReview(a: PendingApproval): ReviewRequest {
     tenantId: a.tenantId,
     ...(a.orgId ? { orgId: a.orgId } : {}),
     approvalId: a.approvalId,
+    ...(kind === 'email-campaign-send' && a.emailSend ? { emailSend: {
+      campaignId: a.emailSend.campaignId, templateId: a.emailSend.templateId, templateVersion: a.emailSend.templateVersion,
+      contentHash: a.emailSend.contentHash, reviewHash: a.emailSend.reviewHash, senderAddress: a.emailSend.senderAddress,
+      audienceHash: a.emailSend.audienceHash, audienceLabel: a.emailSend.audienceLabel, templateName: a.emailSend.templateName,
+      subject: a.emailSend.subject, body: a.emailSend.body, format: a.emailSend.format, estimatedRecipients: a.emailSend.estimatedRecipients,
+    } } : {}),
     ...(a.conversationId ? { conversationId: a.conversationId } : {}),
     ...(a.runId ? { runId: a.runId } : {}),
     requestedBy,

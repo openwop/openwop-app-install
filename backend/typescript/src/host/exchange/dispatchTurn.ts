@@ -34,6 +34,7 @@ import { checkByokChatBudget, recordByokChatUsage } from '../../aiProviders/byok
 import type { Storage } from '../../storage/storage.js';
 import type { ConversationTurn } from '../conversation.js';
 import { asText, isContentParts } from './contentParts.js';
+import type { ServedModel } from '../turnAttribution.js';
 
 const MAX_TOKENS = 1024;
 
@@ -255,7 +256,7 @@ export type ExchangeNotice = ByokBudgetNotice | DeepRunBudgetNotice;
  *  ephemeral key; when that key has expired the resolver returns null and we
  *  surface a clean `credential_unavailable` instead of a 500, so the UI can prompt
  *  the user to re-enter it rather than silently failing mid-thread. */
-export async function dispatchReply(run: RunRecord, messages: ChatMessage[], onDelta?: (delta: string) => Promise<void> | void, webSearchOverride?: boolean, modelOverride?: { provider?: string; model?: string }, tier?: ConversationModelTierInput): Promise<{ completion: string; budgetWarning?: ByokBudgetNotice }> {
+export async function dispatchReply(run: RunRecord, messages: ChatMessage[], onDelta?: (delta: string) => Promise<void> | void, webSearchOverride?: boolean, modelOverride?: { provider?: string; model?: string }, tier?: ConversationModelTierInput): Promise<{ completion: string; budgetWarning?: ByokBudgetNotice; served?: ServedModel }> {
   const inputs = (run.inputs ?? {}) as { provider?: unknown; model?: unknown; credentialRef?: unknown; webSearch?: unknown; compatEndpointId?: unknown };
   const credentialRef = typeof inputs.credentialRef === 'string' ? inputs.credentialRef : 'managed:openwop-free';
   // ADR 0130 Phase 3b + ADR 0124 Phase 3 + CS-GB-1 — the ONE resolver:
@@ -274,7 +275,7 @@ export async function dispatchReply(run: RunRecord, messages: ChatMessage[], onD
 
   if (provider === 'mock') {
     const r = await dispatchChat({ provider: 'mock', model, apiKey: '', messages, maxTokens: MAX_TOKENS, ...(onDelta ? { onDelta } : {}) });
-    return { completion: r.completion };
+    return { completion: r.completion, served: { provider: 'mock', model } };
   }
   if (isManagedCredentialRef(credentialRef)) {
     // ADR 0721 — the acting subject MUST reach the managed dispatch, or
@@ -294,7 +295,9 @@ export async function dispatchReply(run: RunRecord, messages: ChatMessage[], onD
       ...(managedActingSubject ? { actingSubject: managedActingSubject } : {}),
       ...(onDelta ? { onDelta } : {}),
     });
-    return { completion: r.completion };
+    // ADR 0986 H1 — the managed result names the user-facing TIER (its underlying
+    // model is deliberately never exposed), so it is attributed as a tier.
+    return { completion: r.completion, served: { provider: r.provider, model: r.model, managed: true } };
   }
   // RFC 0121 AT-OWN-RISK (ADR 0180) — a `subscription:<provider>` credentialRef
   // resolves the USER-scoped stored token and dispatches to the OPERATOR-configured
@@ -327,7 +330,7 @@ export async function dispatchReply(run: RunRecord, messages: ChatMessage[], onD
       return out;
     }, 'LLM');
     recordTurnUsage(run.tenantId, COPILOT_PROVIDER_ID, model, r.usage);
-    return { completion: r.completion };
+    return { completion: r.completion, served: { provider: COPILOT_PROVIDER_ID, model } };
   }
   if (isSubscriptionCredentialRef(credentialRef)) {
     // ADR 0756 — a credential bound for a provider whose terms now PROHIBIT
@@ -350,7 +353,7 @@ export async function dispatchReply(run: RunRecord, messages: ChatMessage[], onD
       return out;
     }, 'LLM');
     recordTurnUsage(run.tenantId, 'subscription', model, r.usage); // ADR 0118 Phase 2b
-    return { completion: r.completion };
+    return { completion: r.completion, served: { provider: 'subscription', model } };
   }
   // `compat` (self-hosted / OpenAI-compatible, RFC 0108 / ADR 0121): route to the
   // tenant's configured endpoint. The base URL is resolved host-side and passed
@@ -374,7 +377,7 @@ export async function dispatchReply(run: RunRecord, messages: ChatMessage[], onD
       return out;
     }, 'LLM'); // ADR 0118 Phase 6 — OpenInference span kind
     recordTurnUsage(run.tenantId, 'compat', model, r.usage); // ADR 0118 Phase 2b
-    return { completion: r.completion };
+    return { completion: r.completion, served: { provider: 'compat', model } };
   }
   // BYOK-direct: resolve the tenant's provider key and dispatch with it. SR-1:
   // the key never enters an event, prompt, or the result — only this call.
@@ -475,6 +478,8 @@ export async function dispatchReply(run: RunRecord, messages: ChatMessage[], onD
   // dropping r.citations, so plain grounded chat showed no sources).
   return {
     completion: appendSourcesFooter(r.completion, r.citations ?? []),
+    // ADR 0986 D1 — what ANSWERED: the bump fallback may have replaced `model`.
+    served: { provider, model: dispatchedModel },
     // ADR 0178 — soft-warning: dispatch SUCCEEDED but the org crossed the threshold.
     ...(budget.personal?.warn && !budget.personal.exceeded
       ? { budgetWarning: { code: 'byok_budget_warning' as const, usedPct: budget.personal.usedPct, cap: budget.personal.cap, scope: 'personal' as const } }

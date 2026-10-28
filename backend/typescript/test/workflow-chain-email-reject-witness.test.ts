@@ -53,6 +53,14 @@ const chatPack = await import(
 ) as { nodes?: Record<string, unknown> };
 
 const SEND = 'core.openwop.integration.email-send';
+/** Floors at the MEASURED corpus, 19d13e682 (grade-tests wave 64): 12 mailing
+ *  chains, 13 email-send nodes, 37 approval gates upstream of a send or carrying
+ *  a `falsy approved` leg (all 37 declare `config.actions`, so the allowance
+ *  leaves all 37). The old floors were 10 / 11 / 17 / 10. */
+const MAILING_CHAINS_FLOOR = 12;
+const MAILING_SENDS_FLOOR = 13;
+const REJECT_GATES_FLOOR = 37;
+const DECLARED_GATES_FLOOR = 37;
 const GATE = 'core.chat.approvalGate';
 
 /** The real UI resume payloads. `action` is the VALIDATED field on the wire
@@ -64,17 +72,16 @@ const REJECT = { action: 'reject', decidedBy: 'user:reviewer', comment: 'Not thi
 type GateHandler = (ctx: Record<string, unknown>) => Promise<{ status: string; outputs?: Record<string, unknown> }>;
 
 let approvalGate: GateHandler;
+let loadErrors: unknown[] = [];
+let handlers: Record<string, GateHandler> | undefined;
 
 beforeAll(async () => {
   _resetChainRegistryForTest();
-  const { errors } = loadWorkflowChainPacks({ roots: defaultWorkflowChainPackRoots() });
-  expect(errors).toEqual([]);
-
-  const handlers = chatPack.nodes as Record<string, GateHandler> | undefined;
-  expect(handlers, 'vendor.myndhyve.chat must export its `nodes` handler map').toBeTruthy();
-  const h = handlers![GATE];
-  expect(h, `${GATE} must be a real handler, not a stub`).toBeTypeOf('function');
-  approvalGate = h;
+  // The preconditions are asserted in a CASE below: an `expect` that fails in
+  // this hook SKIPS every case instead of turning one red.
+  loadErrors = loadWorkflowChainPacks({ roots: defaultWorkflowChainPackRoots() }).errors;
+  handlers = chatPack.nodes as Record<string, GateHandler> | undefined;
+  approvalGate = handlers?.[GATE] as GateHandler;
 });
 
 /**
@@ -187,12 +194,20 @@ async function sendVerdicts(
 }
 
 describe('WF-EM-4 — the email reject witness is behavioural, not a node count', () => {
+  it('the corpus loads and the REAL gate handler is wired (preconditions)', () => {
+    expect(loadErrors).toEqual([]);
+    expect(handlers, 'vendor.myndhyve.chat must export its `nodes` handler map').toBeTruthy();
+    expect(handlers![GATE], `${GATE} must be a real handler, not a stub`).toBeTypeOf('function');
+  });
+
   it('finds every mailing chain in the corpus (anti-vacuity floor)', () => {
     const chains = mailingChains();
     // A registry that failed to load would make every assertion below vacuous.
-    expect(chains.length, 'the corpus must contain mailing chains to witness').toBeGreaterThanOrEqual(10);
+    // Floors at the MEASURED corpus (see MAILING_*_FLOOR): a new mailing chain
+    // raises them deliberately.
+    expect(chains.length, 'the corpus must contain mailing chains to witness').toBeGreaterThanOrEqual(MAILING_CHAINS_FLOOR);
     const totalSends = chains.reduce((n, c) => n + c.sendIds.length, 0);
-    expect(totalSends).toBeGreaterThanOrEqual(11);
+    expect(totalSends).toBeGreaterThanOrEqual(MAILING_SENDS_FLOOR);
   });
 
   it('drives the REAL gate, not a synthetic output map', async () => {
@@ -273,11 +288,13 @@ describe('WF-EM-1/2/3 — a rejected review reaches no email-send node', () => {
     // is `skipped` and its unconditional successor is skipped with it (the
     // REJECT leg proves exactly that). It exists because the ADDRESS must not
     // ride the gate — see the WF-EM-6 block below.
-    const allowed = new Set([
-      'campaign-journeys.welcome-series: gate2(feature.campaign-journeys.nodes.eligibility) → followup is unconditional',
-      'campaign-journeys.welcome-series: recheck(feature.campaign-journeys.nodes.eligibility) → welcome is unconditional',
-      'campaign-journeys.re-engage-contact: recheck(feature.campaign-journeys.nodes.eligibility) → send is unconditional',
-    ]);
+    // ADR 0955 P2b (J955WF-1) — the same three edges; the gates moved from the legacy
+    // `eligibility` node to `channel-eligibility`, which fails the same way and yields the
+    // same `email` output. Renamed, not widened.
+    // ADR 0955 P5 (J955WF-12) — DRAINED to empty: the three edges are now conditional
+    // (`truthy eligible`), because a re-check can succeed with `eligible: false` when the
+    // contact unsubscribed (`stopOnSuppressed`) and the journey stops cleanly.
+    const allowed = new Set<string>([]);
     expect(failures.filter((f) => !allowed.has(f)), failures.join('\n')).toEqual([]);
     // Anti-rot: every allowance must still describe a real edge, so a stale one
     // cannot sit here silently widening the gate.
@@ -318,7 +335,7 @@ describe('WF-EM-1/2/3 — a rejected review reaches no email-send node', () => {
  * THE SHAPE THAT HOLDS: the address never enters the gate's output at all. The
  * gate still RECEIVES it (`gate1.email → signoff.artifact`) so the approver can
  * see who they are approving, but the send is fed by `recheck` — a second
- * `feature.campaign-journeys.nodes.eligibility` node whose only inbound edge is
+ * `feature.campaign-journeys.nodes.channel-eligibility` node (ADR 0955 P2b; was `eligibility`) whose only inbound edge is
  * the gate's `truthy approved` branch. Approve ⇒ `recheck` runs and supplies an
  * eligibility-derived address; reject ⇒ `recheck` skips and the send skips with
  * it. It also closes a TOCTOU gap for free: a gate can sit pending for hours, so
@@ -345,7 +362,10 @@ describe('WF-EM-6 — an approver cannot redirect the mail', () => {
     // Without this, deleting `artifactType: 'email.recipient'` from both packs
     // would make every assertion below pass over an empty list.
     expect(addressGatedChains().map((c) => c.chainId)).toEqual([
+      'campaign-journeys.abandoned-signup',
+      'campaign-journeys.post-webinar',
       'campaign-journeys.re-engage-contact',
+      'campaign-journeys.welcome-email-sms',
       'campaign-journeys.welcome-series',
     ]);
   });
@@ -488,7 +508,7 @@ describe('WF-EM-5 — a gate whose rejection branch is terminal refuses non-deci
 
   it('every such gate declares an allowlist (anti-vacuity: the population is non-empty)', () => {
     const gates = terminalRejectGates();
-    expect(gates.length, 'no falsy-approved branches found — the enumeration is broken, not the corpus').toBeGreaterThanOrEqual(17);
+    expect(gates.length, 'no falsy-approved branches found — the enumeration is broken, not the corpus').toBeGreaterThanOrEqual(REJECT_GATES_FLOOR);
     const undeclared = gates
       .filter((g) => !Array.isArray(g.actions) || g.actions.length === 0)
       .map((g) => `${g.chainId}:${g.nodeId}`);
@@ -509,7 +529,7 @@ describe('WF-EM-5 — a gate whose rejection branch is terminal refuses non-deci
     // `makeSuspendFn` persists as `interrupt.data`.
     const gates = terminalRejectGates().filter((g) => !UNDECLARED_ALLOWED.has(`${g.chainId}:${g.nodeId}`));
     // Non-vacuity: the allowance above must not be able to empty the population.
-    expect(gates.length, 'the allowance list swallowed every gate — this test would assert nothing').toBeGreaterThanOrEqual(10);
+    expect(gates.length, 'the allowance list swallowed every gate — this test would assert nothing').toBeGreaterThanOrEqual(DECLARED_GATES_FLOOR);
     const failures: string[] = [];
     for (const { chainId, nodeId } of gates) {
       const entry = listChains().find((c) => c.chain.chainId === chainId)!;
@@ -521,7 +541,7 @@ describe('WF-EM-5 — a gate whose rejection branch is terminal refuses non-deci
         chat: { emitCard: async () => undefined },
         suspend: async (p: unknown) => { captured = p; return APPROVE; },
         host: { capabilities: { chat: true } },
-      } as never);
+      });
       const interrupt = { kind: 'approval', data: captured };
       for (const verb of ['defer', 'escalate', 'request-changes']) {
         let threw = false;

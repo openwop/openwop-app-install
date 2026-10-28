@@ -1,5 +1,6 @@
 /**
- * host.webResearch + host.launchStudio — the last two vendor surfaces.
+ * host.webResearch + host.launchStudio — the last two vendor surfaces
+ * (FEATURES "vendor surfaces"; ADR 0101 web research, ADR 0056 launch studio).
  *
  * webResearch: fetchBatch really fetches (against a mock HTTP server) and
  * extracts title + readable text; search returns an honest demo result;
@@ -7,13 +8,35 @@
  * (null for unknown ids); buildProjectContext/resolveLinkedArtifacts derive
  * context; a launch-studio.linkStep node runs end-to-end (ctx.variables +
  * ctx.userId wired) and reports success.
+ *
+ * NO PUBLIC NETWORK (grade-tests wave 63): keyless `research()` composes the
+ * demo search (a `duckduckgo.com` URL) with a real fetch. That fetch is answered
+ * at the product's own seam — `ssrfGuardedFetch` dials undici's `fetch` — by a
+ * passthrough mock that stubs ONLY the demo host and records the request; every
+ * loopback fetch (the page server below) still goes through the real undici.
  */
 
-import { describe, expect, it, beforeAll, afterAll } from 'vitest';
+import { describe, expect, it, beforeAll, afterAll, vi } from 'vitest';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from '../src/index.js';
 import { buildHostSurfaceBundle } from '../src/host/inMemorySurfaces.js';
+
+const demoFetches = vi.hoisted(() => [] as string[]);
+vi.mock('undici', async (importActual) => {
+  const real = await importActual<typeof import('undici')>();
+  return {
+    ...real,
+    fetch: async (input: Parameters<typeof real.fetch>[0], init?: Parameters<typeof real.fetch>[1]) => {
+      const url = String(input);
+      if (new URL(url).hostname === 'duckduckgo.com') {
+        demoFetches.push(url);
+        return new real.Response('<html><head><title>Demo SERP</title></head><body><p>stubbed demo page</p></body></html>', { status: 200, headers: { 'content-type': 'text/html' } });
+      }
+      return real.fetch(input, init);
+    },
+  };
+});
 
 let server: http.Server;
 let mock: http.Server;
@@ -50,21 +73,23 @@ async function jsonFetch<T = unknown>(path: string, init: RequestInit = {}): Pro
 
 interface BundleEvent { type?: string; nodeId?: string; payload?: Record<string, unknown> }
 
-async function runNode(workflowId: string, typeId: string, config: Record<string, unknown>, inputs: Record<string, unknown>): Promise<Record<string, unknown>> {
+async function runNode(workflowId: string, typeId: string, config: Record<string, unknown>, inputs: Record<string, unknown>): Promise<Record<string, unknown> & { __variables?: Record<string, unknown> | null }> {
   await jsonFetch('/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({ workflowId, nodes: [{ nodeId: 'op', typeId, config }], edges: [] }) });
   const create = await jsonFetch<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({ workflowId, inputs, tenantId: 'default' }) });
   expect(create.status).toBe(201);
   const { runId } = create.body;
   let status = 'pending';
+  let variables: Record<string, unknown> | null = null;
   for (let i = 0; i < 40; i++) {
     await new Promise((r) => setTimeout(r, 25));
-    const snap = await jsonFetch<{ status: string }>(`/runs/${runId}`);
+    const snap = await jsonFetch<{ status: string; variables?: Record<string, unknown> | null }>(`/runs/${encodeURIComponent(runId)}`);
     status = snap.body.status;
+    variables = snap.body.variables ?? null;
     if (['completed', 'failed', 'cancelled'].includes(status)) break;
   }
-  const bundle = await jsonFetch<{ events?: BundleEvent[] }>(`/runs/${runId}/debug-bundle`);
+  const bundle = await jsonFetch<{ events?: BundleEvent[] }>(`/runs/${encodeURIComponent(runId)}/debug-bundle`);
   const ev = (bundle.body.events ?? []).find((e) => e.type === 'node.completed' && e.nodeId === 'op');
-  return { __status: status, ...((ev?.payload?.outputs as Record<string, unknown>) ?? {}) };
+  return { __status: status, __variables: variables, ...((ev?.payload?.outputs as Record<string, unknown>) ?? {}) };
 }
 
 describe('host.webResearch', () => {
@@ -86,7 +111,12 @@ describe('host.webResearch', () => {
     expect(s.results[0]!.url).toContain('duckduckgo.com');
     const r = await wr.research({ query: 'openwop protocol', maxResults: 1 });
     expect(r.citations).toHaveLength(1);
-    expect(typeof r.citations[0]!.content).toBe('string');
+    // research fetched the demo result's OWN url (stubbed at the undici seam)…
+    expect(demoFetches).toEqual([s.results[0]!.url]);
+    // …and the citation carries what that page said, not an empty placeholder.
+    expect(r.citations[0]!.url).toBe(s.results[0]!.url);
+    expect(r.citations[0]!.title).toBe('Demo SERP');
+    expect(r.citations[0]!.content).toBe('Demo SERP stubbed demo page');
   });
 });
 
@@ -118,5 +148,12 @@ describe('host.launchStudio', () => {
     expect(out.__status).toBe('completed');
     expect(out.success).toBe(true);
     expect(out.studioId).toBe('demo-launch-studio');
+    // ctx.variables is wired: the node wrote its step bindings into the run bag…
+    const vars = out.__variables ?? {};
+    expect(vars['step-brief_projectId']).toBe('proj-1');
+    expect(vars['brandId']).toBe('brand-acme');
+    // …and ctx.userId reached buildProjectContext (it is echoed into the context).
+    const projectContext = vars['step-brief_projectContext'] as { userId?: unknown } | undefined;
+    expect(typeof projectContext?.userId, 'ctx.userId must be wired into the project context').toBe('string');
   });
 });

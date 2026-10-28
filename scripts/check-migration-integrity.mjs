@@ -9,13 +9,15 @@
  *  - the app-migration `version`s are contiguous `1..N` (or empty), no dupes;
  *  - the app version is in LOCKSTEP across `/VERSION`, both `package.json`s,
  *    both lockfiles' root version, and `src/version.ts` `APP_VERSION`
- *    (ADR 0052 §D4 — one SSoT, propagated).
+ *    (ADR 0052 §D4 — one SSoT, propagated);
+ *  - `releases.json` validates (`scripts/upgrade-plan.mjs`, ADR 0052 §D2a).
  *
  * No deps; parses the sources textually (cheap + CI-safe).
  */
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { validateReleases } from './upgrade-plan.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const read = (p) => readFileSync(join(ROOT, p), 'utf8');
@@ -79,6 +81,10 @@ for (const [name, v] of [['package.json (backend)', be], ['package.json (fronten
   ['package-lock.json (frontend) version', feLock.top], ['package-lock.json (frontend) packages[""].version', feLock.root]]) {
   if (v !== versionFile) fail.push(`version lockstep: ${name} is ${v}, /VERSION is ${versionFile}`);
 }
+
+// Release manifest (ADR 0052 §D2a): the stop/rolling-safety data an upgrade
+// tool plans from must be complete and self-consistent before a release ships.
+for (const e of validateReleases(JSON.parse(read('releases.json')))) fail.push(`releases.json: ${e}`);
 
 if (fail.length) {
   console.error('✗ migration-integrity: FAILED\n  - ' + fail.join('\n  - '));

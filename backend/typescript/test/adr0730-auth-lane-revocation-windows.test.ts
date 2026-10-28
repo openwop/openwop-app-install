@@ -4,14 +4,20 @@
  *
  * WHY A SEPARATE BOOT. The corpus scenario `v2-lane-issuer-advertised` covers
  * this rule, and it passed on this host BEFORE the window existed — because
- * with no workload trust root configured the `workload` lane is not emitted,
- * so its windowed-rule assertion ranged over an empty set. A green there was
- * evidence about the environment, not about the host. This file configures the
- * lane so the assertion has something to range over.
+ * with no gated lane configured the windowed-rule assertion ranged over an
+ * empty set. A green there was evidence about the environment, not about the
+ * host. CORRECTED (wave 60): since ADR 0743 the `workload` lane advertises
+ * `delegation-expiry`, which names NO window; the windowed lane is `oidc`
+ * (`exp-only`, RFC 0210). This file configures OIDC so the windowed assertion
+ * ranges over a real lane, and workload so case 3 can check its rule.
+ *
+ * Tracker TST-BAA-10. Red when (sabotage-witnessed, wave 60): the oidc lane
+ * loses `revocationWindowSeconds`; workload advertises a windowed rule; a lane
+ * claims `exp-and-recheck`; the workload lane is not emitted.
  *
  * `identity.md` §2.2: "`revocationWindowSeconds` (integer >= 1) MUST be
  * advertised wherever the rule names a window (`exp-and-recheck`,
- * `short-lived`, `rebind`)."
+ * `short-lived`, `rebind`)." RFC 0210 adds `exp-only` to that set.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -60,11 +66,14 @@ describe('auth lane revocation windows (identity.md §2.2)', () => {
 
   it('every windowed rule carries an integer window >= 1', () => {
     const windowed = lanes.filter((l) => WINDOWED.has(String(l.revocation)));
-    expect(windowed.length, 'at least one windowed lane, or this leg proves nothing').toBeGreaterThan(0);
+    expect(windowed.map((l) => l.lane), 'the configured oidc lane is the windowed one, or this leg proves nothing').toContain('oidc');
     for (const l of windowed) {
       expect(Number.isInteger(l.revocationWindowSeconds), `${String(l.lane)} (${String(l.revocation)}) must advertise an integer window`).toBe(true);
       expect(l.revocationWindowSeconds as number).toBeGreaterThanOrEqual(1);
     }
+    // The oidc window is the verifier's enforced lifetime bound (a literal, so
+    // a drift between the advert and the enforcement constant is visible here).
+    expect(windowed.find((l) => l.lane === 'oidc')?.revocationWindowSeconds).toBe(3600);
   });
 
   it("the workload lane advertises its §2.2 row's rule, `delegation-expiry`, and no window", () => {

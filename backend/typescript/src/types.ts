@@ -603,8 +603,11 @@ export interface AgentProfile {
    *  own memory and NEVER another user's (the ADR 0442 F1 isolation invariant).
    *  Resolved generically by `resolveAgentMemoryScope` — no agent-id special-case
    *  (David's law). Fail-closed: `per-user` with no acting user recalls nothing,
-   *  never the shared scope. */
-  memoryScope?: 'agent' | 'per-user';
+   *  never the shared scope.
+   *  ADR 0944 D1 — `'per-org'` = the client org's shared `org:<orgId>` scope,
+   *  taken from the run's host-written client stamp; with no client it recalls
+   *  nothing (a sentinel), never the shared agent scope. */
+  memoryScope?: 'agent' | 'per-user' | 'per-org';
   department?: { departmentId: string; name: string; roleId?: string; roleName?: string };
   /** Free-form per-twin config (thresholds, calendars, approval matrices). */
   configParameters?: Record<string, unknown>;
@@ -676,6 +679,15 @@ export type OpenwopErrorCode =
   | 'feature_killed'
   | 'disable_blocked'
   | 'validation_error'
+  // ADR 0945 D1 (host-ext, never on the wire) — a product image token that does
+  // not resolve to a media asset in the product's own org (422).
+  | 'product_media_unresolved'
+  // ADR 0945 D2 (host-ext) — a product-bound generation with no product source.
+  | 'product_depiction_ungrounded'
+  // ADR 0945 D3 (host-ext) — the vision judge's reply stayed invalid after one repair.
+  | 'fidelity_judge_invalid'
+  // ADR 0945 Q1 (host-ext) — edit mode needs the client org's opt-in (403).
+  | 'edit_mode_not_enabled'
   | 'unauthenticated'
   | 'forbidden'
   | 'forbidden_tenant'
@@ -750,6 +762,17 @@ export type OpenwopErrorCode =
   | 'idempotency_in_flight'
   | 'host_capability_missing'
   | 'capability_not_provided'
+  // RFC 0249 (ADR 0972) — the v2 proposal operations' three 409s: a transition
+  // the lifecycle forbids, a decision bound to bytes that have since changed,
+  // and an install the applying tenant's prompt store refuses (`details.reason`
+  // `read-only` | `version-not-greater`). The host-extension proposals routes
+  // keep `conflict` + `details.reason` (ADR 0938).
+  | 'proposal_state_conflict'
+  | 'proposal_stale'
+  | 'proposal_install_conflict'
+  // RFC 0250 (ADR 0973 D5) — `GET /host/events?replay=required` cannot resume
+  // from the cursor. One byte-identical refusal for every cause.
+  | 'host_event_resync_required'
   // `capabilities.md` §"Unsupported capability — refusal contract" names a
   // CLOSED set of refusal codes: `validation_error` (broadest),
   // `capability_required` ("specific — preferred when the host wants to be

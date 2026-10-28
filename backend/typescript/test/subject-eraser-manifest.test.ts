@@ -35,6 +35,17 @@ import {
 
 const SRC = join(__dirname, '..', 'src');
 
+// The REAL boot, once, at FILE level: LAYER 2 asserts against it and LAYER 3
+// needs it (`live.length > 50`). It used to sit in LAYER 2's describe-level
+// `beforeAll`, so `--sequence.shuffle` (which reorders describe blocks) could
+// run LAYER 3 un-booted and red it (grade-tests wave 61).
+beforeAll(async () => {
+  process.env.OPENWOP_STORAGE_DSN = 'memory://';
+  process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
+  const { createApp } = await import('../src/index.js');
+  await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+}, 120_000);
+
 function walk(dir: string): string[] {
   const out: string[] = [];
   for (const name of readdirSync(dir)) {
@@ -70,7 +81,9 @@ describe('WF-CONS-2 — the subject-eraser expected set', () => {
     const derived = idsFromSource();
     // Non-vacuity FIRST: a broken walker or regex would make both sides empty
     // and the equality below would pass over nothing.
-    expect(derived.size, 'the source scan must find the real population').toBeGreaterThanOrEqual(70);
+    // Floor = the MEASURED population (113 registrations, wave 61), not a round
+    // number far below it: a scan that silently lost files would pass 70.
+    expect(derived.size, 'the source scan must find the real population').toBeGreaterThanOrEqual(113);
     expect(derived.has('eraseSubjectApplyGrants'), 'the LIVE instance this finding named').toBe(true);
     expect(derived.has('eraseSalesCommissionsSubject'), 'the eraser that had to be NAMED to be visible').toBe(true);
     expect([...derived].sort()).toEqual([...EXPECTED_SUBJECT_ERASERS].sort());
@@ -83,13 +96,6 @@ describe('WF-CONS-2 — the subject-eraser expected set', () => {
 });
 
 describe('WF-CONS-2 — LAYER 2: a real boot registers every expected eraser', () => {
-  beforeAll(async () => {
-    process.env.OPENWOP_STORAGE_DSN = 'memory://';
-    process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
-    const { createApp } = await import('../src/index.js');
-    await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  });
-
   it('nothing in the manifest is missing after createApp()', () => {
     // NON-VACUITY: `missingSubjectErasers()` returns [] unconditionally once a
     // test seam has emptied the registry. If anything in this file (or a future
@@ -130,11 +136,11 @@ describe('WF-CONS-2 — LAYER 3: a missing eraser is a TYPED FAILURE on the DSAR
     (manifest as Set<string>).add(ghost);
     try {
       const out = await eraseSubject('t-missing-eraser', 'nobody');
-      expect(out.missing).toContain(ghost);
+      expect(out.missing).toEqual([ghost]);
       // It COUNTS — on `origin/main` a never-registered eraser contributed to
       // neither `total` nor `failed`, so `failed === 0` and the operator was
       // told the erasure completed.
-      expect(out.failed).toBeGreaterThan(0);
+      expect(out.failed).toBe(1);
       // …and it is NAMED, so the operator has something to escalate with, and
       // distinguishable from an eraser that ran and threw.
       expect(out.failedFeatures.some((f) => f.includes(ghost) && f.includes('never registered'))).toBe(true);

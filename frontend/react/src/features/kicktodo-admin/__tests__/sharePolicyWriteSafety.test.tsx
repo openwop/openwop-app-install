@@ -3,7 +3,8 @@
  *
  * KTD-1: `setSharePolicy` OVERWRITES the revenue-share rate every future sale
  * accrues at, and it went out on one click. It now asks first through the app's
- * confirm dialog, naming the rate in force and the new one; cancelling writes
+ * confirm dialog, naming the rate in force and the new one (or, when no policy
+ * is set yet, only the new one: there is no rate to replace); cancelling writes
  * nothing.
  *
  * KTD-2: every payout-panel failure reduced to one boolean ("That payout action
@@ -16,7 +17,8 @@
  * run changed elsewhere and re-reads the runs.
  *
  * Breaks it (sabotage-witnessed): removing the confirm (the cancel case writes);
- * the confirm body dropping the current rate; collapsing the 409 back into the
+ * the confirm body dropping the current rate; the first-rate body replaced by
+ * the change body (a "from" rate that does not exist); collapsing the 409 back into the
  * generic failure; not re-reading after a conflict (the new rate never shows);
  * the 409 copy used as a catch-all (the 500 case); a run action not re-reading.
  */
@@ -79,6 +81,19 @@ describe('AdminCommercePage — share policy write (KTD-1)', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: commonEn.cancel }));
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
     expect(api.setSharePolicy).not.toHaveBeenCalled();
+  });
+
+  it('the FIRST rate (no policy yet) names only the new rate, with no rate it replaces', async () => {
+    api.getSharePolicy.mockResolvedValue(null);
+    renderPage();
+    await waitFor(() => expect(screen.getByText(en.payoutPolicyNone)).toBeTruthy());
+    fireEvent.change(screen.getByLabelText(en.payoutPolicyLabel), { target: { value: '1500' } });
+    fireEvent.click(screen.getByRole('button', { name: en.payoutPolicySetCta }));
+    const dialog = await screen.findByRole('dialog', { name: en.payoutPolicyConfirmTitle });
+    expect(within(dialog).getByText(/^Authors will earn 15% of each new sale/)).toBeTruthy();
+    expect(within(dialog).queryByText(/^From /)).toBeNull();
+    fireEvent.click(within(dialog).getByRole('button', { name: en.payoutPolicyConfirmCta }));
+    await waitFor(() => expect(api.setSharePolicy).toHaveBeenCalledWith(1500));
   });
 
   it('confirming writes the typed basis points', async () => {

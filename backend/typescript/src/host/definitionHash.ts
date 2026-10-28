@@ -10,7 +10,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { canonicalize } from './auditChainService.js';
+import { canonicalize } from './canonicalJson.js';
 import type { WorkflowDefinition } from '../executor/types.js';
 
 export function definitionHashOf(def: WorkflowDefinition): string {

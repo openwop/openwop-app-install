@@ -15,9 +15,10 @@
 
 import { agentStorageId } from '../executor/agentIdAliases.js';
 import { subjectMemoryScope, createSubjectMemoryPort, countSubjectMemoryByTag } from './subjectMemory.js';
-import { personSubject } from './subject.js';
+import { personSubject, orgSubject } from './subject.js';
 import type { AgentProfile } from '../types.js';
 import { createLogger } from '../observability/logger.js';
+import { memorySentinelScope } from './memoryScopeSentinel.js';
 
 const log = createLogger('host.agentMemoryAdapter');
 
@@ -65,44 +66,104 @@ export function agentMemoryScope(agentId: string): string {
 }
 
 /**
- * ADR 0442 P3 — the ONE decision point for "which memory scope does this agent
- * recall from this turn." GENERIC (David's law): the choice keys off the
- * profile's host-local `memoryScope` field, never an agent id.
- *
- *  - default / `'agent'`  → the shared `agent:<profileId>` scope (every existing
- *    agent — byte-identical to the pre-P3 `agentMemoryScope(profileId)`).
- *  - `'per-user'` + actor → the acting participant's OWN `user:<id>` scope, so a
- *    standing agent shared across a cohort tenant recalls each participant's own
- *    memory and NEVER another user's (the F1 isolation invariant). The scope is
- *    the participant's namespace — which the participant OWNS and outlives the
- *    agent, so there is no agent-owned per-user scope to orphan on teardown
- *    (rosterCascade correctly leaves it alone).
- *  - `'per-user'` + NO actor → a fail-closed sentinel that no writer ever targets
- *    (so a read is always empty). It MUST NOT fall back to the shared
- *    `agent:<id>` scope — that would re-open F1 whenever the actor is missing.
+ * What a lane knows about WHO and WHICH CLIENT a dispatch is for (ADR 0944 D2).
+ * `userId` is the acting participant (ADR 0442 P3, the shape every existing
+ * caller already passes). `client` is the run's or conversation's host-written
+ * client binding, resolved by the lane BEFORE it calls in (`host/runClientOrg.ts`
+ * on the run lane): `{orgId}` once the person behind it holds scope on that org,
+ * `{refused}` when the binding exists but could not be honoured. Absent ⇒ the
+ * dispatch is for no client. Never taken from tool or node arguments.
  */
-export function resolveAgentMemoryScope(
+export interface AgentMemoryScopeContext {
+  userId?: string | undefined;
+  client?: { orgId: string } | { refused: ClientMemoryRefusal } | undefined;
+}
+
+/** Why a client binding could not be honoured. */
+export type ClientMemoryRefusal = 'wrong_client' | 'forbidden' | 'unreadable';
+
+/** The resolved memory binding for one dispatch (ADR 0944 D3). */
+export interface AgentMemoryResolution {
+  /** The namespace recall reads (and, when `writable`, the turn summary writes). */
+  scope: string;
+  /** `false` for every fail-closed sentinel — no writer may ever target one. */
+  writable: boolean;
+  /** Set when the scope is a sentinel the MODEL should be told about (a client
+   *  run whose client memory could not be read). Absent for the silent per-user
+   *  sentinel, whose behaviour predates ADR 0944 and is unchanged. */
+  unavailable?: 'client-memory';
+}
+
+export { isSentinelMemoryScope } from './memoryScopeSentinel.js';
+
+const WARNED_NO_ORG = new Set<string>();
+function warnNoOrgOnce(profileId: string, reason: string): void {
+  const key = `${profileId}:${reason}`;
+  if (WARNED_NO_ORG.has(key)) return;
+  if (WARNED_NO_ORG.size >= WARNED_CAP) WARNED_NO_ORG.clear();
+  WARNED_NO_ORG.add(key);
+  log.warn('agent_memory_client_unavailable', {
+    profileId, reason,
+    detail: 'client memory resolved to the fail-closed sentinel; recall is EMPTY, never the shared agent scope. Logged ONCE per profile and reason per process.',
+  });
+}
+
+/**
+ * ADR 0442 P3 + ADR 0944 D1/D3 — the ONE decision point for "which memory scope
+ * does this agent recall from (and write to) this turn", on EVERY lane: chat,
+ * run, ad-hoc dispatch and the retrieve preview. GENERIC (David's law): it keys
+ * off the profile's host-local `memoryScope` and the lane's client binding,
+ * never an agent id.
+ *
+ *  1. A dispatch FOR A CLIENT (`ctx.client` present) uses that client's shared
+ *     `org:<orgId>` scope, whatever the profile says (ADR 0944 Q6, decided by the
+ *     P0 architect review): a client run must never write client A's facts into
+ *     a scope a client-B run reads, and an `agent`- or `per-user`-scoped agent
+ *     would. A refused binding is the `:no-org` sentinel — NEVER a fallback.
+ *  2. No client + `'per-org'` → the `:no-org` sentinel (the agent only has
+ *     memory inside a client's work).
+ *  3. No client + `'per-user'` → the acting participant's own `user:<id>` scope
+ *     (ADR 0442 F1: a standing agent shared across a cohort tenant never recalls
+ *     another participant's memory). The participant OWNS that scope and outlives
+ *     the agent, so roster teardown correctly leaves it alone. With no actor, the
+ *     silent `:no-actor` sentinel — never the shared scope, which would re-open F1.
+ *  4. Otherwise the shared `agent:<profileId>` scope (byte-identical to before).
+ */
+export function resolveAgentMemory(
   profile: Pick<AgentProfile, 'profileId' | 'memoryScope'>,
-  actor?: { userId?: string | undefined } | undefined,
-): string {
+  ctx?: AgentMemoryScopeContext | undefined,
+): AgentMemoryResolution {
+  const client = ctx?.client;
+  if (client) {
+    if ('orgId' in client && client.orgId) return { scope: subjectMemoryScope(orgSubject(client.orgId)), writable: true };
+    warnNoOrgOnce(profile.profileId, 'refused' in client ? client.refused : 'empty-org');
+    return { scope: memorySentinelScope(agentMemoryScope(profile.profileId), 'no-org'), writable: false, unavailable: 'client-memory' };
+  }
+  if (profile.memoryScope === 'per-org') {
+    warnNoOrgOnce(profile.profileId, 'no-client');
+    return { scope: memorySentinelScope(agentMemoryScope(profile.profileId), 'no-org'), writable: false, unavailable: 'client-memory' };
+  }
   if (profile.memoryScope === 'per-user') {
-    if (actor?.userId) return subjectMemoryScope(personSubject(actor.userId));
+    if (ctx?.userId) return { scope: subjectMemoryScope(personSubject(ctx.userId)), writable: true };
     // Fail-closed: agent-unique, deterministic, and NEVER written to (no writer
     // forms this scope) — so recall is empty rather than leaking the shared scope.
     //
     // AGMEM-12 (ADR 0587) — the sentinel is CORRECT and was SILENT. An agent
-    // misconfigured to `per-user` in an actor-less lane (the REST retrieve preview
-    // and the workflow-node path both call without an actor) recalls empty
-    // FOREVER with no signal at all, and an empty recall is indistinguishable from
-    // an agent with nothing stored. The behaviour is unchanged — only the silence.
-    //
-    // ONCE per profile per process (review finding F7): this runs per retrieve, and
-    // an unbounded repeat of an identical line buries the very signal it adds. See
-    // `warnPerUserNoActorOnce`.
+    // misconfigured to `per-user` in an actor-less lane recalls empty FOREVER with
+    // no signal at all, and an empty recall is indistinguishable from an agent
+    // with nothing stored. ONCE per profile per process (review finding F7).
     warnPerUserNoActorOnce(profile.profileId);
-    return `${agentMemoryScope(profile.profileId)}:no-actor`;
+    return { scope: memorySentinelScope(agentMemoryScope(profile.profileId), 'no-actor'), writable: false };
   }
-  return agentMemoryScope(profile.profileId);
+  return { scope: agentMemoryScope(profile.profileId), writable: true };
+}
+
+/** The scope half of `resolveAgentMemory` — for read-only callers. */
+export function resolveAgentMemoryScope(
+  profile: Pick<AgentProfile, 'profileId' | 'memoryScope'>,
+  ctx?: AgentMemoryScopeContext | undefined,
+): string {
+  return resolveAgentMemory(profile, ctx).scope;
 }
 
 /** Build an `AgentMemoryPort` bound to one tenant (the dispatch read/write port). */

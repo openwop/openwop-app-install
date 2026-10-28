@@ -13,6 +13,11 @@
  *   5. the tool-owner derivation recognises both live tool-id shapes and never
  *      mistakes a core namespace for a feature;
  *   6. a plain chat turn (`dispatchReply`) is attributed to `chat`.
+ *
+ * Tracker TST-BUL-2. Sabotage-witnessed (w62): red when an explicit featureId is
+ * ignored, the run-metadata mapping changes, the fallback is not `unattributed`,
+ * a write failure is rethrown, the fold stops counting calls, dispatchReply drops
+ * `chat`, a core namespace counts as a feature, or `:` is admitted in a feature id.
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -79,7 +84,7 @@ describe('ADR 0821 D4 — managed spend is attributed per (tenant, day, feature)
     expect(await storage.getManagedUsage('user:attr-a', 'openwop-free', today())).toEqual({ inputTokens: 30, outputTokens: 12 });
   });
 
-  it('folds repeated calls (CAS) and keeps features apart', async () => {
+  it('folds repeated calls and keeps features apart', async () => {
     mockMiniMaxSseOnce('a', 10, 1);
     await dispatchManagedChat({ userFacingProvider: 'openwop-free', tenantId: 'user:attr-b', featureId: 'chat', messages: [{ role: 'user', content: 'x' }] });
     mockMiniMaxSseOnce('b', 20, 2);

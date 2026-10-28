@@ -184,7 +184,7 @@ describe('ADR 0145 — re-graduated tabs gate on their toggle', () => {
     // an id no tab has, so it could never fail — w35 grade-tests.)
     const tabs = visibleHubRoutes(FEATURES, off, true, 'campaigns').map(tabIdOf);
     expect(tabs, 'a genuinely disabled feature IS dropped; the others survive in order')
-      .toEqual(['campaign-ops', 'campaign-brief', 'campaigns', 'campaign-performance']);
+      .toEqual(['campaign-ops', 'campaign-brief', 'campaigns', 'campaign-performance', 'campaign-playbooks']);
     // Positive control: enabled, the same tab IS projected.
     expect(visibleHubRoutes(FEATURES, all, true, 'campaigns').map(tabIdOf)).toContain('campaign-intelligence');
   });

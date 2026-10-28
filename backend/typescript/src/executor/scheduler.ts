@@ -271,6 +271,22 @@ export function evaluateCondition(
 
 const TERMINAL: ReadonlySet<NodeState> = new Set(['completed', 'failed', 'skipped']);
 
+/** A skip caused by failure is not an untaken conditional branch. Follow only
+ * skipped predecessors: a completed error-handler is a real recovery boundary.
+ * This derives provenance from existing state; no new wire or snapshot state. */
+function failedBehindSkip(nodeId: string, graph: SchedulerGraph, snapshot: SchedulerSnapshot): boolean {
+  const queue = [nodeId]; const seen = new Set<string>();
+  while (queue.length) {
+    const id = queue.pop();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const state = snapshot.nodeState.get(id);
+    if (state === 'failed') return true;
+    if (state === 'skipped') for (const edge of graph.incoming.get(id) ?? []) queue.push(edge.sourceNodeId);
+  }
+  return false;
+}
+
 /** The edge's id in either spelling — host `edgeId` or the canonical wire `id`. */
 function edgeSortKey(e: EdgeDef): string {
   return e.edgeId ?? (e as EdgeDef & { id?: string }).id ?? '';
@@ -311,6 +327,8 @@ export function evaluateTrigger(
   const anyTerminal = upstreamStates.some((s) => TERMINAL.has(s));
   const anyCompleted = upstreamStates.some((s) => s === 'completed');
   const anyFailed = upstreamStates.some((s) => s === 'failed');
+  const unrecoveredFailure = anyFailed || ins.some((edge) => snapshot.nodeState.get(edge.sourceNodeId) === 'skipped'
+    && failedBehindSkip(edge.sourceNodeId, graph, snapshot));
 
   // Pick the triggerRule from the first edge (by edgeId) — incoming edges
   // to the same target SHOULD agree on the rule, but we don't enforce.
@@ -325,8 +343,8 @@ export function evaluateTrigger(
 
   switch (rule) {
     case 'all_success':
-      if (allTerminal && !anyFailed && anyCompleted) return 'ready';
-      if (allTerminal && anyFailed) return 'skip';
+      if (allTerminal && !unrecoveredFailure && anyCompleted) return 'ready';
+      if (allTerminal && unrecoveredFailure) return 'skip';
       // All upstreams terminal but none completed (all skipped) — can never satisfy.
       if (allTerminal && !anyCompleted) return 'skip';
       return 'wait';
@@ -338,8 +356,8 @@ export function evaluateTrigger(
       if (allTerminal) return 'ready';
       return 'wait';
     case 'none_failed':
-      if (allTerminal && !anyFailed) return 'ready';
-      if (anyFailed) return 'skip';
+      if (allTerminal && !unrecoveredFailure) return 'ready';
+      if (unrecoveredFailure) return 'skip';
       return 'wait';
     case 'any_failed':
       if (anyFailed) return 'ready';
@@ -564,13 +582,14 @@ export function releaseDownstream(
   onSkip?: (nodeId: string, reason: 'condition' | 'upstream') => void,
 ): void {
   const downstream = graph.outgoing.get(changedNodeId) ?? [];
-  const visited = new Set<string>();
   const queue = [...new Set(downstream.map((e) => e.targetNodeId))];
   while (queue.length > 0) {
     const id = queue.shift();
-    if (!id || visited.has(id)) continue;
-    visited.add(id);
+    if (!id) continue;
     const cur = snapshot.nodeState.get(id);
+    // A waiting join may be reached again after another incoming branch is
+    // skipped in THIS pass. Its state, rather than a visited bit, deduplicates
+    // settled nodes. Every skip propagates once, so work remains edge-bounded.
     if (cur !== 'pending') continue;
     const verdict = evaluateTrigger(id, graph, snapshot);
     if (verdict === 'ready') snapshot.nodeState.set(id, 'ready');
@@ -579,7 +598,7 @@ export function releaseDownstream(
       if (onSkip) onSkip(id, skipReasonFor(id, graph, snapshot));
       // Skipped propagates — re-evaluate downstream.
       const out = graph.outgoing.get(id) ?? [];
-      for (const e of out) if (!visited.has(e.targetNodeId)) queue.push(e.targetNodeId);
+      for (const e of out) queue.push(e.targetNodeId);
     }
   }
 }

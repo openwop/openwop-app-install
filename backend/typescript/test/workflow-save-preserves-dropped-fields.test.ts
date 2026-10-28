@@ -22,7 +22,7 @@ import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
 
-describe('ADR 0523 — a save cannot silently drop fields the head carried', () => {
+describe('ADR 0523/0524 — a save cannot silently drop fields the head carried', () => {
   let server: http.Server;
   let BASE: string;
   const TOKEN = 'dev-token';
@@ -93,7 +93,7 @@ describe('ADR 0523 — a save cannot silently drop fields the head carried', () 
 
   it('restores node inputs an old bundle dropped WHOLESALE', async () => {
     const wf = 'adr0523.wholesale';
-    await save(wf, WITH_INPUTS);
+    expect((await save(wf, WITH_INPUTS)).status, 'seed save').toBe(201);
     const res = await save(wf, STRIPPED);
     expect(res.status).toBe(201);
 
@@ -104,7 +104,7 @@ describe('ADR 0523 — a save cannot silently drop fields the head carried', () 
 
   it('DISCLOSES the restore — a silent merge would be the defect it fixes', async () => {
     const wf = 'adr0523.disclosure';
-    await save(wf, WITH_INPUTS);
+    expect((await save(wf, WITH_INPUTS)).status, 'seed save').toBe(201);
     const res = await save(wf, STRIPPED);
     expect(res.body?.preservedFields).toEqual(['inputs']);
   });
@@ -114,7 +114,7 @@ describe('ADR 0523 — a save cannot silently drop fields the head carried', () 
     // clearing one leaves the others intact. Merging that would make deletion
     // impossible the day editable preset inputs ship.
     const wf = 'adr0523.partial';
-    await save(wf, WITH_INPUTS);
+    expect((await save(wf, WITH_INPUTS)).status, 'seed save').toBe(201);
     const partial = [
       { nodeId: 'a', typeId: 'core.noop', config: {} },
       { nodeId: 'b', typeId: 'core.noop', config: {}, inputs: { subject: 'hello' } },
@@ -127,19 +127,20 @@ describe('ADR 0523 — a save cannot silently drop fields the head carried', () 
 
   it('restores def-level variables and configurableSchema', async () => {
     const wf = 'adr0523.deflevel';
-    await save(wf, WITH_INPUTS, {
+    expect((await save(wf, WITH_INPUTS, {
       variables: [{ name: 'recipientEmail', type: 'string' }],
       configurableSchema: { type: 'object', properties: { recipientEmail: {} } },
-    });
+    })).status, 'seed save').toBe(201);
     const res = await save(wf, WITH_INPUTS); // inputs intact, def-level absent
     expect(res.body?.preservedFields).toEqual(['variables', 'configurableSchema']);
     const h = await head(wf);
     expect(h?.variables).toEqual([{ name: 'recipientEmail', type: 'string' }]);
+    expect(h?.configurableSchema).toEqual({ type: 'object', properties: { recipientEmail: {} } });
   });
 
   it('honours an EXPLICIT clear — an empty array is an author, not an old bundle', async () => {
     const wf = 'adr0523.explicit-clear';
-    await save(wf, WITH_INPUTS, { variables: [{ name: 'x', type: 'string' }] });
+    expect((await save(wf, WITH_INPUTS, { variables: [{ name: 'x', type: 'string' }] })).status, 'seed save').toBe(201);
     const res = await save(wf, WITH_INPUTS, { variables: [] });
     expect(res.body?.preservedFields).toBeUndefined();
     expect((await head(wf))?.variables).toEqual([]);
@@ -147,7 +148,7 @@ describe('ADR 0523 — a save cannot silently drop fields the head carried', () 
 
   it('never resurrects inputs onto a node the save DELETED', async () => {
     const wf = 'adr0523.deleted-node';
-    await save(wf, WITH_INPUTS);
+    expect((await save(wf, WITH_INPUTS)).status, 'seed save').toBe(201);
     const res = await save(wf, [{ nodeId: 'a', typeId: 'core.noop', config: {} }]);
     expect(res.status).toBe(201);
     const h = await head(wf);
@@ -165,7 +166,7 @@ describe('ADR 0523 — a save cannot silently drop fields the head carried', () 
     const withRef = [
       { nodeId: 'a', typeId: 'core.noop', config: {}, inputs: { to: { type: 'variable', variableName: 'recipient' } } },
     ];
-    await save(wf, withRef, { variables: [{ name: 'recipient', type: 'string' }] });
+    expect((await save(wf, withRef, { variables: [{ name: 'recipient', type: 'string' }] })).status, 'seed save').toBe(201);
 
     // A partially-upgraded client: models variables (clears them), drops inputs.
     const res = await save(wf, [{ nodeId: 'a', typeId: 'core.noop', config: {} }], { variables: [] });
@@ -185,7 +186,7 @@ describe('ADR 0523 — a save cannot silently drop fields the head carried', () 
 
   it('E0: a client DECLARING `inputs` deletes them instead of having them restored', async () => {
     const id = `e0-declares-${Date.now()}`;
-    await save(id, WITH_INPUTS);
+    expect((await save(id, WITH_INPUTS)).status, 'seed save').toBe(201);
     const res = await saveDeclaring(id, STRIPPED, 'inputs,variables,configurableSchema');
     expect(res.status).toBe(201);
     expect(res.body?.preservedFields, 'a declared omission was treated as a bundle limitation').toBeUndefined();
@@ -197,7 +198,7 @@ describe('ADR 0523 — a save cannot silently drop fields the head carried', () 
     // The control. Without it, the test above would pass against a guard that
     // had simply stopped working, which is the failure mode that matters most.
     const id = `e0-no-header-${Date.now()}`;
-    await save(id, WITH_INPUTS);
+    expect((await save(id, WITH_INPUTS)).status, 'seed save').toBe(201);
     const res = await save(id, STRIPPED);
     expect(res.body?.preservedFields).toContain('inputs');
     const after = await head(id);
@@ -208,9 +209,10 @@ describe('ADR 0523 — a save cannot silently drop fields the head carried', () 
     // Per-field, not all-or-nothing. A client that models one field must not
     // switch the guard off for the others.
     const id = `e0-partial-${Date.now()}`;
-    await save(id, WITH_INPUTS);
+    expect((await save(id, WITH_INPUTS)).status, 'seed save').toBe(201);
     const res = await saveDeclaring(id, STRIPPED, 'variables');
-    expect(res.body?.preservedFields, 'declaring variables disabled the inputs guard').toContain('inputs');
+    expect(res.body?.preservedFields, 'declaring variables disabled the inputs guard').toEqual(['inputs']);
+    expect((await head(id))?.nodes?.find((n) => n.nodeId === 'a')?.inputs).toEqual({ to: 'someone@example.com' });
   });
 
   it('E0: an UNRECOGNISED contract token does not disable a real guard', async () => {
@@ -221,7 +223,7 @@ describe('ADR 0523 — a save cannot silently drop fields the head carried', () 
     // real (forward-compat) property is asserted directly in
     // `field-contract-parse.test.ts`.
     const id = `e0-unknown-${Date.now()}`;
-    await save(id, WITH_INPUTS);
+    expect((await save(id, WITH_INPUTS)).status, 'seed save').toBe(201);
     const res = await saveDeclaring(id, STRIPPED, 'nodes,edges,metadata');
     expect(res.body?.preservedFields, 'an unknown token disabled a real guard').toContain('inputs');
   });
@@ -236,7 +238,7 @@ describe('ADR 0523 — a save cannot silently drop fields the head carried', () 
 
   it('E: a declaring save STAMPS the contract on the revision', async () => {
     const id = `e-stamp-${Date.now()}`;
-    await saveDeclaring(id, WITH_INPUTS, 'inputs,variables,configurableSchema');
+    expect((await saveDeclaring(id, WITH_INPUTS, 'inputs,variables,configurableSchema')).status, 'seed save').toBe(201);
     const rev = await latestRevision(id);
     expect(rev?.declaredFields, 'the route never recorded what the client declared').toContain('inputs');
   });
@@ -246,7 +248,7 @@ describe('ADR 0523 — a save cannot silently drop fields the head carried', () 
     // that stamps unconditionally — which would mark every old-bundle strip as
     // deliberate and disable the repair for exactly the population it exists for.
     const id = `e-nostamp-${Date.now()}`;
-    await save(id, WITH_INPUTS);
+    expect((await save(id, WITH_INPUTS)).status, 'seed save').toBe(201);
     const rev = await latestRevision(id);
     expect(rev?.declaredFields, 'an undeclared save was recorded as deliberate').toBeUndefined();
   });
@@ -257,8 +259,8 @@ describe('ADR 0523 — a save cannot silently drop fields the head carried', () 
     // user confirms the zero is deliberate; dropping the stamp on that path
     // would leave the repair free to resurrect it.
     const id = `e-upsert-${Date.now()}`;
-    await save(id, STRIPPED);
-    await saveDeclaring(id, STRIPPED, 'inputs');
+    expect((await save(id, STRIPPED)).status, 'seed save').toBe(201);
+    expect((await saveDeclaring(id, STRIPPED, 'inputs')).status, 'seed save').toBe(201);
     const rev = await latestRevision(id);
     expect(rev?.declaredFields, 'the upsert path dropped the declaration').toContain('inputs');
   });
@@ -307,8 +309,8 @@ describe('ADR 0523 — a save cannot silently drop fields the head carried', () 
     // The discriminating half. Without it the assertions above would be satisfied
     // by a wholesale `metadata` merge, which is the thing that must not happen.
     const wf = 'adr0603.m3.control';
-    await save(wf, WITH_INPUTS, { metadata: { name: wf, authoring: { agent: 'workflow-author' } } });
-    await save(wf, WITH_INPUTS, { metadata: { name: wf } });
+    expect((await save(wf, WITH_INPUTS, { metadata: { name: wf, authoring: { agent: 'workflow-author' } } })).status, 'seed save').toBe(201);
+    expect((await save(wf, WITH_INPUTS, { metadata: { name: wf } })).status, 'seed save').toBe(201);
     const meta = ((await head(wf)) as { metadata?: Record<string, unknown> } | undefined)?.metadata ?? {};
     expect(meta.authoring, '`metadata.authoring` is written by the author lane — restoring it would fight the stamper').toBeUndefined();
   });

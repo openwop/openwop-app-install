@@ -32,24 +32,40 @@
 import { describe, expect, it, vi, afterEach } from 'vitest';
 import { startRunDispatchSweeper, POLL_INTERVAL_MS, ORPHAN_SWEEP_EVERY_N_TICKS, WEDGE_TICKS } from '../src/host/runDispatchSweeper.js';
 import type { RunSweeperDeps } from '../src/host/runDispatchSweeper.js';
+import type { Storage } from '../src/storage/storage.js';
+import type { HostAdapterSuite } from '../src/host/index.js';
 
-afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
+afterEach(() => { vi.useRealTimers(); });
+
+/** The storage methods these lanes reach, typed against the REAL signatures
+ *  (a signature drift is a tsc error here). Honest ceiling: the sweeper takes the
+ *  whole ~100-method Storage, so the partial stub is cast to it ONCE, below. */
+type LaneStorage = Pick<Storage, 'claimDispatchOutbox' | 'claimOrphanedRuns' | 'listOpenInterruptsAll' | 'listRuns'>;
+const asDeps = (storage: LaneStorage): RunSweeperDeps => ({
+  storage: storage as Storage,
+  // Never read on these paths: no claim returns a row to dispatch.
+  hostSuite: {} as HostAdapterSuite,
+});
 
 /** Deps whose OUTBOX pass hangs forever and whose orphan claim is observable. */
-function wedgingDeps(): { deps: RunSweeperDeps; orphanClaims: () => number; releaseOutbox: () => void } {
+function wedgingDeps(): { deps: RunSweeperDeps; orphanClaims: () => number; waitReads: () => number; releaseOutbox: () => void } {
   let claims = 0;
+  let waitReads = 0;
   let release: () => void = () => {};
-  const storage = {
+  const storage: LaneStorage = {
     // The outbox lane's first storage call never settles — a hang, not a throw.
     async claimDispatchOutbox() {
       await new Promise<void>((r) => { release = r; });
       return [];
     },
     async claimOrphanedRuns() { claims += 1; return []; },
-  } as unknown as RunSweeperDeps['storage'];
+    async listOpenInterruptsAll() { waitReads++; return []; },
+    async listRuns() { return []; },
+  };
   return {
-    deps: { storage, hostSuite: {} as RunSweeperDeps['hostSuite'] },
+    deps: asDeps(storage),
     orphanClaims: () => claims,
+    waitReads: () => waitReads,
     releaseOutbox: () => release(),
   };
 }
@@ -57,7 +73,7 @@ function wedgingDeps(): { deps: RunSweeperDeps; orphanClaims: () => number; rele
 describe('RFC 0158 §B.5 — the sweeper cannot be silently disabled by one hung pass', () => {
   it('runs the orphan lane even while an outbox pass is hung', async () => {
     vi.useFakeTimers();
-    const { deps, orphanClaims } = wedgingDeps();
+    const { deps, orphanClaims, waitReads } = wedgingDeps();
     const sweeper = startRunDispatchSweeper(deps, 'wedge-worker');
 
     // Run well past several orphan cadences. Pre-fix, tick 1 hangs, `running`
@@ -68,7 +84,9 @@ describe('RFC 0158 §B.5 — the sweeper cannot be silently disabled by one hung
     expect(
       orphanClaims(),
       'a hung OUTBOX pass must not stop the ORPHAN lane — recovery is what the declared bound rests on',
-    ).toBeGreaterThan(0);
+    ).toBeGreaterThanOrEqual(3);
+    // ≥ 3 of the ~4 cadences advanced: a lane that runs once and then wedges reads 1.
+    expect(waitReads(), 'a hung outbox must also leave host dispatch-wait recovery ticking').toBeGreaterThan(0);
     sweeper.stop();
   });
 
@@ -84,18 +102,17 @@ describe('RFC 0158 §B.5 — the sweeper cannot be silently disabled by one hung
     // this whole RFC is about.
     vi.useFakeTimers();
     let outboxAttempts = 0;
-    const storage = {
+    const storage: LaneStorage = {
       async claimDispatchOutbox() {
         outboxAttempts += 1;
         await new Promise<void>(() => { /* never settles */ });
         return [];
       },
       async claimOrphanedRuns() { return []; },
-    } as unknown as RunSweeperDeps['storage'];
-    const sweeper = startRunDispatchSweeper(
-      { storage, hostSuite: {} as RunSweeperDeps['hostSuite'] },
-      'wedge-worker-2',
-    );
+      async listOpenInterruptsAll() { return []; },
+      async listRuns() { return []; },
+    };
+    const sweeper = startRunDispatchSweeper(asDeps(storage), 'wedge-worker-2');
 
     await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS * WEDGE_TICKS * 3);
 

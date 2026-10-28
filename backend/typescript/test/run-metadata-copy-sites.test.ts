@@ -85,8 +85,9 @@ const CLASSIFIED: Record<string, { source: MetadataSource; why: string }> = {
       'The RFC 0173 §C.2 fire seam composes the whole record itself — metadata is ' +
       'the literal `{ seededBy, seam }`. There is no source run: the point of the ' +
       'seam is to create a run that drives ONE declared manifest row into the ' +
-      'Layer-2 ledger, so a scenario can fork it and read the projection. It loads ' +
-      'no run, so the derived leg below does not apply. The run IS created in the ' +
+      'Layer-2 ledger, so a scenario can fork it and read the projection. Its only ' +
+      'run read is a status poll of the run it just inserted (so the 201 lands after ' +
+      'the node ran) — never a source run whose metadata could flow in. The run IS created in the ' +
       'CALLER\'s tenant rather than a fixture tenant — the scenario reads ' +
       '`GET /runs/{runId}/effects` back as the same caller, and a foreign-tenant ' +
       'run answers 403 id_tenant_mismatch.',
@@ -110,8 +111,9 @@ const CLASSIFIED: Record<string, { source: MetadataSource; why: string }> = {
     why:
       'The RFC 0176 era-2 seed seam composes the whole record itself — metadata is the literal ' +
       '`{ seededBy, era }` and there is no source run to copy from, because the point of the seam ' +
-      'is to plant a fixture no existing run could produce. It loads no run, so the derived leg ' +
-      'below does not apply. It DOES set `eventLogSchemaVersion: 2` explicitly, which is the one ' +
+      'is to plant a fixture no existing run could produce. Its append route reads a run back only ' +
+      'to check it is a seam-seeded run of the caller\'s tenant before appending events to it; no ' +
+      'run is created from that read. It DOES set `eventLogSchemaVersion: 2` explicitly, which is the one ' +
       'field it must not leave to the adapter default (that default is era 3).',
   },
 
@@ -127,7 +129,10 @@ const CLASSIFIED: Record<string, { source: MetadataSource; why: string }> = {
     source: 'COPIED_FROM_RUN',
     why:
       'The bulk redrive copies `source.metadata`, deleting caller provenance and keeping execution ' +
-      'parameters. ADR 0604 review H1 — this is the site the §D1 enumeration missed. (The debug-run ' +
+      'parameters. ADR 0604 review H1 — this is the site the §D1 enumeration missed. Reserved keys are ' +
+      'stripped by `buildRunRecord`; the registered inherited stamps (`host/inheritedRunMetadata.ts`: the ' +
+      'ADR 0941 goal, the ADR 0942 autonomy stamp and fork posture) are then re-taken from the STORED SOURCE ' +
+      'ROW, never the request, and inserted with `derivedFromRun` (ADR 0942 P1). (The debug-run ' +
       'creator in the same file is FRESH: `metadata: { launch: "draft" }` plus host stamps.)',
   },
 
@@ -135,16 +140,23 @@ const CLASSIFIED: Record<string, { source: MetadataSource; why: string }> = {
   'executor/subWorkflowDispatcher.ts': {
     source: 'FRESH',
     why:
-      'The child run is built with `metadata: {}`. The parent is reached only for the ancestor-cycle ' +
-      'walk and the variable-bag snapshot (`snapshotRunVariables`), which projects INPUTS via ' +
-      'inputMapping — never the parent metadata blob. A child is a new unit of work, not a copy.',
+      'The child run is built from the reserved-stripped handoff plus two narrow parent reads, never the ' +
+      'parent metadata blob: the parent person as `orgScopeSubject` (ADR 0832 D3) and the keys features ' +
+      'register in `host/inheritedRunMetadata.ts` (ADR 0941 D2b: the campaign run tag + frozen goal), ' +
+      'copied through feature-owned projectors (campaign-ops projects orgId without approval authority). ' +
+      'An inherited key that is ABSENT on the parent stays absent only if its contributor ' +
+      'keys on another inherited value: the campaign goal contributor stamps only when the goal version ' +
+      'equals the inherited tag\'s `goalVersion`, so a child never acquires a goal its parent lacked. ' +
+      'A child is a new unit of work, not a copy.',
   },
   'host/canvasSurface.ts': {
     source: 'FRESH',
     why:
-      'The canvas child run is built with `metadata: { causationCanvasId }` only. `storage.getRun` is ' +
-      'used solely to walk parentRunId for the depth/cycle guard; the ancestor rows are read for their ' +
-      'workflowId and discarded. (The `c.metadata` spreads in this file are CANVAS records, not runs.)',
+      'The canvas child is a fresh unit of work: causationCanvasId, the causing member as orgScopeSubject, ' +
+      'and registered feature-owned projections from the tenant-checked parent row. Campaign-ops inherits ' +
+      'only orgId, never approval execution authority or parent node-keyed agentBindings; child contributors ' +
+      'freeze their own workflow bindings. Other parent reads enforce depth/cycle/tenant guards. ' +
+      '(The c.metadata spreads describe CANVAS records, not runs.)',
   },
   'host/mcpSemantics.ts': {
     source: 'FRESH',
@@ -268,7 +280,9 @@ describe('ADR 0604 H1 — every run-creation site declares where its metadata ca
     expect(creators).toContain('routes/runs.ts');
     expect(creators).toContain('routes/workflowDebug.ts');
     expect(creators).toContain('host/anonymousActor.ts'); // a bare-insertRun lane
-    expect(creators.length).toBeGreaterThanOrEqual(20);
+    // MEASURED 2026-10-22 at 2404797bf: 26 creators (was asserted >= 20, far below
+    // the truth). A floor at the measured count catches a walk that silently loses files.
+    expect(creators.length).toBeGreaterThanOrEqual(26);
   });
 
   it('NO unclassified creator — a new run-creation path must fail here', () => {
@@ -312,7 +326,8 @@ describe('ADR 0604 H1 — every run-creation site declares where its metadata ca
     // The derived leg. This is where the defect can actually live, and the row
     // is only worth having if it forces the judgment rather than the paperwork.
     const risky = creators.filter((f) => CLASSIFIED[f]?.source === 'FRESH' && loadsExistingRun(f));
-    expect(risky.length, 'derivation broke: no FRESH creator reads a run, which cannot be true').toBeGreaterThanOrEqual(6);
+    // MEASURED 2026-10-22 at 2404797bf: 11 FRESH creators also load a run (was asserted >= 6).
+    expect(risky.length, 'derivation broke: no FRESH creator reads a run, which cannot be true').toBeGreaterThanOrEqual(11);
     for (const f of risky) {
       expect(
         CLASSIFIED[f]!.why.length,

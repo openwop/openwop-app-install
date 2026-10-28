@@ -46,7 +46,7 @@ it, or a client-held provider secret.
   `voice` is tenant-bucketed, so `{ tenantId }` is its whole subject.
 - **Secret owner:** `byok/secretResolver.resolveSecret(ref, { tenantId })`, resolved into the adapter's
   `secrets` the way `host/conversationToolLoop.ts:464` already does.
-- **Erasure owner:** `host/chatPostErasure.ts` (matches `authorSubject` by `subjectRefForms`). Voice writes
+- **Erasure owner:** `host/chatPostErasure.ts` (matches `authorSubject` by `subjectRefForms`; since the ADR 0464 DSAR-DBL correction, by `subjectKeyForms`, which absorbed it). Voice writes
   the subject; it adds no eraser.
 - **Fence owner:** `host/promptInjectionGuard.wrapForLLMPrompt`.
 - **No new route, store, toggle, pack, envelope or capability.**

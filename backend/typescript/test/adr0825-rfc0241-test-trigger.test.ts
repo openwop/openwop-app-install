@@ -10,6 +10,14 @@
  * empty; nothing reaches another tenant; the closed body and §B.4 refusals hold.
  * Unbound (contract off, or hostEvents off): nothing is listed and the route is
  * `404`.
+ *
+ * Tracker TST-BHE-6. Sabotage-witnessed (w62): red when the real predicate stops
+ * reading the manifest, the unbound route serves, a foreign workspaceId is
+ * accepted, a test event carries a payload, an Idempotency-Key replay or mismatch
+ * is not honoured, the key is not tenant-scoped, an ephemeral event is webhooked,
+ * or both webhook tenant guards in `fanOutHostEvent` are removed.
+ * The "400 is not cached" claim is STRUCTURAL: validation runs before the
+ * idempotency claim, so no single edit can make a 400 cached (honest ceiling).
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import http from 'node:http';
@@ -135,7 +143,8 @@ describe('RFC 0241 §A/§B — trigger bound (contract defines it, hostEvents on
     const B = `org:t0241-b-${n++}`;
     const ca = await login(A);
     const sa = await openStream(ca);
-    const sb = await openStream(await login(B));
+    const cb = await login(B);
+    const sb = await openStream(cb);
     const subA = `sub-a-${n++}`;
     const subB = `sub-b-${n++}`;
     await insertSub(subA, A, [HOST_TEST_EVENT_TYPES.durable]);
@@ -151,13 +160,21 @@ describe('RFC 0241 §A/§B — trigger bound (contract defines it, hostEvents on
     expect(fa).toHaveLength(1);
     expect(fa[0]!.event).toBe(HOST_TEST_EVENT_TYPES.durable);
     expect((JSON.parse(fa[0]!.data!) as { payload: unknown }).payload).toEqual({});
-    // Tenant isolation: B's stream and B's webhook got nothing.
-    await new Promise((r2) => setTimeout(r2, 50));
+    // Tenant isolation: B's stream and B's webhook got nothing. B's OWN event is
+    // awaited first, so B's stream is proven live before A's absence is read.
+    const rb = await trigger(cb, { delivery: 'durable' });
+    expect(rb.status).toBe(202);
+    const { eventId: bEventId } = (await rb.json()) as { eventId: string };
+    await until(() => sb.text().includes(bEventId));
+    expect(sb.text()).toContain(bEventId);
     expect(sb.text()).not.toContain(eventId);
     const d = await drain();
     expect(d.get(subA)?.length).toBe(1);
     expect(d.get(subA)![0]).toContain(eventId);
-    expect(d.get(subB)).toBeUndefined();
+    // B's webhook got only B's own event, never A's.
+    expect(d.get(subB)?.length).toBe(1);
+    expect(d.get(subB)![0]).toContain(bEventId);
+    expect(d.get(subB)![0]).not.toContain(eventId);
     sa.close(); sb.close();
   });
 
@@ -187,6 +204,7 @@ describe('RFC 0241 §A/§B — trigger bound (contract defines it, hostEvents on
       body: JSON.stringify({ url: 'https://example.test/hook', events: [HOST_TEST_EVENT_TYPES.ephemeral] }),
     });
     expect(r.status).toBe(400);
+    expect(((await r.json()) as { error?: string }).error).toBe('validation_error');
   });
 
   it('the closed body and the §B.4 refusals', async () => {
@@ -203,7 +221,8 @@ describe('RFC 0241 §A/§B — trigger bound (contract defines it, hostEvents on
     expect(await code({ delivery: 'durable', workspaceId: `${toWireTenant(A)}/ws-0000000000000001` })).toBe('404 not_found');
     // Unauthenticated: no tenant to emit to.
     const anon = await trigger(null, { delivery: 'durable' });
-    expect([401, 403]).toContain(anon.status);
+    expect(anon.status).toBe(401);
+    expect(((await anon.json()) as { error?: string }).error).toBe('unauthenticated');
   });
 });
 
@@ -213,12 +232,14 @@ describe('RFC 0241 §B.1 — trigger unbound', () => {
     expect(advertisedHostEventTypes().some((t) => t.type.startsWith('host-test.'))).toBe(false);
     const r = await trigger(await login(`org:t0241-off-${n++}`), { delivery: 'durable' });
     expect(r.status).toBe(404);
+    expect(((await r.json()) as { error?: string }).error).toBe('not_found');
   });
 
   it('hostEvents off: the route is 404 even when the contract defines it', async () => {
     delete process.env.OPENWOP_HOST_EVENTS_V2;
     const r = await trigger(await login(`org:t0241-flag-${n++}`), { delivery: 'durable' });
     expect(r.status).toBe(404);
+    expect(((await r.json()) as { error?: string }).error).toBe('not_found');
   });
 });
 

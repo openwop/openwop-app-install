@@ -14,6 +14,15 @@
  *   2. the executor registers the ref into the run's secret set;
  *   3. the create + fork routes refuse a ref that is foreign, provider-less,
  *      managed or unresolvable with `403 credential_forbidden`.
+ *
+ * Each refusal asserts its own MESSAGE: the managed and empty refs are also
+ * refused by the provider-name rung, so a status/code-only assertion cannot tell
+ * which check fired.
+ *
+ * Tracker TST-BGF-17. Red when: the ladder's run rung ignores the provider; the
+ * executor stops passing `runCredentialRef` or stops declaring the wire ref;
+ * admission stops refusing an empty, managed, provider-less or unresolvable ref
+ * (create or fork overlay).
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -189,13 +198,13 @@ describe('ADR 0712 — create + fork refuse a ref the run may not use (HTTP)', (
 
   /** ADR 0812 P3c-0 — was `createV1` (`POST /v1/runs`); now the major-2 create,
    *  the field inside the closed versioned `configurable`. Returns the BOUND id. */
-  async function create(configurable: Record<string, unknown>): Promise<{ status: number; code: string; runId?: string }> {
+  async function create(configurable: Record<string, unknown>): Promise<{ status: number; code: string; message: string; runId?: string }> {
     const res = await fetch(`${base}/runs`, {
       method: 'POST', headers: V2,
       body: JSON.stringify({ workflowId: 'openwop-app.uppercase', inputs: { message: 'adr0712' }, configurable: { version: 1, ...configurable } }),
     });
-    const body = await res.json() as { runId?: string; error?: unknown; code?: unknown };
-    return { status: res.status, code: errorCode(body), ...(body.runId ? { runId: body.runId } : {}) };
+    const body = await res.json() as { runId?: string; error?: unknown; code?: unknown; message?: unknown };
+    return { status: res.status, code: errorCode(body), message: typeof body.message === 'string' ? body.message : '', ...(body.runId ? { runId: body.runId } : {}) };
   }
 
   function errorCode(body: { error?: unknown; code?: unknown }): string {
@@ -223,17 +232,19 @@ describe('ADR 0712 — create + fork refuse a ref the run may not use (HTTP)', (
     expect(res.status).toBe(201);
   });
 
-  it('advertises MiniMax BYOK and accepts its tenant-owned run key', async () => {
+  // ADR 0990 D6 (corrects ADR 0759): MiniMax backs the free tier and is never a
+  // user's own key, so run admission refuses it. It stays in `providers[]`: the
+  // host still dispatches to it (free tier, RFC 0105 speech), and that list names
+  // the providers the host routes to, not the ones a user may key.
+  it('admits no MiniMax BYOK run key, while MiniMax stays a dispatch provider', async () => {
     const doc = await (await fetch(`${base}/.well-known/openwop`, { headers: { 'OpenWOP-Version': '2' } })).json() as { aiProviders: { providers: string[]; authModes: string[] } };
     expect(doc.aiProviders.providers).toContain('minimax');
-    expect(advertisedByokProviders()).toContain('minimax');
-    expect(doc.aiProviders.authModes).toContain('apiKey');
+    expect(advertisedByokProviders()).not.toContain('minimax');
+    expect(advertisedByokProviders()).toEqual(expect.arrayContaining(['anthropic', 'openai', 'google']));
     await storeKey('minimax:showcase');
-    const res = await fetch(`${base}/runs`, {
-      method: 'POST', headers: V2,
-      body: JSON.stringify({ workflowId: 'openwop-app.uppercase', inputs: { message: 'credential admission test' }, configurable: { version: 1, ai: { credentialRef: 'minimax:showcase' } } }),
-    });
-    expect(res.status).toBe(201);
+    const res = await create({ ai: { credentialRef: 'minimax:showcase' } });
+    expect(res.status).toBe(403);
+    expect(res.code).toContain('credential_forbidden');
   });
 
   it('accepts the same field under v2, inside the closed versioned configurable', async () => {
@@ -253,6 +264,9 @@ describe('ADR 0712 — create + fork refuse a ref the run may not use (HTTP)', (
     expect(foreign.code).toContain('credential_forbidden');
     expect(missing.status).toBe(403);
     expect(missing.code).toBe(foreign.code);
+    // The SAME message for both — no existence probe.
+    expect(foreign.message).toMatch(/does not resolve to a key in this workspace/);
+    expect(missing.message).toBe(foreign.message);
   });
 
   it('refuses a stored key whose name carries no advertised provider', async () => {
@@ -260,11 +274,18 @@ describe('ADR 0712 — create + fork refuse a ref the run may not use (HTTP)', (
     const res = await create({ ai: { credentialRef: 'my-key' } });
     expect(res.status).toBe(403);
     expect(res.code).toContain('credential_forbidden');
+    expect(res.message).toMatch(/must name a key for one of/);
   });
 
   it('refuses a managed ref and an empty ref — neither is a BYOK credential', async () => {
-    expect((await create({ ai: { credentialRef: 'managed:openwop-free' } })).status).toBe(403);
-    expect((await create({ ai: { credentialRef: '' } })).status).toBe(403);
+    const managed = await create({ ai: { credentialRef: 'managed:openwop-free' } });
+    expect(managed.status).toBe(403);
+    expect(managed.code).toContain('credential_forbidden');
+    expect(managed.message).toMatch(/the free managed tier is not a BYOK credential/);
+    const empty = await create({ ai: { credentialRef: '' } });
+    expect(empty.status).toBe(403);
+    expect(empty.code).toContain('credential_forbidden');
+    expect(empty.message).toMatch(/must be a non-empty credential reference/);
   });
 
   it('checks a branch fork\'s overlay the same way, and the ref never reaches the event stream', async () => {
@@ -287,6 +308,6 @@ describe('ADR 0712 — create + fork refuse a ref the run may not use (HTTP)', (
       method: 'POST', headers: V2, body: JSON.stringify({ mode: 'branch', fromSeq: 0, runOptionsOverlay: overlay }),
     })).status;
     expect(await fork({ ai: { credentialRef: 'openai:other-tenant-only' } })).toBe(403);
-    expect(await fork({ ai: { credentialRef: 'google:fork-src' } })).not.toBe(403);
+    expect(await fork({ ai: { credentialRef: 'google:fork-src' } })).toBe(201);
   });
 });

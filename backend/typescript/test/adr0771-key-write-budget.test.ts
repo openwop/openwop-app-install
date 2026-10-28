@@ -9,6 +9,11 @@
  *    middleware verified, so a fake bearer buys nothing.
  * Every request carries X-Forwarded-For, since a bare loopback connection is
  * exempt from the limiter entirely.
+ *
+ * Red when (wave 60 probes, tracker TST-BRB-4): the keyed write bucket is never
+ * chosen; it admits an unconfigured dev-token or an `owk_` key; two keys sharing an
+ * 8-character prefix share a bucket; FORCE stops shrinking the key budget; or a keyed
+ * write is also charged to the caller's IP bucket.
  */
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 import express from 'express';
@@ -110,7 +115,9 @@ describe('ADR 0771 D4 — through the real auth middleware', () => {
     srv = await listen(app);
     const post = (token: string) => fetch(`${srv.base}/runs`, { method: 'POST', headers: { 'x-forwarded-for': '198.51.100.7', authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: '{}' }).then((r) => r.status);
     const real: number[] = []; for (let i = 0; i < 4; i++) real.push(await post('real-operator-key-1234'));
-    expect(real.filter((s) => s === 429), `configured key statuses ${real.join(',')}`).toHaveLength(0);
+    // Positive control: the configured key AUTHENTICATED (an empty run body is a 400
+    // past auth). A key refused 401 would also show "no 429".
+    expect(real, `configured key statuses ${real.join(',')}`).toEqual([400, 400, 400, 400]);
     const fake: number[] = []; for (let i = 0; i < 3; i++) fake.push(await post(`not-a-key-${i}`));
     // A bearer that is not a configured key never becomes `env-key`: auth refuses
     // it outright, so rotating fake tokens cannot buy fresh budget of ANY kind.

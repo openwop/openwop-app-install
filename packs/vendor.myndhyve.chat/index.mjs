@@ -279,6 +279,15 @@ function approverRefsPayload(config) {
   return out;
 }
 
+/** WF-UP-2 — the quorum keys the host's resolver reads off `interrupt.data`. */
+function quorumPayload(config) {
+  const out = {};
+  const n = config.requiredApprovals;
+  if (Number.isInteger(n) && n >= 1) out.requiredApprovals = n;
+  if (config.rejectionPolicy === 'any' || config.rejectionPolicy === 'majority') out.rejectionPolicy = config.rejectionPolicy;
+  return out;
+}
+
 export async function approvalGate(ctx) {
   if (typeof ctx.suspend !== 'function') {
     throw Object.assign(new Error('host does not expose ctx.suspend'), {
@@ -346,6 +355,13 @@ export async function approvalGate(ctx) {
     // (`approvals.two-stage-sign-off` defaults both to "" — "blank = any team member") still
     // freezes to an intentional OPEN gate.
     ...approverRefsPayload(config),
+    // WF-UP-2 (Book AI) — `requiredApprovals` (N-of-M) and `rejectionPolicy` were
+    // read by the host's quorum resolver (`interrupt.data.requiredApprovals`,
+    // `reviewDecisionLedger.ts`) but this node never forwarded them, so a chain
+    // could set N=2 and get a single-approver gate. Same shape as the built-in
+    // `core.approvalGate` forward (`bootstrap/nodes.ts`). Only a positive integer
+    // / a known policy is forwarded; anything else stays the single-approver gate.
+    ...quorumPayload(config),
   });
 
   // Resume payload shape: { action | decision, approved?, feedback?,

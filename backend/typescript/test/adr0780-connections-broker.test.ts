@@ -17,6 +17,33 @@
  *  - D4: the DSAR eraser revokes the subject's user rows (both spellings) and
  *    in-flight grants, and nothing else.
  *  - D5: inbound PUT refuses an unknown or foreign workflow and a short secret.
+ *
+ * Tracker: TST-BCN-1 (/grade-tests wave 60). Probe-witnessed, among others:
+ *   - red when the create path's `requireTenantWrite`, the closed `scope` set, the
+ *     WORKSPACE create/manage gate, the cross-tenant org refusal or the user-row
+ *     owner check is dropped (legs 1–5); when the inbound PUT's
+ *     `requireTenantWrite` is dropped (leg 14); when the signing-secret floor drops
+ *     (leg 13);
+ *   - red when `actingUserIds` aliases outside the home tenant (7, 7b), when the
+ *     org-use check reads one spelling only (6), when the eraser drops its subject
+ *     filter, its pending-grant delete or its pending-throw (7b, 12, 12b);
+ *   - red when the refresh write-back scrub (8b), the newer-secret check (9b), the
+ *     stale-generation refusal (10), the revoke's rethrow (11) or the sweep's
+ *     live-row guard (11f) is dropped, and when revoke removes the secret before
+ *     the row (11b).
+ *
+ * DOUBLE GUARDS (a single-guard probe stays green by design):
+ *   - Leg 8: `refreshAndWriteBack` checks the row/generation BEFORE its write AND
+ *     scrubs its own write when the row is gone AFTER it. Breaking both reds it.
+ *   - Leg 9: the same pre-write generation check AND the `currentGeneration >
+ *     generation` check (leg 9b witnesses the second alone).
+ *   - Legs 13 / 13b (foreign workflow): the OUTER guard is the launch funnel
+ *     `resolveTenantWorkflow` (`host/resolveLaunchDefinition.ts`), which treats a
+ *     workflow another tenant owns as not-found; the INNER guards are the inbound
+ *     PUT's and the dispatch-time `isAuthoredByOtherTenant` checks
+ *     (`features/connections/routes.ts`, `inboundWebhooks.ts`). All of them read
+ *     `isAuthoredByOtherTenant` (`host/workflowOwnership.ts`); breaking that one
+ *     predicate reds both legs.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { Server } from 'node:http';
@@ -112,13 +139,35 @@ async function login(subject: string, tenantId: string, sharedWorkspace = true):
   return (res.headers.get('set-cookie') ?? '').split(';')[0] ?? '';
 }
 
-async function call(path: string, cookie: string, method = 'GET', body?: unknown): Promise<{ status: number; body: any }> {
+async function call(path: string, cookie: string, method = 'GET', body?: unknown): Promise<{ status: number; body: unknown }> {
   const res = await fetch(`${BASE}${path}`, {
     method,
     headers: { cookie, ...(body !== undefined ? { 'content-type': 'application/json' } : {}) },
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
   });
-  return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+  const parsed: unknown = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+  return { status: res.status, body: parsed };
+}
+
+/** Read a nested field of an untyped JSON body, without a cast. */
+function field(value: unknown, ...path: string[]): unknown {
+  let cur: unknown = value;
+  for (const key of path) {
+    if (typeof cur !== 'object' || cur === null) return undefined;
+    cur = Reflect.get(cur, key);
+  }
+  return cur;
+}
+
+/** A string field, or '' (so a missing id fails the next assertion, not a type check). */
+function text(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
+/** The `connectionId`s of a `GET /connections` body. */
+function connectionIds(body: unknown): string[] {
+  const rows = field(body, 'connections');
+  return Array.isArray(rows) ? rows.map((r: unknown) => text(field(r, 'connectionId'))) : [];
 }
 
 const expiredOAuth = (accessToken: string): Parameters<typeof upsertOAuthConnection>[0]['tokens'] => ({
@@ -162,14 +211,14 @@ describe('ADR 0780 D1 — who may bind a credential', () => {
     const viewer = await login(VIEWER, WS);
     const refused = await call(C, viewer, 'POST', { provider: 'servicenow', kind: 'api_key', secret: 'sn-viewer-key-123' });
     expect(refused.status, JSON.stringify(refused.body)).toBe(403);
-    expect(refused.body?.details?.requiredScope).toBe('workspace:write');
+    expect(field(refused.body, 'details', 'requiredScope')).toBe('workspace:write');
     const auth = await call(`${C}/slack/authorize`, viewer, 'POST', {});
     expect(auth.status, JSON.stringify(auth.body)).toBe(403);
 
     const editor = await login(EDITOR, WS);
     const made = await call(C, editor, 'POST', { provider: 'servicenow', kind: 'api_key', secret: 'sn-editor-key-123' });
     expect(made.status, JSON.stringify(made.body)).toBe(201);
-    expect(made.body.userId).toBe(userIdFor(WS, EDITOR));
+    expect(field(made.body, 'userId')).toBe(userIdFor(WS, EDITOR));
     const editorAuth = await call(`${C}/slack/authorize`, editor, 'POST', {});
     expect(editorAuth.status, JSON.stringify(editorAuth.body)).toBe(200);
   });
@@ -180,20 +229,26 @@ describe('ADR 0780 D1 — who may bind a credential', () => {
     expect(bogus.status, JSON.stringify(bogus.body)).toBe(400);
     const planted = await call(C, editor, 'POST', { provider: 'servicenow', kind: 'api_key', secret: 'sn-key-12345678', scope: 'workspace' });
     expect(planted.status, JSON.stringify(planted.body)).toBe(403);
-    expect(planted.body?.details?.requiredScope).toBe('host:connections:manage');
+    expect(field(planted.body, 'details', 'requiredScope')).toBe('host:connections:manage');
 
     const admin = await login(ADMIN, WS);
     const made = await call(C, admin, 'POST', { provider: 'servicenow', kind: 'api_key', secret: 'sn-key-12345678', scope: 'workspace' });
     expect(made.status, JSON.stringify(made.body)).toBe(201);
-    expect(made.body.userId).toBeUndefined();
-    expect(made.body.orgId).toBeUndefined();
+    expect(field(made.body, 'connectionId')).toBeTypeOf('string');
+    expect(field(made.body, 'userId')).toBeUndefined();
+    expect(field(made.body, 'orgId')).toBeUndefined();
   });
 
   it('leg 3: a WORKSPACE row is admin-only to delete, probe and re-wire', async () => {
     const row = await createSecretConnection({ tenantId: WS, provider: 'zoom', kind: 'bearer', secret: 'zoom-ws-token-123', scope: 'workspace' });
     const editor = await login(EDITOR, WS);
-    expect((await call(`${C}/${encodeURIComponent(row.connectionId)}`, editor, 'DELETE')).status).toBe(403);
-    expect((await call(`${C}/${encodeURIComponent(row.connectionId)}/test`, editor, 'POST')).status).toBe(403);
+    for (const refused of [
+      await call(`${C}/${encodeURIComponent(row.connectionId)}`, editor, 'DELETE'),
+      await call(`${C}/${encodeURIComponent(row.connectionId)}/test`, editor, 'POST'),
+    ]) {
+      expect(refused.status, JSON.stringify(refused.body)).toBe(403);
+      expect(field(refused.body, 'details', 'requiredScope')).toBe('host:connections:manage');
+    }
     expect(await getConnection(WS, row.connectionId)).not.toBeNull();
     const admin = await login(ADMIN, WS);
     expect((await call(`${C}/${encodeURIComponent(row.connectionId)}`, admin, 'DELETE')).status).toBe(204);
@@ -223,12 +278,15 @@ describe('ADR 0780 D2 — the same human by every spelling, and nobody else', ()
     const row = await createSecretConnection({ tenantId: WS, provider: 'runway', kind: 'api_key', secret: 'rw-legacy-key-12', scope: 'user', userId: EDITOR });
     const other = await login(OTHER, WS);
     const otherList = await call(C, other, 'GET');
-    expect((otherList.body.connections as Array<{ connectionId: string }>).some((c) => c.connectionId === row.connectionId)).toBe(false);
-    expect((await call(`${C}/${encodeURIComponent(row.connectionId)}`, other, 'DELETE')).status).toBe(403);
+    expect(otherList.status).toBe(200);
+    expect(connectionIds(otherList.body).includes(row.connectionId)).toBe(false);
+    const otherDelete = await call(`${C}/${encodeURIComponent(row.connectionId)}`, other, 'DELETE');
+    expect(otherDelete.status).toBe(403);
+    expect(field(otherDelete.body, 'message')).toBe('Only the connecting user may manage this connection.');
 
     const editor = await login(EDITOR, WS);
     const mine = await call(C, editor, 'GET');
-    expect((mine.body.connections as Array<{ connectionId: string }>).some((c) => c.connectionId === row.connectionId), 'the owner must see a row written before the bind').toBe(true);
+    expect(connectionIds(mine.body).includes(row.connectionId), 'the owner must see a row written before the bind').toBe(true);
     expect((await call(`${C}/${encodeURIComponent(row.connectionId)}`, editor, 'DELETE')).status).toBe(204);
   });
 
@@ -410,17 +468,22 @@ describe('ADR 0780 D3 — revoke means revoked', () => {
     const spy = vi.spyOn(DurableCollection.prototype, 'delete').mockImplementation(async function (this: DurableCollection<unknown>, id: string) {
       if (!swept && id === row.connectionId) {
         swept = true;
-        await sweepSecretTombstones(WS); // the daemon tick, between the tombstone put and the row delete
+        // The daemon tick, between the tombstone put and the row delete. The store
+        // is HEALTHY for this sweep, so only the live-row guard keeps it from
+        // removing a live connection's token and dropping the tombstone.
+        await sweepSecretTombstones(WS);
+        // Then the revoke's own removal fails, so the tombstone is all that names the token.
+        secretFault.failRemove = true;
       }
       return del.call(this, id);
     });
-    secretFault.failRemove = true;
     try {
       await expect(revokeConnection(WS, row.connectionId)).rejects.toThrow('kms unavailable');
     } finally {
       secretFault.failRemove = false;
       spy.mockRestore();
     }
+    expect(swept, 'the sweep must have run inside the revoke').toBe(true);
     expect((await sweepSecretTombstones(WS)).removed, 'the tombstone must still name the orphaned token').toBeGreaterThan(0);
     expect(await resolveSecret(`connection:${row.connectionId}`, { tenantId: WS })).toBeNull();
   });
@@ -438,11 +501,14 @@ describe('ADR 0780 D3 — revoke means revoked', () => {
     await createSecretConnection({ tenantId: WS, provider: 'runway', kind: 'api_key', secret: 'rw-x-clean-12345', scope: 'user', userId: x });
     secretFault.beforeRemove = async (ref) => { if (ref === `connection:${stuck.connectionId}`) throw new Error('still stuck'); };
     try {
-      await expect(eraseSubjectConnections(WS, x)).resolves.toBeTruthy();
+      await expect(eraseSubjectConnections(WS, x)).resolves.toEqual({ rowsTouched: 1 });
+      // Non-vacuity: Y's removal really is still stuck while X's DSAR succeeded.
+      expect((await sweepSecretTombstones(WS)).pending).toBeGreaterThan(0);
     } finally {
       secretFault.beforeRemove = null;
     }
-    await sweepSecretTombstones(WS);
+    expect((await sweepSecretTombstones(WS)).pending).toBe(0);
+    expect(await resolveSecret(`connection:${stuck.connectionId}`, { tenantId: WS })).toBeNull();
   });
 
   it('leg 11b: revoke removes the ROW before the secret', async () => {
@@ -567,10 +633,22 @@ describe('ADR 0780 D5 — inbound targets a workflow this workspace may run', ()
     const row = await createSecretConnection({ tenantId: WS, provider: 'slack', kind: 'bearer', secret: 'xoxb-inbound-1234', scope: 'user', userId: userIdFor(WS, EDITOR) });
     const put = (body: Record<string, unknown>) => call(`${C}/${encodeURIComponent(row.connectionId)}/inbound`, editor, 'PUT', body);
     const secret = 's'.repeat(32);
-    expect((await put({ workflowId: 'b780-does-not-exist', signingSecret: secret })).status).toBe(400);
-    expect((await put({ workflowId: foreign.body.workflowId, signingSecret: secret })).status).toBe(400);
-    expect((await put({ workflowId: owned.body.workflowId, signingSecret: 'short' })).status).toBe(400);
-    const ok = await put({ workflowId: owned.body.workflowId, signingSecret: secret });
+    const ownedId = text(field(owned.body, 'workflowId'));
+    const foreignId = text(field(foreign.body, 'workflowId'));
+    expect(ownedId).not.toBe('');
+    expect(foreignId).not.toBe('');
+    // Each refusal is the one named (they share `validation_error`, so code alone cannot tell them apart).
+    const unknown = await put({ workflowId: 'b780-does-not-exist', signingSecret: secret });
+    expect(unknown.status).toBe(400);
+    expect(field(unknown.body, 'message')).toBe("Workflow 'b780-does-not-exist' was not found in this workspace.");
+    const foreignPut = await put({ workflowId: foreignId, signingSecret: secret });
+    expect(foreignPut.status).toBe(400);
+    expect(field(foreignPut.body, 'details', 'field')).toBe('workflowId');
+    expect(field(foreignPut.body, 'message')).toContain('was not found in this workspace.');
+    const short = await put({ workflowId: ownedId, signingSecret: 'short' });
+    expect(short.status).toBe(400);
+    expect(field(short.body, 'details', 'field')).toBe('signingSecret');
+    const ok = await put({ workflowId: ownedId, signingSecret: secret });
     expect(ok.status, JSON.stringify(ok.body)).toBe(201);
   });
 
@@ -589,10 +667,10 @@ describe('ADR 0780 D5 — inbound targets a workflow this workspace may run', ()
       const signature = `v0=${createHmac('sha256', secret).update(`v0:${ts}:${rawBody}`).digest('hex')}`;
       return handleInboundEvent({ storage, hostSuite }, { connectionId: row.connectionId, rawBody, body: JSON.parse(rawBody) as Record<string, unknown>, headers: { timestamp: ts, signature }, now: Date.now() });
     };
-    const refused = await fire(foreign.body.workflowId, `Ev-foreign-${Date.now()}`);
+    const refused = await fire(text(field(foreign.body, 'workflowId')), `Ev-foreign-${Date.now()}`);
     expect(refused.status).toBe('accepted');
     expect((refused as { runId?: string | null }).runId, 'another workspace\'s workflow must not run here').toBeNull();
-    const fired = await fire(owned.body.workflowId, `Ev-owned-${Date.now()}`);
+    const fired = await fire(text(field(owned.body, 'workflowId')), `Ev-owned-${Date.now()}`);
     expect((fired as { runId?: string | null }).runId, 'non-vacuity: an owned workflow does fire').toBeTruthy();
   });
 
@@ -601,6 +679,8 @@ describe('ADR 0780 D5 — inbound targets a workflow this workspace may run', ()
     const viewer = await login(VIEWER, WS);
     const res = await call(`${C}/${encodeURIComponent(row.connectionId)}/inbound`, viewer, 'PUT', { workflowId: 'anything', signingSecret: 's'.repeat(32) });
     expect(res.status, JSON.stringify(res.body)).toBe(403);
+    // The tenant-write refusal, not the owner check (the Viewer OWNS this row).
+    expect(field(res.body, 'details', 'requiredScope')).toBe('workspace:write');
     expect((await listConnections(WS, userIdFor(WS, VIEWER))).some((c) => c.connectionId === row.connectionId)).toBe(true);
   });
 });
@@ -626,7 +706,8 @@ describe('ADR 0780 D2 — the credential-interrupt connect lane under a legacy r
     expect([200, 201], JSON.stringify(reg.body)).toContain(reg.status);
     const started = await call('/runs', editor, 'POST', { workflowId: wf, inputs: {} });
     expect([200, 201, 202], JSON.stringify(started.body)).toContain(started.status);
-    const runId = started.body.runId as string;
+    const runId = text(field(started.body, 'runId'));
+    expect(runId).not.toBe('');
     await vi.waitFor(async () => expect((await storage.getRun(bareRunId(runId)))?.status).toBe('waiting-input'), { timeout: 5000, interval: 50 });
     // The #4215 shape: the run carries the legacy principal, the caller presents `user:`.
     const run = await storage.getRun(bareRunId(runId));

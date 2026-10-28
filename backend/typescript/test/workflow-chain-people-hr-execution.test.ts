@@ -15,7 +15,10 @@
  *     REAL executor fails at `plan` before it can ever reach the gate or the
  *     connectors. Mode: real-executor HONEST FAILURE (mirrors
  *     `workflow-chain-exec-ops-execution.test.ts`) — `error.code ===
- *     'provider_not_supported'`, nothing downstream ever runs.
+ *     'provider_not_supported'`, nothing downstream ever runs. CORRECTION: the
+ *     pack now templates `provider: "{{params.provider}}"` (ADR 0903), so a
+ *     credential-less tenant fails at `plan` with `openwop-app.byok_required`
+ *     (see the §Correction at the assertion).
  *   - `people-hr.offboarding`: the three roots (`deprovision`, `accessTickets`,
  *     `finalPay`) are NOT AI nodes — they run in parallel, feed `handoff`
  *     (AI), which gates `attest` (the approval gate). `accessTickets`
@@ -99,7 +102,7 @@ import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { getChain, expandChain } from '../src/host/workflowChainPackLoader.js';
 import { registerWorkflow } from '../src/host/workflowsRegistry.js';
 import { getNodeRegistry } from '../src/executor/nodeRegistry.js';
-import { buildGraph, buildNodeInputs } from '../src/executor/scheduler.js';
+import { buildGraph, buildNodeInputs, freshSnapshot, markCompleted } from '../src/executor/scheduler.js';
 import type { AiCallRequest, AiCallResult, NodeContext } from '../src/executor/types.js';
 
 let BASE: string;
@@ -129,11 +132,16 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
-interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res> }
+interface Res<T = unknown> { status: number; body: T }
+/** Each call site names the response shape it reads; the JSON boundary is the one
+ *  place an untyped body becomes typed. */
+interface Client {
+  get: <T = unknown>(p: string) => Promise<Res<T>>;
+  post: <T = unknown>(p: string, b?: unknown) => Promise<Res<T>>;
+}
 function client(): Client {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T,>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
@@ -141,10 +149,11 @@ function client(): Client {
     });
     const sc = getSetCookies(res.headers);
     for (const c of sc as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    // The one JSON-boundary cast: the caller's type parameter names the body it reads.
+    const out = (res.status === 204 ? undefined : await res.json().catch(() => undefined)) as T;
     return { status: res.status, body: out };
   };
-  return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b) };
+  return { get: <T,>(p: string) => call<T>('GET', p), post: <T,>(p: string, b?: unknown) => call<T>('POST', p, b) };
 }
 
 let n = 0;
@@ -153,7 +162,7 @@ async function ownerOrg(): Promise<{ owner: Client; orgId: string; tenantId: str
   const owner = client();
   const r = await owner.post('/host/openwop-app/test/login', { email: `hrchain-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   return { owner, orgId: org.body.orgId, tenantId };
 }
@@ -162,9 +171,9 @@ interface RunSnapshot { status: string; error?: { code: string; message: string 
 async function pollRun(owner: Client, runId: string): Promise<RunSnapshot> {
   let snap: RunSnapshot = { status: 'pending' };
   for (let i = 0; i < 80; i++) {
-    const r = await owner.get(`/runs/${runId}`);
+    const r = await owner.get<RunSnapshot>(`/runs/${runId}`);
     expect(r.status, JSON.stringify(r.body)).toBe(200);
-    snap = r.body as RunSnapshot;
+    snap = r.body;
     if (snap.status === 'completed' || snap.status === 'failed' || snap.status === 'cancelled' || snap.status.startsWith('waiting')) break;
     await new Promise((res) => setTimeout(res, 25));
   }
@@ -173,9 +182,9 @@ async function pollRun(owner: Client, runId: string): Promise<RunSnapshot> {
 
 interface BundleEvent { type?: string; nodeId?: string; payload?: Record<string, unknown> }
 async function bundleEvents(owner: Client, runId: string): Promise<BundleEvent[]> {
-  const b = await owner.get(`/runs/${runId}/debug-bundle`);
+  const b = await owner.get<{ events?: BundleEvent[] }>(`/runs/${runId}/debug-bundle`);
   expect(b.status, JSON.stringify(b.body)).toBe(200);
-  return (b.body.events as BundleEvent[]) ?? [];
+  return b.body.events ?? [];
 }
 function completedOutputs(events: BundleEvent[], nodeSuffix: string): Record<string, unknown> {
   const ev = events.find((e) => e.type === 'node.completed' && e.nodeId?.endsWith(`_${nodeSuffix}`));
@@ -222,9 +231,9 @@ describe('people-hr.offboarding — end-to-end execution (real executor, honest 
     const expanded = expandChain(found!.chain, { params });
     registerWorkflow(expanded);
 
-    const create = await owner.post('/runs', { workflowId: expanded.workflowId, inputs: params });
+    const create = await owner.post<{ runId: string }>('/runs', { workflowId: expanded.workflowId, inputs: params });
     expect(create.status, JSON.stringify(create.body)).toBe(201);
-    const runId = create.body.runId as string;
+    const runId = create.body.runId;
 
     const snap = await pollRun(owner, runId);
     expect(snap.status).toBe('failed');
@@ -259,9 +268,9 @@ describe('people-hr.onboarding — end-to-end execution (real executor, honest f
     const expanded = expandChain(found!.chain, { params });
     registerWorkflow(expanded);
 
-    const create = await owner.post('/runs', { workflowId: expanded.workflowId, inputs: params });
+    const create = await owner.post<{ runId: string }>('/runs', { workflowId: expanded.workflowId, inputs: params });
     expect(create.status, JSON.stringify(create.body)).toBe(201);
-    const runId = create.body.runId as string;
+    const runId = create.body.runId;
 
     const snap = await pollRun(owner, runId);
     expect(snap.status).toBe('failed');
@@ -289,7 +298,7 @@ describe('people-hr.onboarding — end-to-end execution (real executor, honest f
 /* ═══════════════ BUG PATTERN A regression proofs (buildNodeInputs) ═══════ */
 
 describe('people-hr — BUG PATTERN A regression proof: multi-fan-in port collision', () => {
-  it('people-hr.onboarding "track" merges itProvision + hris + tickets onto 3 distinct ports — and the real AI node sees all 3', async () => {
+  it('people-hr.onboarding "track" merges itProvision + hris + tickets + invite-host onto 4 distinct ports — and the real AI node sees them', async () => {
     const found = getChain('people-hr.onboarding');
     expect(found).toBeTruthy();
     const params = { newHireName: 'Riley Bug-A', newHireEmail: 'riley.buga@acme.test', role: 'Engineer', ticketingBaseUrl: '', ticketProject: 'HR' };
@@ -317,38 +326,31 @@ describe('people-hr — BUG PATTERN A regression proof: multi-fan-in port collis
     expect(ticketsResult.status, JSON.stringify(ticketsResult)).toBe('success');
     const ticketsOutputs: Record<string, unknown> = ticketsResult.status === 'success' ? ((ticketsResult.outputs ?? {}) as Record<string, unknown>) : {};
 
-    const snapshot = { order: [], nodeState: new Map<string, 'completed'>(), nodeOutputs: new Map<string, Record<string, unknown>>(), nodeErrors: new Map() };
+    const snapshot = freshSnapshot(expanded);
+    // `invite-host` (feature.orgs.nodes.invite, ADR 0622 D3) is the fourth inbound
+    // edge (`invite-host → track.inviteHost`); it sits behind the approval gate, so a
+    // representative completed output stands in, like `itProvision`'s.
+    const inviteHostOutput = { invited: true, inviteId: 'inv-hr-77' };
     const sources: Array<[string, Record<string, unknown>]> = [
       ['itProvision', itProvisionOutput],
       ['hris', hrisOutputs],
       ['tickets', ticketsOutputs],
+      ['invite-host', inviteHostOutput],
     ];
     for (const [suffix, output] of sources) {
-      snapshot.nodeState.set(nodeId(suffix), 'completed');
-      snapshot.nodeOutputs.set(nodeId(suffix), output);
+      markCompleted(nodeId(suffix), output, snapshot);
     }
 
     // THE FIX under test: `buildNodeInputs` is the exact scheduler function
     // BUG PATTERN A broke (executor/scheduler.ts). With the pack.json dot-
-    // notation ports, it resolves to 3 distinct keys — one per upstream source.
+    // notation ports, it resolves to 4 distinct keys — one per upstream source.
     const inputsByPort = buildNodeInputs(nodeId('track'), graph, snapshot, undefined);
-    expect(Object.keys(inputsByPort).sort()).toEqual(['hris', 'itProvision', 'tickets']);
+    expect(Object.keys(inputsByPort).sort()).toEqual(['hris', 'inviteHost', 'itProvision', 'tickets']);
     expect(inputsByPort.itProvision).toEqual(itProvisionOutput);
     expect(inputsByPort.hris).toEqual(hrisOutputs);
     expect(inputsByPort.tickets).toEqual(ticketsOutputs);
+    expect(inputsByPort.inviteHost).toEqual(inviteHostOutput);
 
-    // Regression proof: the SAME real `buildNodeInputs` against a simulated
-    // PRE-FIX edge shape (no `targetInput` at all — exactly what pack.json
-    // shipped with before this fix) collapses all 3 onto the scheduler's
-    // shared default port key, last-edge-wins: only `tickets` (the last of
-    // the 3 edges) survives.
-    const buggyGraph = buildGraph({
-      ...expanded,
-      edges: (expanded.edges ?? []).map((e) => (e.targetNodeId === nodeId('track') ? { ...e, targetInput: undefined } : e)),
-    });
-    const buggyInputs = buildNodeInputs(nodeId('track'), buggyGraph, snapshot, undefined);
-    expect(Object.keys(buggyInputs)).toEqual(['input']);
-    expect(buggyInputs.input).toEqual(ticketsOutputs); // itProvision + hris silently dropped, pre-fix
 
     // Downstream proof: the REAL core.ai.chatCompletion node (`toMessages`,
     // packs/core.openwop.ai/index.mjs) serializes a structured ctx.inputs
@@ -371,6 +373,7 @@ describe('people-hr — BUG PATTERN A regression proof: multi-fan-in port collis
     const serialized = JSON.stringify(capturedMessages);
     expect(serialized).toContain('m365-user-42'); // itProvision's marker
     expect(serialized).toContain('connected'); // hris + tickets output shape
+    expect(serialized).toContain('inv-hr-77'); // invite-host's marker
   });
 
   it('people-hr.offboarding "handoff" merges deprovision + accessTickets + finalPay onto 3 distinct ports', async () => {
@@ -398,15 +401,14 @@ describe('people-hr — BUG PATTERN A regression proof: multi-fan-in port collis
     expect(finalPayResult.status, JSON.stringify(finalPayResult)).toBe('success');
     const finalPayOutputs: Record<string, unknown> = finalPayResult.status === 'success' ? ((finalPayResult.outputs ?? {}) as Record<string, unknown>) : {};
 
-    const snapshot = { order: [], nodeState: new Map<string, 'completed'>(), nodeOutputs: new Map<string, Record<string, unknown>>(), nodeErrors: new Map() };
+    const snapshot = freshSnapshot(expanded);
     const sources: Array<[string, Record<string, unknown>]> = [
       ['deprovision', deprovisionOutput],
       ['accessTickets', accessTicketsOutputs],
       ['finalPay', finalPayOutputs],
     ];
     for (const [suffix, output] of sources) {
-      snapshot.nodeState.set(nodeId(suffix), 'completed');
-      snapshot.nodeOutputs.set(nodeId(suffix), output);
+      markCompleted(nodeId(suffix), output, snapshot);
     }
 
     const inputsByPort = buildNodeInputs(nodeId('handoff'), graph, snapshot, undefined);
@@ -415,15 +417,6 @@ describe('people-hr — BUG PATTERN A regression proof: multi-fan-in port collis
     expect(inputsByPort.accessTickets).toEqual(accessTicketsOutputs);
     expect(inputsByPort.finalPay).toEqual(finalPayOutputs);
 
-    // Regression proof — the pre-fix edge shape collapses to the last edge
-    // (`finalPay`) only.
-    const buggyGraph = buildGraph({
-      ...expanded,
-      edges: (expanded.edges ?? []).map((e) => (e.targetNodeId === nodeId('handoff') ? { ...e, targetInput: undefined } : e)),
-    });
-    const buggyInputs = buildNodeInputs(nodeId('handoff'), buggyGraph, snapshot, undefined);
-    expect(Object.keys(buggyInputs)).toEqual(['input']);
-    expect(buggyInputs.input).toEqual(finalPayOutputs); // deprovision + accessTickets silently dropped, pre-fix
   });
 
   it('people-hr.pto-routing "approve" merges policy + calendar onto 2 distinct ports — and preserves the real AI plan for the gate-preview artifact', async () => {
@@ -451,14 +444,13 @@ describe('people-hr — BUG PATTERN A regression proof: multi-fan-in port collis
     // limitation as the other two proofs' openapi-call node.
     const calendarOutput = { status: 200, headers: {}, body: { value: [] }, url: 'https://graph.microsoft.com/v1.0/me/calendarView', method: 'GET' };
 
-    const snapshot = { order: [], nodeState: new Map<string, 'completed'>(), nodeOutputs: new Map<string, Record<string, unknown>>(), nodeErrors: new Map() };
+    const snapshot = freshSnapshot(expanded);
     const sources: Array<[string, Record<string, unknown>]> = [
       ['policy', policyOutputs],
       ['calendar', calendarOutput],
     ];
     for (const [suffix, output] of sources) {
-      snapshot.nodeState.set(nodeId(suffix), 'completed');
-      snapshot.nodeOutputs.set(nodeId(suffix), output);
+      markCompleted(nodeId(suffix), output, snapshot);
     }
 
     const inputsByPort = buildNodeInputs(nodeId('approve'), graph, snapshot, undefined);
@@ -467,15 +459,32 @@ describe('people-hr — BUG PATTERN A regression proof: multi-fan-in port collis
     expect(inputsByPort.calendar).toEqual(calendarOutput);
     expect((inputsByPort.policy as { content?: string }).content).toBe('Eligible; low coverage risk.');
 
-    // Regression proof — the pre-fix edge shape collapses to the last edge
-    // (`calendar`) only, silently dropping the AI policy assessment the
-    // manager-approval gate's preview would have shown.
-    const buggyGraph = buildGraph({
-      ...expanded,
-      edges: (expanded.edges ?? []).map((e) => (e.targetNodeId === nodeId('approve') ? { ...e, targetInput: undefined } : e)),
-    });
-    const buggyInputs = buildNodeInputs(nodeId('approve'), buggyGraph, snapshot, undefined);
-    expect(Object.keys(buggyInputs)).toEqual(['input']);
-    expect(buggyInputs.input).toEqual(calendarOutput);
   });
+
+  // SCHED-FANIN-CLOBBER-1 (BLOCKED-ON-PRODUCT). The three cases above each used to
+  // end with a "regression proof" asserting that a BARE multi-fan-in (no
+  // `targetInput`) collapses to the LAST edge — i.e. they pinned the clobber as the
+  // contract. Nothing specifies it: `workflow-definition.schema.json` WorkflowEdge
+  // says only "Target input port key. Default 'input'", and
+  // `executor/scheduler.ts` `buildNodeInputs` (`out[targetPort] = value;`) silently
+  // overwrites an earlier edge's value on the shared port with no error. The
+  // steward ledger treats the portless class as a defect (WORKFLOWS-ASSESSMENT
+  // `ISWF-2`, `WF-KB-5`), and the packs were fixed one by one. The correct
+  // behaviour is that no upstream output is dropped without a trace; this pins it.
+  // Fix-probe `8fw5g4-hr-fanin-clobber-fix-r2` keeps both values and turns this red.
+  it.fails('a bare multi-fan-in keeps every upstream output instead of the last edge winning (SCHED-FANIN-CLOBBER-1)', () => {
+    const found = getChain('people-hr.onboarding');
+    expect(found).toBeTruthy();
+    const params = { newHireName: 'Riley Clobber', newHireEmail: 'riley.clobber@acme.test', role: 'Engineer', ticketingBaseUrl: '', ticketProject: 'HR' };
+    const expanded = expandChain(found!.chain, { params });
+    const trackId = expanded.nodes.find((nd) => nd.nodeId.endsWith('_track'))!.nodeId;
+    const bare = { ...expanded, edges: (expanded.edges ?? []).map((e) => (e.targetNodeId === trackId ? { ...e, targetInput: undefined } : e)) };
+    const snapshot = freshSnapshot(bare);
+    const inbound = (bare.edges ?? []).filter((e) => e.targetNodeId === trackId);
+    expect(inbound).toHaveLength(4);
+    inbound.forEach((e, i) => markCompleted(e.sourceNodeId, { marker: `upstream-${i}` }, snapshot));
+    const serialized = JSON.stringify(buildNodeInputs(trackId, buildGraph(bare), snapshot, undefined));
+    for (let i = 0; i < inbound.length; i += 1) expect(serialized).toContain(`upstream-${i}`);
+  });
+
 });

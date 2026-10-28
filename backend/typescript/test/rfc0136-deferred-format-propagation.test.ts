@@ -8,6 +8,11 @@
  * MUST NOT carry it into `configurableSchema` (req 8), the run-options validation
  * surface where a format-asserting validator would turn an advisory hint into a
  * run-rejection path (violating the absolute requirement 3).
+ *
+ * Each case looks its variable up by name (round 1 graded the filtered COUNTS as
+ * able to pass for the wrong variable). Over-HTTP twin for reqs 7/2/1:
+ * `chain-deferred-expand-seam.test.ts` › "inline chain → variables[] carries
+ * `format` iff minted"; this unit file is the only witness of reqs 6 and 8.
  */
 import { describe, it, expect } from 'vitest';
 import { expandChain, type WorkflowChain } from '../src/host/workflowChainPackLoader.js';
@@ -35,42 +40,50 @@ describe('RFC 0136 — deferred-mode chain-param `format` propagation (step 4)',
     { deferred: true },
   );
   const vars = def.variables ?? [];
+  // Each materialized variable is `<chain-slug>_<expansionId>_<param>`; the five
+  // param names here share no suffix, so a suffix lookup names exactly one var.
+  const varOf = (param: string) => {
+    const hits = vars.filter((v) => v.name.endsWith(`_${param}`));
+    expect(hits, param).toHaveLength(1);
+    return hits[0]!;
+  };
 
   it('req 7 — a string parameter’s `format` is copied verbatim onto the WorkflowVariable', () => {
-    // recipientEmail + apiKey both declare format:"email"
-    const emailVars = vars.filter((v) => v.format === 'email');
-    expect(emailVars.length).toBe(2);
-    for (const v of emailVars) expect(v.type).toBe('string');
+    expect(vars).toHaveLength(5);
+    expect(varOf('recipientEmail')).toMatchObject({ type: 'string', format: 'email' });
   });
 
   it('req 2 — an UNRECOGNISED `format` is still copied verbatim (never validated at mint)', () => {
-    expect(vars.some((v) => v.format === 'not-a-real-format')).toBe(true);
+    expect(varOf('weird')).toMatchObject({ type: 'string', format: 'not-a-real-format' });
   });
 
   it('req 1 — `format` on a NON-string parameter is NOT propagated', () => {
-    const numberVars = vars.filter((v) => v.type === 'number');
-    expect(numberVars.length).toBe(1); // `count`
-    expect(numberVars.every((v) => !('format' in v))).toBe(true);
+    const count = varOf('count');
+    expect(count.type).toBe('number');
+    expect(count).not.toHaveProperty('format');
   });
 
   it('req 6 — `format` composes with `sensitive` (both present, no interaction)', () => {
-    const both = vars.filter((v) => v.sensitive === true && v.format === 'email');
-    expect(both.length).toBe(1); // apiKey
+    expect(varOf('apiKey')).toMatchObject({ type: 'string', format: 'email', sensitive: true });
   });
 
   it('a string parameter with no declared `format` mints no `format`', () => {
-    // `plain` is the only string var without format; every var either has a
-    // format we declared or is `plain`.
-    const noFormat = vars.filter((v) => v.type === 'string' && !('format' in v));
-    expect(noFormat.length).toBe(1);
+    const plain = varOf('plain');
+    expect(plain.type).toBe('string');
+    expect(plain).not.toHaveProperty('format');
   });
 
   it('req 8 — `format` is NOT propagated into `configurableSchema` (the validation surface)', () => {
-    const cs = (def as { configurableSchema?: { properties?: Record<string, Record<string, unknown>> } })
-      .configurableSchema;
-    expect(cs?.properties).toBeTruthy();
-    for (const prop of Object.values(cs!.properties!)) {
-      expect(prop).not.toHaveProperty('format');
-    }
+    // The whole schema, literally: bare names, `type` only, no `format` anywhere.
+    expect(def.configurableSchema).toEqual({
+      type: 'object',
+      properties: {
+        recipientEmail: { type: 'string' },
+        weird: { type: 'string' },
+        count: { type: 'number' },
+        apiKey: { type: 'string' },
+        plain: { type: 'string' },
+      },
+    });
   });
 });

@@ -1,43 +1,45 @@
 /**
- * ADR 0123 Phase 1c — tenant leaderboard service.
+ * Tenant leaderboard service (ADR 0123 Phase 1c, rebuilt by ADR 0986 D2/D3).
  *
- * Aggregates a tenant's `MessageFeedback` into a per-model win-rate + Elo ranking
- * (`combineLeaderboard`). The feedback→model JOIN (a rated message's producing
- * model) is an INJECTED resolver — the route binds it to the message-meta lookup;
- * tests inject a stub. A message whose model can't be resolved is dropped (it can't
- * be attributed), keeping the ranking honest.
+ * Reads the tenant's ratings and ranks those the SERVER attributed to a model.
+ * A rating is attributed when it is recorded (`resolveRatingAttribution`, the
+ * exchange's per-turn row); a legacy row recorded before that gets the same
+ * lookup once here. Nothing reads client-written message meta.
  *
- * @see docs/adr/0123-eval-feedback-leaderboard.md
+ * Every rating that still names no model is COUNTED (`coverage.unattributed`),
+ * so the page can say how much of the signal it could not rank instead of
+ * reading as "no ratings yet".
+ *
+ * @see docs/adr/0986-evals-attributed-leaderboard-and-bound-arena.md
  */
 import { listFeedbackForTenant } from '../../host/messageFeedbackStore.js';
-import { combineLeaderboard, type EvalModelRating } from './leaderboard.js';
+import { resolveRatingAttribution, type ServedModel } from '../../host/turnAttribution.js';
+import { combineLeaderboard, type ModelRating, type RatedTurn } from './leaderboard.js';
 
-/** Resolve the producing model for a rated message, or null if unattributable. */
-export type ModelResolver = (conversationId: string, messageId: string) => Promise<string | null> | (string | null);
-
-/** CONV-1: bound the concurrent model-resolution fan-out so a large-feedback tenant can't
- *  exhaust the storage pool (the prior code was a sequential N+1; unbounded Promise.all
- *  would burst O(unique-messages) reads at once). Analytics read — pool-safety over speed. */
+/** Bound the legacy-row lookups so a large tenant cannot burst the storage pool. */
 const RESOLVE_CONCURRENCY = 10;
 
-export async function buildTenantLeaderboard(tenantId: string, resolveModel: ModelResolver): Promise<EvalModelRating[]> {
+export interface LeaderboardCoverage { attributed: number; unattributed: number }
+
+export async function buildTenantLeaderboard(tenantId: string): Promise<{ leaderboard: ModelRating[]; coverage: LeaderboardCoverage }> {
   const rows = await listFeedbackForTenant(tenantId);
-  // DEDUPE unique (conversation,message) keys — re-ratings reference the same message, so
-  // they collapse to one resolve. Tab-separated (ids don't contain a tab).
-  const uniqueKeys = [...new Set(rows.map((f) => `${f.conversationId}\t${f.messageId}`))];
-  const modelByKey = new Map<string, string | null>();
-  for (let i = 0; i < uniqueKeys.length; i += RESOLVE_CONCURRENCY) {
-    const resolved = await Promise.all(uniqueKeys.slice(i, i + RESOLVE_CONCURRENCY).map(async (key) => {
-      const [conversationId, messageId] = key.split('\t');
-      return [key, await resolveModel(conversationId!, messageId!)] as const;
+  // Only rows recorded before ADR 0986 — a row checked at write is never re-read,
+  // so forged or unattributable ratings cannot make every admin read slower.
+  const legacy = rows.filter((f) => !f.attribution && !f.attributionChecked);
+  const resolved = new Map<string, ServedModel | null>();
+  for (let i = 0; i < legacy.length; i += RESOLVE_CONCURRENCY) {
+    await Promise.all(legacy.slice(i, i + RESOLVE_CONCURRENCY).map(async (f) => {
+      const key = `${f.conversationId}\t${f.messageId}`;
+      if (resolved.has(key)) return;
+      resolved.set(key, (await resolveRatingAttribution(tenantId, f.conversationId, f.messageId))?.served ?? null);
     }));
-    for (const [key, model] of resolved) modelByKey.set(key, model);
   }
-  const rated: Array<{ model: string; rating: 'up' | 'down' | 'neutral' }> = [];
+  const rated: RatedTurn[] = [];
+  let unattributed = 0;
   for (const f of rows) {
-    const model = modelByKey.get(`${f.conversationId}\t${f.messageId}`);
-    if (!model) continue; // unattributable → dropped (honest)
-    rated.push({ model, rating: f.rating });
+    const served = f.attribution ?? resolved.get(`${f.conversationId}\t${f.messageId}`) ?? null;
+    if (!served) { unattributed += 1; continue; }
+    rated.push({ provider: served.provider, model: served.model, ...(served.managed ? { managed: true } : {}), rating: f.rating, rater: f.subjectRef });
   }
-  return combineLeaderboard(rated);
+  return { leaderboard: combineLeaderboard(rated), coverage: { attributed: rated.length, unattributed } };
 }

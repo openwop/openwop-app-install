@@ -15,7 +15,7 @@
 import { randomUUID } from 'node:crypto';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { OpenwopError } from '../../types.js';
-import { cleanString } from '../../host/boundedStrings.js';
+import { cleanContent } from '../../host/boundedStrings.js';
 
 export interface Review {
   reviewId: string;
@@ -93,7 +93,7 @@ export async function upsertReview(input: {
   authorId: string;
 }): Promise<Review> {
   const rating = requireRating(input.rating);
-  const body = cleanString(input.body, MAX.body) || undefined;
+  const body = cleanContent(input.body, MAX.body, 'body') || undefined;
   const now = new Date().toISOString();
 
   // MPL-8 — bounded (see `listReviews`). The duplicate check was the third

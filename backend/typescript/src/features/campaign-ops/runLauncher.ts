@@ -19,7 +19,7 @@ export const CHANGE_REQUEST_CHAIN_ID = 'campaign-ops.change-request';
 
 export async function startChangeRequestRun(
   deps: { storage: Storage; hostSuite: HostAdapterSuite },
-  input: { tenantId: string; orgId: string; requestId: string; version: number; causedBy: string; personalTenant?: string },
+  input: { tenantId: string; orgId: string; requestId: string; version: number; causedBy: string; personalTenant?: string; metadata?: Record<string, unknown> },
 ): Promise<string> {
   const runId = randomUUID();
   const started = await startWorkflowRun(deps, {
@@ -27,7 +27,8 @@ export async function startChangeRequestRun(
     workflowId: CHANGE_REQUEST_CHAIN_ID,
     runId,
     inputs: { orgId: input.orgId, requestId: input.requestId, version: input.version },
-    metadata: { [CAMPAIGN_OPS_RUN_STAMP]: { orgId: input.orgId, requestId: input.requestId, requestVersion: input.version } },
+    // ADR 0962 P2 — extra provenance (an outside agent's request) never overrides the stamp.
+    metadata: { ...(input.metadata ?? {}), [CAMPAIGN_OPS_RUN_STAMP]: { orgId: input.orgId, requestId: input.requestId, requestVersion: input.version } },
     orgScopeSubject: input.causedBy,
     ...(input.personalTenant ? { personalTenant: input.personalTenant } : {}),
   });

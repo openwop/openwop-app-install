@@ -1,12 +1,20 @@
 {
   "name": "vendor.openwop-app.email.agents",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "kind": "node",
-  "description": "Email feature agent pack — a copywriter agent that drafts/optimizes campaign subject + body (the baseline's email.generate / email.optimize). Tool-allowlisted to the registered openwop:email.* chat tools (get-campaign read + save-draft write); it drafts copy, it does not send. Mirrors vendor.openwop-app.kb.agents.",
+  "description": "Email feature agent pack — a copywriter agent that drafts/optimizes campaign subject + body (the baseline's email.generate / email.optimize). Tool-allowlisted to the registered openwop:email.* chat tools (get-campaign read, save-draft write, submit-for-review write); it drafts copy and may submit a draft for review, but it can never approve or send. Mirrors vendor.openwop-app.kb.agents.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
-  "keywords": ["feature", "email", "agent", "copywriter", "marketing"],
-  "engines": { "openwop": ">=1.1.0 <3.0.0" },
+  "keywords": [
+    "feature",
+    "email",
+    "agent",
+    "copywriter",
+    "marketing"
+  ],
+  "engines": {
+    "openwop": ">=1.1.0 <3.0.0"
+  },
   "peerDependencies": {
     "aiProviders": "supported",
     "agents.manifestRuntime": "supported"
@@ -16,16 +24,26 @@
       "agentId": "vendor.openwop-app.email.agents.copywriter",
       "persona": "GENERAL",
       "label": "Email Copywriter",
-      "description": "Drafts and optimizes marketing campaign copy (subject line + body, with {{contact.*}} merge fields). Reads existing drafts + templates for style via openwop:email.get-campaign and persists the copy into a DRAFT campaign via openwop:email.save-draft. Drafts copy only — it does NOT send (no send tool in its allowlist, by design).",
+      "description": "Drafts and optimizes marketing campaign copy (subject line + body, with {{contact.*}} merge fields). Reads existing drafts + templates for style via openwop:email.get-campaign, persists the copy into a DRAFT campaign via openwop:email.save-draft, and can submit a draft for send review via openwop:email.submit-for-review. It can never approve or send (no approve or send tool in its allowlist, by design).",
       "modelClass": "general",
       "systemPromptRef": "prompts/email-copywriter.md",
       "toolAllowlist": [
         "openwop:email.get-campaign",
-        "openwop:email.save-draft"
+        "openwop:email.save-draft",
+        "openwop:email.submit-for-review"
       ],
-      "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
-      "confidence": { "defaultThreshold": 0.6 }
+      "memoryShape": {
+        "scratchpad": true,
+        "conversation": false,
+        "longTerm": false
+      },
+      "confidence": {
+        "defaultThreshold": 0.6
+      }
     }
   ],
-  "runtime": { "language": "remote", "entry": "pack.json" }
+  "runtime": {
+    "language": "remote",
+    "entry": "pack.json"
+  }
 }

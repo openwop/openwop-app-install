@@ -15,9 +15,14 @@
  *
  * The trigger pack is mounted from the repo's `packs/` tree by
  * `ensureLocalPacksMounted()` during `createApp`.
+ *
+ * Protected: the advertised `host.triggers` surface (hostSurfaceRegistry.ts).
+ * What breaks if this goes red: trigger nodes see empty data, or a webhook
+ * reply is never recorded. Runs are awaited on their terminal status
+ * (`vi.waitFor`), and every case asserts the run COMPLETED.
  */
 
-import { describe, expect, it, beforeAll, afterAll } from 'vitest';
+import { describe, expect, it, beforeAll, afterAll, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
@@ -59,11 +64,14 @@ async function runToCompletion(workflowId: string, body: Record<string, unknown>
   const create = await jsonFetch<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({ workflowId, ...body }) });
   expect(create.status).toBe(201);
   const { runId } = create.body;
-  for (let i = 0; i < 40; i++) {
-    await new Promise((r) => setTimeout(r, 25));
-    const snap = await jsonFetch<{ status: string }>(`/runs/${runId}`);
-    if (['completed', 'failed', 'cancelled'].includes(snap.body.status)) break;
-  }
+  // Wait for the real settle signal — a terminal run status — rather than a
+  // fixed 25 ms × 40 poll that ran out on a loaded machine (wave 61).
+  let status = '';
+  await vi.waitFor(async () => {
+    status = (await jsonFetch<{ status: string }>(`/runs/${runId}`)).body.status;
+    expect(['completed', 'failed', 'cancelled']).toContain(status);
+  }, { timeout: 10_000, interval: 25 });
+  expect(status).toBe('completed');
   const bundle = await jsonFetch<BundleBody>(`/host/openwop-app/runs/${bareRunId(runId)}/debug-bundle`);
   expect(bundle.status).toBe(200);
   return bundle.body.events ?? [];

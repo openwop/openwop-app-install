@@ -890,9 +890,13 @@ async function main(): Promise<void> {
     const { issueApiKey } = await import('../src/features/developer-keys/apiKeyService.js');
     process.env.OPENWOP_TEST_LOW_SCOPE_KEY = (await issueApiKey({
       tenantId: 'conformance-low-scope',
-      name: 'conformance low-scope (runs:read only)',
+      name: 'conformance low-scope (runs:read, proposals:read/write)',
       createdBy: 'user:conformance-harness',
-      scopes: ['runs:read'],
+      // ADR 0972 D10 — RFC 0249's unscoped-apply leg needs a key holding the
+      // proposal read/write scopes but NOT `proposals:apply`. The key-lane
+      // scope check runs before any load, so the separate tenant does not turn
+      // that 403 into a foreign-tenant 404.
+      scopes: ['runs:read', 'proposals:read', 'proposals:write'],
     })).token;
   }
 

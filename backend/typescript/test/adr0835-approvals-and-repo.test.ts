@@ -8,6 +8,12 @@
  *    emits — into `apply-repair.approval`, and the node never read it. A copy
  *    whose review edge is deleted in the builder wrote the candidate unreviewed.
  *  - S8: `.` / `..` passed `REPO_NAME_RE` and were spliced into GitHub paths.
+ *
+ * TST-BWA-2 (grade-tests w62): each apply-repair case owns its `writes` log (the shared
+ * array made the file order-dependent under shuffle). Red when `isApproved` drops
+ * `accept` or admits `override`, when apply-repair's approval guard is bypassed or drops
+ * `accept`, when the chain wires `review.approved` instead of `review`, or when
+ * `REPO_NAME_RE` loses its `(?!\.{1,2}$)` lookahead.
  */
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -46,13 +52,18 @@ describe('ADR 0835 D5 — both spellings of an approval are an approval (S6)', (
 
 describe('ADR 0835 D5 — apply-repair writes only an approved candidate (S7)', () => {
   const apply = appNodes.applyDesignRepair as (ctx: Record<string, unknown>) => Promise<unknown>;
-  const writes: unknown[] = [];
-  const ctx = (approval: unknown): Record<string, unknown> => ({
-    inputs: { artifact: { payload: { name: 'A', screens: [] } }, canvasId: 'c1', baseVersion: 2, ...(approval === undefined ? {} : { approval }) },
-    features: { 'app-builder': { applyRepair: async (a: unknown) => { writes.push(a); return { canvasId: 'c1', newVersion: 3 }; } } },
-  });
+  /** A fresh write log per case, so no case reads another's writes. */
+  const harness = () => {
+    const writes: unknown[] = [];
+    const ctx = (approval: unknown): Record<string, unknown> => ({
+      inputs: { artifact: { payload: { name: 'A', screens: [] } }, canvasId: 'c1', baseVersion: 2, ...(approval === undefined ? {} : { approval }) },
+      features: { 'app-builder': { applyRepair: async (a: unknown) => { writes.push(a); return { canvasId: 'c1', newVersion: 3 }; } } },
+    });
+    return { writes, ctx };
+  };
 
   it('refuses without an approval, or with a reject', async () => {
+    const { writes, ctx } = harness();
     for (const approval of [undefined, { action: 'reject' }, 'yes']) {
       await expect(apply(ctx(approval)), JSON.stringify(approval)).rejects.toMatchObject({ code: 'approval_required' });
     }
@@ -60,8 +71,12 @@ describe('ADR 0835 D5 — apply-repair writes only an approved candidate (S7)', 
   });
 
   it('writes after approve / accept', async () => {
+    const { writes, ctx } = harness();
     for (const action of ['approve', 'accept']) await apply(ctx({ action }));
-    expect(writes).toHaveLength(2);
+    expect(writes).toEqual([
+      { canvasId: 'c1', expectedVersion: 2, app: { name: 'A', screens: [] } },
+      { canvasId: 'c1', expectedVersion: 2, app: { name: 'A', screens: [] } },
+    ]);
   });
 
   it('the repair chain feeds the review gate\'s decision into apply (no phantom port)', () => {

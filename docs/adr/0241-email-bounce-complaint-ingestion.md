@@ -71,6 +71,13 @@ NOT a re-use of the workflow-firing inbound-webhook seam.
 - Providers: **sendgrid + postmark** end-to-end (both are supported send
   providers; shipping only one leaves the other's users with a silently
   non-functional feature). **SES excluded** (not a supported send provider).
+
+  > **CORRECTED 2026-10-27 (ADR 0994 D4): SES is now included.** SES sends through
+  > the `smtp` provider (ADR 0193's follow-up), so "not a supported send provider"
+  > stopped being true, and campaigns sent that way had no bounce ingestion. `ses`
+  > is a `BounceProvider`: the endpoint verifies the SNS signature, pins the
+  > operator's topic ARN (the stored secret), confirms the subscription, and maps
+  > Permanent bounces and complaints to suppressions.
 - No wire/RFC: host-ext receive endpoint under `/v1/host/openwop-app/*`,
   non-normative, no capability advertisement (a receive sink, not advertised
   behavior).

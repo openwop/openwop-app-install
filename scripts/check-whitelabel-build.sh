@@ -10,20 +10,34 @@
 # guard (vite.config.ts aborts a prod build with no/default backend URL) stays intact.
 # A baked-in default would be a footgun (a forgotten value → a silently broken deploy).
 #
+# It first checks that the steward-only trees build-whitelabel-zip.sh strips are
+# really absent. That needs no npm, so it runs even when the build smoke is skipped.
+#
 # Usage: check-whitelabel-build.sh [path/to/openwop-demo-app.zip]
-# Skip:  OPENWOP_SKIP_WHITELABEL_SMOKE=1 (e.g. an environment without npm).
+# Skip:  OPENWOP_SKIP_WHITELABEL_SMOKE=1 skips the BUILD smoke (e.g. no npm), not the strip check.
 set -euo pipefail
-
-if [ "${OPENWOP_SKIP_WHITELABEL_SMOKE:-0}" = "1" ]; then
-  echo "[whitelabel-smoke] skipped (OPENWOP_SKIP_WHITELABEL_SMOKE=1)"
-  exit 0
-fi
 
 ROOT="$(git rev-parse --show-toplevel)"
 ZIP="${1:-$ROOT/dist-whitelabel/openwop-demo-app.zip}"
 SMOKE_URL="https://whitelabel-build-smoke.invalid"   # throwaway, inline only
 
 [ -f "$ZIP" ] || { echo "[whitelabel-smoke] FATAL: zip not found: $ZIP (run build-whitelabel-zip.sh first)"; exit 1; }
+
+# A stripped path that reaches the bundle reaches every adopter: the steward's meta
+# leaks, and a path the adopter also writes conflicts on every sync. One entry per
+# strip in build-whitelabel-zip.sh; the root-markdown allowlist has its own check.
+LEAKED="$(unzip -Z1 "$ZIP" | grep -E '^openwop-demo-app/(\.claude/|\.agents/|\.github/|docs/steward/|docs/research/|backend/typescript/test/steward/|\.hyve/|hyvemind\.json$)' || true)"
+if [ -n "$LEAKED" ]; then
+  echo "[whitelabel-smoke] ✗ the bundle ships paths build-whitelabel-zip.sh must strip:"
+  echo "$LEAKED" | head -20 | sed 's/^/    /'
+  exit 1
+fi
+echo "[whitelabel-smoke] ✓ no steward-only paths in the bundle"
+
+if [ "${OPENWOP_SKIP_WHITELABEL_SMOKE:-0}" = "1" ]; then
+  echo "[whitelabel-smoke] build smoke skipped (OPENWOP_SKIP_WHITELABEL_SMOKE=1)"
+  exit 0
+fi
 command -v npm >/dev/null 2>&1 || { echo "[whitelabel-smoke] FATAL: npm not on PATH"; exit 1; }
 
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT

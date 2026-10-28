@@ -132,6 +132,12 @@ export const MANAGEMENT_SCOPES = [
   // spends for, or cancels, everyone. Reserved to built-in admin/owner, never
   // mintable onto a custom role (the `host:byok:manage` reasoning).
   'host:billing:manage',
+  // ADR 0951 D4 — list and play back recorded visitor sessions (session replay).
+  // Individual recordings of a person, so a separate grant from reporting reads
+  // (`workspace:read` sees heat maps, never a recording). Reserved to built-in
+  // admin/owner; a custom role cannot carry it (management scopes are never
+  // mintable onto one — `isProtocolScope`).
+  'host:analytics:replay',
   // ADR 0788 D5 — switch MCP tools off for the workspace's external AI clients.
   // Workspace-wide policy over what every member's client can call. Reserved to
   // built-in admin/owner, never mintable onto a custom role.
@@ -212,7 +218,38 @@ export const MANAGEMENT_SCOPES = [
   'host:compensation:waive',
 ] as const;
 
-export type Scope = (typeof PROTOCOL_SCOPES)[number] | (typeof MANAGEMENT_SCOPES)[number];
+/**
+ * ADR 0947 D2 — host-extension scopes a CUSTOM ROLE (and a developer key) MAY carry.
+ *
+ * The third class, between the two above: `host:`-prefixed like the management
+ * scopes, so NOT the RFC 0049 protocol vocabulary (adding to `PROTOCOL_SCOPES` is a
+ * wire change — RFC 0154 delegated credentials validate against it), but unlike the
+ * management scopes it administers nothing, so an org may hand it to a role of its
+ * own making. Each entry MUST grant strictly less than `workspace:write` on one
+ * feature's own records; anything that administers access, credentials, billing or
+ * shared policy belongs in `MANAGEMENT_SCOPES` instead.
+ *
+ *  - `host:comments:write` — post, reply to, edit own and resolve comments (and the
+ *    proofing annotations that ride them). The "reviewer who may annotate but not
+ *    edit" permission ADR 0933 D8 recorded. Implied by `workspace:write` (see
+ *    `unionScopes`), never the reverse.
+ */
+export const DELEGABLE_HOST_SCOPES = ['host:comments:write'] as const;
+
+export type Scope = (typeof PROTOCOL_SCOPES)[number] | (typeof MANAGEMENT_SCOPES)[number] | (typeof DELEGABLE_HOST_SCOPES)[number];
+
+/** ADR 0947 D2 — a scope implied by another, applied wherever role scopes are
+ *  unioned. One direction only: writing the workspace includes commenting on it. */
+const IMPLIED_SCOPES: ReadonlyArray<readonly [Scope, Scope]> = [['workspace:write', 'host:comments:write']];
+
+/** A scope list plus what it implies (ADR 0947 D2). The ONE expansion: role unions
+ *  and a key's declared (narrowing) scopes both go through it, so a key that
+ *  declared `workspace:write` keeps commenting exactly as its issuer's role does. */
+export function withImpliedScopes<T extends string>(scopes: readonly T[]): Array<T | Scope> {
+  const set = new Set<string>(scopes);
+  for (const [has, implies] of IMPLIED_SCOPES) if (set.has(has)) set.add(implies);
+  return [...set] as Array<T | Scope>;
+}
 
 const PROTOCOL_SCOPES_SET: ReadonlySet<string> = new Set(PROTOCOL_SCOPES);
 /**
@@ -224,6 +261,13 @@ const PROTOCOL_SCOPES_SET: ReadonlySet<string> = new Set(PROTOCOL_SCOPES);
  */
 export function isProtocolScope(value: unknown): value is (typeof PROTOCOL_SCOPES)[number] {
   return typeof value === 'string' && PROTOCOL_SCOPES_SET.has(value);
+}
+
+const DELEGABLE_HOST_SCOPES_SET: ReadonlySet<string> = new Set(DELEGABLE_HOST_SCOPES);
+/** ADR 0947 D2 — what a custom role may carry: the RFC 0049 protocol scopes plus the
+ *  delegable host scopes. Never a management scope. */
+export function isCustomRoleScope(value: unknown): value is (typeof PROTOCOL_SCOPES)[number] | (typeof DELEGABLE_HOST_SCOPES)[number] {
+  return typeof value === 'string' && (PROTOCOL_SCOPES_SET.has(value) || DELEGABLE_HOST_SCOPES_SET.has(value));
 }
 
 // ── Built-in role catalog (role → scopes) ───────────────────────────────────
@@ -239,7 +283,7 @@ export interface AccessRole {
 }
 
 const VIEWER_SCOPES: Scope[] = ['manifest:read', 'runs:read', 'artifacts:read', 'audit:read', 'workspace:read'];
-const EDITOR_SCOPES: Scope[] = [...VIEWER_SCOPES, 'runs:create', 'runs:cancel', 'workspace:write', 'approvals:respond'];
+const EDITOR_SCOPES: Scope[] = [...VIEWER_SCOPES, 'runs:create', 'runs:cancel', 'workspace:write', 'approvals:respond', 'host:comments:write'];
 const ADMIN_SCOPES: Scope[] = [
   ...EDITOR_SCOPES,
   'webhooks:manage',
@@ -256,6 +300,8 @@ const ADMIN_SCOPES: Scope[] = [
   'host:byok:manage',
   // ADR 0786 D5 — admin/owner buy and manage the workspace's billing.
   'host:billing:manage',
+  // ADR 0951 D4 — admin/owner play back recorded sessions (every view is logged).
+  'host:analytics:replay',
   // ADR 0788 D5 — admin/owner control which MCP tools external AI clients reach.
   'host:mcp:manage',
   // ADR 0272 — admin/owner administer territory models + hold the visibility override.
@@ -1336,6 +1382,18 @@ export function isWorkspaceRootPair(orgId: string, tenantId: string): boolean {
   return orgId === tenantId;
 }
 
+/**
+ * ADR 0948 D8 (David, 2026-10-19, #5038) — a CLIENT org of an agency workspace:
+ * any non-root org of a shared `ws:` workspace (ADR 0921: the workspace is the
+ * agency, each sub-org is a client). Such an org is its own merchant: it never
+ * settles on the agency's (tenant's) Connect seller or on the platform account.
+ * Keyed on the org model, not on a `ClientAccount` row existing, so a missing
+ * row can never reopen the agency's lane. Shape-only: no read.
+ */
+export function isNonRootWorkspaceOrg(tenantId: string, orgId: string): boolean {
+  return isSharedWorkspaceTenant(tenantId) && !isWorkspaceRootPair(orgId, tenantId);
+}
+
 /** True iff `org` is a workspace root (its org id equals its tenant). */
 export function isWorkspaceOrg(org: Organization): boolean {
   return isWorkspaceRootPair(org.orgId, org.tenantId);
@@ -1804,7 +1862,9 @@ function unionScopes(roleIds: readonly string[], customById: ReadonlyMap<string,
       if (cr) for (const s of cr.scopes) set.add(s);
     }
   }
-  return [...set];
+  // ADR 0947 D2 — a custom role written before `host:comments:write` existed keeps
+  // commenting: `workspace:write` implies it (one direction only).
+  return withImpliedScopes([...set]) as Scope[];
 }
 
 // ── Effective-access resolution ───────────────────────────────────────────────
@@ -1893,8 +1953,11 @@ async function viaDelegation<T extends { scopes: Scope[] }>(
     const issuer = d.issuer.startsWith('bearer:')
       ? (isConfiguredOperatorIssuer(d.issuer) ? r.owner() : r.none())
       : isPersonalTenantId(tenantId) ? r.owner() : await r.direct(d.issuer);
-    next = isNarrowingDeclaration(d.declaredScopes)
-      ? r.narrow(issuer, issuer.scopes.filter((sc) => d.declaredScopes.includes(sc)))
+    // ADR 0947 D2 — a declared `workspace:write` covers what it implies, so a
+    // key minted before `host:comments:write` existed keeps commenting.
+    const declared = isNarrowingDeclaration(d.declaredScopes) ? new Set<string>(withImpliedScopes(d.declaredScopes)) : null;
+    next = declared
+      ? r.narrow(issuer, issuer.scopes.filter((sc) => declared.has(sc)))
       : issuer;
   }
   if (mode === 'enforce') return next;

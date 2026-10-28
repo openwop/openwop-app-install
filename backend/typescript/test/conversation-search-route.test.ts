@@ -7,8 +7,9 @@
  * "404 when off"). ADR 0043 visibility scoping is pinned once, in
  * `conversation-search-engine.test.ts`, on `searchVisibleConversations` — the ONE
  * helper this route and the agent tool share (XCH-HOLE-5) — not re-booted here.
- * Breaks if: the route stops being registered, drops the `role` param, or stops
- * reading `q` from a POST body (probes w24g1-route-*).
+ * Breaks if: the route stops being registered, drops the `role` param, stops
+ * reading `q` from a POST body (probes w24g1-route-*), drops `truncated`, or
+ * matches stored envelope fields the person never saw (ADR 0997).
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -42,7 +43,7 @@ async function appendMsg(sessionId: string, role: string, content: string): Prom
   });
 }
 
-interface SearchResp { hits: Array<{ conversationId: string; title: string; type?: string; messageId?: string; snippet: string; role?: string }> }
+interface SearchResp { hits: Array<{ conversationId: string; title: string; type?: string; messageId?: string; snippet: string; role?: string }>; truncated?: boolean }
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -104,5 +105,21 @@ describe('conversation-search route', () => {
     expect(r.status).toBe(200);
     expect(r.body.hits).toHaveLength(1);
     expect(r.body.hits[0]!.conversationId).toBe(s);
+  });
+
+  it('ADR 0997: every word must match, the body carries truncated, and only shown text matches', async () => {
+    const s = await newSession('Envelope route probe');
+    // The SPA's stored shape: the whole ChatMessage envelope (encodeMessageForStore).
+    await appendMsg(s, 'assistant', JSON.stringify({ role: 'assistant', content: 'the lighthouse budget is final', thoughts: 'quietly considering the lantern' }));
+
+    const both = await jsonFetch<SearchResp>('/host/openwop-app/chat/search?q=lighthouse%20budget');
+    expect(both.body.truncated).toBe(false);
+    expect(both.body.hits.map((h) => h.conversationId)).toEqual([s]);
+    expect(both.body.hits[0]!.snippet).toBe('the lighthouse budget is final');
+
+    // AND: one word that appears nowhere empties the result.
+    expect((await jsonFetch<SearchResp>('/host/openwop-app/chat/search?q=lighthouse%20zanzibar')).body.hits).toEqual([]);
+    // A thought is stored in the row but was never shown, so it does not match.
+    expect((await jsonFetch<SearchResp>('/host/openwop-app/chat/search?q=lantern')).body.hits).toEqual([]);
   });
 });

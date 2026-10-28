@@ -4,6 +4,13 @@
  *  (one owner, deterministic id), makes only capability-true claims (no
  *  fabricated certifications), carries the operator placeholders, and links the
  *  existing policy pages instead of duplicating them.
+ *  P2: the audit-chain export is keyed by the CALLER's tenant only.
+ *
+ * TST-BQR-15. Red when: the trust seed makes a certification claim; the export
+ * includes another tenant's chain rows (JSONL or anonymous caller); the CSV
+ * cell stops RFC-4180 quoting. Honest ceiling: `verified` is true for every
+ * valid chain, so a hard-coded `verified: true` is indistinguishable here
+ * (no broken chain is seeded — outside this file's claim).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -116,9 +123,11 @@ describe('ADR 0416 P2 — tenant audit-chain export', () => {
     expect(proof.proof).toBe(true);
     expect(proof.tenantId).toBe(tenantId);
     expect(proof.verified).toBe(true);
-    expect((proof.head as { seq: number }).seq).toBeGreaterThanOrEqual(2);
+    expect((proof.head as { seq: number }).seq).toBe(2); // a fresh tenant + exactly our two appends
     const entries = lines.slice(1);
-    expect(entries.length).toBe(proof.entries);
+    // The genesis row + our two — the foreign tenant's append is absent.
+    expect(entries.map((e) => [e.kind, e.seq])).toEqual([['genesis', 0], ['test.event', 1], ['test.event', 2]]);
+    expect(proof.entries).toBe(3);
     for (const e of entries) {
       expect(e.tenantId).toBe(tenantId); // isolation — no foreign rows
       expect(typeof e.entryHash).toBe('string');
@@ -135,7 +144,7 @@ describe('ADR 0416 P2 — tenant audit-chain export', () => {
     expect(r.status).toBe(200);
     expect(r.headers.get('content-type')).toContain('text/csv');
     expect(r.headers.get('x-audit-verified')).toBe('true');
-    expect(Number(r.headers.get('x-audit-head-seq'))).toBeGreaterThanOrEqual(1);
+    expect(r.headers.get('x-audit-head-seq')).toBe('1');
     expect(r.headers.get('x-audit-head-hash')).toMatch(/^[0-9a-f]{64}$/);
     const [header] = r.text.split('\r\n');
     expect(header).toBe('seq,at,kind,prevHash,entryHash,payload');

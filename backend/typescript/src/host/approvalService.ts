@@ -65,6 +65,10 @@ export const APPROVAL_KINDS = [
   'claude-code-permission',
   'campaign-change-set',
   'email-campaign-send',
+  'playbook-rollout',
+  // ADR 0945 × 0942 — a person's approval to publish ONE asset at ONE fidelity verdict.
+  'creative-publish-review',
+  'funnel-publish',
 ] as const;
 export type ApprovalKind = (typeof APPROVAL_KINDS)[number];
 
@@ -307,16 +311,19 @@ export interface PendingApproval {
    *  OVERWROTE the disclosure: the same unreviewed machine drafts, now
    *  presented as provenance-clean. Derived state cannot decay that way. */
   aiDraftedLocales?: string[];
-  /** ADR 0859 D3 — `content-publish` only: everyone who submitted this review cycle
+  /** ADR 0859 D3 / ADR 0905 — everyone who submitted a content/email review cycle
    *  (a UNION across resubmits, never overwritten — an overwrite let a second
    *  person's resubmit erase the first submitter and with it the separation-of-duties
-   *  check). Subject ids, erased by the `content-publish` redactor. */
+   *  check). Subject ids, erased by the owning kind's redactor. */
   submitters?: string[];
-  /** ADR 0859 D4 (code grade CMSA2CD-1) — members who CAUSED an actorless run that
+  /** ADR 0859 D4 / ADR 0905 — members who CAUSED an actorless run that
    *  submitted this review (a channel poster, a schedule's author). Counted by the
    *  separation-of-duties check ONLY — never told anything, because the causing
    *  member is not the run's actor (ADR 0832 D3). Unioned like `submitters`. */
   submitterCauses?: string[];
+  /** ADR 0942 — originating campaign run, for canonical requester/owner checks.
+   *  This is a reference, not `runId` (which names a run started by a claim). */
+  autonomySourceRunId?: string;
   /** ADR 0859 D5 (ADR 0594 D1) — `content-publish` only: the page's sections that
    *  resolve LIVE at read time (a registered content-section resolver), so the
    *  reviewer is told their approval does not freeze what those sections show.
@@ -338,6 +345,8 @@ export interface PendingApproval {
    *  `requiredApprovals: 1`, so the quorum path stays inert and the handler checks
    *  eligibility itself. `submitters` (above) records who asked. */
   emailSend?: {
+    /** Digest of the complete displayed send review, distinct from template contentHash. Legacy rows must be resubmitted. */
+    reviewHash?: string;
     campaignId: string;
     templateId: string;
     templateVersion: number;
@@ -349,9 +358,31 @@ export interface PendingApproval {
     templateName: string;
     subject: string;
     body: string;
-    format?: 'text' | 'markdown';
+    format?: 'text' | 'markdown' | 'sms';
     /** The recipient count at submit time — an ESTIMATE (membership resolves at send). */
     estimatedRecipients?: number;
+  };
+  /** Host-only ownership generation: even an identical resubmit changes the
+   *  exact CAS snapshot. Deliberately outside the displayed semantic digest. */
+  emailSendRevision?: string;
+  /** ADR 0948 P1b — when `kind: 'funnel-publish'`, this approval gates publishing ONE
+   *  funnel exactly as it was when requested: `digest` pins its slug, steps, offers,
+   *  campaign and completion CTA, so an edit after the request makes the decision
+   *  stale. Opaque to core; `features/funnels/funnelPublishApproval.ts` owns the shape,
+   *  the decide handler and the one publish function. */
+  funnelPublish?: {
+    funnelId: string;
+    funnelName: string;
+    slug: string;
+    digest: string;
+    stepCount: number;
+    /** The run that asked, when a workflow node asked (display + audit only). */
+    runId?: string;
+    /** ADR 0948 P1b × ADR 0942 — the autonomy gate this review carries: the policy
+     *  hash + rule that resolved `content.publish` to approve, or absent for a review
+     *  decided by the org's writers alone. Part of the row identity, so a review
+     *  without named approvers can never stand in for one that has them. */
+    gate?: string;
   };
   /** Campaign gap plan §5B B3 — when `kind: 'campaign-spend'`, this approval
    *  gates a live ad-platform spend action (dispatch or budget-set) that met the
@@ -359,7 +390,7 @@ export interface PendingApproval {
    *  are empty (no agent, no run); the decide path simply flips status — the ads
    *  adapter re-checks the record (keyed by `spendIdemKey`) on the next attempt.
    *  SAME queue + inbox + CAS resolve (ADR 0025 §4 "no new approval store"). */
-  spendKind?: 'publish' | 'budget' | 'audience' | 'order' | 'refund';
+  spendKind?: 'publish' | 'budget' | 'audience' | 'launch' | 'reallocation' | 'order' | 'refund';
   platform?: string;
   briefId?: string;
   adAccountId?: string;
@@ -369,6 +400,11 @@ export interface PendingApproval {
    *  `kind: 'warehouse-load'` (ADR 0292) as the per-batch idempotency key so an
    *  approve-then-rerun of the SAME warehouse batch proceeds and a `:fork` can't re-ask. */
   spendIdemKey?: string;
+  /** ADR 0945 × 0942 — when `kind: 'creative-publish-review'`: the asset, the
+   *  verdict it was approved AT, and the content hash the publish gate checks. */
+  assetId?: string;
+  verdictId?: string;
+  reviewHash?: string;
   /** ADR 0292 / CDP-D §6 — when `kind: 'warehouse-load'`, this approval gates a
    *  reverse-ETL BigQuery `insertAll` (the `warehouse.load` action policy defaults to
    *  `approval-required`, fail-closed). `rosterId`/`persona`/`workflowId` are empty (no
@@ -426,6 +462,14 @@ export interface PendingApproval {
   changeSetSourceVersions?: Record<string, { version: number; contentHash: string }>;
   /** The member who caused the proposal (separation of duties). A data subject. */
   changeSetProposedBy?: string;
+  /** ADR 0959 D7 — `playbook-rollout`: the rollout an approval names and the plan hash
+   *  the approver saw. `orgId` is the workspace ROOT (agency admins decide). Opaque to
+   *  core; the campaign-playbooks feature owns the checks (re-plan, separation of duties). */
+  playbookRolloutId?: string;
+  playbookId?: string;
+  playbookRolloutPlanHash?: string;
+  /** The agency admin who requested the rollout (separation of duties). A data subject. */
+  playbookRolloutRequestedBy?: string;
   /** The board card the proposal originated from (the "cited source"). */
   boardId?: string;
   cardId?: string;
@@ -470,6 +514,12 @@ export interface ApprovalPolicy {
   approverRoleRefs?: string[];
   /** How rejections fail the gate. Default: a single reject fails it. */
   rejectionPolicy?: 'any' | 'majority';
+  /** ADR 0942 D7 — a per-row SLA ladder that overrides the tenant's (`approvalSla.ts`). Expire = reject. */
+  sla?: { remindAfterMs?: number; escalateAfterMs?: number; expireAfterMs?: number };
+  /** ADR 0942 D7 — who the escalate rung notifies (roles on the row's org). */
+  escalateTo?: { roleRefs: string[] };
+  /** ADR 0942 D7 — `false` turns ADR 0198 delegation off for this row. */
+  allowDelegation?: boolean;
 }
 
 const approvals = new DurableCollection<PendingApproval>('approval', (a) => a.approvalId);
@@ -1312,19 +1362,24 @@ registerApprovalRedactor('connect-seller', { idFields: ['connectSeller.submitted
 // records (contact-merge — erased by the CRM feature per its retention
 // precedent) or tenant refs (page/order/strategy ids); the proposing agent's
 // `rosterId` (run-proposal) is agent identity handled by `deleteApprovalsForRoster`.
-for (const k of ['assistant-action', 'run-proposal', 'contact-merge', 'campaign-spend', 'commerce-spend', 'warehouse-load'] as const) {
+for (const k of ['assistant-action', 'run-proposal', 'contact-merge', 'commerce-spend', 'warehouse-load'] as const) {
   registerApprovalRedactor(k, { idFields: [], textFields: [] });
 }
 // ADR 0859 D3 — a content-publish row now records who SUBMITTED it (separation of
 // duties + the decision notice). A subject list, so the walk redacts per element.
 registerApprovalRedactor('content-publish', { idFields: ['submitters', 'submitterCauses'], textFields: [] });
+// ADR 0942 D10.2 — an autonomy-gated spend row records the run's requesters (subject ids).
+registerApprovalRedactor('campaign-spend', { idFields: ['submitters', 'submitterCauses'], textFields: [] });
+registerApprovalRedactor('creative-publish-review', { idFields: ['submitters'], textFields: [] }); // ADR 0945 × 0942
 // ADR 0845 D5 — a strategy activation now records its SUBMITTER (a subject id) for the
 // separation-of-duties check; it is erased like every other subject ref.
 // ADR 0905 D3 — the submitters are subject ids; the pinned subject/body is template
 // copy (not subject data) and the approver refs are scrubbed with every `policy`.
-registerApprovalRedactor('email-campaign-send', { idFields: ['submitters'], textFields: [] });
+registerApprovalRedactor('email-campaign-send', { idFields: ['submitters', 'submitterCauses'], textFields: [] });
+registerApprovalRedactor('funnel-publish', { idFields: ['submitters', 'submitterCauses'], textFields: [] });
 registerApprovalRedactor('strategy-activation', { idFields: ['strategyRequestedBy'], textFields: [] });
 registerApprovalRedactor('campaign-change-set', { idFields: ['changeSetProposedBy'], textFields: [] }); // ADR 0924
+registerApprovalRedactor('playbook-rollout', { idFields: ['playbookRolloutRequestedBy'], textFields: [] }); // ADR 0959
 // ADR 0473 — composed-workflow: the proposer is an AGENT (agentProfileId — not a
 // data subject), but the PROPOSAL originates from a human conversation:
 // `composedWorkflow.proposedByUserId` records that acting user (grade-data H1
@@ -1404,7 +1459,7 @@ export async function erasePlanProposalApprovalsForSubject(tenantId: string, sub
 
 export async function createCampaignSpendApproval(input: {
   tenantId: string;
-  spendKind: 'publish' | 'budget' | 'audience';
+  spendKind: 'publish' | 'budget' | 'audience' | 'launch' | 'reallocation';
   platform: string;
   adAccountId: string;
   briefId?: string;
@@ -1414,10 +1469,20 @@ export async function createCampaignSpendApproval(input: {
   proposal: string;
   /** Multi-approver / quorum policy (ADR 0070). Omit for the single-decision gate. */
   policy?: ApprovalPolicy;
+  /** ADR 0942 — the client org whose roles the policy's approvers resolve on. */
+  orgId?: string;
+  /** ADR 0942 D10.2 — the run's requesters, who may not decide (no sole-approver escape). */
+  submitters?: string[];
+  submitterCauses?: string[];
+  autonomySourceRunId?: string;
 }): Promise<PendingApproval> {
   const approval: PendingApproval = {
     approvalId: `appr:${randomUUID()}`,
     tenantId: input.tenantId,
+    ...(input.orgId ? { orgId: input.orgId } : {}),
+    ...(input.submitters?.length ? { submitters: input.submitters } : {}),
+    ...(input.submitterCauses?.length ? { submitterCauses: input.submitterCauses } : {}),
+    ...(input.autonomySourceRunId ? { autonomySourceRunId: input.autonomySourceRunId } : {}),
     rosterId: '',
     persona: '',
     workflowId: '',
@@ -1437,6 +1502,37 @@ export async function createCampaignSpendApproval(input: {
   await approvals.put(approval);
   await indexApproval(approval);
   return approval;
+}
+
+/** ADR 0945 × 0942 — a creative publish review, bound to a content hash. Written
+ *  only by `features/campaign-orchestration/creativeReview.ts`: the deterministic
+ *  immutable primary is confirmed before its binding index. Same queue and CAS resolve. */
+export async function insertCreativeReviewApproval(input: {
+  approvalId: string; tenantId: string; orgId: string; assetId: string; verdictId: string; reviewHash: string;
+  policy: ApprovalPolicy; submitters: string[]; proposal: string;
+}): Promise<PendingApproval> {
+  const owned = (row: PendingApproval): boolean => row.kind === 'creative-publish-review' && row.tenantId === input.tenantId
+    && row.orgId === input.orgId && row.assetId === input.assetId && row.verdictId === input.verdictId && row.reviewHash === input.reviewHash;
+  const existing = await approvals.get(input.approvalId);
+  if (existing) {
+    if (!owned(existing)) throw new OpenwopError('conflict', 'The review identity is already in use.', 409);
+    await indexApproval(existing);
+    return existing;
+  }
+  const approval: PendingApproval = {
+    approvalId: input.approvalId, tenantId: input.tenantId, orgId: input.orgId, submitters: input.submitters,
+    rosterId: '', persona: '', workflowId: '', kind: 'creative-publish-review',
+    assetId: input.assetId, verdictId: input.verdictId, reviewHash: input.reviewHash,
+    proposal: input.proposal, policy: input.policy, status: 'pending', createdAt: nowIso(),
+  };
+  if (await approvals.compareAndSwap(null, approval)) {
+    await indexApproval(approval);
+    return approval;
+  }
+  const confirmed = await approvals.get(input.approvalId);
+  if (!confirmed || !owned(confirmed)) throw new OpenwopError('conflict', 'The review could not be confirmed. Try again.', 409);
+  await indexApproval(confirmed);
+  return confirmed;
 }
 
 /** Create a commerce order/refund-value approval (ecommerce gap plan §5B B3) —
@@ -1661,6 +1757,7 @@ export async function createEmailSendApprovalOnce(input: {
   emailSend: NonNullable<PendingApproval['emailSend']>;
   proposal: string;
   submitters: string[];
+  submitterCauses?: string[];
   approverGroupRefs?: string[];
   approverRoleRefs?: string[];
 }): Promise<{ approval: PendingApproval; created: boolean }> {
@@ -1672,7 +1769,9 @@ export async function createEmailSendApprovalOnce(input: {
     kind: 'email-campaign-send',
     orgId: input.orgId,
     emailSend: input.emailSend,
+    emailSendRevision: randomUUID(),
     ...(input.submitters.length > 0 ? { submitters: [...new Set(input.submitters)] } : {}),
+    ...(input.submitterCauses?.length ? { submitterCauses: [...new Set(input.submitterCauses)] } : {}),
     proposal: input.proposal,
     ...(refs ? { policy: refs } : {}),
     status: 'pending',
@@ -1701,15 +1800,16 @@ function emailSendPolicy(input: { approverGroupRefs?: string[]; approverRoleRefs
  *  approver refs are re-stamped from the org's current setting. */
 export async function repinEmailSendApproval(
   approvalId: string,
-  patch: { emailSend: NonNullable<PendingApproval['emailSend']>; proposal: string; submitters: string[]; approverGroupRefs?: string[]; approverRoleRefs?: string[] },
+  patch: { emailSend: NonNullable<PendingApproval['emailSend']>; proposal: string; submitters: string[]; submitterCauses?: string[]; approverGroupRefs?: string[]; approverRoleRefs?: string[] },
 ): Promise<PendingApproval | null> {
   return withApprovalLock(approvalId, async () => {
     const cur = await approvals.get(approvalId);
     if (!cur || cur.kind !== 'email-campaign-send' || cur.status !== 'pending') return null;
     const submitters = [...new Set([...(cur.submitters ?? []), ...patch.submitters])];
+    const submitterCauses = [...new Set([...(cur.submitterCauses ?? []), ...(patch.submitterCauses ?? [])])];
     const refs = emailSendPolicy(patch);
     const { policy: _old, ...rest } = cur;
-    const next: PendingApproval = { ...rest, emailSend: patch.emailSend, proposal: patch.proposal, ...(submitters.length ? { submitters } : {}), ...(refs ? { policy: refs } : {}) };
+    const next: PendingApproval = { ...rest, emailSend: patch.emailSend, emailSendRevision: randomUUID(), proposal: patch.proposal, ...(submitters.length ? { submitters } : {}), ...(submitterCauses.length ? { submitterCauses } : {}), ...(refs ? { policy: refs } : {}) };
     if (!(await approvals.compareAndSwap(cur, next))) return null;
     return next;
   });
@@ -1721,11 +1821,71 @@ export type EmailSendApprovalHandler = (
   tenantId: string,
   approvalId: string,
   outcome: 'approved' | 'rejected',
-  opts: { decidedByUserId?: string; note?: string },
+  opts: { decidedByUserId?: string; note?: string; expectedContentHash?: string },
 ) => Promise<{ approval: PendingApproval; changed: boolean } | null>;
 let emailSendApprovalHandler: EmailSendApprovalHandler | null = null;
 export function registerEmailSendApprovalHandler(fn: EmailSendApprovalHandler): void { emailSendApprovalHandler = fn; }
 export function getEmailSendApprovalHandler(): EmailSendApprovalHandler | null { return emailSendApprovalHandler; }
+
+/**
+ * ADR 0948 P1b — create a `funnel-publish` approval on a DETERMINISTIC id with
+ * `compareAndSwap(null, …)` (the `createEmailSendApprovalOnce` shape): two requests for
+ * the same funnel content converge on one row, the loser gets the winner back
+ * (`created: false`) — whatever its status, so the CALLER checks it is still pending.
+ *
+ * `policy` + `autonomySourceRunId` (ADR 0948 P1b × ADR 0942): set ONLY when the
+ * autonomy chokepoint resolved `content.publish` to approve for a campaign-bound run.
+ * The shared eligibility check (`registerAutonomyPolicyRowEligibility`) then admits
+ * only the policy's named, non-requesting approvers, on top of the funnels decide
+ * handler's own `workspace:write` floor; the core quorum counts their votes.
+ */
+export async function createFunnelPublishApprovalOnce(input: {
+  tenantId: string;
+  orgId: string;
+  approvalId: string;
+  funnelPublish: NonNullable<PendingApproval['funnelPublish']>;
+  proposal: string;
+  submitters: string[];
+  /** ADR 0859 D4 — a member who CAUSED an actorless run: narrows separation of duties only. */
+  submitterCauses?: string[];
+  policy?: ApprovalPolicy;
+  autonomySourceRunId?: string;
+}): Promise<{ approval: PendingApproval; created: boolean }> {
+  const approval: PendingApproval = {
+    approvalId: input.approvalId,
+    tenantId: input.tenantId,
+    rosterId: '', persona: '', workflowId: '',
+    kind: 'funnel-publish',
+    orgId: input.orgId,
+    funnelPublish: input.funnelPublish,
+    ...(input.policy ? { policy: input.policy } : {}),
+    ...(input.autonomySourceRunId ? { autonomySourceRunId: input.autonomySourceRunId } : {}),
+    ...(input.submitters.length > 0 ? { submitters: [...new Set(input.submitters)] } : {}),
+    ...(input.submitterCauses && input.submitterCauses.length > 0 ? { submitterCauses: [...new Set(input.submitterCauses)] } : {}),
+    proposal: input.proposal,
+    status: 'pending',
+    createdAt: nowIso(),
+  };
+  if (await approvals.compareAndSwap(null, approval)) {
+    await indexApproval(approval);
+    return { approval, created: true };
+  }
+  const winner = await approvals.get(input.approvalId);
+  if (!winner || winner.kind !== 'funnel-publish' || winner.tenantId !== input.tenantId || winner.orgId !== input.orgId
+    || winner.funnelPublish?.funnelId !== input.funnelPublish.funnelId || winner.funnelPublish.digest !== input.funnelPublish.digest
+    || (winner.funnelPublish.gate ?? '') !== (input.funnelPublish.gate ?? '')) {
+    throw new OpenwopError('conflict', 'Could not confirm the publish review.', 409, { reason: 'review_unconfirmed' });
+  }
+  if (winner.status === 'pending') await indexApproval(winner);
+  return { approval: winner, created: false };
+}
+
+/** ADR 0948 P1b — the `funnel-publish` decide handler, registered by the funnels
+ *  FEATURE at boot (core owns the hook; feature → core only). */
+export type FunnelPublishApprovalHandler = EmailSendApprovalHandler;
+let funnelPublishApprovalHandler: FunnelPublishApprovalHandler | null = null;
+export function registerFunnelPublishApprovalHandler(fn: FunnelPublishApprovalHandler): void { funnelPublishApprovalHandler = fn; }
+export function getFunnelPublishApprovalHandler(): FunnelPublishApprovalHandler | null { return funnelPublishApprovalHandler; }
 
 /**
  * ADR 0458 §2.2 (correction, 2026-09-15) — the challenge-publish decision handler,
@@ -2127,6 +2287,62 @@ export async function createChangeSetApprovalOnce(input: {
     changeSetProposedBy: input.proposedBy,
     proposal: input.proposal,
     ...(input.policy ? { policy: input.policy } : {}),
+    status: 'pending',
+    createdAt: nowIso(),
+  };
+  if (await approvals.compareAndSwap(null, approval)) {
+    await indexApproval(approval);
+    return { approval, created: true };
+  }
+  const winner = await approvals.get(input.approvalId);
+  if (!winner) throw new OpenwopError('conflict', 'Could not create the review (concurrent write).', 409, { approvalId: input.approvalId });
+  if (winner.status === 'pending') await indexApproval(winner);
+  return { approval: winner, created: false };
+}
+
+// ── ADR 0959 D7: campaign-playbooks rollout approval ───────────────────────────
+
+/** The decide handler the campaign-playbooks feature registers (core owns the hook). It
+ *  re-plans the rollout and refuses when the plan no longer hashes to what the approver
+ *  saw, enforces separation of duties, and moves the rollout. */
+export type PlaybookRolloutApprovalHandler = (
+  tenantId: string,
+  approvalId: string,
+  outcome: 'approved' | 'rejected',
+  opts: { decidedByUserId?: string; note?: string },
+) => Promise<{ approval: PendingApproval; changed: boolean } | null>;
+
+let playbookRolloutApprovalHandler: PlaybookRolloutApprovalHandler | null = null;
+export function registerPlaybookRolloutApprovalHandler(fn: PlaybookRolloutApprovalHandler): void {
+  playbookRolloutApprovalHandler = fn;
+}
+export function getPlaybookRolloutApprovalHandler(): PlaybookRolloutApprovalHandler | null {
+  return playbookRolloutApprovalHandler;
+}
+
+/** ADR 0959 D7 — one row per rollout (deterministic id, `compareAndSwap(null)`). */
+export async function createPlaybookRolloutApprovalOnce(input: {
+  tenantId: string;
+  approvalId: string;
+  rolloutId: string;
+  playbookId: string;
+  planHash: string;
+  requestedBy: string;
+  proposal: string;
+}): Promise<{ approval: PendingApproval; created: boolean }> {
+  const approval: PendingApproval = {
+    approvalId: input.approvalId,
+    tenantId: input.tenantId,
+    rosterId: '',
+    persona: '',
+    workflowId: '',
+    kind: 'playbook-rollout',
+    orgId: input.tenantId,
+    playbookRolloutId: input.rolloutId,
+    playbookId: input.playbookId,
+    playbookRolloutPlanHash: input.planHash,
+    playbookRolloutRequestedBy: input.requestedBy,
+    proposal: input.proposal,
     status: 'pending',
     createdAt: nowIso(),
   };
@@ -2758,9 +2974,11 @@ export function resolveApproval(
      *  system/agent-resolved decisions legitimately have no user actor. */
     decidedBy?: string;
   },
+  expectedSnapshot?: PendingApproval,
 ): Promise<{ approval: PendingApproval; changed: boolean } | null> {
   return withApprovalLock(approvalId, async () => {
-    const approval = await approvals.get(approvalId);
+    if (expectedSnapshot && expectedSnapshot.approvalId !== approvalId) throw new Error('approval_snapshot_id_mismatch');
+    const approval = expectedSnapshot ?? await approvals.get(approvalId);
     if (!approval) return null;
     if (approval.status !== 'pending') return { approval, changed: false };
     const next: PendingApproval = {
@@ -2821,9 +3039,10 @@ export function resolveApproval(
  *  (the page left `in_review`, or was deleted), this restores the approval so a
  *  failed decide never consumes it — the row never lies about what happened.
  *  Idempotent + CAS-guarded; a no-op if the row is already pending/gone. */
-export async function reopenApproval(approvalId: string): Promise<void> {
+export async function reopenApproval(approvalId: string, expectedResolved?: PendingApproval): Promise<void> {
   await withApprovalLock(approvalId, async () => {
-    const a = await approvals.get(approvalId);
+    if (expectedResolved && expectedResolved.approvalId !== approvalId) throw new Error('approval_snapshot_id_mismatch');
+    const a = expectedResolved ?? await approvals.get(approvalId);
     if (!a || a.status === 'pending') return;
     const { resolvedAt: _resolvedAt, ...rest } = a;
     const reopened: PendingApproval = { ...rest, status: 'pending' };

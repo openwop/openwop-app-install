@@ -167,5 +167,8 @@ describe('funnels Phase 4 — step experiments', () => {
     expect(byKey.get('b')!.insufficientSample).toBe(true);
     expect(byKey.get('b')!.significant).toBeNull();
     expect(results.body.minSessionsPerVariant).toBe(30);
+    // ADR 0949 P0 — the split check rides the funnel result too (over the same event window).
+    expect(results.body.health.stopEarly).toBe('fixed_horizon_do_not_stop_early');
+    expect(results.body.health.srm).toMatchObject({ alpha: 0.001, mismatch: false });
   });
 });

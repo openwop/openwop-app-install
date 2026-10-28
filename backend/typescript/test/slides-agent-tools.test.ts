@@ -5,9 +5,21 @@
  * The exchange contract under test: the model can REQUEST the block catalog,
  * READ an existing deck (+ CAS version), and RENDER through the one
  * normalization gate (`feature.slides.nodes.render`) + closed-world validation
- * with structured error feedback — all gated exactly like the HTTP editor path
- * (toggle, acting user, org RBAC). Plus the allowlist-resolution pin: the pack's
- * three ids are exactly the three registered ids. Boots the REAL app.
+ * with structured error feedback — gated like the HTTP editor path (toggle,
+ * acting user). Plus the allowlist-resolution pin: the pack's three ids are
+ * exactly the three registered ids. Boots the REAL app.
+ *
+ * Not covered here (claim gap, recorded by /grade-tests wave 61): the org-RBAC
+ * branch (`forbidden_scope` for a non-member). Every case acts as the org owner.
+ *
+ * What breaks it: dropping the acting-user / toggle gates, the CAS or the
+ * baseVersion guard (exact code + message, so the CAS conflict — which also
+ * says "get-design" — cannot stand in for it), the get-design type pin (a real
+ * app-builder canvas must be not_found), the per-run idempotency key, or the
+ * producedBy stamp. Sabotage-witnessed (8fw3g1-sat-*).
+ *
+ * The `slides` toggle is GLOBAL (`saveConfig(cfg, 'test')`): every case that
+ * turns it off restores it in `finally`.
  */
 import http from 'node:http';
 import { readFileSync } from 'node:fs';
@@ -41,12 +53,22 @@ afterAll(async () => { await new Promise<void>((res) => server.close(() => res()
 
 const setSlides = async (status: 'on' | 'off'): Promise<void> => {
   const d = getToggleDefault('slides');
-  if (d) await saveConfig({ ...d, status }, 'test');
+  expect(d, 'the slides toggle is registered').toBeTruthy();
+  await saveConfig({ ...d!, status }, 'test');
 };
+/** Run `fn` with slides OFF, restoring ON even when an assertion fails. */
+async function withSlidesOff(fn: () => Promise<void>): Promise<void> {
+  await setSlides('off');
+  try { await fn(); } finally { await setSlides('on'); }
+}
 
 function provider(scope: { actingUserId?: string; runId?: string; agentProfileId?: string } = {}) {
   return createAgentToolProvider({ tenantId: TENANT, ...scope });
 }
+
+/** Measured wave 61 from the render node's empty-slides refusal. */
+const REPAIR_CODE = 'validation_error';
+const REPAIR_MESSAGE = 'The deck failed structural normalization — fix and call again.';
 
 const VALID_DECK = {
   title: 'Q3 Review',
@@ -94,11 +116,11 @@ describe('CFP-1 — catalog tool: the schema-request path', () => {
   });
 
   it('fails closed when the toggle is off', async () => {
-    await setSlides('off');
-    const out = await provider({ actingUserId: 'u-1' }).executeTool({ name: SLIDES_CATALOG_TOOL_ID, input: {} });
-    expect(out.isError).toBe(true);
-    expect(JSON.parse(out.content)).toMatchObject({ error: 'feature_disabled' });
-    await setSlides('on');
+    await withSlidesOff(async () => {
+      const out = await provider({ actingUserId: 'u-1' }).executeTool({ name: SLIDES_CATALOG_TOOL_ID, input: {} });
+      expect(out.isError).toBe(true);
+      expect(JSON.parse(out.content)).toMatchObject({ error: 'feature_disabled' });
+    });
   });
 });
 
@@ -110,11 +132,11 @@ describe('CFP-1 — render tool: gates, repair-loop errors, persistence', () => 
   });
 
   it('fails closed when the toggle is off (structured, not a throw)', async () => {
-    await setSlides('off');
-    const out = await provider({ actingUserId: 'u-1' }).executeTool({ name: SLIDES_RENDER_TOOL_ID, input: { deck: VALID_DECK } });
-    expect(out.isError).toBe(true);
-    expect(JSON.parse(out.content)).toMatchObject({ error: 'feature_disabled' });
-    await setSlides('on');
+    await withSlidesOff(async () => {
+      const out = await provider({ actingUserId: 'u-1' }).executeTool({ name: SLIDES_RENDER_TOOL_ID, input: { deck: VALID_DECK } });
+      expect(out.isError).toBe(true);
+      expect(JSON.parse(out.content)).toMatchObject({ error: 'feature_disabled' });
+    });
   });
 
   it('returns closed-world validation errors the model can act on (the repair loop)', async () => {
@@ -124,17 +146,27 @@ describe('CFP-1 — render tool: gates, repair-loop errors, persistence', () => 
       input: { deck: { title: 'Bad', slides: [] } },
     });
     expect(out.isError).toBe(true);
-    expect(JSON.parse(out.content).error).toBeTruthy();
+    const err = JSON.parse(out.content) as { error: string; message: string };
+    expect(err.error).toBe(REPAIR_CODE);
+    expect(err.message).toBe(REPAIR_MESSAGE);
+    expect(JSON.parse(out.content).detail, 'the node failure rides back for the model to act on').toBeTruthy();
   });
 
-  it('rejects a bad theme through the closed-world validator', async () => {
+  // Retitled (wave 61): this case used to be called "rejects a bad theme through
+  // the closed-world validator" while asserting SUCCESS. What actually happens is
+  // that the render node's normalization drops the unknown theme, so the deck is
+  // saved — and what must hold is that `neon` never reaches the stored canvas.
+  it('an unknown theme is normalized away, never persisted', async () => {
     const out = await provider({ actingUserId: 'u-1' }).executeTool({
       name: SLIDES_RENDER_TOOL_ID,
       input: { deck: { title: 'X', theme: 'neon', slides: [{ layout: 'title', title: 'A' }] } },
     });
-    // `neon` is dropped by the render node's normalization, so the persisted
-    // deck is valid; this asserts the happy path is not broken by an unknown enum.
     expect(out.isError).toBeFalsy();
+    const { canvasId } = JSON.parse(out.content) as { canvasId: string };
+    const stored = (await getCanvasForTenant(TENANT, canvasId))?.state as { theme?: string; title?: string } | undefined;
+    expect(stored?.title).toBe('X');
+    expect(stored?.theme).toBeUndefined(); // dropped (measured), so the default theme renders
+    expect(JSON.stringify(stored)).not.toContain('neon');
   });
 
   it('creates a real canvas, normalized through the render node, adds editor identity fields', async () => {
@@ -183,9 +215,19 @@ describe('CFP-1 — render tool: gates, repair-loop errors, persistence', () => 
   it('update without baseVersion is rejected with guidance toward get-design', async () => {
     const p = provider({ actingUserId: 'u-1' });
     const created = JSON.parse((await p.executeTool({ name: SLIDES_RENDER_TOOL_ID, input: { deck: VALID_DECK } })).content) as { canvasId: string };
-    const out = await p.executeTool({ name: SLIDES_RENDER_TOOL_ID, input: { deck: VALID_DECK, canvasId: created.canvasId } });
+    const out = await p.executeTool({ name: SLIDES_RENDER_TOOL_ID, input: { deck: { ...VALID_DECK, title: 'No base' }, canvasId: created.canvasId } });
     expect(out.isError).toBe(true);
-    expect(JSON.parse(out.content).message).toContain('get-design');
+    // Exact code + message: the CAS conflict ALSO mentions get-design, so a
+    // `toContain('get-design')` was satisfied with this guard deleted
+    // (8fw3g1-sat-baseversion, round 1 vacuous).
+    expect(JSON.parse(out.content)).toEqual({
+      error: 'validation_error',
+      message: 'Updating an existing deck requires `baseVersion` — read it with the get-design tool first.',
+    });
+    // …and nothing was written.
+    const after = await getCanvasForTenant(TENANT, created.canvasId);
+    expect(after?.version).toBe(1);
+    expect((after?.state as { title?: string }).title).toBe('Q3 Review');
   });
 
   it('stamps producedBy provenance (agent when agentProfileId, else user); owner stays the human', async () => {
@@ -211,7 +253,15 @@ describe('CFP-1 — get-design: the deck-state read path', () => {
 
     const missing = await p.executeTool({ name: SLIDES_GET_DESIGN_TOOL_ID, input: { canvasId: 'canvas-nope' } });
     expect(missing.isError).toBe(true);
-    expect(JSON.parse(missing.content)).toMatchObject({ error: 'not_found' });
+    expect(JSON.parse(missing.content)).toMatchObject({ error: 'not_found', message: "Slide deck 'canvas-nope' not found in this workspace." });
+
+    // Cross-TYPE: a real app-builder canvas in the SAME tenant is not a deck.
+    const appCanvas = await createCanvasForTenant(TENANT, {
+      canvasTypeId: 'canvas.app-builder', name: 'App', ownerSubject: { kind: 'user', id: 'u-1' }, initialState: { name: 'App', screens: [] },
+    });
+    const crossType = await p.executeTool({ name: SLIDES_GET_DESIGN_TOOL_ID, input: { canvasId: appCanvas.canvasId } });
+    expect(crossType.isError).toBe(true);
+    expect(JSON.parse(crossType.content)).toMatchObject({ error: 'not_found', message: `Slide deck '${appCanvas.canvasId}' not found in this workspace.` });
   });
 
   it('fails EMPTY without a human-initiated turn (tenant rows never leak to system runs; the loop is not derailed)', async () => {
@@ -224,7 +274,7 @@ describe('CFP-1 — get-design: the deck-state read path', () => {
     const foreign = await createCanvasForTenant('other-tenant', {
       canvasTypeId: 'canvas.slides',
       name: 'Foreign',
-      initialState: { title: 'Foreign', slides: [{ id: 'slide-1', name: 'S', layout: 'title', title: 'S' }] } as never,
+      initialState: { title: 'Foreign', slides: [{ id: 'slide-1', name: 'S', layout: 'title', title: 'S' }] },
     });
     const out = await provider({ actingUserId: 'u-1' }).executeTool({ name: SLIDES_GET_DESIGN_TOOL_ID, input: { canvasId: foreign.canvasId } });
     expect(out.isError).toBe(true);

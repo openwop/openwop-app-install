@@ -32,6 +32,14 @@ vi.mock('../campaignIntelClient.js', async (orig) => {
     getPacing: () => getPacing(),
     getAnomalies: () => getAnomalies(),
     planBudget: vi.fn(async () => ({ plan: null })),
+    // ADR 0956 D2 — the multi-touch sub-toggle is off by default: the section hides.
+    getAttributionModels: vi.fn(async () => { throw new (actual.FeatureDisabledError as new (m: string) => Error)('not enabled'); }),
+    getReconciliation: vi.fn(async () => { throw new (actual.FeatureDisabledError as new (m: string) => Error)('not enabled'); }),
+    getAdMap: vi.fn(async () => { throw new (actual.FeatureDisabledError as new (m: string) => Error)('not enabled'); }),
+    // ADR 0952 D3 — the reallocation panel's read (no plans).
+    listReallocations: vi.fn(async () => []),
+    // ADR 0952 D2 — the caps panel's read (no caps).
+    listSpendCaps: vi.fn(async () => []),
   };
 });
 
@@ -143,7 +151,8 @@ describe('R2 CI-SP-1/4 — the failure legs round 1 never covered', () => {
     await act(async () => {});
     // The old page gated EVERYTHING on `budget === null`, so this state was a
     // perpetual "Analyzing performance…" spinner over three healthy sections.
-    expect(await screen.findByText('Paced campaign')).toBeTruthy();
+    // The caps panel lists the campaign in its scope <select> too; the pacing row is the span.
+    expect(await screen.findByText('Paced campaign', { selector: 'span' })).toBeTruthy();
     expect(screen.queryByText(/Analyzing performance/i)).toBeNull();
     // The failure is named — and only the failure.
     expect(screen.getByText(/Could not load/)).toBeTruthy();

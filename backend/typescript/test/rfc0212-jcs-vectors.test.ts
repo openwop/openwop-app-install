@@ -13,7 +13,14 @@
  *     host actually serves from GCS for ea9cd39ee, and the signingKeys its live
  *     discovery published (2026-09-24). `publish-evidence.sh` gates every upload
  *     on `bundle-v3-verify.mjs`, so a false refusal here would block publishing.
+ *
+ * The vector counts are EXACT (measured on the committed copy, 2026-10-22: 10
+ * objects, 24 numbers, 7 text refusals, 2 number refusals), so a truncated
+ * re-copy reds. The relaxations case carries an independent oracle: sha256 of a
+ * hand-written canonical preimage, so the two verifiers cannot agree on a shared
+ * wrong preimage and still pass.
  */
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -52,23 +59,27 @@ const IMPLS = [
 
 describe.each(IMPLS)('RFC 0212 §A/§B vectors — $name', (impl) => {
   it('every object vector reproduces its canonical bytes', () => {
-    expect(V.objects.length).toBeGreaterThan(5);
+    expect(V.objects.length).toBe(10);
     for (const o of V.objects) expect(impl.canonicalJSON(impl.parseIJson(o.input)), o.id).toBe(o.canonical);
   });
   it('every number vector serializes per RFC 8785 Appendix B', () => {
-    expect(V.numbers.length).toBeGreaterThan(20);
+    expect(V.numbers.length).toBe(24);
     for (const n of V.numbers) expect(impl.canonicalJSON(fromBits(n.ieee754)), n.ieee754).toBe(n.canonical);
   });
   it('every text refusal vector is refused — never coerced', () => {
-    expect(V.refusals.length).toBeGreaterThan(5);
+    expect(V.refusals.length).toBe(7);
     for (const r of V.refusals) {
       expect(() => impl.canonicalJSON(impl.parseIJson(r.input)), r.id).toThrow(/RFC 0212 §B refusal/);
     }
   });
   it('every non-finite number vector is refused at the value boundary', () => {
-    expect(V.numberRefusals.length).toBeGreaterThan(0);
+    expect(V.numberRefusals.length).toBe(2);
     for (const r of V.numberRefusals) expect(() => impl.canonicalJSON(fromBits(r.ieee754)), r.ieee754).toThrow(/non-finite/);
   });
+  // A locale collation (`localeCompare`) reds this case (probes 8fw2g1-jcs-ts-locale /
+  // -mjs-locale). Replacing the comparator with the DEFAULT `.sort()` does not, and
+  // cannot: the default sort IS UTF-16 code-unit order, an equivalent mutant
+  // (round-1 probe 8fw2g1-jcs-ts-default-sort, vacuous by design).
   it('member order is UTF-16 code units, never a collation', () => {
     const obj = Object.fromEntries(V.ordering.ids.map((id) => [id, 0]));
     const keys = Object.keys(JSON.parse(impl.canonicalJSON(obj)) as Record<string, unknown>);
@@ -130,5 +141,11 @@ describe('RFC 0212 §C — witness digest and full verification', () => {
     expect(relaxed).not.toBe(bare);
     expect(mjs.witnessDigest(rows, relax)).toBe(relaxed);
     expect(mjs.witnessDigest(rows, [])).toBe(bare);
+    // Independent oracle: the canonical preimages written by hand (rows sorted by id
+    // in code-unit order, members sorted, no whitespace), hashed here.
+    const sha = (t: string): string => createHash('sha256').update(t, 'utf8').digest('hex');
+    const ROWS = '[{"id":"openwop.x.a","result":"skipped","scenario":"s"},{"id":"openwop.x.b","result":"executed-pass","scenario":"s"}]';
+    expect(bare).toBe(sha(ROWS));
+    expect(relaxed).toBe(sha(`{"relaxations":[{"id":"r1","reason":"operator relaxation"}],"rows":${ROWS}}`));
   });
 });

@@ -28,6 +28,7 @@ import { candidateRunKey, createCandidate, getCandidate, listCandidates, Prohibi
 import { getPublication, publicationView } from './publishService.js';
 import { ensureChallengeAuthor } from './challengeAuthorService.js';
 import { CHALLENGE_FACTORY_WORKFLOW_ID } from './builtinWorkflows.js';
+import { dedicatedFactoryProvider, factoryCredentialRef } from '../kicktodoFactoryAi.js';
 import { PLAN_DAILY_MINUTES, PLAN_DURATION_DAYS } from './planService.js';
 
 const log = createLogger('kicktodo.challenge-author-tools');
@@ -228,6 +229,8 @@ export async function runFactoryRunTool(deps: StartRunDeps, input: Record<string
       candidateId,
       topic: cand?.topic ?? topic,
       audience: cand?.audience ?? audience,
+      // ADR 0975 D3 — disambiguates the research search query (research-frame@1.1.0).
+      ...((cand?.transformation ?? transformation) ? { transformation: cand?.transformation ?? transformation } : {}),
       authorSubject: scope.actingUserId,
       ...(cadenceRaw ? { checkpointEvery: cadenceRaw } : {}),
       // ADR 0706 — the frozen binding rides the run record (replay-neutral):
@@ -265,10 +268,9 @@ type FactoryImageResolution =
 
 /** ADR 0910 D8 — the Factory's dedicated Vault ref for a provider. Kept apart from
  *  the workspace's chat keys so the Factory never borrows whichever provider key
- *  `pickCredentialRef` happens to list first, and chat never points at it. */
-export function factoryCredentialRef(provider: string): string {
-  return `kicktodo-factory:${provider}`;
-}
+ *  `pickCredentialRef` happens to list first, and chat never points at it.
+ *  ADR 0975 D2 — defined once in `features/kicktodoFactoryAi.ts` (readiness reads it too). */
+export { factoryCredentialRef };
 
 /** ADR 0910 D8 — pick the Factory's key: an explicit ref wins (it was already
  *  checked to name the provider); else the dedicated `kicktodo-factory:<provider>`
@@ -343,7 +345,7 @@ function intakeInt(raw: unknown, bounds: { min: number; max: number }, name: str
 }
 
 /** Where a factory run's frozen AI binding came from. */
-type FactoryAiSource = 'creator' | 'workspace-default' | 'host-default';
+type FactoryAiSource = 'creator' | 'factory-key' | 'workspace-default' | 'host-default';
 
 /** The frozen AI binding for one factory run, or the typed refusal. */
 type FactoryAiResolution =
@@ -385,7 +387,19 @@ async function resolveFactoryAi(tenantId: string, input: Record<string, unknown>
   if (!namedProvider && ((typeof input.model === 'string' && input.model.trim()) || (typeof input.credentialRef === 'string' && input.credentialRef.trim()))) {
     return { error: { content: JSON.stringify({ error: 'validation_error', message: 'Pass `provider` together with `model` or `credentialRef`; on their own they would be ignored.' }), isError: true } };
   }
-  const binding = await resolveIgnitionAiBinding(tenantId, { provider: input.provider, model: input.model, credentialRef: input.credentialRef });
+  // ADR 0975 D2 — with no creator choice, a stored Factory key (ADR 0910 D8) is the
+  // Factory's binding, ahead of the workspace's general headless default: storing
+  // it IS the operator saying which key the Factory runs on. Its credential is
+  // left to `pickFactoryCredentialRef`, which takes the dedicated ref by name (the
+  // ignition binding would otherwise inherit the default's own ref when the
+  // providers coincide).
+  const factoryProvider = namedProvider ? null : await dedicatedFactoryProvider(tenantId);
+  const ignition = await resolveIgnitionAiBinding(tenantId, factoryProvider
+    ? { provider: factoryProvider }
+    : { provider: input.provider, model: input.model, credentialRef: input.credentialRef });
+  const binding: { provider: string; model: string; credentialRef?: string; source: FactoryAiSource } | null = ignition && factoryProvider
+    ? { provider: ignition.provider, model: ignition.model, source: 'factory-key' }
+    : ignition;
   let provider = binding?.provider ?? '';
   let model = binding?.model ?? '';
   let source: FactoryAiSource = binding?.source ?? 'host-default';

@@ -4,10 +4,17 @@
  *     see each other's prefs; the key is the authenticated user, never input);
  *   - validation typed-400s (cap bounds, warn pct, directive enum);
  *   - the personal BYOK budget lane: off-by-default (no `personal` verdict
- *     without a set cap), fail-closed hard block when the personal cap is
+ *     without a set cap), the personal VERDICT is exceeded once the cap is
  *     reached, org lane independent, usage recorded per user;
  *   - the per-user reasoning-directive override resolves over the host
  *     posture and falls back when cleared (P4 precedence).
+ *
+ * Not claimed here: the dispatch-time hard block itself (the 429
+ * `byok_personal_budget_exceeded` in host/exchange/dispatchTurn.ts) — this file
+ * asserts the budget verdict that block reads. Grade-code lead SETPREF-BLOCK-1.
+ * PROTECTED (self-scoping isolation + BYOK budget lane, ADR 0396 / 0693).
+ * Sabotage witnesses (grade-tests 8f w2): sp-self-scope, sp-cap-neg, sp-pct,
+ * sp-directive, sp-clear, sp-exceeded, sp-active-bucket, sp-off-default.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -38,25 +45,44 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
-interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; put: (p: string, b?: unknown) => Promise<Res> }
+/** A response body is typed at each call site (no `any` default). */
+interface Res<T> { status: number; body: T }
+/** GET/PUT /settings/prefs (features/settings/routes.ts). */
+interface PrefsBody {
+  personalBudget: { dailyTokenCap: number; softWarningPct?: number } | null;
+  reasoningDirective: string | null;
+  privacy: { analyticsOptOut?: boolean; crashReportsOptOut?: boolean; recentFilesOptOut?: boolean } | null;
+  usageToday?: { day: string; tokens: number };
+  managedUsageToday?: { tokens: number; scope: string } | null;
+}
+interface ErrBody { error: string; message: string; details?: { field?: string } }
+interface Client {
+  get: <T>(p: string) => Promise<Res<T>>;
+  post: <T>(p: string, b?: unknown) => Promise<Res<T>>;
+  put: <T>(p: string, b?: unknown) => Promise<Res<T>>;
+}
 function client(): Client {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-    for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    return { status: res.status, body: await res.json().catch(() => undefined) };
+    for (const ck of getSetCookies(res.headers)) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
+    const text = await res.text();
+    return { status: res.status, body: (text ? JSON.parse(text) : undefined) as T };
   };
-  return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), put: (p, b) => call('PUT', p, b) };
+  return {
+    get: <T>(p: string) => call<T>('GET', p),
+    post: <T>(p: string, b?: unknown) => call<T>('POST', p, b),
+    put: <T>(p: string, b?: unknown) => call<T>('PUT', p, b),
+  };
 }
 
 const PREFS = '/host/openwop-app/settings/prefs';
 let n = 0;
 async function login(tenantId: string): Promise<{ c: Client; userId: string }> {
   const c = client();
-  const r = await c.post('/host/openwop-app/test/login', { email: `set-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await c.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email: `set-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  return { c, userId: (r.body as { user: { userId: string } }).user.userId };
+  return { c, userId: r.body.user.userId };
 }
 
 describe('settings prefs — self-scoping + validation', () => {
@@ -65,31 +91,49 @@ describe('settings prefs — self-scoping + validation', () => {
     const a = await login(tenantId);
     const b = await login(tenantId);
 
-    expect((await a.c.get(PREFS)).body.personalBudget).toBeNull();
-    const saved = await a.c.put(PREFS, { personalBudget: { dailyTokenCap: 5000, softWarningPct: 50 }, reasoningDirective: 'mandatory', privacy: { analyticsOptOut: true } });
+    expect((await a.c.get<PrefsBody>(PREFS)).body.personalBudget).toBeNull();
+    const saved = await a.c.put<PrefsBody>(PREFS, { personalBudget: { dailyTokenCap: 5000, softWarningPct: 50 }, reasoningDirective: 'mandatory', privacy: { analyticsOptOut: true } });
     expect(saved.status, JSON.stringify(saved.body)).toBe(200);
     expect(saved.body.personalBudget).toEqual({ dailyTokenCap: 5000, softWarningPct: 50 });
 
+    // Persisted, not only echoed: A's fresh GET reads every saved field back.
+    const aPrefs = await a.c.get<PrefsBody>(PREFS);
+    expect(aPrefs.body.personalBudget).toEqual({ dailyTokenCap: 5000, softWarningPct: 50 });
+    expect(aPrefs.body.reasoningDirective).toBe('mandatory');
+    expect(aPrefs.body.privacy).toEqual({ analyticsOptOut: true });
+
     // B sees NOTHING of A's prefs (self-scoped by the authenticated user).
-    const bPrefs = await b.c.get(PREFS);
+    const bPrefs = await b.c.get<PrefsBody>(PREFS);
     expect(bPrefs.body.personalBudget).toBeNull();
     expect(bPrefs.body.reasoningDirective).toBeNull();
+    expect(bPrefs.body.privacy).toBeNull();
 
     // clearing: cap 0 (or null) removes the personal budget
-    const cleared = await a.c.put(PREFS, { personalBudget: { dailyTokenCap: 0 } });
+    const cleared = await a.c.put<PrefsBody>(PREFS, { personalBudget: { dailyTokenCap: 0 } });
     expect(cleared.body.personalBudget).toBeNull();
+    expect((await a.c.get<PrefsBody>(PREFS)).body.personalBudget).toBeNull();
   });
 
   it('validates typed-400s', async () => {
     const { c } = await login(`org:test-set-val-${Date.now()}`);
-    expect((await c.put(PREFS, { personalBudget: { dailyTokenCap: -5 } })).status).toBe(400);
-    expect((await c.put(PREFS, { personalBudget: { dailyTokenCap: 10, softWarningPct: 101 } })).status).toBe(400);
-    expect((await c.put(PREFS, { reasoningDirective: 'sometimes' })).status).toBe(400);
+    // Each leg is valid except the one property under test, and the refusal is
+    // pinned to THAT field, so an earlier validator cannot stand in for it.
+    const legs: Array<[unknown, string]> = [
+      [{ personalBudget: { dailyTokenCap: -5 } }, 'personalBudget.dailyTokenCap'],
+      [{ personalBudget: { dailyTokenCap: 10, softWarningPct: 101 } }, 'personalBudget.softWarningPct'],
+      [{ reasoningDirective: 'sometimes' }, 'reasoningDirective'],
+    ];
+    for (const [body, field] of legs) {
+      const r = await c.put<ErrBody>(PREFS, body);
+      expect(r.status, field).toBe(400);
+      expect(r.body.error, field).toBe('validation_error');
+      expect(r.body.details?.field).toBe(field);
+    }
   });
 });
 
 describe('personal BYOK budget lane (min() with the org backstop)', () => {
-  it('off by default; hard-blocks fail-closed at the personal cap; usage recorded per user', async () => {
+  it('off by default; the personal verdict is exceeded at the personal cap; usage recorded per user', async () => {
     await __resetSettingsStores();
     const tenantId = `org:test-budget-${Date.now()}`;
     const { c, userId } = await login(tenantId);
@@ -100,7 +144,7 @@ describe('personal BYOK budget lane (min() with the org backstop)', () => {
     expect(before.exceeded).toBe(false); // org lane uncapped in this suite
 
     // Set a tiny personal cap, record usage past it (the post-dispatch path).
-    expect((await c.put(PREFS, { personalBudget: { dailyTokenCap: 100, softWarningPct: 50 } })).status).toBe(200);
+    expect((await c.put<PrefsBody>(PREFS, { personalBudget: { dailyTokenCap: 100, softWarningPct: 50 } })).status).toBe(200);
     await recordByokChatUsage(tenantId, 'anthropic', 80, 40, userId);
     const usage = await getUserByokUsage(tenantId, userId, new Date().toISOString().slice(0, 10));
     expect(usage.inputTokens + usage.outputTokens).toBe(120);
@@ -123,9 +167,9 @@ describe('per-user reasoning-directive override (P4 precedence)', () => {
     const tenantId = `org:test-reason-${Date.now()}`;
     const { c, userId } = await login(tenantId);
     expect((await resolveEnvelopeReasoning(tenantId, userId)).promptDirective).toBe('advisory'); // host default
-    await c.put(PREFS, { reasoningDirective: 'mandatory' });
+    await c.put<PrefsBody>(PREFS, { reasoningDirective: 'mandatory' });
     expect((await resolveEnvelopeReasoning(tenantId, userId)).promptDirective).toBe('mandatory');
-    await c.put(PREFS, { reasoningDirective: null });
+    await c.put<PrefsBody>(PREFS, { reasoningDirective: null });
     expect((await resolveEnvelopeReasoning(tenantId, userId)).promptDirective).toBe('advisory');
     // no user context ⇒ host posture (system runs unchanged)
     expect((await resolveEnvelopeReasoning(tenantId, undefined)).promptDirective).toBe('advisory');
@@ -145,24 +189,24 @@ describe('ADR 0693 phase 5 — the ROUTE reads the ACTIVE workspace bucket, not 
     const day = new Date().toISOString().slice(0, 10);
 
     // At home (personal, single-principal): the tenant row, scope 'tenant'.
-    const home = (await c.get(PREFS)).body.managedUsageToday as { tokens: number; scope: string } | null;
+    const home = (await c.get<PrefsBody>(PREFS)).body.managedUsageToday ?? null;
     expect(home, 'a managed target is configured in tests, so the figure is present').not.toBeNull();
     expect(home!.scope).toBe('tenant');
 
-    const ws = await c.post('/host/openwop-app/workspaces', { name: `Usage WS ${n++}` });
+    const ws = await c.post<{ workspaceId: string }>('/host/openwop-app/workspaces', { name: `Usage WS ${n++}` });
     expect(ws.status, JSON.stringify(ws.body)).toBe(201);
-    const wsId = ws.body.workspaceId as string;
+    const wsId = ws.body.workspaceId;
     expect(wsId).toMatch(/^ws:/);
-    const sw = await c.post(`/host/openwop-app/workspaces/${encodeURIComponent(wsId)}/switch`);
+    const sw = await c.post<unknown>(`/host/openwop-app/workspaces/${encodeURIComponent(wsId)}/switch`);
     expect(sw.status, JSON.stringify(sw.body)).toBe(200);
 
     // The dispatcher's charge: (ACTIVE workspace, acting user) — runs.ts stamps
     // `req.userId ?? principalId` on every run.
     await hostExtStorage().incrementManagedUsage(managedUsageBucket(wsId, userId), 'openwop-free', day, 120, 30);
 
-    const g = await c.get(PREFS);
+    const g = await c.get<PrefsBody>(PREFS);
     expect(g.status).toBe(200);
-    const mu = g.body.managedUsageToday as { tokens: number; scope: string } | null;
+    const mu = g.body.managedUsageToday ?? null;
     expect(mu!.scope, 'a shared workspace meters per subject').toBe('subject');
     expect(mu!.tokens, "the participant's OWN charge on the ACTIVE workspace — 0 here is the home-tenant read").toBe(150);
   });

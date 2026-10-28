@@ -8,6 +8,14 @@
  * from v2 discovery exactly when its operations 404. Covered gates:
  * `prompts` (endpointsSupported, facet mutableLibrary), `content` (host i18n),
  * `triggerBridge` (facet ingestion).
+ *
+ * Tracker: TST-BUN-1 (/grade-tests wave 60). Probe-witnessed:
+ *   - red when the `/content` i18n gate or the discovery `content` condition is
+ *     dropped → content, i18n off;
+ *   - red when the trigger-subscription ingestion gate is dropped → triggerBridge;
+ *   - red when the prompts GET `endpointsSupported` gate, the POST
+ *     `mutableLibrary` gate or the `facet` detail is dropped → prompts cases;
+ *   - red when the unadvertised refusal is not `404 not_found` → every refusal case.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';
@@ -76,7 +84,11 @@ describe('ADR 0781 — content + triggerBridge through the real app', () => {
     const disco = await call(base, 'GET', '/.well-known/openwop', V2);
     expect(disco.body.content).toBeDefined();
     const res = await call(base, 'GET', '/content/settings', V2);
-    expect(res.status === 404 && res.body.error === 'not_found', JSON.stringify(res.body)).toBe(false);
+    // Served, not merely "some other refusal": the effective settings come back.
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    // MEASURED: the base locale is `en` and the content locales are the non-base ones.
+    expect(res.body.baseLocale).toBe('en');
+    expect(res.body.supportedLocales).toEqual(['es']);
   });
 
   it('triggerBridge ingestion off: v2 404 not_found', async () => {

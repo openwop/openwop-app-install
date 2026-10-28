@@ -39,8 +39,13 @@ const rows = readFileSync(LEDGER, 'utf8')
   .split('\n')
   .filter(Boolean)
   .map((l) => {
-    const [at, sha, outcome] = l.split('\t');
-    return { at, sha, outcome: outcome ?? 'unset' };
+    const [at, sha, recorded] = l.split('\t');
+    // ci.sh records the required pass and advisory pass independently, e.g.
+    // ran:pass;serial=FAIL. Comparing that whole field with ran:pass hid every
+    // successful required run and every advisory failure from this report.
+    const [outcome, ...details] = (recorded ?? 'unset').split(';');
+    const serial = details.find((detail) => detail.startsWith('serial='))?.slice('serial='.length).toLowerCase();
+    return { at, sha, outcome, serial };
   });
 
 if (rows.length === 0) {
@@ -52,10 +57,13 @@ const ran = rows.filter((r) => r.outcome.startsWith('ran:'));
 const passed = rows.filter((r) => r.outcome === 'ran:pass');
 const failed = rows.filter((r) => r.outcome === 'ran:fail');
 const skipped = rows.filter((r) => r.outcome.startsWith('skipped:'));
+const serialPassed = ran.filter((r) => r.serial === 'pass');
+const serialFailed = ran.filter((r) => r.serial === 'fail');
 const rate = ran.length / rows.length;
 
 console.log(`e2e gate ledger — ${rows.length} run(s) since ${rows[0].at}\n`);
-console.log(`  RAN     ${ran.length}  (${passed.length} pass, ${failed.length} fail)`);
+console.log(`  RAN     ${ran.length}  (${passed.length} required pass, ${failed.length} required fail, ${ran.length - passed.length - failed.length} unknown)`);
+console.log(`  ADVISORY ${serialPassed.length} pass, ${serialFailed.length} fail, ${ran.length - serialPassed.length - serialFailed.length} not recorded`);
 console.log(`  SKIPPED ${skipped.length}`);
 console.log(`  run rate ${(rate * 100).toFixed(0)}%  (healthy ≥ ${HEALTHY_RUN_RATE * 100}%)\n`);
 
@@ -77,11 +85,9 @@ if (skipped.length > 0) {
 if (rows.length < 10) {
   console.log(`VERDICT: not enough data (${rows.length} runs; want >= 10 before judging).`);
 } else if (rate >= HEALTHY_RUN_RATE) {
-  console.log('VERDICT: the promoted lane is REAL COVERAGE — it runs on most gate invocations.');
-  console.log('  ADR 0509 Phase 4 may escalate: make Chromium mandatory so the residual skips stop.');
+  console.log(`VERDICT: browser execution meets the ${HEALTHY_RUN_RATE * 100}% run-rate target.`);
+  console.log('  This measures execution; inspect the required and advisory outcomes above for failures.');
 } else {
-  console.log('VERDICT: the promoted lane is closer to THEATRE than coverage.');
-  console.log('  It skips on most gate invocations, so "green" does not mean the browser lane ran.');
-  console.log('  ADR 0509 says: escalate (mandatory Chromium) or revert to a pre-push-only hook.');
-  console.log('  Do NOT leave it as-is looking like coverage.');
+  console.log(`VERDICT: browser execution is below the ${HEALTHY_RUN_RATE * 100}% run-rate target.`);
+  console.log('  Review the skip reasons and any unrecorded outcomes; a green gate alone does not prove browser coverage.');
 }

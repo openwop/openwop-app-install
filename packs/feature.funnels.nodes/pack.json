@@ -1,8 +1,8 @@
 {
   "name": "feature.funnels.nodes",
-  "version": "1.0.1",
+  "version": "1.5.0",
   "kind": "node",
-  "description": "Funnels feature node pack (Funnel A chat-drivability) — nodes over the ctx.features.funnels surface. Reads: `list` / `get` / `step-stats` (per-step views/completions/revenue totals). Writes: `create` and `set-steps` author DRAFT state only — publishing a funnel changes a PUBLIC surface, so it is never exposed to agents ('agent proposes, human disposes'; the promotions firewall). All role:'action' (recorded → replay-safe).",
+  "description": "Funnels feature node pack (Funnel A chat-drivability) — nodes over the ctx.features.funnels surface. Reads (role:action): `list` / `get` / `step-stats` (per-step views/completions/revenue totals). Writes (role:side-effect, ADR 0948 P1 — a replay fork is served the recorded output, never re-executed): `create` and `set-steps` author DRAFT state only; `set-steps` refuses a published funnel (editing a live funnel is publishing its new steps). `request-publish` (ADR 0948 P1b) queues a `funnel-publish` review and returns; a human's approve publishes. Blueprint plumbing (ADR 0948 P2, pure, role:action): `compose-step-page` builds a step page's sections from schema-validated copy (closed-world; the opt-in form must be one of the org's own forms), `step-result` returns a step sub-chain's step through the run variable bag, `collect-steps` orders the steps a blueprint's sub-chains returned. No node and no ctx.funnels method publishes ('agent proposes, human disposes').",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": ["feature", "funnels", "marketing", "conversion", "landing-pages"],
@@ -28,20 +28,20 @@
     },
     {
       "typeId": "feature.funnels.nodes.create",
-      "version": "1.0.0",
+      "version": "1.2.0",
       "label": "Funnel Create (draft)",
-      "description": "Authors a funnel — agent-authored ⇒ DRAFT; a human publishes in the Funnels page (public-surface change, never auto-live). Inputs: orgId, name, slug?, steps?:[{kind,pageId,name?,routing?}].",
+      "description": "Authors a DRAFT funnel; a human publishes it in the Funnels page (public-surface change, never auto-live). In a run the funnel id is derived from the run, the node and `key`, so a re-delivered call (same inputs) returns the same draft with `reused: true`; a different create under the same id, or a draft that has since been published, is refused `run_funnel_exists` (409). Inputs: orgId, name, slug?, key? (separates funnels created by one node in a loop; letters, digits, `-` and `_` only), campaignId? (a campaign in the same org, ADR 0948 D1), steps?:[{kind, pageId, name?, routing?, offer?, webinar?, application?}]. `webinar` (webinar steps only) = {marketingEventId} of a webinar of the same org; `application` (application steps only) = {formId} of a form of the same org. A webinar or application step's routing outcome is decided by the server (attendance; a qualification verdict), never by the visitor. `offer` (checkout/upsell/downsell only, ADR 0948 D2): {productIds:[1..5], bumpProductIds?:[0..5] (checkout only), oneClickProductId? (upsell/downsell only)}, products active and in the same org. Output: { funnelId, slug, status, proposed, reused? }.",
       "category": "integration",
-      "role": "action",
+      "role": "side-effect",
       "capabilities": []
     },
     {
       "typeId": "feature.funnels.nodes.set-steps",
-      "version": "1.0.0",
+      "version": "1.2.0",
       "label": "Funnel Set Steps (draft edit)",
-      "description": "Replaces a funnel's step list (pages validated against the workspace CMS; running step experiments are preserved by stepId). Inputs: orgId, funnelId, steps.",
+      "description": "Replaces a DRAFT funnel's step list (pages validated against the workspace CMS; running step experiments are preserved by stepId). A published or archived funnel is refused `funnel_not_draft` (409): a human edits a live funnel in the Funnels page. A missing funnel is a `not_found` failure. Each step may carry `offer`, `webinar` or `application` (see create); an omitted `offer`, `webinar` or `application` keeps the stored one for that stepId while the step's kind is unchanged, and `null` clears it. Inputs: orgId, funnelId, steps.",
       "category": "integration",
-      "role": "action",
+      "role": "side-effect",
       "capabilities": []
     },
     {
@@ -50,6 +50,42 @@
       "label": "Funnel Step Stats",
       "description": "Per-step totals (views/completions/revenue/orders) from the derived rollups — the planning read for optimization proposals. Inputs: orgId, funnelId.",
       "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.funnels.nodes.request-publish",
+      "version": "1.0.0",
+      "label": "Funnel Request Publish",
+      "description": "Requests publishing a DRAFT funnel (ADR 0948 P1b): queues a `funnel-publish` review in the approvals inbox, pinned to everything a visitor or a charge sees (slug, steps with their pages, names, routing, offers and experiments, campaign, completion CTA), and returns without waiting. Older open requests for the same funnel are closed as superseded. A writer's approve publishes it, and only if it is unchanged since the request; this node never publishes. In a campaign run, the campaign's autonomy policy (ADR 0942, class content.publish) decides who may approve: only the policy's named approvers, never the requester; a policy that blocks it refuses the request. It always needs a person, even under an automatic policy. Every step page must already be published (submit them with feature.cms.nodes.submit-page first): a funnel publish never publishes its pages. Needs `workspace:write` in the org. Refusals are typed failures (a chain receives them as `openwop-app.<code>`): `funnel_not_draft`, `step_pages_unpublished`, `not_found`, `validation_error` (no steps, or a missing orgId/funnelId), `review_cycles_exhausted`, `autonomy_blocked` (the campaign's policy forbids it), `approver_org_mismatch` (the run's campaign is in another organization). Inputs: orgId, funnelId. Output: { status: 'pending_approval', approvalId, created } — always an OPEN review; `created:false` when the same request was already open.",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.funnels.nodes.compose-step-page",
+      "version": "1.0.0",
+      "label": "Funnel Compose Step Page",
+      "description": "ADR 0948 P2. Builds the CMS sections for one funnel step page from model-written copy, closed-world (only the fields below reach the page; the CMS sanitizes again like an editor save). Pure: no surface call, so a replay re-derives the same output. Inputs: kind ('optin' | 'thankyou' | 'sales' | 'checkout' | 'upsell' | 'downsell'), copy (object, or a structured-output result carrying it under `data`), formId (optin only: the form that captures the lead, chosen by the caller, never by the model), forms (optin only: the org's forms from feature.forms.nodes.list-forms; formId must be one of them). Copy fields: optin {headline (required), subheadline?, bulletsHeading?, bullets?: string[] (≤6), formHeading?}; thankyou {headline (required), message?, nextStepsHeading?, nextSteps?: string[] (≤5)}; sales/checkout/upsell/downsell {headline (required), subheadline?, bulletsHeading?, bullets?: string[] (≤6)} — copy only: the buy controls of a checkout or offer step come from the step's offer in the public viewer (ADR 0948 P2c), never from the page. Output: { title, sections }. Typed failures: unsupported_kind, invalid_copy, form_required, form_check_missing, form_not_found.",
+      "category": "data",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.funnels.nodes.step-result",
+      "version": "1.0.0",
+      "label": "Funnel Step Result",
+      "description": "ADR 0948 P2. The result of a funnel step sub-chain: from the drafted page (feature.cms.nodes.create-draft-page's `page`) it forms the funnel step {kind, pageId, name?}, writes it to the run variable bag under `variable` (default `step`) so the parent's subWorkflow `outputMapping` can carry it out, and outputs `pageId` as a flat port (for submit-page). Deterministic. Inputs: kind ('optin' | 'thankyou' | 'sales' | 'checkout' | 'upsell' | 'downsell'), page, name?, variable?, stepId? (a fixed id so the blueprint's routing can name this step), offerProductId (required on checkout/upsell/downsell: the product the step sells), offerBumpProductId? (checkout only: the order bump). The offer it builds is validated against the org's catalog when the funnel is written. Output: { pageId, step }. Typed failures: unsupported_kind, page_missing, offer_missing.",
+      "category": "data",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.funnels.nodes.collect-steps",
+      "version": "1.0.0",
+      "label": "Funnel Collect Steps",
+      "description": "ADR 0948 P2. Reads the step variables a blueprint's step sub-chains returned, in funnel order, and outputs the `steps` list for feature.funnels.nodes.create. A missing or malformed step fails `step_missing`: a funnel is never created with a step dropped. Inputs: variables (string[], the bag names in order), routing? ({ [stepId]: rules[] }: the blueprint's own routing, attached to the step with that stepId; the funnels write checks every goto names a sibling step). Output: { steps } (kind, pageId, stepId?, name?, offer?, routing?).",
+      "category": "data",
       "role": "action",
       "capabilities": []
     }

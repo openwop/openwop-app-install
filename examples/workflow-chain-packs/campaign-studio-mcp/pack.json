@@ -1,0 +1,541 @@
+{
+  "name": "core.openwop.workflows.campaign-studio-mcp",
+  "version": "1.0.1",
+  "kind": "workflow-chain",
+  "description": "ADR 0962 — Campaign Studio's open agent interface: MCP read tools (core.openwop.mcp.expose-tool → a campaign-ops read node). Every tool requires a clientId and binds the run to that client (access, the client's externalAgents switch, the client stamp). Registered chain-backed by campaign-ops with the ADR 0087 MCP gates; no tool publishes, sends, spends or approves.",
+  "keywords": [
+    "MCP",
+    "Tools",
+    "Campaign Studio"
+  ],
+  "engines": {
+    "openwop": ">=1.0.0 <3.0.0"
+  },
+  "chains": [
+    {
+      "chainId": "campaign-studio.mcp.list",
+      "internal": true,
+      "version": "1.0.0",
+      "label": "campaign_list",
+      "description": "ADR 0962 MCP read tool campaign_list.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "clientId"
+        ],
+        "properties": {
+          "clientId": {
+            "type": "string",
+            "description": "The client (its org id). Every campaign tool acts for exactly one client."
+          }
+        }
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "expose",
+            "typeId": "core.openwop.mcp.expose-tool@1.0.0",
+            "config": {
+              "name": "campaign_list",
+              "description": "List one client's campaigns: id, name, status, channels. Read-only.",
+              "inputSchema": {
+                "type": "object",
+                "properties": {
+                  "clientId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200,
+                    "description": "The client (its org id). Every campaign tool acts for exactly one client."
+                  }
+                },
+                "required": [
+                  "clientId"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          {
+            "id": "backing",
+            "typeId": "feature.campaign-ops.nodes.mcp-campaign-list@1.0.0",
+            "inputs": {
+              "clientId": "{{params.clientId}}"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "expose.handle",
+            "to": "backing._order",
+            "triggerRule": "all_success"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "campaign-studio.mcp.get",
+      "internal": true,
+      "version": "1.0.0",
+      "label": "campaign_get",
+      "description": "ADR 0962 MCP read tool campaign_get.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "clientId",
+          "campaignId"
+        ],
+        "properties": {
+          "clientId": {
+            "type": "string",
+            "description": "The client (its org id). Every campaign tool acts for exactly one client."
+          },
+          "campaignId": {
+            "type": "string",
+            "description": "The campaign."
+          }
+        }
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "expose",
+            "typeId": "core.openwop.mcp.expose-tool@1.0.0",
+            "config": {
+              "name": "campaign_get",
+              "description": "One campaign's summary for a client: objective, status, channels, the messaging-kernel headline, its goal. Aggregates only. Read-only.",
+              "inputSchema": {
+                "type": "object",
+                "properties": {
+                  "clientId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200,
+                    "description": "The client (its org id). Every campaign tool acts for exactly one client."
+                  },
+                  "campaignId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200,
+                    "description": "The campaign."
+                  }
+                },
+                "required": [
+                  "clientId",
+                  "campaignId"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          {
+            "id": "backing",
+            "typeId": "feature.campaign-ops.nodes.mcp-campaign-get@1.0.0",
+            "inputs": {
+              "clientId": "{{params.clientId}}",
+              "campaignId": "{{params.campaignId}}"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "expose.handle",
+            "to": "backing._order",
+            "triggerRule": "all_success"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "campaign-studio.mcp.performance",
+      "internal": true,
+      "version": "1.0.0",
+      "label": "campaign_performance",
+      "description": "ADR 0962 MCP read tool campaign_performance.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "clientId",
+          "campaignId"
+        ],
+        "properties": {
+          "clientId": {
+            "type": "string",
+            "description": "The client (its org id). Every campaign tool acts for exactly one client."
+          },
+          "campaignId": {
+            "type": "string",
+            "description": "The campaign."
+          }
+        }
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "expose",
+            "typeId": "core.openwop.mcp.expose-tool@1.0.0",
+            "config": {
+              "name": "campaign_performance",
+              "description": "A campaign's performance for a client: spend, impressions, clicks and conversions per ad platform and currency, with the date range. Read-only.",
+              "inputSchema": {
+                "type": "object",
+                "properties": {
+                  "clientId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200,
+                    "description": "The client (its org id). Every campaign tool acts for exactly one client."
+                  },
+                  "campaignId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200,
+                    "description": "The campaign."
+                  }
+                },
+                "required": [
+                  "clientId",
+                  "campaignId"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          {
+            "id": "backing",
+            "typeId": "feature.campaign-ops.nodes.mcp-campaign-performance@1.0.0",
+            "inputs": {
+              "clientId": "{{params.clientId}}",
+              "campaignId": "{{params.campaignId}}"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "expose.handle",
+            "to": "backing._order",
+            "triggerRule": "all_success"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "campaign-studio.mcp.pending-gates",
+      "internal": true,
+      "version": "1.0.0",
+      "label": "campaign_pending_gates",
+      "description": "ADR 0962 MCP read tool campaign_pending_gates.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "clientId"
+        ],
+        "properties": {
+          "clientId": {
+            "type": "string",
+            "description": "The client (its org id). Every campaign tool acts for exactly one client."
+          }
+        }
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "expose",
+            "typeId": "core.openwop.mcp.expose-tool@1.0.0",
+            "config": {
+              "name": "campaign_pending_gates",
+              "description": "The approvals waiting on a client's campaigns: what each asks, which roles approve and how many. Approvals are decided by people in the app's inbox, never through this tool. Read-only.",
+              "inputSchema": {
+                "type": "object",
+                "properties": {
+                  "clientId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200,
+                    "description": "The client (its org id). Every campaign tool acts for exactly one client."
+                  }
+                },
+                "required": [
+                  "clientId"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          {
+            "id": "backing",
+            "typeId": "feature.campaign-ops.nodes.mcp-pending-gates@1.0.0",
+            "inputs": {
+              "clientId": "{{params.clientId}}"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "expose.handle",
+            "to": "backing._order",
+            "triggerRule": "all_success"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "campaign-studio.mcp.run-status",
+      "internal": true,
+      "version": "1.0.0",
+      "label": "campaign_run_status",
+      "description": "ADR 0962 MCP read tool campaign_run_status.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "clientId",
+          "runId"
+        ],
+        "properties": {
+          "clientId": {
+            "type": "string",
+            "description": "The client (its org id). Every campaign tool acts for exactly one client."
+          },
+          "runId": {
+            "type": "string",
+            "description": "A run of one of this client's campaigns."
+          }
+        }
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "expose",
+            "typeId": "core.openwop.mcp.expose-tool@1.0.0",
+            "config": {
+              "name": "campaign_run_status",
+              "description": "The state of one of a client's campaign runs and which approvals it is waiting on. Read-only.",
+              "inputSchema": {
+                "type": "object",
+                "properties": {
+                  "clientId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200,
+                    "description": "The client (its org id). Every campaign tool acts for exactly one client."
+                  },
+                  "runId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200,
+                    "description": "A run of one of this client's campaigns."
+                  }
+                },
+                "required": [
+                  "clientId",
+                  "runId"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          {
+            "id": "backing",
+            "typeId": "feature.campaign-ops.nodes.mcp-run-status@1.0.0",
+            "inputs": {
+              "clientId": "{{params.clientId}}",
+              "runId": "{{params.runId}}"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "expose.handle",
+            "to": "backing._order",
+            "triggerRule": "all_success"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "campaign-studio.mcp.explain",
+      "internal": true,
+      "version": "1.0.0",
+      "label": "campaign_explain",
+      "description": "ADR 0962 MCP read tool campaign_explain.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "clientId",
+          "runId"
+        ],
+        "properties": {
+          "clientId": {
+            "type": "string",
+            "description": "The client (its org id). Every campaign tool acts for exactly one client."
+          },
+          "runId": {
+            "type": "string",
+            "description": "A run of one of this client's campaigns."
+          }
+        }
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "expose",
+            "typeId": "core.openwop.mcp.expose-tool@1.0.0",
+            "config": {
+              "name": "campaign_explain",
+              "description": "Why each step of a client's campaign run ran on its own, waited for approval or was blocked: the review-policy rule that decided it. Read-only.",
+              "inputSchema": {
+                "type": "object",
+                "properties": {
+                  "clientId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200,
+                    "description": "The client (its org id). Every campaign tool acts for exactly one client."
+                  },
+                  "runId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200,
+                    "description": "A run of one of this client's campaigns."
+                  }
+                },
+                "required": [
+                  "clientId",
+                  "runId"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          {
+            "id": "backing",
+            "typeId": "feature.campaign-ops.nodes.mcp-explain@1.0.0",
+            "inputs": {
+              "clientId": "{{params.clientId}}",
+              "runId": "{{params.runId}}"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "expose.handle",
+            "to": "backing._order",
+            "triggerRule": "all_success"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "campaign-studio.mcp.request-change",
+      "internal": true,
+      "version": "1.0.1",
+      "label": "campaign_request_change",
+      "description": "ADR 0962 MCP request tool campaign_request_change.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "clientId",
+          "text",
+          "assetIds"
+        ],
+        "properties": {
+          "clientId": {
+            "type": "string",
+            "description": "The client (its org id). Every campaign tool acts for exactly one client."
+          },
+          "text": {
+            "type": "string",
+            "description": "The change, in plain words (for example: change the hero headline on the spring landing page to …)."
+          },
+          "assetIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Optional: the client's registered assets the change is about."
+          },
+          "campaignId": {
+            "type": "string",
+            "description": "Optional: the campaign the change belongs to."
+          }
+        }
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "expose",
+            "typeId": "core.openwop.mcp.expose-tool@1.0.0",
+            "config": {
+              "name": "campaign_request_change",
+              "description": "Ask for a change to one client's registered pages or emails (name 1 to 10 asset ids). The app plans the edit, and a person at the client must approve it in the app before anything changes. Returns the request id and the run that plans it; it never reports the change as done.",
+              "inputSchema": {
+                "type": "object",
+                "properties": {
+                  "clientId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200,
+                    "description": "The client (its org id). Every campaign tool acts for exactly one client."
+                  },
+                  "text": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4000,
+                    "description": "The change, in plain words (for example: change the hero headline on the spring landing page to …)."
+                  },
+                  "assetIds": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 10,
+                    "items": {
+                      "type": "string",
+                      "maxLength": 200
+                    },
+                    "description": "The client's registered assets this change may touch (1 to 10). campaign_get lists a campaign; the agency registers pages and emails as assets."
+                  },
+                  "campaignId": {
+                    "type": "string",
+                    "maxLength": 200,
+                    "description": "Optional: the campaign the change belongs to."
+                  }
+                },
+                "required": [
+                  "clientId",
+                  "text",
+                  "assetIds"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          {
+            "id": "backing",
+            "typeId": "feature.campaign-ops.nodes.mcp-request-change@1.0.1",
+            "inputs": {
+              "clientId": "{{params.clientId}}",
+              "text": "{{params.text}}",
+              "assetIds": "{{params.assetIds}}",
+              "campaignId": "{{params.campaignId}}"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "expose.handle",
+            "to": "backing._order",
+            "triggerRule": "all_success"
+          }
+        ]
+      },
+      "capabilities": [
+        "side-effectful"
+      ]
+    }
+  ]
+}

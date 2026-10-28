@@ -13,6 +13,7 @@
 import { Button } from '../../ui/Button.js';
 import { useEffect, useRef, useState, lazy, Suspense } from 'react';
 import { Link, useInRouterContext } from 'react-router-dom';
+import { EmailSendReviewContext } from '../../notifications/EmailSendReviewContext.js';
 import { Notice, StatusBadge } from '../../ui/index.js';
 import { confirm } from '../../ui/confirm.js';
 import { decideErrorMessage } from '../../interrupts/decideErrorMessage.js';
@@ -173,6 +174,7 @@ export function ReviewCard({ review, onDecide, onOpenArtifact, compact }: Props)
       // hash of the definition THIS card displayed; the backend refuses when
       // the live definition no longer matches (409 proposal_stale → error line).
       const liveHash = review.composedWorkflow?.liveDefinitionHash;
+      const emailReviewHash = review.kind === 'email-campaign-send' ? review.emailSend?.reviewHash : undefined;
       // `requiresValue` actions arrive here only with the value the inline
       // answer form produced — never an invented `{}` (`APUX-4`).
       await onDecide(action.action, {
@@ -181,6 +183,7 @@ export function ReviewCard({ review, onDecide, onOpenArtifact, compact }: Props)
         ...(action.action === 'approve' && liveHash ? { expectedDefinitionHash: liveHash } : {}),
         // ADR 0862 D1 — an assistant action approve echoes the hash of the fields shown.
         ...(action.action === 'approve' && review.assistantAction ? { expectedContentHash: review.assistantAction.contentHash } : {}),
+        ...(action.action === 'approve' && emailReviewHash ? { expectedContentHash: emailReviewHash } : {}),
       });
     } catch (err) {
       setError(failureMessage(err));
@@ -252,6 +255,7 @@ export function ReviewCard({ review, onDecide, onOpenArtifact, compact }: Props)
       ) : null}
 
       {review.assistantAction ? <AssistantActionFields payload={review.assistantAction.payload} /> : null}
+      {review.kind === 'email-campaign-send' ? <EmailSendReviewContext a={review} /> : null}
 
       {/* ADR 0501 step 4 — only while the decision is still open: once resolved, a
           "what this would do" panel describes a choice already made. */}

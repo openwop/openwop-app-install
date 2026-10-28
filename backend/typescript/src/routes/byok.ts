@@ -45,7 +45,7 @@ import { OpenwopError } from '../types.js';
 import { listSecretRefs, removeSecret, setSecret, type SecretScope } from '../byok/secretResolver.js';
 import { lookupCredentialRefConsumers, type ConsumerLookup } from '../host/credentialRefRegistry.js';
 import { createLogger } from '../observability/logger.js';
-import { requireTenantScope } from '../features/featureRoute.js';
+import { requireByokManage } from '../features/featureRoute.js';
 import { systemOwnedRefOwner } from '../byok/refNamespaces.js';
 import { appendAudit } from '../host/auditChainService.js';
 import { managedAnonSignInRequired } from '../host/deployPosture.js';
@@ -75,10 +75,6 @@ function chatBindingSignInRequired(binding: { credentialRef: string } | null, te
     && tenantId.startsWith('anon:') && managedAnonSignInRequired();
 }
 
-/** ADR 0779 D1 — the ONE write authority for the tenant-wide key store. */
-function requireByokManage(req: import('express').Request): Promise<void> {
-  return requireTenantScope(req, 'host:byok:manage');
-}
 
 function scopeFromReq(req: import('express').Request): { tenantId: string; actorId?: string } | undefined {
   // In ephemeral mode the resolver needs a tenantId. Pull it from the

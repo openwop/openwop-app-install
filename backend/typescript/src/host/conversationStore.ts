@@ -163,6 +163,12 @@ export interface ConversationMeta {
    *  (every tool re-checks its own predicate on the resolved id). Server-set,
    *  after the route verified the caller may read the entity. */
   focus?: ConversationFocus;
+  /** ADR 0944 D2 — the CLIENT org this conversation works for, bound ONCE at
+   *  creation (there is no setter) after the creator was checked for
+   *  `workspace:read` on it; a branch copies it. Agents recall that client's
+   *  shared `org:<orgId>` memory here, re-checked live for whoever speaks. `name`
+   *  is a display snapshot taken at binding, never an authority. */
+  client?: { orgId: string; name: string };
   participants: ConversationParticipant[];
   createdAt: string;
   updatedAt: string;
@@ -298,6 +304,8 @@ export interface ConversationMetaInit {
   ownerSubject?: Subject;
   branchedFrom?: { conversationId: string; fromSeq: number };
   channel?: { name: string; description?: string; visibility: 'public' | 'private'; archived?: boolean };
+  /** ADR 0944 D2 — set only here; the caller checked the creator's access first. */
+  client?: { orgId: string; name: string };
 }
 
 /** Create (or return the existing) conversation meta for a session — idempotent.
@@ -328,6 +336,7 @@ export async function ensureConversationMeta(
     ...(init.ownerSubject ? { ownerSubject: init.ownerSubject } : {}),
     ...(init.branchedFrom ? { branchedFrom: init.branchedFrom } : {}),
     ...(init.channel ? { channel: init.channel } : {}),
+    ...(init.client ? { client: init.client } : {}),
     participants,
     createdAt: ts,
     updatedAt: ts,
@@ -566,24 +575,15 @@ export async function setConversationChannel(
   return next;
 }
 
-/** ADR 0879 D0 — every spelling a person's ref can take in a conversation row.
- *  Rows are written with `userRef(req.userId ?? principalId)`, so a person whose id
- *  is `user:<hash>` is stored as `user:user:<hash>` (and an OIDC caller as
- *  `user:oidc:<sub>`), while member rows and erasure keys carry the bare subject.
- *  The set is the subject's own forms plus their `userRef` — never an alias
- *  principal⇄user (principals are not issuer-qualified). */
-export function subjectRefForms(subjectKey: string): ReadonlySet<string> {
-  const { forms } = subjectKeyForms(subjectKey);
-  return new Set([...forms, ...[...forms].map(userRef)]);
-}
-
 /** ADR 0879 D4 — a person left the workspace: drop every participant row that is
  *  theirs (owner row included) and relinquish ownership, so a re-invite does not
  *  restore a private room or manage rights. Returns the number of conversations
  *  changed. Channels only — other conversation types keep the ADR 0464 posture. */
 export async function relinquishChannelSubject(tenantId: string, subjectKey: string): Promise<number> {
   if (!tenantId || !subjectKey) return 0;
-  const refs = subjectRefForms(subjectKey);
+  // ADR 0879 D0 — rows hold `userRef(<id>)`, i.e. `user:user:<hash>`; the
+  // subject-key forms include that spelling (ADR 0464 correction, DSAR-DBL).
+  const refs = subjectKeyForms(subjectKey).forms;
   let changed = 0;
   for (const m of await metas.listByPrefix(`${tenantId}:`)) {
     if (m.type !== 'channel') continue;
@@ -622,19 +622,20 @@ export async function markRead(tenantId: string, conversationId: string, subject
  *  in the tenant, without deleting any conversation. */
 export async function eraseSubjectConversations(tenantId: string, subjectKey: string): Promise<void> {
   if (!tenantId || !subjectKey) return;
-  const { forms } = subjectKeyForms(subjectKey);
-  // ADR 0879 D0 — participant refs are `userRef(<id>)`, so `user:<hash>` is stored
-  // as `user:user:<hash>`; match the ref forms, not only the bare subject forms.
-  const refs = subjectRefForms(subjectKey);
+  // ADR 0879 D0 — participant refs and dmKey segments are `userRef(<id>)`, so
+  // `user:<hash>` is stored as `user:user:<hash>`. The forms include that spelling
+  // (ADR 0464 correction, DSAR-DBL); the dmKey used to be checked against a set
+  // without it, so an erased person's id survived in every DM key.
+  const forms = subjectKeyForms(subjectKey).forms;
   for (const m of await metas.listByPrefix(`${tenantId}:`)) {
     const ownerHit = m.ownerUserId !== undefined && forms.has(m.ownerUserId);
-    const partHit = m.participants.some((p) => refs.has(p.subjectRef));
+    const partHit = m.participants.some((p) => forms.has(p.subjectRef));
     const subjHit = m.ownerSubject?.kind === 'user' && forms.has(m.ownerSubject.id);
     const dmHit = m.dmKey !== undefined && m.dmKey.split('|').some((seg) => forms.has(seg));
     if (!ownerHit && !partHit && !subjHit && !dmHit) continue;
     const next: ConversationMeta = {
       ...m,
-      participants: m.participants.map((p) => (refs.has(p.subjectRef) ? { ...p, subjectRef: ERASED_USER_REF } : p)),
+      participants: m.participants.map((p) => (forms.has(p.subjectRef) ? { ...p, subjectRef: ERASED_USER_REF } : p)),
       updatedAt: now(),
     };
     if (ownerHit) next.ownerUserId = ERASED;

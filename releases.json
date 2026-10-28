@@ -1,11 +1,13 @@
 {
-  "_comment": "ADR 0052 §D2/§D7 — machine-readable release manifest and the single source of truth for REQUIRED UPGRADE STOPS. /cut-app-release PREPENDS each immutable vX.Y.Z release into `releases` (newest first) and sets `latest`. An upgrade tool reads `releases` to compute which required stops sit between a customer's current version and the target. `latest` names the newest stable (the moving alias the /install/ download points at). The per-entry field shape is documented in `_releaseShape` — that is a SCHEMA EXAMPLE, never a real release; do not parse it as one.",
-  "latest": "0.7.0",
+  "_comment": "ADR 0052 \u00a7D2/\u00a7D7 \u2014 machine-readable release manifest and the single source of truth for REQUIRED UPGRADE STOPS. /cut-app-release PREPENDS each immutable vX.Y.Z release into `releases` (newest first) and sets `latest`. An upgrade tool reads `releases` to compute which required stops sit between a customer's current version and the target. `latest` names the newest stable (the moving alias the /install/ download points at). `requiredStop` (land on this version before going past it) and `rollingSafe` (the previous binary may keep running against this version's schema; false \u21d2 stop every old instance first, even when skipping past it) are separate constraints (ADR 0052 \u00a7D2a); `node scripts/upgrade-plan.mjs <from> [<to>]` computes the plan. The per-entry field shape is documented in `_releaseShape` \u2014 that is a SCHEMA EXAMPLE, never a real release; do not parse it as one.",
+  "latest": "0.8.0",
   "_releaseShape": {
     "version": "X.Y.Z",
     "date": "YYYY-MM-DD",
     "requiredStop": false,
     "requiredStopReason": null,
+    "rollingSafe": true,
+    "rollingUnsafeReason": null,
     "schemaVersion": {
       "sqlite": 28,
       "postgres": 25
@@ -16,10 +18,34 @@
   },
   "releases": [
     {
+      "version": "0.8.0",
+      "date": "2026-10-28",
+      "requiredStop": false,
+      "requiredStopReason": null,
+      "rollingSafe": true,
+      "rollingUnsafeReason": null,
+      "schemaVersion": {
+        "sqlite": 51,
+        "postgres": 49
+      },
+      "appMigrationVersion": 24,
+      "breakingConfig": [
+        "The auth posture requires OPENWOP_AUTHORIZATION_ENFORCEMENT=true or OPENWOP_ALLOW_UNENFORCED_AUTHORIZATION=true (ADR 0981 P3).",
+        "When superadmins are configured in the auth posture, set OPENWOP_SUPERADMIN_REQUIRE_MFA=true or OPENWOP_ALLOW_SUPERADMIN_WITHOUT_MFA=true (ADR 0981 P3).",
+        "Postmark marketing/unlabelled sends require a Broadcast stream: default broadcast, or OPENWOP_POSTMARK_BROADCAST_STREAM naming an existing Broadcast stream (ADR 0994).",
+        "Production in-process WASI requires OPENWOP_CODE_EXEC_RUNTIME=wasi; a bundled runtime no longer enables it automatically (ADR 0995).",
+        "Workflow vector/search/NoSQL/blob names now resolve under wf:. Inventory and back up existing workflow data before upgrading; quiesce affected workflows and arrange a reviewed data transition. No automatic migration; never copy host-private data into the run namespace (ADR 0998).",
+        "Existing OpenSearch indexes use new physical names and need an operator-reviewed rebuild from authoritative tenant-scoped data; old colliding indexes must not be copied wholesale into one tenant. Back up, quiesce affected writers and verify isolation/counts/queries before resuming. No automatic data migration; coordinate the wf: transition where applicable (#5355)."
+      ],
+      "notes": "CHANGELOG.md#080--2026-10-28"
+    },
+    {
       "version": "0.7.0",
       "date": "2026-10-23",
       "requiredStop": false,
       "requiredStopReason": null,
+      "rollingSafe": true,
+      "rollingUnsafeReason": null,
       "schemaVersion": {
         "sqlite": 50,
         "postgres": 48
@@ -33,6 +59,8 @@
       "date": "2026-10-20",
       "requiredStop": false,
       "requiredStopReason": null,
+      "rollingSafe": true,
+      "rollingUnsafeReason": null,
       "schemaVersion": {
         "sqlite": 50,
         "postgres": 48
@@ -48,6 +76,8 @@
       "date": "2026-10-18",
       "requiredStop": false,
       "requiredStopReason": null,
+      "rollingSafe": true,
+      "rollingUnsafeReason": null,
       "schemaVersion": {
         "sqlite": 50,
         "postgres": 48
@@ -61,6 +91,8 @@
       "date": "2026-10-18",
       "requiredStop": false,
       "requiredStopReason": null,
+      "rollingSafe": true,
+      "rollingUnsafeReason": null,
       "schemaVersion": {
         "sqlite": 50,
         "postgres": 48
@@ -74,6 +106,8 @@
       "date": "2026-10-10",
       "requiredStop": false,
       "requiredStopReason": null,
+      "rollingSafe": true,
+      "rollingUnsafeReason": null,
       "schemaVersion": {
         "sqlite": 49,
         "postgres": 47
@@ -87,6 +121,8 @@
       "date": "2026-10-09",
       "requiredStop": false,
       "requiredStopReason": null,
+      "rollingSafe": true,
+      "rollingUnsafeReason": null,
       "schemaVersion": {
         "sqlite": 49,
         "postgres": 47
@@ -96,7 +132,7 @@
         "OpenWOP v1 removed: /v1/* answers 410 (public read twins 308), discovery advertises only 2.0; OPENWOP_V1_RETIRED no longer exists (ADR 0812)",
         "Chain packs must pin every node reference exactly (typeId@x.y.z) or they are refused at load (ADR 0766)",
         "Registry packs must be signed for the v2 tree (ed25519-canonical-json) with engines admitting <3.0.0",
-        "OPENWOP_TRUSTED_PROXY_CIDRS (new) — set it when a public-address proxy other than Google's front end fronts the backend (ADR 0851)",
+        "OPENWOP_TRUSTED_PROXY_CIDRS (new) \u2014 set it when a public-address proxy other than Google's front end fronts the backend (ADR 0851)",
         "Scale-out hosts withhold memory-backed storage families; select OPENWOP_SURFACE_* shared backends (ADR 0867)"
       ],
       "notes": "CHANGELOG.md#030--2026-10-09"
@@ -106,15 +142,17 @@
       "date": "2026-09-27",
       "requiredStop": false,
       "requiredStopReason": null,
+      "rollingSafe": false,
+      "rollingUnsafeReason": "Postgres migration 37 / SQLite 39 rename invocation_log.provider_key to invocation_id; a 0.1.0 process sharing the upgraded database fails on that table. Recorded 2026-10-24 (ADR 0052 \u00a7D2a): the 0.2.0 release notes said this, but the manifest had no field for it.",
       "schemaVersion": {
         "sqlite": 48,
         "postgres": 46
       },
       "appMigrationVersion": 21,
       "breakingConfig": [
-        "Webhook: pre-spec `openwop-signature: t=…,v1=…` and `openwop-subscription-id` headers removed — verify with the OpenWOP-* / X-openwop-* family",
+        "Webhook: pre-spec `openwop-signature: t=\u2026,v1=\u2026` and `openwop-subscription-id` headers removed \u2014 verify with the OpenWOP-* / X-openwop-* family",
         "OPENWOP_RATELIMIT_IP_REQS_PER_MIN is now the WRITE budget; reads use OPENWOP_RATELIMIT_IP_READ_REQS_PER_MIN (ADR 0640)",
-        "OPENWOP_INTERRUPT_TOKEN_SECRET (new) — set it; the fallback is not a secret",
+        "OPENWOP_INTERRUPT_TOKEN_SECRET (new) \u2014 set it; the fallback is not a secret",
         "Not rolling-safe: stop the 0.1.0 binary before starting 0.2.0 (invocation_log column rename)"
       ],
       "notes": "CHANGELOG.md#020--2026-09-27"
@@ -124,6 +162,8 @@
       "date": "2026-06-30",
       "requiredStop": false,
       "requiredStopReason": null,
+      "rollingSafe": true,
+      "rollingUnsafeReason": null,
       "schemaVersion": {
         "sqlite": 32,
         "postgres": 29

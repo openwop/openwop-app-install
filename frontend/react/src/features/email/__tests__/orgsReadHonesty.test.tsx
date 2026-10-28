@@ -16,7 +16,9 @@ const api = vi.hoisted(() => ({ listOrgs: vi.fn(), listSegments: vi.fn() }));
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 vi.mock('../emailClient.js', async (orig) => {
   const actual = await orig<Record<string, unknown>>();
-  return { ...actual, listOrgs: api.listOrgs, listSegments: api.listSegments };
+  return { ...actual, listOrgs: api.listOrgs, listSegments: api.listSegments, listTopics: async () => ({ topics: [], max: 20 }),
+    // ADR 0955 D7 — the page's sending-health card (a healthy sender).
+    getSendingHealth: async () => ({ state: null, window: { sent: 0, hardBounces: 0, complaints: 0 }, thresholds: { minSends: 500, complaintRate: 0.001, hardBounceRate: 0.02 }, canResume: false }) };
 });
 const access = vi.hoisted(() => ({ useFeatureAccess: vi.fn() }));
 vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({

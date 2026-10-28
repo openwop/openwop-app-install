@@ -243,6 +243,14 @@ and group route in every tenant, so a standing, non-expiring grant cannot be min
 It is added to the roles listing (`GET /roles`) marked `activationOnly: true`, so the UI never offers
 it as an assignable role.
 
+> **CORRECTED 2026-10-25 (ADR 0975 D1) — "exactly these two scopes" left the Factory's own gates
+> undecidable.** Walking P4 on kicktodo.com, the operator started a Factory run and could not answer
+> its outline gate: `403 forbidden_scope (approvals:respond)`. The role is unchanged — adding
+> `approvals:respond` would decide every approval in `host-kicktodo`, which this decision rightly
+> refused. Instead a run-scoped grant admits the person who STARTED a Factory (or lesson-batch) run,
+> while they hold KickTodo manage authority, on that run's gates only. See
+> `docs/adr/0975-kicktodo-factory-operator-path.md`.
+
 **D2 — eligibility.** `isListedSuperadmin(req)` (allowlist only: no wildcard bearer, no
 `OPENWOP_FEATURE_TOGGLES_DEV_OPEN`, a narrowed key never qualifies) is ELIGIBILITY. It grants nothing by
 itself, anywhere. Eligibility is reviewed by the boot pass (D7), which runs on every revision, and every
@@ -539,7 +547,9 @@ red against the guard removed, and the result is recorded in the PR.
 3. **D-23:** confirm ADR 0711 option B is live (a member with no stored binding reads the managed
    default as `valid`), then `DELETE /byok/active-config` from `host-kicktodo`. Verify participants
    still reach the managed default.
-4. Store the Factory key as `kicktodo-factory:<provider>` (D8). Run the Factory, then submit and
+4. Store the Factory key as `kicktodo-factory:<provider>` (D8) from the Challenge Factory key card on
+   `/admin/kicktodo/connections`, while switched into `host-kicktodo`. The Keys page cannot write
+   this ref: its form builds `<provider>:<label>`, which the chat ladder would pick up. Run the Factory, then submit and
    self-approve (D5) while the activation is live, re-activating as needed.
 5. Record the ADR 0684 ban-path witness that the operator identity finally makes possible.
 6. Readiness shows the activation and the Factory credential. Let the activation expire and confirm

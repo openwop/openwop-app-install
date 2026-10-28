@@ -7,6 +7,13 @@
  * the id BARE for such a tenant (every bound kind unbound for every signed-in
  * user's default workspace) and `fromWireRunId` refused the raw spelling with a
  * 403. Measured on the full suite 2026-09-17: 120 of 128 remaining wire errors.
+ *
+ * Tracker TST-BAA-9. The key-shape table itself (every `toWireTenant` row,
+ * round-trip, injectivity) is `adr0814-wire-tenant.test.ts`; this file keeps the
+ * BINDING and REFUSAL legs. Red when (sabotage-witnessed, wave 60):
+ * `fromWireRunId` stops comparing the tenant segment, or stops enforcing the
+ * opaque grammar; `toWireRunId` binds the raw tenant; tenant fields are not
+ * projected; the `user:` row maps elsewhere.
  */
 import { describe, expect, it } from 'vitest';
 import { fromWireRunId, fromWireTenant, projectV2RunIds, toWireRunId, toWireTenant, V2_TENANT_FIELD_KEYS, V2_TENANT_ID } from '../src/host/v2Ids.js';
@@ -48,10 +55,11 @@ describe('ADR 0726 — tenant segment codec', () => {
   it('projects every schema-typed tenant field (owner.tenant, subject.tenant) and every bound kind under the personal tenant', () => {
     expect(V2_TENANT_FIELD_KEYS.has('tenant')).toBe(true);
     expect(V2_TENANT_FIELD_KEYS.has('tenantId')).toBe(true);
-    const out = projectV2RunIds({ runId: OPAQUE, owner: { tenant: PERSONAL, subject: { issuer: 'urn:openwop:legacy', subjectId: 'x', tenant: PERSONAL, lane: 'session', kind: 'user' } } }, PERSONAL) as any;
-    expect(out.runId).toBe(`${WIRE_PERSONAL}/${OPAQUE}`);
-    expect(out.owner.tenant).toBe(WIRE_PERSONAL);
-    expect(out.owner.subject.tenant).toBe(WIRE_PERSONAL);
-    expect(V2_TENANT_ID.test(out.owner.tenant)).toBe(true);
+    const out = projectV2RunIds({ runId: OPAQUE, owner: { tenant: PERSONAL, subject: { issuer: 'urn:openwop:legacy', subjectId: 'x', tenant: PERSONAL, lane: 'session', kind: 'user' } } }, PERSONAL);
+    expect(out).toEqual({
+      runId: `${WIRE_PERSONAL}/${OPAQUE}`,
+      owner: { tenant: WIRE_PERSONAL, subject: { issuer: 'urn:openwop:legacy', subjectId: 'x', tenant: WIRE_PERSONAL, lane: 'session', kind: 'user' } },
+    });
+    expect(V2_TENANT_ID.test(WIRE_PERSONAL)).toBe(true);
   });
 });

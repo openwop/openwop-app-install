@@ -16,6 +16,14 @@
  * It reads the FRONTEND authored content as well as the backend seed, because
  * until ADR 0488 P4/P5 retires the frontend copy BOTH can carry bindings and a
  * dangling one in either is equally dead to the learner.
+ *
+ * Floors MEASURED 2026-10-23 (wave 61): 9 referenced ids (3
+ * `tutorial.connect-your-ai.phase-2..4` + 6 `walkthrough.*`), 30 chains that
+ * resolve through the run resolver, 4 phase-level `chainId`s, 6 frontend
+ * content modules. The old floors were `> 0`, and the launchable-set one could
+ * never fail: the demo walkthroughs and the two constant ids are always in it
+ * (probe tbd-launchable-floor). The frontend half used to be skipped silently
+ * if its directory moved, and read single-quoted ids only.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
@@ -43,20 +51,22 @@ function referencedChainIds(): string[] {
       }
     }
   }
-  // Frontend authored modules (still live until P4/P5).
-  if (existsSync(FE_CONTENT)) {
-    for (const f of readdirSync(FE_CONTENT)) {
-      if (!f.endsWith('.ts')) continue;
-      const src = readFileSync(join(FE_CONTENT, f), 'utf8');
-      for (const m of src.matchAll(/chainId:\s*'([^']+)'/g)) ids.add(m[1]!);
-      for (const m of src.matchAll(/walkthroughId:\s*'([^']+)'/g)) ids.add(m[1]!);
-    }
+  // Frontend authored modules (still live until P4/P5). A moved directory must
+  // fail here, not silently drop half the check.
+  expect(existsSync(FE_CONTENT), `frontend tutorial content not found at ${FE_CONTENT}`).toBe(true);
+  for (const f of readdirSync(FE_CONTENT)) {
+    if (!f.endsWith('.ts')) continue;
+    const src = readFileSync(join(FE_CONTENT, f), 'utf8');
+    for (const m of src.matchAll(/chainId:\s*['"]([^'"]+)['"]/g)) ids.add(m[1]!);
+    for (const m of src.matchAll(/walkthroughId:\s*['"]([^'"]+)['"]/g)) ids.add(m[1]!);
   }
   return [...ids];
 }
 
 /** Ids the player can actually launch. */
 let launchable: Set<string>;
+/** The subset that resolves through the RUN RESOLVER (`getChainBackedWorkflow`). */
+let registered: string[];
 
 beforeAll(() => {
   // §Correction (grade-code `TUT-2`) — THIS TEST USED TO CERTIFY DEAD BUTTONS.
@@ -77,8 +87,9 @@ beforeAll(() => {
   // The REAL registration paths, exactly as the features run them at boot.
   registerWalkthroughWorkflows();
   registerTutorialChainWorkflows();
+  registered = listChains().map((c) => c.chain.chainId).filter((id) => getChainBackedWorkflow(id) !== undefined);
   launchable = new Set<string>([
-    ...listChains().map((c) => c.chain.chainId).filter((id) => getChainBackedWorkflow(id) !== undefined),
+    ...registered,
     // ADR 0435 — the two SAMPLE walkthroughs are seeded example data, not
     // builtins, so they are launchable by id without being in the registry here.
     ...DEMO_WALKTHROUGHS.map((d) => d.workflowId),
@@ -90,11 +101,18 @@ beforeAll(() => {
 
 describe('ADR 0488 D1 — tutorial→chain binding drift', () => {
   it('tutorials actually reference chains (non-vacuous — an empty set would pass everything)', () => {
-    expect(referencedChainIds().length).toBeGreaterThan(0);
+    expect(referencedChainIds().length).toBeGreaterThanOrEqual(9); // measured 9
   });
 
   it('the launchable set is non-empty (a broken registration fails here first)', () => {
-    expect(launchable.size).toBeGreaterThan(0);
+    // The REGISTERED half, not `launchable` (which always holds the demo
+    // walkthroughs and the two constant ids, so it could never be empty).
+    expect(registered.length).toBeGreaterThanOrEqual(29); // measured 30
+    expect(registered).toEqual(expect.arrayContaining([
+      'tutorial.connect-your-ai.phase-2',
+      'tutorial.connect-your-ai.phase-3',
+      'tutorial.connect-your-ai.phase-4',
+    ]));
   });
 
   it('EVERY referenced chainId resolves to something the player can launch', () => {
@@ -154,12 +172,20 @@ describe('ADR 0488 D1 — tutorial→chain binding drift', () => {
   });
 
   it('ADR 0488 D2 — a phase `chainId`, where present, also resolves', () => {
+    // Twin of "EVERY referenced chainId resolves" (whose set already includes
+    // phase chainIds — probe tbd-typo reddens both). Kept as the per-PHASE view:
+    // its failure names the tutorial and phase, and it pins that phase-level
+    // bindings exist at all (measured 4), which the merged set cannot show.
+    const phased: string[] = [];
     const dangling: string[] = [];
     for (const t of SEED_TUTORIALS) {
       for (const p of t.phases) {
-        if (p.chainId && !launchable.has(p.chainId)) dangling.push(`${t.id}/phase-${p.number}: ${p.chainId}`);
+        if (!p.chainId) continue;
+        phased.push(p.chainId);
+        if (!launchable.has(p.chainId)) dangling.push(`${t.id}/phase-${p.number}: ${p.chainId}`);
       }
     }
+    expect(phased.length).toBeGreaterThanOrEqual(4); // measured 4
     expect(dangling).toEqual([]);
   });
 });

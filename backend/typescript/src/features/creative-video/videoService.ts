@@ -30,7 +30,9 @@ import { OpenwopError } from '../../types.js';
 import { createLogger } from '../../observability/logger.js';
 import type { BrokeredEgressDeps } from '../../host/brokeredEgress.js';
 import { checkMediaBudget, recordMediaUsage } from '../../aiProviders/mediaBudget.js';
-import { createAsset, assertOrgCapacity, findAssetByContentHash } from '../media/mediaService.js';
+import { createAsset, assertOrgCapacity, findAssetByContentHash, getAsset, isVerifiedProductSource, promptHashOf, setGroundingFidelity, stampGroundingIfAbsent, PROVIDER_DEFAULT_MODEL } from '../media/mediaService.js';
+import { FIDELITY_RULESET_VERSION, getVerdict, imageSize, isRasterisable, recordVerdict, verdictIdFor } from '../../host/creativeFidelity/index.js';
+import { resolveMediaAsset } from '../../host/inMemorySurfaces.js';
 import { put as mediaPut } from '../media/mediaStorage.js';
 import { makeVideoAdapter, type VideoAdapter, type SubmitJobInput } from './host/videoProviderAdapter.js';
 import { makeT2VAdapter, t2vProvider } from './host/t2vProviderAdapter.js';
@@ -124,6 +126,8 @@ interface RunParams {
   createdBy: string;
   nowMs?: number;
   lineage: { model: string; rightsNote: string };
+  /** ADR 0945 D7 (i2v) — the verified still and the product it depicts. */
+  source?: { assetId: string; sha256: string; productId?: string };
 }
 
 /** Generate (or resolve) an avatar video (ADR 0404 §b). */
@@ -137,6 +141,95 @@ export async function generateVideo(deps: BrokeredEgressDeps, input: GenerateVid
     costUnits: 1, createdBy: input.createdBy, ...(input.nowMs !== undefined ? { nowMs: input.nowMs } : {}),
     lineage: { model: AVATAR_PROVIDER, rightsNote: 'AI-generated avatar video' },
   });
+}
+
+/** ADR 0945 D7 — an image→video request. */
+export interface ImageToVideoInput {
+  tenantId: string;
+  orgId: string;
+  sourceAssetId: string;
+  /** The product the still depicts (required when the still is a raw product photo). */
+  productId?: string;
+  prompt: string;
+  model?: string;
+  durationSec?: number;
+  createdBy: string;
+  nowMs?: number;
+}
+
+/** A still above this many bytes is refused before any spend (the provider caps
+ *  data-URI images, and base64 inflates the bytes by a third). */
+const I2V_MAX_SOURCE_BYTES = 3_500_000;
+
+/**
+ * ADR 0945 D7 — animate a still (image→video) on the SAME job pipeline as t2v.
+ * The source must be (a) a grounded still (a composite or edit whose STORED
+ * verdict is `pass`) or (b) one of the product's own photos. Anything else is
+ * `product_depiction_ungrounded`. Both checks re-run on every call, BEFORE the
+ * request hash, so a dedup hit cannot skip them. Every product video lands
+ * `needs_review` (no frame sampling yet, G7): the publish gate holds it for a
+ * person. Gated by `creative-video.t2v` at the verb/route boundary.
+ */
+export async function imageToVideo(deps: BrokeredEgressDeps, input: ImageToVideoInput, adapter: VideoAdapter = makeT2VAdapter(deps)): Promise<GenerateOutput> {
+  const prompt = input.prompt.trim();
+  if (!prompt) throw new OpenwopError('validation_error', 'A motion prompt is required.', 400, { field: 'prompt' });
+  const source = await getAsset(input.tenantId, input.orgId, input.sourceAssetId);
+  if (!source) throw new OpenwopError('not_found', 'Source image not found.', 404, { assetId: input.sourceAssetId });
+  if (!isRasterisable(source.contentType)) throw new OpenwopError('validation_error', `The source must be a PNG, JPEG or GIF image (it is ${source.contentType}).`, 422, { field: 'sourceAssetId' });
+  if (source.sizeBytes > I2V_MAX_SOURCE_BYTES) throw new OpenwopError('validation_error', `The source image is over ${Math.floor(I2V_MAX_SOURCE_BYTES / 1_000_000 * 10) / 10} MB — use a smaller one.`, 422, { field: 'sourceAssetId' });
+  const entry = await resolveMediaAsset(source.serveToken);
+  if (!entry || entry.tenantId !== input.tenantId) throw new OpenwopError('not_found', 'Source image bytes unavailable.', 404, { assetId: input.sourceAssetId });
+  const sha256 = createHash('sha256').update(Buffer.from(entry.contentBase64, 'base64')).digest('hex');
+
+  // (a) a grounded still with a PASSING stored verdict, or (b) a product photo.
+  let allowed = false;
+  let productId: string | undefined;
+  const g = source.lineage?.grounding;
+  if (g && (g.mode === 'composite' || g.mode === 'edit') && g.fidelity) {
+    const v = await getVerdict(input.tenantId, source.orgId, g.fidelity.verdictId).catch(() => null);
+    const sourceKeys = (sources: readonly { assetId: string; sha256: string }[]): string =>
+      JSON.stringify(sources.map((s) => JSON.stringify([s.assetId, s.sha256])).sort());
+    if (v && v.assetId === source.assetId && v.assetSha256 === sha256 && v.outcome === 'pass'
+      && g.productId && v.productId === g.productId && v.mode === g.mode && g.sources.length > 0
+      && v.rulesetVersion === FIDELITY_RULESET_VERSION && sourceKeys(v.sources) === sourceKeys(g.sources)) {
+      allowed = true; productId = g.productId;
+    }
+  }
+  // The catalog owner answers through media's verifier seam (commerce fills it, G11-gated).
+  if (!allowed && input.productId && await isVerifiedProductSource(input.tenantId, input.orgId, input.productId, sha256)) {
+    allowed = true;
+    productId = input.productId;
+  }
+  if (!allowed) {
+    throw new OpenwopError('product_depiction_ungrounded', 'Only a checked product shot, or one of the product\'s own photos, can be animated.', 422, { assetId: input.sourceAssetId });
+  }
+  const model = (input.model ?? '').trim() || undefined;
+  const durationSec = Number.isFinite(input.durationSec) && (input.durationSec ?? 0) > 0 ? Math.floor(input.durationSec!) : undefined;
+  // The provider takes a fixed set of output ratios; pick the orientation that
+  // matches the still (its own pixel size is not a valid ratio value).
+  const size = imageSize(Buffer.from(entry.contentBase64, 'base64'));
+  const ratio = size && size.h > size.w ? { width: 768, height: 1280 } : { width: 1280, height: 768 };
+  return runGeneration(adapter, {
+    tenantId: input.tenantId, orgId: input.orgId, kind: 'i2v', provider: t2vProvider(), ...(model ? { model } : {}),
+    text: prompt,
+    submit: { script: prompt, avatarId: '', promptImage: `data:${source.contentType};base64,${entry.contentBase64}`, ...(model ? { model } : {}), ...(durationSec ? { durationSec } : {}), ...ratio },
+    costUnits: t2vCostUnits(), createdBy: input.createdBy, ...(input.nowMs !== undefined ? { nowMs: input.nowMs } : {}),
+    lineage: { model: model ?? t2vProvider(), rightsNote: 'AI-generated video (image-to-video)' },
+    source: { assetId: source.assetId, sha256, ...(productId ? { productId } : {}) },
+  });
+}
+
+/** ADR 0945 D7 — a product video's verdict: `needs_review`, because no frame of
+ *  it can be sampled on this host yet. Recorded once per asset (idempotent id). */
+async function recordAnimateReview(tenantId: string, orgId: string, assetId: string, assetSha256: string, job: VideoJob): Promise<void> {
+  const checks = [{ id: 'mode' as const, status: 'not_applicable' as const, detail: 'Video frames cannot be sampled on this host yet, so a person must review every product video.' }];
+  const sources = [{ assetId: job.sourceAssetId!, sha256: job.sourceSha256! }];
+  const verdict = await recordVerdict({
+    verdictId: verdictIdFor({ assetId, assetSha256, mode: 'animate', rulesetVersion: FIDELITY_RULESET_VERSION, sources, outcome: 'needs_review', checks }),
+    tenantId, orgId, assetId, assetSha256, mode: 'animate', ...(job.productId ? { productId: job.productId } : {}),
+    sources, checks, outcome: 'needs_review', rulesetVersion: FIDELITY_RULESET_VERSION, checkedAt: new Date().toISOString(),
+  });
+  await setGroundingFidelity(tenantId, orgId, assetId, { verdictId: verdict.verdictId, outcome: verdict.outcome, rulesetVersion: verdict.rulesetVersion });
 }
 
 /** Generate (or resolve) a frontier text-to-video (ADR 0404 §P4). Gated by the
@@ -176,7 +269,7 @@ function isReclaimable(job: VideoJob, nowMs: number): boolean {
 
 /** The shared replay-safe pipeline for both modes. */
 async function runGeneration(adapter: VideoAdapter, p: RunParams): Promise<GenerateOutput> {
-  const requestHash = requestHashFor({ provider: p.provider, orgId: p.orgId, kind: p.kind, ...(p.model ? { model: p.model } : {}), script: p.text, avatarId: p.submit.avatarId, ...(p.submit.voiceId ? { voiceId: p.submit.voiceId } : {}), ...(p.submit.durationSec ? { durationSec: p.submit.durationSec } : {}) });
+  const requestHash = requestHashFor({ provider: p.provider, orgId: p.orgId, kind: p.kind, ...(p.model ? { model: p.model } : {}), script: p.text, avatarId: p.submit.avatarId, ...(p.submit.voiceId ? { voiceId: p.submit.voiceId } : {}), ...(p.submit.durationSec ? { durationSec: p.submit.durationSec } : {}), ...(p.source ? { sourceSha256: p.source.sha256 } : {}) });
   const jobId = jobIdFor(p.tenantId, requestHash);
   const nowMs = p.nowMs ?? Date.now();
   const claimArgs = { tenantId: p.tenantId, orgId: p.orgId, requestHash, kind: p.kind, provider: p.provider, ...(p.model ? { model: p.model } : {}), createdBy: p.createdBy };
@@ -230,7 +323,8 @@ async function doSubmit(adapter: VideoAdapter, p: RunParams, claimed: VideoJob):
   // the original request) can mint the asset once the provider finishes.
   const job: VideoJob = {
     ...claimed, providerJobId: submitted.value.providerJobId, status: 'processing',
-    promptSnippet: p.text.slice(0, 2000), lineageModel: p.lineage.model, rightsNote: p.lineage.rightsNote,
+    promptSnippet: p.text.slice(0, 2000), promptHash: promptHashOf(p.text), lineageModel: p.lineage.model, rightsNote: p.lineage.rightsNote,
+    ...(p.source ? { sourceAssetId: p.source.assetId, sourceSha256: p.source.sha256, ...(p.source.productId ? { productId: p.source.productId } : {}) } : {}),
   };
   await putJob(job);
   // Meter the spend AT submit; the claim CAS guarantees this runs exactly once.
@@ -316,9 +410,23 @@ async function storeCompletion(adapter: VideoAdapter, job: VideoJob, resultUrl: 
   }
   // Content-hash dedup — reuse an identical asset rather than mint a second copy.
   const dup = await findAssetByContentHash(tenantId, orgId, contentHash).catch(() => null);
+  // ADR 0945 D4 — the provenance stamp, from the job row (a text-to-video or
+  // avatar render depicts no product source: mode `none`). Rows submitted
+  // before the hash existed record none rather than a hash of the snippet.
+  const animated = claimedDl.kind === 'i2v' && claimedDl.sourceAssetId && claimedDl.sourceSha256;
+  const grounding = {
+    mode: animated ? 'animate' : 'none',
+    sources: animated ? [{ assetId: claimedDl.sourceAssetId, sha256: claimedDl.sourceSha256 }] : [],
+    ...(animated && claimedDl.productId ? { productId: claimedDl.productId } : {}),
+    ...(claimedDl.promptHash ? { promptHash: claimedDl.promptHash } : {}),
+    provider: claimedDl.provider,
+    model: claimedDl.model ?? claimedDl.lineageModel ?? PROVIDER_DEFAULT_MODEL,
+    op: claimedDl.kind === 'i2v' ? 'image-to-video' : claimedDl.kind === 't2v' ? 'text-to-video' : 'avatar-video',
+  };
   let assetId: string;
   if (dup) {
-    assetId = dup.assetId;
+    assetId = (await stampGroundingIfAbsent(dup, grounding)).assetId;
+    if (animated && claimedDl.productId) await recordAnimateReview(tenantId, orgId, assetId, contentHash, claimedDl);
   } else {
     const stored = await mediaPut(tenantId, { contentBase64: dl.value.base64, contentType: dl.value.contentType });
     const asset = await createAsset({
@@ -327,8 +435,10 @@ async function storeCompletion(adapter: VideoAdapter, job: VideoJob, resultUrl: 
       contentType: dl.value.contentType, sizeBytes: stored.sizeBytes, storageRef: stored.storageRef, serveToken: stored.serveToken,
       uploadedBy: claimedDl.createdBy, contentHash,
       lineage: { generatedBy: 'ai', prompt: claimedDl.promptSnippet ?? '', model: claimedDl.lineageModel ?? claimedDl.provider, provider: claimedDl.provider, rightsNote: claimedDl.rightsNote ?? 'AI-generated video' },
+      grounding,
     });
     assetId = asset.assetId;
+    if (animated && claimedDl.productId) await recordAnimateReview(tenantId, orgId, assetId, contentHash, claimedDl);
   }
   await putJob({ ...claimedDl, status: 'completed', assetId });
   return { status: 'completed', jobId: job.jobId, assetId };
@@ -342,7 +452,7 @@ export async function resolveVideoJob(deps: BrokeredEgressDeps, tenantId: string
   const job = await getJob(tenantId, orgId, jobId);
   if (!job) return null;
   if ((job.status === 'processing' || job.status === 'downloading') && job.providerJobId) {
-    const a = adapter ?? (job.kind === 't2v' ? makeT2VAdapter(deps) : makeVideoAdapter(deps));
+    const a = adapter ?? (job.kind === 't2v' || job.kind === 'i2v' ? makeT2VAdapter(deps) : makeVideoAdapter(deps)); // i2v rides the t2v provider (ADR 0945 D7)
     await finalize(a, job, { maxMs: 0 }); // single poll — never hold the request
     return getJob(tenantId, orgId, jobId);
   }

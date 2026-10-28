@@ -102,7 +102,10 @@ describe('funnels Phase 2 — public serving over HTTP', () => {
       name: 'Live Path', slug: 'live-path',
       steps: [
         { stepId: 'st-landing', kind: 'landing', pageId: landing.pageId },
-        { stepId: 'st-offer', kind: 'upsell', pageId: offer.pageId, routing: [{ when: { outcome: 'declined' }, goto: 'st-thanks' }] },
+        // ADR 0948 P2c — an upsell/downsell's outcome is now the server's (the buyer's
+        // recorded decision; adr0948-p2c-money-steps), so the client-outcome rule
+        // this leg exercises sits on a `sales` step, where a visitor still says it.
+        { stepId: 'st-offer', kind: 'sales', pageId: offer.pageId, routing: [{ when: { outcome: 'declined' }, goto: 'st-thanks' }] },
         { stepId: 'st-extra', kind: 'sales', pageId: offer.pageId },
         { stepId: 'st-thanks', kind: 'thankyou', pageId: thanks.pageId },
       ],

@@ -14,30 +14,37 @@
  * baseline is a SCHEMA ratchet — it proves the key is declared, not that the
  * node reads it. A code review pointed out the behaviour fix had no guard at
  * all, which is how it would silently regress.
+ *
+ * The ctx is a real `NodeContext` (no cast): a stub free to drift from the
+ * thing it stands in for proves nothing about it. The `v.trim() !== ''` guard is
+ * masked by the `n > 0` check after it (probe ws-emptystr: vacuous); the
+ * "non-numeric value" claim is witnessed through `usable()` as a whole
+ * (ws-inputs reds it).
  */
 import { describe, expect, it } from 'vitest';
 import { getNodeRegistry } from '../src/executor/nodeRegistry.js';
 import { ensureNodesRegistered } from '../src/bootstrap/nodes.js';
+import type { NodeContext } from '../src/executor/types.js';
+import type { WebResearchSurface } from '../src/host/webResearchSurface.js';
 
 ensureNodesRegistered();
 const node = getNodeRegistry().get('core.web.search');
 
 /** Capture what the node asks the research surface for. */
-function probe(config: Record<string, unknown>, inputs: Record<string, unknown>) {
+function probe(config: Record<string, unknown>, inputs: Record<string, unknown>): { ctx: NodeContext; asked: Array<{ query?: string; maxResults?: number; suitability?: string }> } {
   const asked: { query?: string; maxResults?: number; suitability?: string }[] = [];
-  const ctx = {
-    config,
-    inputs,
-    webResearch: {
-      // Mirrors the REAL call shape `{ query, maxResults, suitability }`. The
-      // first version of this stub omitted `query` and the test still passed,
-      // because `execute(ctx as never)` disabled every structural check — a stub
-      // free to drift from the thing it stands in for proves nothing about it.
-      search: async (req: { query: string; maxResults: number; suitability: string }) => {
-        asked.push({ query: req.query, maxResults: req.maxResults, suitability: req.suitability });
-        return { results: [], engine: 'test', totalResults: 0 };
-      },
+  const webResearch: WebResearchSurface = {
+    search: async (req) => {
+      asked.push({ query: req.query, maxResults: req.maxResults, suitability: req.suitability });
+      return { results: [], engine: 'test', totalResults: 0 };
     },
+    fetchBatch: async () => { throw new Error('core.web.search must not fetch pages'); },
+    research: async () => { throw new Error('core.web.search must not call research'); },
+  };
+  const ctx: NodeContext = {
+    runId: 'run-ws', nodeId: 'search', tenantId: 'tenant-ws', attempt: 1,
+    inputs, config, configurable: {}, secrets: {}, webResearch,
+    emit: async () => { throw new Error('core.web.search emits no events on this path'); },
   };
   return { ctx, asked };
 }
@@ -50,32 +57,32 @@ describe('core.web.search maxResults', () => {
 
   it('honours `config.maxResults` (the path that always worked)', async () => {
     const { ctx, asked } = probe({ maxResults: 8 }, { query: 'q' });
-    await node!.execute(ctx as unknown as Parameters<NonNullable<typeof node>['execute']>[0]);
+    await node!.execute(ctx);
     expect(asked[0]?.maxResults).toBe(8);
   });
 
   it('honours `inputs.maxResults` — THE LIVE DEFECT', async () => {
     // Two shipped chains ask this way and ran at 5.
     const { ctx, asked } = probe({}, { query: 'q', maxResults: 8 });
-    await node!.execute(ctx as unknown as Parameters<NonNullable<typeof node>['execute']>[0]);
+    await node!.execute(ctx);
     expect(asked[0]?.maxResults, 'a chain asking via inputs is still silently capped at the default').toBe(8);
   });
 
   it('config WINS when both are set', async () => {
     const { ctx, asked } = probe({ maxResults: 3 }, { query: 'q', maxResults: 9 });
-    await node!.execute(ctx as unknown as Parameters<NonNullable<typeof node>['execute']>[0]);
+    await node!.execute(ctx);
     expect(asked[0]?.maxResults).toBe(3);
   });
 
   it('falls back to the default when neither is set', async () => {
     const { ctx, asked } = probe({}, { query: 'q' });
-    await node!.execute(ctx as unknown as Parameters<NonNullable<typeof node>['execute']>[0]);
+    await node!.execute(ctx);
     expect(asked[0]?.maxResults).toBe(5);
   });
 
   it('clamps an absurd request rather than forwarding it', async () => {
     const { ctx, asked } = probe({}, { query: 'q', maxResults: 5000 });
-    await node!.execute(ctx as unknown as Parameters<NonNullable<typeof node>['execute']>[0]);
+    await node!.execute(ctx);
     expect(asked[0]?.maxResults).toBe(50);
   });
 
@@ -85,14 +92,14 @@ describe('core.web.search maxResults', () => {
     // '8'. A number-only guard discarded that back to 5 — the same silent loss,
     // one layer along.
     const { ctx, asked } = probe({}, { query: 'q', maxResults: '8' });
-    await node!.execute(ctx as unknown as Parameters<NonNullable<typeof node>['execute']>[0]);
+    await node!.execute(ctx);
     expect(asked[0]?.maxResults, "a correctly-filled numeric token was discarded").toBe(8);
   });
 
   it('forwards the query the node resolved', async () => {
     // Pins the stub against the real call shape, so it cannot silently drift.
     const { ctx, asked } = probe({}, { query: 'hello' });
-    await node!.execute(ctx as unknown as Parameters<NonNullable<typeof node>['execute']>[0]);
+    await node!.execute(ctx);
     expect(asked[0]?.query).toBe('hello');
   });
 
@@ -100,7 +107,7 @@ describe('core.web.search maxResults', () => {
     // A `{{params.n}}` that never got a value freezes to a STRING, which is not
     // nullish — so it must not shadow a valid sibling or reach the surface.
     const { ctx, asked } = probe({ maxResults: '' }, { query: 'q', maxResults: 8 });
-    await node!.execute(ctx as unknown as Parameters<NonNullable<typeof node>['execute']>[0]);
+    await node!.execute(ctx);
     expect(asked[0]?.maxResults, 'an empty frozen token shadowed a real value').toBe(8);
   });
 });

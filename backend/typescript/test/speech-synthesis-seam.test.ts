@@ -9,9 +9,22 @@
  * Asserts: the host advertises aiProviders.speechSynthesis === "supported" with
  * minimax in supported[]; the seam validates text/voiceId (400 invalid_request);
  * and the seam is wired to the real ctx.callSpeechSynthesizer adapter (NOT a
- * 404, NOT a stub) under BOTH path prefixes. A live 200-with-audio roundtrip
- * runs against a deployed rev that has the managed MiniMax key; CI (no key)
- * deterministically exercises the validation + wiring contract.
+ * 404, NOT a stub) under BOTH path prefixes. The live 200-with-audio roundtrip
+ * is the published conformance suite's, run against a deployed rev that has the
+ * managed MiniMax key — NOT this file's: a fresh `memory://` boot (with
+ * `OPENWOP_BOOT_SECRETS` cleared below) seeds no key, so every lane that runs
+ * this file takes the 400 `speech_synthesis_unsupported` arm, which is asserted
+ * unconditionally. (An `if (res.status === 200)` arm used to sit here; it could
+ * never run in any lane that runs this file — /grade-tests wave 61.)
+ *
+ * DOUBLE GUARD (named): text and voiceId are validated by the ROUTE
+ * (`routes/agents.ts`) AND by the adapter (`aiProvidersHost.ts`), with the same
+ * code `invalid_request`. The cases assert the ROUTE's exact message, so a
+ * route-only sabotage now surfaces the adapter's different message instead of
+ * staying green (8fw3g1-sps-voice-route, round-1 vacuous).
+ *
+ * What else breaks it (8fw3g1-sps-*): the per-org TTS budget check, the seam's
+ * registration under either prefix.
  */
 
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
@@ -27,18 +40,23 @@ const WILDCARD_KEY = 'seam-synth-wildcard-operator-key';
 const H = { authorization: `Bearer ${WILDCARD_KEY}`, 'content-type': 'application/json' };
 let server: http.Server;
 let savedKeys: string | undefined;
+let savedBootSecrets: string | undefined;
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   savedKeys = process.env.OPENWOP_API_KEYS;
   process.env.OPENWOP_API_KEYS = `${WILDCARD_KEY}:*`;
+  // No managed provider key may be seeded: the wiring case asserts the no-key arm.
+  savedBootSecrets = process.env.OPENWOP_BOOT_SECRETS;
+  delete process.env.OPENWOP_BOOT_SECRETS;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
 });
 afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
   if (savedKeys === undefined) delete process.env.OPENWOP_API_KEYS; else process.env.OPENWOP_API_KEYS = savedKeys;
+  if (savedBootSecrets !== undefined) process.env.OPENWOP_BOOT_SECRETS = savedBootSecrets;
 });
 
 const APP_PATH = '/host/openwop-app/ai/call-speech-synthesizer';
@@ -60,34 +78,29 @@ describe('RFC 0105 — speech-synthesis seam', () => {
   it('400s (invalid_request) on missing text', async () => {
     const res = await post(APP_PATH, { voiceId: 'male-qn-qingse' });
     expect(res.status).toBe(400);
-    expect(errorCodeOf(await res.json())).toBe('invalid_request');
+    const body: unknown = await res.json();
+    expect(errorCodeOf(body)).toBe('invalid_request');
+    expect(body).toMatchObject({ message: 'text (non-empty string) required' }); // the ROUTE's guard
   });
 
   it('400s (invalid_request) on missing voiceId', async () => {
     const res = await post(APP_PATH, { text: 'hello' });
     expect(res.status).toBe(400);
-    expect(errorCodeOf(await res.json())).toBe('invalid_request');
+    const body: unknown = await res.json();
+    expect(errorCodeOf(body)).toBe('invalid_request');
+    expect(body).toMatchObject({ message: 'voiceId (non-empty string) required' }); // the ROUTE's guard
   });
 
   it('is wired to the real adapter under BOTH path prefixes (not 404, not a stub)', async () => {
-    // With a valid request the seam reaches ctx.callSpeechSynthesizer. In CI no
-    // managed MiniMax key is seeded, so the managed path returns
-    // speech_synthesis_unsupported (400) — proving the seam calls the real
-    // adapter rather than serving a canned 200. A deployed rev WITH the key
-    // returns 200 + audio. Either way it must NOT be 404 (seam registered).
+    // With a valid request the seam reaches ctx.callSpeechSynthesizer. No
+    // managed MiniMax key is seeded (see the header), so the managed path
+    // returns speech_synthesis_unsupported (400) — proving the seam calls the
+    // real adapter rather than serving a canned 200 or a 404.
     for (const path of [APP_PATH, SAMPLE_PATH]) {
       const res = await post(path, { text: 'OpenWOP RFC 0105 witness.', voiceId: 'male-qn-qingse' });
-      expect(res.status).not.toBe(404);
-      if (res.status === 200) {
-        const body = await res.json() as { audio?: { mimeType?: string; voiceId?: string; url?: string; base64?: string } };
-        expect(body.audio?.voiceId).toBe('male-qn-qingse');
-        expect(typeof body.audio?.mimeType).toBe('string');
-        expect(Boolean(body.audio?.url) !== Boolean(body.audio?.base64)).toBe(true); // exactly one
-      } else {
-        expect(res.status).toBe(400);
-        // The sample seam is a major-2 path, so a host code travels vendor-namespaced there.
-        expect(errorCodeOf(await res.json())).toBe(path === SAMPLE_PATH ? 'openwop-app.speech_synthesis_unsupported' : 'speech_synthesis_unsupported');
-      }
+      expect(res.status, path).toBe(400);
+      // The sample seam is a major-2 path, so a host code travels vendor-namespaced there.
+      expect(errorCodeOf(await res.json()), path).toBe(path === SAMPLE_PATH ? 'openwop-app.speech_synthesis_unsupported' : 'speech_synthesis_unsupported');
     }
   });
 

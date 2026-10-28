@@ -12,6 +12,7 @@
     "chat-autotitle",
     "chat-export",
     "cms",
+    "collab",
     "connections",
     "consent",
     "conversation-search",
@@ -25,6 +26,7 @@
     "intent-ledger",
     "interactive-artifacts",
     "kb",
+    "managed-tier-admin",
     "manual-tests",
     "marketplace",
     "media",
@@ -106,6 +108,7 @@
         "campaign-orchestration",
         "creative-briefs",
         "custom-domains",
+        "experiments",
         "funnels",
         "webinars"
       ]

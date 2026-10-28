@@ -38,6 +38,8 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 // Inject pg-mem as the `pg` module BEFORE any import of the storage
 // adapter resolves the real `pg`. `vi.hoisted` lets us create the
@@ -132,8 +134,9 @@ function S(name: BackendName): Storage {
  *  Postgres (via testcontainers or live Cloud SQL) would exercise
  *  these — the parity harness is set up for that future drop-in.
  *
- *  Affected tests are listed here so the harness still surfaces the
- *  remaining 30 (15 sqlite + 15 postgres) and documents the gap. */
+ *  Affected tests are listed here; each one's postgres half returns early
+ *  through `trackedSkipPgMem`, its sqlite half still runs. The set is the
+ *  whole list (no count is kept here, so none can go stale). */
 const PG_MEM_INCOMPAT = new Set<string>([
   'appendEvent assigns +1 per call (impl-defined offset)',
   'listEvents returns sequence-ordered events',
@@ -155,19 +158,11 @@ const PG_MEM_INCOMPAT = new Set<string>([
   // sqlite half runs here.
   'dispatch outbox claim \u2192 reschedule \u2192 complete',
 ]);
-function skipPgMem(name: BackendName, testName: string): boolean {
-  return name === 'postgres' && PG_MEM_INCOMPAT.has(testName);
-}
-
-// Track which PG_MEM_INCOMPAT entries were consumed by at least one
-// `trackedSkipPgMem(...)` call. After the suite collection finishes, the
-// guard test below verifies every key was matched — guarding against
-// silent breakage when a test is renamed and the skip stops applying.
-const _pgMemIncompatHits = new Set<string>();
-const _origSkipPgMem = skipPgMem;
+// Every skip goes through this one call with the key as a LITERAL, so the
+// integrity guard at the end of the file can match keys to call sites from
+// this file's source (order-independent; see the guard's comment).
 function trackedSkipPgMem(name: BackendName, testName: string): boolean {
-  if (PG_MEM_INCOMPAT.has(testName)) _pgMemIncompatHits.add(testName);
-  return _origSkipPgMem(name, testName);
+  return name === 'postgres' && PG_MEM_INCOMPAT.has(testName);
 }
 
 describe('Storage parity: runs lifecycle', () => {
@@ -393,6 +388,11 @@ describe('Storage parity: events monotonic sequence', () => {
     await s.appendEvent({ runId: run.runId, type: 'artifact.created', payload: { artifactId: 'a-2', n: 4 }, timestamp: baseTime, eventId: 'ef4' });
     // The first of the right TYPE, not the first mention of the value.
     expect((await s.findFirstEventByPayload(run.runId, 'artifact.created', 'artifactId', 'a-2'))?.payload).toEqual({ artifactId: 'a-2', n: 3 });
+    await s.appendEvent({ runId: run.runId, nodeId: 'target', type: 'artifact.created', payload: { artifactId: 'a-2', n: 5 }, timestamp: baseTime, eventId: 'ef5' });
+    await s.appendEvent({ runId: run.runId, nodeId: 'other', type: 'artifact.created', payload: { artifactId: 'a-2', n: 6 }, timestamp: baseTime, eventId: 'ef6' });
+    expect((await s.findFirstEventByPayload(run.runId, 'artifact.created', 'artifactId', 'a-2', { newestFirst: true }))?.eventId).toBe('ef6');
+    expect((await s.findFirstEventByPayload(run.runId, 'artifact.created', 'artifactId', 'a-2', { newestFirst: true, nodeId: 'target' }))?.eventId).toBe('ef5');
+    expect((await s.findFirstEventByPayload(run.runId, 'artifact.created', 'artifactId', 'a-2', { nodeId: 'target' }))?.eventId).toBe('ef5');
     expect(await s.findFirstEventByPayload(run.runId, 'artifact.created', 'artifactId', 'nope')).toBeNull();
     expect(await s.findFirstEventByPayload('no-such-run', 'artifact.created', 'artifactId', 'a-1')).toBeNull();
     await expect(s.findFirstEventByPayload(run.runId, 'artifact.created', "x') OR 1=1 --", 'a-1')).rejects.toThrow(/invalid payload key/);
@@ -518,7 +518,7 @@ describe('Storage parity: webhooks', () => {
     await s.insertWebhook(kept);
     const t = 1_700_000_000_000;
     const row = (id: string, sub: string, status: 'pending' | 'delivered' | 'dead') => ({
-      deliveryId: `${name}-${id}`, subscriptionId: sub, url: 'https://x.test/hook', secret: 's', eventType: 'run.completed',
+      deliveryId: `${name}-dw-${id}`, subscriptionId: sub, url: 'https://x.test/hook', secret: 's', eventType: 'run.completed',
       payload: '{}', status, attempts: 1, maxAttempts: 5, nextAttemptAt: t, createdAt: t, updatedAt: t,
     });
     await s.enqueueWebhookDelivery(row('p1', gone.subscriptionId, 'pending'));
@@ -529,8 +529,11 @@ describe('Storage parity: webhooks', () => {
     await s.deleteWebhook(gone.subscriptionId);
 
     const claimed = await s.claimDueWebhookDeliveries(`w-${name}`, t + 1, 60_000, 50);
-    const mine = claimed.filter((c) => c.deliveryId.startsWith(`${name}-`)).map((c) => c.deliveryId);
-    expect(mine, 'only the surviving subscription’s pending row is still deliverable').toEqual([`${name}-other`]);
+    // Scoped to THIS case's ids: the storage is file-shared, and the WHROT-3
+    // case's still-pending `${name}-w3-live` row matched a bare `${name}-`
+    // prefix whenever shuffle ran that case first (wave 61).
+    const mine = claimed.filter((c) => c.deliveryId.startsWith(`${name}-dw-`)).map((c) => c.deliveryId);
+    expect(mine, 'only the surviving subscription’s pending row is still deliverable').toEqual([`${name}-dw-other`]);
     // History survives: the dead row is not a pending delivery, so it stays.
     expect(await s.pruneWebhookDeliveries(t + 1)).toBeGreaterThanOrEqual(1);
   });
@@ -539,7 +542,6 @@ describe('Storage parity: webhooks', () => {
   // inside an overlap retires the OLDEST secret; and the opt-in list survives
   // the round trip (absent stays absent — §B.8).
   it.each(backendNames)('%s: rotateWebhookSecret shifts current → previous in one statement', async (name) => {
-    if (trackedSkipPgMem(name, 'rotateWebhookSecret shifts current → previous')) return;
     const s = S(name);
     const plain = mkWebhook(`${name}-plain`);
     await s.insertWebhook(plain);
@@ -557,7 +559,6 @@ describe('Storage parity: webhooks', () => {
   // `/grade-data` 2026-09-26 WHROT-1 — a retired previous secret leaves the row
   // once its overlap ends; an in-overlap one (and the rotation history) stays.
   it.each(backendNames)('%s: retireExpiredWebhookSecrets clears only lapsed previous secrets', async (name) => {
-    if (trackedSkipPgMem(name, 'retireExpiredWebhookSecrets clears lapsed previous secrets')) return;
     const s = S(name);
     const lapsed = { ...mkWebhook(`${name}-lapsed`), secret: 'a1', signatureAlgorithms: ['v1', 'standard-webhooks-1'] };
     const live = { ...mkWebhook(`${name}-live`), secret: 'b1', signatureAlgorithms: ['v1', 'standard-webhooks-1'] };
@@ -573,7 +574,6 @@ describe('Storage parity: webhooks', () => {
 
   // WHROT-2 — a delivered row keeps no copy of the secret it was enqueued with.
   it.each(backendNames)('%s: markWebhookDeliveryDelivered blanks the enqueue-time secret copy', async (name) => {
-    if (trackedSkipPgMem(name, 'markWebhookDeliveryDelivered blanks the secret copy')) return;
     const s = S(name);
     const t = 1_700_000_000_000;
     const deliveryId = `${name}-blank`;
@@ -595,7 +595,6 @@ describe('Storage parity: webhooks', () => {
   // the subscription), and the backfill reaches terminal rows written before
   // either transition blanked. `pending` rows keep theirs (pre-0747 rollback).
   it.each(backendNames)('%s: dead transition + backfill blank terminal secret copies, pending keeps its copy', async (name) => {
-    if (trackedSkipPgMem(name, 'dead transition + backfill blank terminal secret copies')) return;
     const s = S(name);
     const t = 1_700_000_000_000;
     const row = (id: string, status: 'pending' | 'delivered' | 'dead') => ({
@@ -639,17 +638,31 @@ describe('Storage parity: BYOK secrets', () => {
 });
 
 describe('Storage parity: audit append', () => {
+  // Title kept (a probe keys on it). The append is READ BACK through
+  // `listAudit`'s exact `resource` pushdown: a write that silently drops the
+  // row, or a field, now fails here instead of passing on "no throw".
   it.each(backendNames)('%s: appendAudit is write-only (no throw)', async (name) => {
+    const resource = `run:r-audit-${name}`;
     await expect(
       S(name).appendAudit({
         timestamp: baseTime,
         principalId: 'pid-1',
         action: 'run.create',
-        resource: 'run:r-audit',
+        resource,
         outcome: 'success',
         payload: { workflowId: 'wf.audit' },
       }),
-    ).resolves.not.toThrow();
+    ).resolves.toBeUndefined();
+    const rows = await S(name).listAudit({ actionPrefix: 'run.create', resource });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      principalId: 'pid-1',
+      action: 'run.create',
+      resource,
+      outcome: 'success',
+      payload: { workflowId: 'wf.audit' },
+    });
+    expect(typeof rows[0]?.auditId).toBe('string');
   });
 });
 
@@ -667,10 +680,11 @@ describe('Storage parity: tenant hard delete cascade', () => {
     await s.upsertTenantSecret(T, 'del-ref', '{"v":"x"}', baseTime);
 
     const counts = await s.deleteAllTenantData(T);
-    expect(counts.runs).toBeGreaterThanOrEqual(2);
-    expect(counts.events).toBeGreaterThanOrEqual(1);
-    expect(counts.interrupts).toBeGreaterThanOrEqual(1);
-    expect(counts.secrets).toBeGreaterThanOrEqual(1);
+    // `T` is unique to this case, so the counts are exact.
+    expect(counts.runs).toBe(2);
+    expect(counts.events).toBe(1);
+    expect(counts.interrupts).toBe(1);
+    expect(counts.secrets).toBe(1);
 
     expect(await s.getRun(r1.runId)).toBeNull();
     expect(await s.getRun(r2.runId)).toBeNull();
@@ -792,22 +806,27 @@ describe('Storage parity: tenant reassign (anon → user migration)', () => {
 });
 
 describe('Storage parity: PG_MEM_INCOMPAT skip-set integrity guard', () => {
-  // Guard against silent breakage: if a test in PG_MEM_INCOMPAT gets
-  // renamed without updating the set, the postgres half stops being
-  // skipped and the failure surfaces noisily. This guard runs LAST
-  // (vitest preserves file-order); by then every other test has been
-  // collected + (for the affected ones) called `trackedSkipPgMem`.
+  // Guard against silent breakage in BOTH directions, read from this file's
+  // own source so it holds in any case order (the old guard relied on running
+  // LAST and went red under `--sequence.shuffle`, wave 61):
+  //   - a key that no literal `trackedSkipPgMem` call names is orphaned (a
+  //     renamed case whose postgres half stopped being skipped);
+  //   - a call whose key is NOT in the set is dead: it reads as a skip and
+  //     skips nothing (four such calls existed until wave 61).
   it('every PG_MEM_INCOMPAT key matches at least one collected test', () => {
-    const orphaned: string[] = [];
-    for (const key of PG_MEM_INCOMPAT) {
-      if (!_pgMemIncompatHits.has(key)) orphaned.push(key);
-    }
+    const src = readFileSync(fileURLToPath(import.meta.url), 'utf8');
+    const called = new Set([...src.matchAll(/trackedSkipPgMem\(name, '([^']+)'\)/g)].map((m) => m[1]));
+    expect(called.size).toBeGreaterThan(0);
+    const orphaned = [...PG_MEM_INCOMPAT].filter((key) => !called.has(key));
     expect(
       orphaned,
       `PG_MEM_INCOMPAT keys with no matching test (likely renamed): ${orphaned.join(', ')}`,
     ).toEqual([]);
+    const dead = [...called].filter((key) => !PG_MEM_INCOMPAT.has(key));
+    expect(dead, `trackedSkipPgMem keys not in PG_MEM_INCOMPAT (the call skips nothing): ${dead.join(', ')}`).toEqual([]);
   });
 });
+
 
   // Grade-pass DEL-1 — deleteRun (the API delete + workforce teardown path)
   // must cascade exactly like retention: envelope correlations, the agent

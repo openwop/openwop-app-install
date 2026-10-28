@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.crm.nodes/1.15.0/sla-rung.output.json",
+  "title": "CrmSlaRungOutput",
+  "type": "object",
+  "required": [
+    "success",
+    "rung",
+    "outcome",
+    "fired",
+    "continueClock"
+  ],
+  "properties": {
+    "success": {
+      "type": "boolean",
+      "const": true
+    },
+    "rung": {
+      "type": "integer",
+      "enum": [
+        1,
+        2,
+        3
+      ]
+    },
+    "outcome": {
+      "type": "string"
+    },
+    "fired": {
+      "type": "boolean"
+    },
+    "continueClock": {
+      "type": "boolean",
+      "description": "False once rung 2 re-routed the lead: the new owner's round is a new decision."
+    },
+    "sla": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "The immutable source assignment clock, for the next deadline calculation."
+    }
+  },
+  "additionalProperties": false
+}

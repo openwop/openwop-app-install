@@ -6,9 +6,12 @@
  * `canonicalUrl` was stored as `[REDACTED:secret-shaped]` on kicktodo.com from
  * 2026-09-19 on (every re-save reproduced it).
  *
- * Sabotage (witnessed): returning the marker for every match (the old replace)
- * reds the slug and safeUrl legs; dropping the `sk-` guard in `isWordSlug` reds
- * the hyphenated-key leg.
+ * Sabotage (witnessed, grade-tests wave 64): returning the marker for every
+ * match reds the slug and safeUrl legs (8fw5g5-rsw-replace); dropping the `sk-`
+ * guard in `isWordSlug` reds the embedded/hyphenated-key legs (rsw-skguard);
+ * loosening the segment count, the segment length or the lowercase/no-underscore
+ * character class each reds the opaque-blob leg (rsw-segcount, rsw-seglen,
+ * rsw-charclass-r2).
  */
 import { describe, expect, it } from 'vitest';
 import { scrubSecretShaped } from '../src/host/redactSecrets.js';
@@ -29,6 +32,12 @@ describe('word slugs survive the secret scrub', () => {
     expect(scrubSecretShaped('AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEf')).toBe(MARK);
     expect(scrubSecretShaped('abcd_efgh_ijkl_mnop_qrst_uvwx_yz01_2345_6789')).toBe(MARK);
     expect(scrubSecretShaped('a'.repeat(45))).toBe(MARK);
+    // The two fixtures above carry no hyphen, so the segment-count rule refuses
+    // them before the character class is consulted. These pass every other slug
+    // rule (6 hyphenated segments, none over 20 chars) and differ only in case /
+    // an underscore, so they are what pins the character class itself.
+    expect(scrubSecretShaped('Plans-That-Adapt-Without-Erasing-Progress')).toBe(MARK);
+    expect(scrubSecretShaped('plans_that-adapt-without-erasing-progress')).toBe(MARK);
     // Too few words, or a segment too long to be a word.
     expect(scrubSecretShaped('abcdefghijabcdefghij-abcdefghij-abcdefghij')).toBe(MARK);
     expect(scrubSecretShaped('abcdefghijklmnopqrstuvwxyz0123-abcd-efgh-ijkl')).toBe(MARK);

@@ -41,7 +41,7 @@ function isTerritory(v: unknown): v is Territory {
   return identified(v, 'territoryId') && isNeStr(v.modelId) && isNeStr(v.name) && (v.parentTerritoryId === null || isStr(v.parentTerritoryId)) && Array.isArray(v.memberSubjectIds);
 }
 function isAssignmentRule(v: unknown): v is AssignmentRule {
-  return identified(v, 'ruleId') && isNeStr(v.modelId) && isNeStr(v.territoryId) && (v.target === 'deal' || v.target === 'company') && isObj(v.filter) && isNum(v.priority);
+  return identified(v, 'ruleId') && isNeStr(v.modelId) && isNeStr(v.territoryId) && (v.target === 'deal' || v.target === 'company' || v.target === 'contact') && isObj(v.filter) && isNum(v.priority);
 }
 function isAssignment(v: unknown): v is Assignment {
   return identified(v, 'assignmentId') && isNeStr(v.modelId) && isNeStr(v.recordId) && (v.target === 'deal' || v.target === 'company');

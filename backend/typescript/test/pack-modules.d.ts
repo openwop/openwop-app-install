@@ -25,3 +25,8 @@ declare module '*vendor.myndhyve.landing-page/index.mjs';
 // LLM-EXCHANGE-AUDIT round 2 — bounded-repair regressions execute the real
 // pack implementations (same pattern).
 declare module '*core.openwop.rag/index.mjs';
+
+// ADR 0946 P1 — the ad packs that read the generated content-rules copy.
+declare module '*vendor.myndhyve.ads-platforms/index.mjs';
+declare module '*vendor.myndhyve.ads-policy/index.mjs';
+declare module '*vendor.myndhyve.ads-creative-validate/index.mjs';

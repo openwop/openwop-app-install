@@ -38,6 +38,9 @@ import { CopyIcon, ArrowDownIcon, ArrowUpIcon, TrashIcon } from '../../ui/icons/
 import { useFeatureAccess } from '../../featureToggles/FeatureAccessContext.js';
 import { useFormat } from '../../i18n/useFormat.js';
 import { listPages, type Page } from '../cms/cmsClient.js';
+import { listWebinarEvents, type MarketingEvent } from '../webinars/webinarsClient.js';
+import { listForms, type FormDef } from '../forms/formsClient.js';
+import { listDomains } from '../custom-domains/domainsClient.js';
 import {
   listOrgs, getFunnel, updateFunnel, deleteFunnel,
   getFunnelStats, rebuildFunnelStats,
@@ -47,7 +50,7 @@ import {
   type FunnelStats, type ExperimentResults, type Org,
 } from './funnelsClient.js';
 
-interface EditStep { stepId?: string; kind: FunnelStepKind; pageId: string; name?: string; routing?: StepRule[] }
+interface EditStep { stepId?: string; kind: FunnelStepKind; pageId: string; name?: string; routing?: StepRule[]; webinar?: { marketingEventId: string } | null; application?: { formId: string } | null }
 
 const statusChip = (status: Funnel['status']): string =>
   status === 'published' ? 'chip chip--success' : status === 'archived' ? 'chip chip--muted' : 'chip chip--warning';
@@ -93,6 +96,10 @@ export function FunnelDetailPage(): JSX.Element {
   /** The CMS page read FAILED — the picker says so rather than reading as "this
    *  workspace has no pages", which is a claim the failed read did not earn. */
   const [pagesFailed, setPagesFailed] = useState(false);
+  // ADR 0948 D4 — what a webinar / application step can bind; read only when such a step exists.
+  const [webinarEvents, setWebinarEvents] = useState<MarketingEvent[] | null>(null);
+  const [forms, setForms] = useState<FormDef[] | null>(null);
+  const [bindingsFailed, setBindingsFailed] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [editSteps, setEditSteps] = useState<EditStep[]>([]);
@@ -117,13 +124,19 @@ export function FunnelDetailPage(): JSX.Element {
   // R2R F3 — the completion-CTA edit state, seeded from the loaded funnel.
   const [ctaLabel, setCtaLabel] = useState('');
   const [ctaUrl, setCtaUrl] = useState('');
+  // ADR 0948 P6a — the funnel's primary domain: one of this org's LIVE custom domains.
+  const [liveDomains, setLiveDomains] = useState<string[] | null>(null);
+  // A failed domain read is its own state: never "this org has no live domains".
+  const [domainsFailed, setDomainsFailed] = useState(false);
+  const [primaryHost, setPrimaryHost] = useState('');
   const reload = useCallback(async (): Promise<void> => {
     if (!orgId || !funnelId) return;
     try {
       const f = await getFunnel(orgId, funnelId);
       setFunnel(f);
-      setEditSteps(f.steps.map((s) => ({ stepId: s.stepId, kind: s.kind, pageId: s.pageId, ...(s.name ? { name: s.name } : {}), ...(s.routing ? { routing: s.routing } : {}) })));
+      setEditSteps(f.steps.map((s) => ({ stepId: s.stepId, kind: s.kind, pageId: s.pageId, ...(s.name ? { name: s.name } : {}), ...(s.routing ? { routing: s.routing } : {}), ...(s.webinar ? { webinar: s.webinar } : {}), ...(s.application ? { application: s.application } : {}) })));
       setCtaLabel(f.completionCta?.label ?? '');
+      setPrimaryHost(f.primaryHostname ?? '');
       setCtaUrl(f.completionCta?.url ?? '');
     } catch (e) {
       // A 404 IS the answer ("no such funnel here"), not a failure to read.
@@ -158,6 +171,32 @@ export function FunnelDetailPage(): JSX.Element {
       .catch(() => { setPages([]); setPagesFailed(true); });
     void loadStats();
   }, [access.enabled, orgId, funnelId, reload, loadStats]);
+
+  useEffect(() => {
+    if (!orgId || liveDomains !== null) return;
+    void listDomains(orgId).then((ds) => setLiveDomains(ds.filter((d) => d.status === 'live').map((d) => d.hostname))).catch(() => { setDomainsFailed(true); setLiveDomains([]); });
+  }, [orgId, liveDomains]);
+  const savePrimaryHost = useCallback(async () => {
+    if (!funnel || !orgId) return;
+    setBusy(true);
+    try {
+      await updateFunnel(orgId, funnel.funnelId, { primaryHostname: primaryHost || null });
+      toast.success(t('primaryDomainSaved'));
+      await reload();
+    } catch (e) { toast.error(e instanceof Error ? e.message : t('updateFailed')); }
+    finally { setBusy(false); }
+  }, [funnel, orgId, primaryHost, reload, t]);
+
+  const needsWebinars = editSteps.some((s) => s.kind === 'webinar');
+  const needsForms = editSteps.some((s) => s.kind === 'application');
+  useEffect(() => {
+    if (!orgId || !needsWebinars || webinarEvents !== null) return;
+    void listWebinarEvents(orgId).then(setWebinarEvents).catch(() => { setWebinarEvents([]); setBindingsFailed(true); });
+  }, [orgId, needsWebinars, webinarEvents]);
+  useEffect(() => {
+    if (!orgId || !needsForms || forms !== null) return;
+    void listForms(orgId).then(setForms).catch(() => { setForms([]); setBindingsFailed(true); });
+  }, [orgId, needsForms, forms]);
 
   const expStep = useMemo(
     () => funnel?.steps.find((s) => s.stepId === expStepId) ?? null,
@@ -404,7 +443,12 @@ export function FunnelDetailPage(): JSX.Element {
           <div key={s.stepId ?? `new-${ix}`} className="surface-form u-items-end">
             <label className="u-grid u-gap-1 is-narrow">
               <span className="u-label-sm">{t('fieldKind')}</span>
-              <select value={s.kind} onChange={(e) => setEditSteps((prev) => prev.map((p, i) => i === ix ? { ...p, kind: e.target.value as FunnelStepKind } : p))} disabled={funnel.status === 'archived'}>
+              <select value={s.kind} onChange={(e) => { const kind = e.target.value as FunnelStepKind; setEditSteps((prev) => prev.map((p, i) => {
+                if (i !== ix) return p;
+                // A binding belongs to its own kind only; switching kind drops it (the server refuses a mismatch).
+                const { webinar: _w, application: _a, ...rest } = p;
+                return { ...rest, kind, ...(kind === 'webinar' && p.webinar ? { webinar: p.webinar } : {}), ...(kind === 'application' && p.application ? { application: p.application } : {}) };
+              })); }} disabled={funnel.status === 'archived'}>
                 {FUNNEL_STEP_KINDS.map((k) => <option key={k} value={k}>{t(`kind_${k}`)}</option>)}
               </select>
               {/* ADR 0332 — an opt-in step captures via a `form` section on its
@@ -446,6 +490,28 @@ export function FunnelDetailPage(): JSX.Element {
                   failed. Non-blocking: the step is still editable. */}
               {pagesFailed ? <span className="muted u-fs-13">{tc('loadFailed')}</span> : null}
             </label>
+            {s.kind === 'webinar' ? (
+              <label className="u-grid u-gap-1">
+                <span className="u-label-sm">{t('fieldWebinar')}</span>
+                <select value={s.webinar?.marketingEventId ?? ''} disabled={funnel.status === 'archived'}
+                  onChange={(e) => { const v = e.target.value; setEditSteps((prev) => prev.map((p, i) => i === ix ? { ...p, webinar: v ? { marketingEventId: v } : null } : p)); }}>
+                  <option value="">{t('pickWebinar')}</option>
+                  {(webinarEvents ?? []).map((ev) => <option key={ev.eventId} value={ev.eventId}>{ev.title}</option>)}
+                </select>
+                {bindingsFailed ? <span className="muted u-fs-13">{tc('loadFailed')}</span> : <span className="u-label-sm muted">{t('webinarStepHint')}</span>}
+              </label>
+            ) : null}
+            {s.kind === 'application' ? (
+              <label className="u-grid u-gap-1">
+                <span className="u-label-sm">{t('fieldApplicationForm')}</span>
+                <select value={s.application?.formId ?? ''} disabled={funnel.status === 'archived'}
+                  onChange={(e) => { const v = e.target.value; setEditSteps((prev) => prev.map((p, i) => i === ix ? { ...p, application: v ? { formId: v } : null } : p)); }}>
+                  <option value="">{t('pickApplicationForm')}</option>
+                  {(forms ?? []).map((f) => <option key={f.formId} value={f.formId}>{f.title}</option>)}
+                </select>
+                {bindingsFailed ? <span className="muted u-fs-13">{tc('loadFailed')}</span> : <span className="u-label-sm muted">{t('applicationStepHint')}</span>}
+              </label>
+            ) : null}
             <div className="u-grid u-gap-1">
               {(s.routing ?? []).map((rule, rIx) => (
                 <span key={rIx} className="action-bar">
@@ -513,6 +579,27 @@ export function FunnelDetailPage(): JSX.Element {
           <Button variant="secondary" disabled={busy || (Boolean(ctaLabel.trim()) !== Boolean(ctaUrl.trim()))} onClick={() => void saveCta()}>{t('saveCompletionCta')}</Button>
         </div>
       </section>
+
+      {/* ADR 0948 P6a — the primary domain. Honest: funnel links keep the platform
+          URL until funnels can be served on a custom domain (P6b). */}
+      {domainsFailed && funnel.primaryHostname ? (
+        <p className="u-label-sm muted u-m-0">{t('primaryDomainHeading')}: {funnel.primaryHostname} · {tc('loadFailed')}</p>
+      ) : null}
+      {liveDomains && liveDomains.length > 0 ? (
+        <section className="u-grid u-gap-2">
+          <h3 className="u-m-0">{t('primaryDomainHeading')}</h3>
+          <p className="u-label-sm muted u-m-0">{t('primaryDomainLede')}</p>
+          <div className="u-flex u-gap-2 u-wrap u-items-end">
+            <label className="u-label-sm u-flex-1">{t('primaryDomainField')}
+              <select value={primaryHost} onChange={(e) => setPrimaryHost(e.target.value)} disabled={funnel.status === 'archived'}>
+                <option value="">{t('primaryDomainNone')}</option>
+                {liveDomains.map((h) => <option key={h} value={h}>{h}</option>)}
+              </select>
+            </label>
+            <Button variant="secondary" disabled={busy || primaryHost === (funnel.primaryHostname ?? '')} onClick={() => void savePrimaryHost()}>{t('primaryDomainSave')}</Button>
+          </div>
+        </section>
+      ) : null}
 
       <section className="u-grid u-gap-2">
         <header className="u-flex u-items-center u-gap-2">
@@ -596,6 +683,12 @@ export function FunnelDetailPage(): JSX.Element {
         {expResultsFailed ? (
           <div role="alert"><p className="u-m-0 u-label-sm">{t('resultsLoadFailed')}</p></div>
         ) : null}
+        {/* ADR 0949 P0 (E-4) — a broken split withholds every verdict. */}
+        {expResults?.significanceWithheld === 'srm' ? <Notice variant="warning">{t('expSrmNotice')}</Notice> : null}
+        {/* ADR 0949 P1b (E-2) — retention removed events from the test's life. */}
+        {expResults?.significanceWithheld === 'coverage' ? <Notice variant="warning">{t('expCoverageNotice')}</Notice> : null}
+        {/* ADR 0949 P0 (E-1) — the verdict is fixed-horizon: say so wherever it shows. */}
+        {expResults?.health?.stopEarly ? <p className="u-label-sm muted u-m-0">{t('expStopEarlyNote')}</p> : null}
         {expResults ? (
           <table className="data-table">
             <caption>{t('captionResults')}</caption>

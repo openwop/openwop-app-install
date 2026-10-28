@@ -5,6 +5,12 @@
  * a live subscription (exercising createStripeSubscription), then a Stripe invoice.paid
  * webhook drives the next period order via the billing→commerce seam — and a re-delivered
  * invoice is idempotent.
+ *
+ * It also owns the TENANT-SCOPING claim for `getProductSubscriptionByStripeId`
+ * (moved here in grade-tests wave 61): this is the file with a REAL
+ * `stripeSubscriptionId` in a tenant, so another tenant asking for that same id
+ * is a real isolation check, with the owning tenant's read as the positive
+ * control. `subscription-recurrence` keeps a null-for-unknown-id case only.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -12,7 +18,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openStorage } from '../src/storage/index.js';
 import { createProduct, listOrders, __resetCommerce, type Product } from '../src/features/commerce/commerceService.js';
-import { subscribeToProduct, registerSubscriptionRecurrence, __resetSubscriptions } from '../src/features/commerce/subscriptions.js';
+import { subscribeToProduct, registerSubscriptionRecurrence, getProductSubscriptionByStripeId, __resetSubscriptions } from '../src/features/commerce/subscriptions.js';
 import { processStripeEvent } from '../src/features/billing/billingService.js';
 import { __platformChargeForTest } from '../src/features/commerce-connect/storefrontSettlement.js';
 
@@ -51,6 +57,10 @@ describe('MERCH-E full recurrence bridge (mock Stripe)', () => {
     const { subscription } = await subscribeToProduct({ tenantId: T, orgId: ORG, createdBy: 'u', productId: p.productId, interval: 'monthly', charge: __platformChargeForTest('sk_test_x') });
     expect(subscription.paymentMode).toBe('live');               // Stripe subscription created
     expect(subscription.stripeSubscriptionId).toBe('sub_test');  // via the mock
+    // Tenant-scoped lookup: the owning tenant finds it, another tenant asking
+    // for the SAME Stripe id gets nothing.
+    expect((await getProductSubscriptionByStripeId(T, 'sub_test'))?.subscriptionId).toBe(subscription.subscriptionId);
+    expect(await getProductSubscriptionByStripeId('other-tenant', 'sub_test')).toBeNull();
     const [first] = await listOrders(T, ORG);
     expect(first?.status).toBe('pending');                       // the first period order, awaiting its invoice
     expect((await listOrders(T, ORG))).toHaveLength(1);
@@ -67,12 +77,12 @@ describe('MERCH-E full recurrence bridge (mock Stripe)', () => {
     expect((await listOrders(T, ORG))).toHaveLength(1);
 
     // A genuinely new invoice ⇒ the next period's order, paid on arrival.
-    await processStripeEvent(T, invoicePaid('evt_3', 'inv_2'));
+    expect((await processStripeEvent(T, invoicePaid('evt_3', 'inv_2'))).status).toBe('applied');
     expect((await listOrders(T, ORG))).toHaveLength(2);
     expect((await listOrders(T, ORG)).every((o) => o.status === 'paid')).toBe(true);
 
     // And the one after that — the seam keeps driving period orders.
-    await processStripeEvent(T, invoicePaid('evt_4', 'inv_3'));
+    expect((await processStripeEvent(T, invoicePaid('evt_4', 'inv_3'))).status).toBe('applied');
     expect((await listOrders(T, ORG))).toHaveLength(3);
   });
 });

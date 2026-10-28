@@ -300,6 +300,7 @@ export function TabStrip({
               className={`tabdeck-tab__pin${tab.pinned ? ' tabdeck-tab__pin--on' : ''}`}
               tabIndex={-1}
               aria-pressed={tab.pinned}
+              aria-keyshortcuts="Alt+P"
               onClick={() => onSetPinned(sid, !tab.pinned)}
             />
             {onPopOut ? (

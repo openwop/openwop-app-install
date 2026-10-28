@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.crm.nodes/1.15.0/route-lead.input.json",
+  "title": "CrmRouteLeadInput",
+  "description": "Read from the merged `{ ...ctx.config, ...ctx.inputs }` bag. `orgId`, `contactId` and `routingEpoch` are required by the surface (a typed refusal); the dispatch route supplies them.",
+  "type": "object",
+  "properties": {
+    "orgId": {
+      "type": "string"
+    },
+    "contactId": {
+      "type": "string"
+    },
+    "routingEpoch": {
+      "type": "integer",
+      "minimum": 1
+    }
+  },
+  "additionalProperties": true
+}

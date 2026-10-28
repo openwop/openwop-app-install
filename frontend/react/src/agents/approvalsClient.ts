@@ -52,7 +52,17 @@ export interface PendingApproval {
   persona: string;
   workflowId: string;
   /** Discriminator; absent ⇒ 'run-proposal' (back-compat). */
-  kind?: 'run-proposal' | 'assistant-action' | 'content-publish' | 'campaign-spend' | 'commerce-spend' | 'strategy-activation' | 'strategy-checkin' | 'pm-scenario-select' | 'claude-code-permission';
+  kind?: 'run-proposal' | 'assistant-action' | 'content-publish' | 'campaign-spend' | 'commerce-spend' | 'strategy-activation' | 'strategy-checkin' | 'pm-scenario-select' | 'claude-code-permission' | 'email-campaign-send' | 'creative-publish-review' | 'funnel-publish';
+  /** ADR 0905 D3 — `email-campaign-send` rows: exactly what the approval covers (the
+   *  pinned template version's text, the sender, the audience definition). */
+  emailSend?: {
+    reviewHash?: string;
+    campaignId: string; templateId: string; templateVersion: number; contentHash: string;
+    senderAddress: string; audienceHash: string; audienceLabel: string; templateName: string;
+    subject: string; body: string; format?: 'text' | 'markdown'; estimatedRecipients?: number;
+  };
+  /** ADR 0948 P1b — the exact funnel content this decision publishes. */
+  funnelPublish?: { funnelId: string; funnelName: string; slug: string; digest: string; stepCount: number; runId?: string };
   /** ADR 0785 P4 — a permission prompt from the viewer's own Claude Code. */
   claudeCodePermission?: { deviceId: string; deviceLabel: string; tool: string; summary: string; inputDigest: string };
   /** PMXU-2 (ADR 0590) — pm-scenario-select rows: the scenario the gate adopts
@@ -68,7 +78,7 @@ export interface PendingApproval {
    *  the protected content plus where the strategy lives. Absent on legacy rows. */
   strategySnapshot?: StrategyActivationSnapshot;
   /** campaign-spend rows (campaign gap plan §5B B3): what the spend gate is holding. */
-  spendKind?: 'publish' | 'budget' | 'audience' | 'order' | 'refund';
+  spendKind?: 'publish' | 'budget' | 'audience' | 'launch' | 'reallocation' | 'order' | 'refund';
   platform?: string;
   dailyBudgetMinor?: number;
   /** R2 UCP-P2-B1 — commerce-spend rows (an agent about to spend real money) carry
@@ -84,6 +94,10 @@ export interface PendingApproval {
   /** Set for content-publish approvals (ADR 0066) — the CMS page this gate
    *  publishes on claim / returns to draft on reject. */
   orgId?: string;
+  /** Creative review binds one asset and one immutable fidelity verdict. */
+  assetId?: string;
+  verdictId?: string;
+  reviewHash?: string;
   pageId?: string;
   pageTitle?: string;
   /** ADR 0593 D4 (CMSAU-1/CMSAU-18) — the page version the review is PINNED to.
@@ -161,6 +175,10 @@ export class ApprovalApiError extends Error {
 export function approvalErrorInfo(e: unknown): { key: string; options?: Record<string, unknown> } | null {
   if (!(e instanceof ApprovalApiError)) return null;
   const reason = typeof e.details?.reason === 'string' ? e.details.reason : null;
+  // ADR 0905 D3 — an email campaign review names its campaign; the page copy would lie.
+  if (typeof e.details?.campaignId === 'string' && (reason === 'stale_review' || reason === 'review_closed')) {
+    return { key: reason === 'stale_review' ? 'approvalEmailStale' : 'approvalEmailClosed' };
+  }
   if (reason === 'stale_review') return { key: 'approvalStaleReview' };
   if (reason === 'unpinned_review') return { key: 'approvalUnpinnedReview' };
   // ADR 0845 — a strategy activation whose content changed is CLOSED (not "already
@@ -237,7 +255,8 @@ export async function claimApproval(
   approvalId: string,
   note?: string,
   /** ADR 0862 D1 — REQUIRED by the server for an assistant-action approve: the
-   *  `contentHash` of the card the approver is looking at. Ignored for other kinds. */
+   *  `contentHash` of the card the approver is looking at. Email send approvals
+   *  require their full `emailSend.reviewHash` here (ADR 0905). */
   expectedContentHash?: string,
 ): Promise<{ runId?: string; actionId?: string; status?: string }> {
   const res = await fetch(`${base}/${encodeURIComponent(approvalId)}/claim`, fetchOpts({

@@ -19,7 +19,8 @@ import { processDueWebhookDeliveries, WEBHOOK_MAX_ATTEMPTS } from '../src/host/w
 vi.mock('undici', async (importOriginal) => { const actual = await importOriginal<typeof import('undici')>(); return { ...actual, fetch: vi.fn() }; });
 const fetchMock = vi.mocked(undiciFetch);
 const T0 = 1_700_000_000_000;
-const row = (over: Partial<WebhookDeliveryRecord>): WebhookDeliveryRecord => ({ deliveryId: `d-${Math.random().toString(36).slice(2)}`, subscriptionId: 'sub-1', url: 'https://example.test/hook', secret: 'shh', eventType: 'run.completed', payload: JSON.stringify({ type: 'run.completed', runId: 'r1' }), status: 'pending', attempts: 0, maxAttempts: WEBHOOK_MAX_ATTEMPTS, nextAttemptAt: T0, claimedBy: null, claimExpiresAt: null, lastError: null, createdAt: T0, updatedAt: T0, ...over });
+let seq = 0;
+const row = (over: Partial<WebhookDeliveryRecord>): WebhookDeliveryRecord => ({ deliveryId: `d-${seq++}`, subscriptionId: 'sub-1', url: 'https://example.test/hook', secret: 'shh', eventType: 'run.completed', payload: JSON.stringify({ type: 'run.completed', runId: 'r1' }), status: 'pending', attempts: 0, maxAttempts: WEBHOOK_MAX_ATTEMPTS, nextAttemptAt: T0, claimedBy: null, claimExpiresAt: null, lastError: null, createdAt: T0, updatedAt: T0, ...over });
 
 afterEach(() => { fetchMock.mockReset(); vi.restoreAllMocks(); });
 

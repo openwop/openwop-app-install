@@ -11,6 +11,18 @@
  * These assert the PROPERTIES a hand-kept allowlist cannot: that the type forces
  * the decision, that a factory cannot collapse N decisions into one, and that
  * the classification did not degenerate into fence-everything.
+ *
+ * Wave 61 (protected ratchet, 8 cases kept): the complete-set and WHY cases
+ * scanned only `registerFeatureAgentTool({` windows, so the STATIC builtins
+ * (agentToolProvider's BUILTINS map, incl. the factory-minted RAG retrievers and
+ * projected compute nodes) and factory-minted feature tools
+ * (`registerFeatureAgentTool(readTool(…, 'trusted', …))`) were invisible —
+ * flipping the RAG retriever to trusted stayed green (probe ct-static-trusted),
+ * and so did a `readTool` factory that ignored its parameter (ct-factory).
+ * MEASURED 2026-10-23: 15 trusted tools (13 feature-registered + the static
+ * `openwop:kanban.add-todo` and `openwop:schema.lookup`), not the 13 pinned.
+ * The static set is read at RUNTIME (BUILTINS is populated on bare import, see
+ * case 2); feature registrations are read from source as before.
  */
 import { describe, expect, it } from 'vitest';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
@@ -24,13 +36,24 @@ const walk = (d: string): string[] =>
     return statSync(f).isDirectory() ? walk(f) : f.endsWith('.ts') ? [f] : [];
   });
 
+/**
+ * Every non-test source file under `src/`, read ONCE per test file, in walk order.
+ * The scans below used to re-walk and re-read the tree per lookup (once per
+ * registration in `idOfConst`), so two cases took 6.5–7.4 s each and hit the
+ * 15 s timeout under gate load (train 189, 2026-10-23).
+ */
+let sourceCache: ReadonlyArray<readonly [string, string]> | undefined;
+const sources = (): ReadonlyArray<readonly [string, string]> =>
+  (sourceCache ??= walk(SRC).filter((x) => !x.includes('__tests__')).map((f) => [f, readFileSync(f, 'utf8')] as const));
+
 /** Resolve `EXPORTED_CONST` → its tool-id string literal, wherever it is declared. */
 function idOfConst(constName: string): string | undefined {
-  for (const f of walk(SRC).filter((x) => !x.includes('__tests__'))) {
+  for (const [, text] of sources()) {
     // `\b` anchors the NAME: unanchored, `PROPOSE_TOOL_ID` matched inside
     // `TEAM_LEDGER_PROPOSE_TOOL_ID = …` whenever that file was walked first, and the
     // trusted `workflows.propose` was reported as `team-ledger.propose`.
-    const m = new RegExp(`\\b${constName}\\s*=\\s*'([^']+)'`).exec(readFileSync(f, 'utf8'));
+    if (!text.includes(constName)) continue;
+    const m = new RegExp(`\\b${constName}\\s*=\\s*'([^']+)'`).exec(text);
     if (m) return m[1];
   }
   return undefined;
@@ -43,15 +66,15 @@ function idOfConst(constName: string): string | undefined {
  * Tools name themselves by an exported const, so resolve the const first.
  */
 function trustOf(id: string): string | undefined {
-  const files = walk(SRC).filter((f) => !f.includes('__tests__'));
+  const files = sources();
   const esc = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   let constName: string | undefined;
-  for (const f of files) {
-    const m = new RegExp(`export const ([A-Z0-9_]+)\\s*=\\s*'${esc}'`).exec(readFileSync(f, 'utf8'));
+  for (const [, text] of files) {
+    const m = new RegExp(`export const ([A-Z0-9_]+)\\s*=\\s*'${esc}'`).exec(text);
     if (m) { constName = m[1]; break; }
   }
-  for (const f of files) {
-    const lines = readFileSync(f, 'utf8').split('\n');
+  for (const [, text] of files) {
+    const lines = text.split('\n');
     const i = lines.findIndex((l) => l.includes(`name: '${id}'`) || (constName ? l.includes(`name: ${constName},`) : false));
     if (i < 0) continue;
     for (let j = i; j >= Math.max(0, i - 14); j--) {
@@ -60,6 +83,41 @@ function trustOf(id: string): string | undefined {
     }
   }
   return undefined;
+}
+
+interface FeatureRegistration { at: string; name: string; trusted: boolean; window: string[] }
+
+/**
+ * Every `registerFeatureAgentTool(` call in source — an object literal
+ * (`registerFeatureAgentTool({ contentTrust: 'trusted', … })`) or a factory call
+ * (`registerFeatureAgentTool(readTool(def, run, 'trusted', 'read'))`, where the
+ * trust is a positional string-literal argument on its own line).
+ */
+let registrationCache: FeatureRegistration[] | undefined;
+function featureRegistrations(): FeatureRegistration[] {
+  if (registrationCache) return registrationCache;
+  const out: FeatureRegistration[] = [];
+  for (const [f, text] of sources()) {
+    if (!text.includes('registerFeatureAgentTool(')) continue;
+    const L = text.split('\n');
+    L.forEach((ln, i) => {
+      if (!/registerFeatureAgentTool\((?!tool: BuiltinTool)/.test(ln) || /function registerFeatureAgentTool/.test(ln)) return;
+      const literal = ln.includes('registerFeatureAgentTool({');
+      let end = i + 18;
+      if (!literal) {
+        end = -1;
+        for (let k = i + 1; k < L.length; k++) if (/^\s*\)\);/.test(L[k]!)) { end = k; break; }
+        if (end < 0) end = i + 40;
+      }
+      const w = L.slice(i, end + 1);
+      const trusted = literal
+        ? w.join('\n').includes("contentTrust: 'trusted'")
+        : w.some((x) => /^\s*'trusted',/.test(x));
+      const c = /name: ([A-Z0-9_]+)/.exec(w.join(' '))?.[1];
+      if (c) out.push({ at: `${f}:${i + 1}`, name: idOfConst(c) ?? c, trusted, window: w });
+    });
+  }
+  return (registrationCache = out);
 }
 
 describe('RFC 0137 §F1 — every builtin tool declares its trust', () => {
@@ -136,7 +194,7 @@ describe('RFC 0137 §F1 — every builtin tool declares its trust', () => {
     // one decision point, not two), a `trusted` tool is genuinely UNFENCED on the
     // chat path. The former blanket wrap was the backstop that made a
     // misclassification survivable; this list replaces it. A comment alone is too
-    // cheap a gate — a 14th trusted tool must fail here until someone amends this
+    // cheap a gate — a 16th trusted tool must fail here until someone amends this
     // list deliberately.
     const EXPECTED = [
       'openwop:accessibility.alt-text.generate',
@@ -148,40 +206,45 @@ describe('RFC 0137 §F1 — every builtin tool declares its trust', () => {
       'openwop:feature.workflow-author.nodes.draft',
       'openwop:feature.workflow-author.nodes.persist',
       'openwop:feature.workflow-author.nodes.validate',
+      'openwop:kanban.add-todo',      // static builtin (agentToolProvider BUILTINS)
+      'openwop:schema.lookup',        // static builtin (agentToolProvider BUILTINS)
       'openwop:slides.catalog',
       'openwop:walkthroughs.register-draft',
       'openwop:workflows.compose-and-run',
       'openwop:workflows.propose',
     ];
-    const actual: string[] = [];
-    for (const f of walk(SRC).filter((x) => !x.includes('__tests__'))) {
-      const L = readFileSync(f, 'utf8').split('\n');
-      L.forEach((ln, i) => {
-        if (!ln.includes('registerFeatureAgentTool({')) return;
-        const w = L.slice(i, i + 18);
-        if (!w.join('\n').includes("contentTrust: 'trusted'")) return;
-        const c = /name: ([A-Z0-9_]+)/.exec(w.join(' '))?.[1];
-        if (c) actual.push(idOfConst(c) ?? c);
-      });
-    }
+    // (1) Static builtins, read at runtime — covers the static consts AND the
+    // tools their factories mint (RAG retrievers, projected compute nodes).
+    const staticTrusted = builtinAgentToolIds().filter((id) => builtinAgentTool(id)?.contentTrust === 'trusted');
+    expect(builtinAgentToolIds().length, 'no static builtins — the runtime half is vacuous').toBeGreaterThan(3);
+    // (2) Feature registrations, read from source: object literals AND factory calls.
+    const actual: string[] = [...staticTrusted];
+    for (const { name } of featureRegistrations().filter((r) => r.trusted)) actual.push(name);
     expect(actual.sort(), 'the trusted set changed — every addition is unfenced on the chat path').toEqual(EXPECTED);
   });
 
-  it('every TRUSTED tool states WHY — the 13 are the entire security surface', () => {
+  it('every TRUSTED tool states WHY — the 15 are the entire security surface', () => {
     // The compiler forces a VALUE but cannot force a REASON, and an unexplained
     // `trusted` is the same fail-open shape one level up: nothing distinguishes
     // "audited, host-authored" from "nobody looked". An error among the untrusted
     // majority costs tokens; an error here costs security — the asymmetry is why
     // only this direction carries the burden of proof.
     const bare: string[] = [];
-    for (const f of walk(SRC).filter((x) => !x.includes('__tests__'))) {
-      const L = readFileSync(f, 'utf8').split('\n');
-      L.forEach((ln, i) => {
-        if (!ln.includes('registerFeatureAgentTool({')) return;
-        const w = L.slice(i, i + 16);
-        if (!w.join('\n').includes("contentTrust: 'trusted'")) return;
-        if (!w.some((x) => /\/\/\s*TRUSTED:/.test(x))) bare.push(`${f}:${i + 1}`);
-      });
+    for (const r of featureRegistrations().filter((x) => x.trusted)) {
+      if (!r.window.slice(0, 16).some((x) => /\/\/\s*TRUSTED:/.test(x))) bare.push(r.at);
+    }
+    // Static builtins justify trust with the `// RFC 0137 §F1 — <reason>` comment
+    // on the line directly above their `contentTrust: 'trusted'` (accepted for
+    // statics only; a feature registration must use `// TRUSTED:`).
+    const provider = readFileSync(join(SRC, 'host/agentToolProvider.ts'), 'utf8').split('\n');
+    const staticTrusted = builtinAgentToolIds().filter((id) => builtinAgentTool(id)?.contentTrust === 'trusted');
+    expect(staticTrusted.length, 'no trusted static — the static half is vacuous').toBeGreaterThan(0);
+    for (const id of staticTrusted) {
+      const i = provider.findIndex((l) => l.includes(`name: '${id}'`));
+      let decl = -1;
+      for (let j = i; j >= Math.max(0, i - 12); j--) if (provider[j]!.includes("contentTrust: 'trusted'")) { decl = j; break; }
+      const why = decl > 0 ? provider[decl - 1]! : '';
+      if (i < 0 || !/\/\/\s*(RFC 0137 §F1 —|TRUSTED:)\s*\S/.test(why)) bare.push(`agentToolProvider.ts ${id}`);
     }
     expect(bare, 'a tool classified trusted with no stated justification').toEqual([]);
   });
@@ -192,5 +255,9 @@ describe('RFC 0137 §F1 — every builtin tool declares its trust', () => {
     // would stop being a complete ratchet — the falsifier the architect named.
     const src = readFileSync(join(SRC, 'features/commerce/agentTools.ts'), 'utf8');
     expect(src, 'readTool must accept contentTrust as a parameter').toMatch(/contentTrust: BuiltinTool\['contentTrust'\]/);
+    // …and must RETURN that parameter: a factory that accepts it but writes a
+    // literal in its body (`contentTrust: 'trusted'`) collapses the 7 decisions
+    // into one just the same (wave-61 probe ct-factory).
+    expect(src, 'readTool must return the contentTrust it was given').toMatch(/return \{\s*contentTrust,\s*effect,/);
   });
 });

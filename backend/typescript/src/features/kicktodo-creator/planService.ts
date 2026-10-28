@@ -156,7 +156,11 @@ export const CHALLENGE_PLAN_JSON_SCHEMA = {
       items: {
         type: 'object',
         additionalProperties: false,
-        required: ['day', 'stableActivityId', 'title', 'actionInstruction', 'userFacingWhy', 'estimatedMinutes', 'achievementIds', 'evidencePolicy'],
+        // ADR 0975 D7 — `claimRefs` is REQUIRED (an empty array is still allowed).
+        // Optional, a structured-output model may drop it from every day (MEASURED:
+        // gemini-3.8-flash, all 21 days) and the skeptic simulation then blocks an
+        // uncited plan at the very end of the run.
+        required: ['day', 'stableActivityId', 'title', 'actionInstruction', 'userFacingWhy', 'estimatedMinutes', 'achievementIds', 'evidencePolicy', 'claimRefs'],
         properties: {
           day: { type: 'integer', minimum: 1 },
           stableActivityId: { type: 'string', minLength: 1, description: 'kebab-case, unique across the plan' },
@@ -289,8 +293,20 @@ export function validatePlan(input: unknown, opts?: PlanValidationOptions): Plan
 function claimRefDefects(plan: ChallengePlan, knownClaimIds: readonly string[] | undefined): PlanDefect[] {
   const defects: PlanDefect[] = [];
   const known = knownClaimIds ? new Set(knownClaimIds) : null;
+  // ADR 0975 D7 — with supported evidence in scope, a day must SAY what it cites
+  // (an empty array is an answer; a missing field is not), and the plan as a whole
+  // must cite something. Both used to pass here and fail only at the skeptic
+  // simulation, after every lesson had been built; as defects they reach the
+  // generator's one bounded repair instead.
+  const evidenceInScope = known !== null && known.size > 0;
+  let cited = 0;
   for (const d of plan.days ?? []) {
-    if (d.claimRefs === undefined) continue;
+    if (d.claimRefs === undefined) {
+      if (evidenceInScope) {
+        defects.push({ code: 'claim-refs-missing', message: 'Every day needs `claimRefs`: the claimIds from the EVIDENCE it relies on, or an empty array when it states no fact beyond its own instruction.', ref: d.stableActivityId });
+      }
+      continue;
+    }
     if (!Array.isArray(d.claimRefs) || d.claimRefs.some((r) => typeof r !== 'string' || r.trim().length === 0)) {
       defects.push({ code: 'claim-refs-malformed', message: '`claimRefs` must be an array of non-empty claim ids.', ref: d.stableActivityId });
       continue;
@@ -300,6 +316,10 @@ function claimRefDefects(plan: ChallengePlan, knownClaimIds: readonly string[] |
     if (unknown.length) {
       defects.push({ code: 'claim-ref-unknown', message: `claimRefs name claims the research did not record or does not support: ${unknown.join(', ')}. Cite only SUPPORTED ids from the EVIDENCE, or use an empty array.`, ref: d.stableActivityId });
     }
+    cited += d.claimRefs.length - unknown.length;
+  }
+  if (evidenceInScope && cited === 0 && defects.length === 0) {
+    defects.push({ code: 'plan-cites-no-evidence', message: 'No day cites the EVIDENCE. Cite the supported claimIds that each day\'s why or instruction relies on; a plan with no cited evidence is blocked at publication.' });
   }
   return defects;
 }

@@ -7,6 +7,13 @@
  * AsyncLocalStorage — so without this guard the executor's parent-log reads on a
  * major-2 `:fork` came back projected, one carry step away from persisting a
  * read projection into the child log (RFC 0041 §C byte-equivalence).
+ *
+ * Tracker TST-BAA-5. Red when (sabotage-witnessed, wave 60): `executeRun` stops
+ * entering `runUnderWorkerContract` (case 2); `WORKER_CONTRACT` becomes 2
+ * (cases 2 and 3). CEILING (case 3): with no ambient context `currentContract()`
+ * already falls back to 1, so a launch outside any request cannot tell "entered
+ * the worker contract" from "fell through `?? 1`". Case 3 pins only that the
+ * worker contract IS 1; the entry itself is witnessed by case 2.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { mkdtempSync } from 'node:fs';
@@ -29,6 +36,7 @@ setSuspendBackend(storage);
 initInMemorySurfaces({ dataDir: mkdtempSync(join(tmpdir(), 'openwop-adr0725-')) });
 
 const observed: number[] = [];
+let seq = 0;
 beforeAll(() => {
   getNodeRegistry().register({
     typeId: 'test.observe-contract',
@@ -41,7 +49,7 @@ beforeAll(() => {
 });
 async function newRun(): Promise<RunRecord> {
   const now = new Date().toISOString();
-  const run: RunRecord = { runId: `run-${Math.random().toString(36).slice(2)}`, workflowId: 'wf.contract', tenantId: 'demo', status: 'pending', inputs: {}, metadata: {}, configurable: {}, createdAt: now, updatedAt: now };
+  const run: RunRecord = { runId: `run-adr0725-contract-${++seq}`, workflowId: 'wf.contract', tenantId: 'demo', status: 'pending', inputs: {}, metadata: {}, configurable: {}, createdAt: now, updatedAt: now };
   await storage.insertRun(run);
   return run;
 }
@@ -60,7 +68,7 @@ describe('ADR 0725 — executeRun enters the worker contract at its one owner', 
     expect(result.status).toBe('completed');
     expect(observed, 'the node body — and every seat read the executor takes — runs as a worker').toEqual([1]);
   });
-  it('a run launched with no context at all is also a worker (not the `?? 1` fallback by accident)', async () => {
+  it('a run launched with no context at all executes under the worker contract value (1)', async () => {
     observed.length = 0;
     const run = await newRun();
     await executeRun(storage, run, def);

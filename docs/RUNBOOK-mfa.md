@@ -90,9 +90,12 @@ meaningless, because nobody *can* enroll.
 5. **Verify.** Sign in to the app → Settings → Security. The operator notice should be
    replaced by an **Add authenticator app** button. Enroll one factor end to end, then
    sign out and back in to confirm the challenge fires.
-6. **Enroll a second factor and confirm the backup copy appears.** This is not optional
-   polish — a second factor is the *only* self-service recovery path that exists (§2),
-   so the operator should verify the affordance works before any user depends on it.
+6. **Confirm the backup copy appears.** Identity Platform holds **one** TOTP factor per
+   account (a second enrollment fails with `auth/maximum-second-factor-count-exceeded`;
+   ADR 0389 § Correction 2026-10-24). So the self-service backup is the same secret on a
+   second device, captured at enrollment. With one factor enrolled, the panel should show
+   the "Keep a backup" notice and no second "Set up" button. Verify it before any user
+   depends on it.
 
 **Cost note (verify before committing).** Identity Platform is a paid tier above the
 Firebase Auth free tier — the free allowance is ~50k MAU with per-MAU pricing in bands
@@ -116,13 +119,13 @@ is foreclosed by ADR 0026.
 
 ## 2 · A user is locked out of their second factor
 
-**First: this is usually avoidable.** The Security panel prompts every user with a single
-enrolled factor to add a **backup authenticator**, and a second enrolled factor is the
-self-service recovery path (NIST 800-63B-4 §4.2.2's "one recovery code plus a
-single-factor authenticator" shape). Check whether the user has a second factor before
-escalating — they can remove the lost one themselves after signing in with the backup.
+**First: this is usually avoidable.** Each account holds one authenticator app, so the
+Security panel tells every enrolled user to keep the same authenticator on a second device
+(scanned at enrollment, or in a synced password manager). Ask whether they still have that
+other device before escalating: it produces the same codes, and they can sign in and
+re-enroll from it.
 
-**If the user has no second factor**, Identity Platform is explicit that it *"does not
+**If the user has no other device holding the authenticator**, Identity Platform is explicit that it *"does not
 provide a built-in mechanism for recovering second factors"* and that the user *"will be
 locked out."* Password reset does **not** bypass MFA. The out-of-band path:
 

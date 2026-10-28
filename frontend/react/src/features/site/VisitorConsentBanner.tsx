@@ -17,6 +17,12 @@
  *     withdrawing is always one click away (GDPR Art. 7(3): as easy as giving) —
  *     even when the posture read fails.
  *
+ * ADR 0951 D1 — on a site whose org offers session recording (the posture's
+ * `choices`), the region also carries a separate, UNTICKED "Session recording"
+ * checkbox while asking (Accept records it as ticked; Reject refuses both), and a
+ * turn-on/turn-off button while changing. Recording is explicit opt-in in every
+ * region, so such a site asks a visitor with no recorded choice under either regime.
+ *
  * Focus: a choice returns focus to where it was before the region took it, else to
  * the footer control without scrolling (never to `<body>`), and is announced
  * through the shell's one live region. Opening from the footer moves focus to the
@@ -32,7 +38,7 @@ import { useTranslation } from 'react-i18next';
 import { Button } from '../../ui/Button.js';
 import { Notice } from '../../ui/Notice.js';
 import { announce } from '../../ui/announce.js';
-import { recordChoice, useVisitorConsent } from './visitorConsent.js';
+import { recordChoice, replayOfferedFor, useVisitorConsent } from './visitorConsent.js';
 import { PRIVACY_HREF } from '../../brand/privacyHref.js';
 
 
@@ -48,6 +54,12 @@ export function VisitorConsentBanner({ orgId }: { orgId: string }): JSX.Element 
   const footerBtnRef = useRef<HTMLButtonElement>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
   const headingId = useId();
+  const replayHintId = useId();
+  const replayBoxId = useId();
+  // ADR 0951 D1 — the separate, UNTICKED session-recording choice, only on a site
+  // that offers it. "Accept" never ticks it (Q2: always its own tick, in every region).
+  const replayOffered = replayOfferedFor(orgId);
+  const [replayTicked, setReplayTicked] = useState(false);
 
   // The footer control's container is created HERE, inside PublicShell's existing
   // footer, so the entry chunk (PublicShell) carries no slot of its own — the
@@ -63,7 +75,9 @@ export function VisitorConsentBanner({ orgId }: { orgId: string }): JSX.Element 
     return () => { el.remove(); };
   }, []);
 
-  const asking = regime === 'opt-in' && !choice;
+  // ADR 0951 — a site that offers recording asks a visitor who has not chosen yet,
+  // in any regime: recording is explicit opt-in everywhere.
+  const asking = !choice && (regime === 'opt-in' || (replayOffered && regime === 'opt-out'));
   const shown = asking || open;
 
   // Keep the end of the page and any focused control clear of the pinned region.
@@ -118,14 +132,14 @@ export function VisitorConsentBanner({ orgId }: { orgId: string }): JSX.Element 
   // The lane is unavailable AND nothing was ever chosen: there is nothing to show.
   if (!orgId || ((regime === undefined || regime === null) && !choice)) return null;
 
-  const choose = async (analytics: boolean): Promise<void> => {
+  const choose = async (analytics: boolean, replay?: boolean, saved?: string): Promise<void> => {
     if (busy) return; // `aria-disabled`, not `disabled`: a disabled button drops focus
     setBusy(true);
     setFailed(false);
     try {
-      await recordChoice(orgId, analytics);
+      await recordChoice(orgId, analytics, replay !== undefined ? { replay } : {});
       setOpen(false);
-      announce(t(analytics ? 'consentSavedOn' : 'consentSavedOff'));
+      announce(saved ?? t(analytics ? 'consentSavedOn' : 'consentSavedOff'));
       const back = returnFocusRef.current;
       returnFocusRef.current = null;
       // After the region unmounts: back to where the visitor was, else the footer
@@ -146,10 +160,29 @@ export function VisitorConsentBanner({ orgId }: { orgId: string }): JSX.Element 
   };
 
   const current = choice ? choice.analytics : regime === 'opt-out';
+  const currentReplay = choice?.replay === true;
   const changing = !asking;
+  // While asking: Accept records analytics plus the recording tick as it stands;
+  // Reject refuses both. While changing: the analytics button leaves the
+  // recording answer untouched.
   const choiceButton = (analytics: boolean): JSX.Element => (
-    <Button key={String(analytics)} variant="secondary" aria-disabled={busy || undefined} onClick={() => void choose(analytics)}>
+    <Button
+      key={String(analytics)}
+      variant="secondary"
+      aria-disabled={busy || undefined}
+      onClick={() => void choose(analytics, changing || !replayOffered ? undefined : analytics && replayTicked)}
+    >
       {t(analytics ? 'consentAccept' : 'consentReject')}
+    </Button>
+  );
+  const replayButton = (
+    <Button
+      key="replay"
+      variant="secondary"
+      aria-disabled={busy || undefined}
+      onClick={() => void choose(current, !currentReplay, t(currentReplay ? 'consentReplaySavedOff' : 'consentReplaySavedOn'))}
+    >
+      {t(currentReplay ? 'consentReplayTurnOff' : 'consentReplayTurnOn')}
     </Button>
   );
   const region = shown ? (
@@ -162,13 +195,25 @@ export function VisitorConsentBanner({ orgId }: { orgId: string }): JSX.Element 
       <div className="visitor-consent__inner">
         <h2 id={headingId} ref={headingRef} tabIndex={-1} className="visitor-consent__title">{t('consentTitle')}</h2>
         <p className="visitor-consent__body">
-          {t(changing ? 'consentBodyChange' : 'consentBody')}{' '}
+          {t(changing ? 'consentBodyChange' : regime === 'opt-out' ? 'consentBodyOptOut' : 'consentBody')}{' '}
           <a href={PRIVACY_HREF}>{t('consentPrivacyLink')}</a>
         </p>
         {changing ? <p className="visitor-consent__state">{t(current ? 'consentStateOn' : 'consentStateOff')}</p> : null}
+        {replayOffered && changing ? (
+          <p className="visitor-consent__state">{t(currentReplay ? 'consentReplayStateOn' : 'consentReplayStateOff')}</p>
+        ) : null}
+        {replayOffered && !changing ? (
+          <div className="visitor-consent__replay">
+            <input id={replayBoxId} type="checkbox" checked={replayTicked} onChange={(e) => setReplayTicked(e.target.checked)} aria-describedby={replayHintId} />
+            <span>
+              <label htmlFor={replayBoxId} className="visitor-consent__replay-label">{t('consentReplayLabel')}</label>{' '}
+              <span id={replayHintId}>{t('consentReplayHint')}</span>
+            </span>
+          </div>
+        ) : null}
         {failed ? <Notice variant="error" announce={t('consentFailed')}>{t('consentFailed')}</Notice> : null}
         <div className="visitor-consent__actions">
-          {changing ? choiceButton(!current) : [choiceButton(true), choiceButton(false)]}
+          {changing ? [choiceButton(!current), ...(replayOffered ? [replayButton] : [])] : [choiceButton(true), choiceButton(false)]}
           {changing ? (
             <Button variant="quiet" className="visitor-consent__close" onClick={() => { setOpen(false); setFailed(false); footerBtnRef.current?.focus(); }}>{t('consentClose')}</Button>
           ) : null}

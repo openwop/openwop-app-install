@@ -31,6 +31,7 @@ import Database from 'better-sqlite3';
 import { applyMigrations, LATEST_SCHEMA_VERSION } from '../src/storage/sqlite/schema.js';
 import { legacyDbAtVersion } from './_legacyDbFixture.js';
 import { initInMemorySurfaces } from '../src/host/inMemorySurfaces.js';
+import { getNodeRegistry } from '../src/executor/nodeRegistry.js';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -219,6 +220,27 @@ describe('ADR 0551 P1 — dispatch outbox worker', () => {
     expect(
       (await storage.listEvents('stranded', { limit: 100 })).filter((e) => e.type === 'run.started'),
     ).toHaveLength(1);
+  });
+
+  it('a crash before variable seeding recovers accepted inputs and deferred overrides before the first node', async () => {
+    const typeId = 'test.outbox.variables';
+    getNodeRegistry().register({ typeId, version: '1.0.0', execute: async (ctx) => {
+      if (!ctx.variables) throw new Error('executor did not provide variables');
+      return { status: 'success', outputs: { value: ctx.config?.picked, remembered: ctx.variables.get('target') } };
+    } });
+    const definition = {
+      workflowId: 'wf-1', name: 'recover initial variables', version: '1.0.0',
+      variables: [{ name: 'target', defaultValue: 'wrong default' }],
+      metadata: { deferredParameterAliases: { bareTarget: 'target' } },
+      nodes: [{ nodeId: 'read', typeId, config: { picked: '{{inputs.target}}' } }], edges: [],
+    };
+    await insertRunWithStartContext(storage, makeRun({ runId: 'unseeded-variables', inputs: { target: 'input' }, configurable: { bareTarget: 'accepted override' } }), { enqueueDispatch: true });
+    const due = (await storage.getDispatchOutbox('unseeded-variables'))!.nextAttemptAt;
+    expect(await sweepDispatchOutbox({ storage, hostSuite: stubHostSuite(async () => ({ workflowId: 'wf-1', definition })) }, 'survivor', due)).toBe(1);
+    await flush();
+    expect((await storage.getRun('unseeded-variables'))?.status).toBe('completed');
+    const completed = (await storage.listEvents('unseeded-variables', { limit: 100 })).find((e) => e.type === 'node.completed' && e.nodeId === 'read');
+    expect(completed?.payload).toMatchObject({ outputs: { value: 'accepted override', remembered: 'accepted override' } });
   });
 
   it('duplicate delivery of one intent yields exactly one logical execution', async () => {
@@ -418,6 +440,7 @@ describe('ADR 0551 P1 — forward migration onto a real pre-outbox database', ()
     // ADR 0752 P2 (RFC 0215 §A.3): bumped to 48 (`webhook_deliveries.tenant_id`).
     // RFC 0173 §C.2 (suite 2.42.5): bumped to 49 (`invocation_log.presented_key`).
     // ADR 0812 P3d: bumped to 50 (drop the major-1 webhook subscriptions).
-    expect(LATEST_SCHEMA_VERSION).toBe(50);
+    // ADR 0987 D2: bumped to 51 (`runs.admission_key` + its index).
+    expect(LATEST_SCHEMA_VERSION).toBe(51);
   });
 });

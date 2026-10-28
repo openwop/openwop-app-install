@@ -27,16 +27,20 @@
  *      `workflow-chain-marketing-execution.test.ts` document), so a real run
  *      genuinely cannot complete past `checklist`. This test asserts the
  *      HONEST FAILURE contract (`status:'failed'`, `error.code:
- *      'provider_not_supported'`) rather than forcing completion — but proves
+ *      'openwop-app.byok_required'` — see the §Correction at the assertion; the
+ *      pack now templates `provider: "{{params.provider}}"`, ADR 0903) rather
+ *      than forcing completion — but proves
  *      the thing that matters: `docs` (`feature.kb.nodes.rag`) is an
  *      independent, non-AI chain-entry node that runs for real, in parallel
  *      with `checklist`, and its `node.completed` event in the real debug-
  *      bundle carries REAL citations from a REAL seeded KB document — the
  *      BUG-2 fix below, proved against the real executor, not a harness.
  *
- *   2. A MINI-SCHEDULER (`walkChain` below) — the SAME technique `cms-chain-
- *      execution.test.ts`/`workflow-chain-marketing-execution.test.ts` use for
- *      the same "no BYOK credential in a test tenant" problem: the REAL node
+ *   2. A MINI-SCHEDULER (`walkChain` below) driving the REAL scheduler
+ *      primitives — `buildGraph`, `freshSnapshot`, `evaluateTrigger`,
+ *      `buildNodeInputs` are IMPORTED from `executor/scheduler.ts` (the
+ *      `workflow-chain-inbox-execution.test.ts` pattern), never reproduced —
+ *      for the "no BYOK credential in a test tenant" problem: the REAL node
  *      implementations (`packs/core.openwop.ai` `chatCompletion`,
  *      `packs/feature.kb.nodes` `rag`, `packs/vendor.myndhyve.chat`
  *      `core.chat.approvalGate`), the REAL `ctx.features.kb` surface over
@@ -76,7 +80,17 @@
  *    downstream edges (`variance`→`chase`, `chase`→`report`) are each
  *    single-inbound.
  *
- * 2. Missing `orgId`/`collectionId`/`query` parameters on `docs` (an
+ * 2. CORRECTION (grade-tests wave 64): the paragraph below describes the
+ *    ORIGINAL fix. The pack has since moved to authored `docs.inputs`
+ *    (`{ query, orgId, collectionId }` as `{{params.*}}`), which `expandChain`
+ *    freezes and `executor.ts` merges over the edge/run inputs
+ *    (`{...edgeInputs, ...node.inputs}`). So "`ctx.inputs` for a chain-entry
+ *    node is ALWAYS the run's params VERBATIM" is no longer the whole story: the
+ *    authored inputs win. Probe `8fw5g4-fin-org-real` (docs `orgId` frozen to a
+ *    foreign org) turned the real-executor case red, which witnesses this wiring.
+ *    The required top-level params are still declared and still supply the values.
+ *
+ *    Original text: Missing `orgId`/`collectionId`/`query` parameters on `docs` (an
  *    org-scoping-style defect — no BUG PATTERN B instance was specifically
  *    flagged for finance, but this is the same class: an org/tenant-scoped
  *    feature surface read with no way to supply the scope). Verified the
@@ -116,6 +130,7 @@ import { buildFeatureSurfaces } from '../src/host/featureSurfaces.js';
 import { getChain, expandChain } from '../src/host/workflowChainPackLoader.js';
 import { registerWorkflow } from '../src/host/workflowsRegistry.js';
 import { makeSuspendFn, SuspendSignal } from '../src/executor/suspendSignal.js';
+import { buildGraph, buildNodeInputs, evaluateTrigger, freshSnapshot, type SchedulerSnapshot } from '../src/executor/scheduler.js';
 
 let BASE: string;
 let server: http.Server;
@@ -135,10 +150,15 @@ beforeAll(async () => {
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 interface Res<T = unknown> { status: number; body: T }
-interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res> }
+/** Each call site names the response shape it reads; the JSON boundary is the one
+ *  place an untyped body becomes typed. */
+interface Client {
+  get: <T = unknown>(p: string) => Promise<Res<T>>;
+  post: <T = unknown>(p: string, b?: unknown) => Promise<Res<T>>;
+}
 function client(): Client {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T,>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
@@ -146,10 +166,11 @@ function client(): Client {
     });
     const sc = getSetCookies(res.headers);
     for (const c of sc as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    // The one JSON-boundary cast: the caller's type parameter names the body it reads.
+    const out = (res.status === 204 ? undefined : await res.json().catch(() => undefined)) as T;
     return { status: res.status, body: out };
   };
-  return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b) };
+  return { get: <T,>(p: string) => call<T>('GET', p), post: <T,>(p: string, b?: unknown) => call<T>('POST', p, b) };
 }
 
 let n = 0;
@@ -158,9 +179,9 @@ async function ownerOrg(): Promise<{ owner: Client; orgId: string; tenantId: str
   const owner = client();
   const r = await owner.post('/host/openwop-app/test/login', { email: `financechain-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
-  return { owner, orgId: (org.body as { orgId: string }).orgId, tenantId };
+  return { owner, orgId: org.body.orgId, tenantId };
 }
 const kbPath = (orgId: string, suffix = ''): string => `/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}${suffix}`;
 
@@ -168,9 +189,9 @@ interface RunSnapshot { status: string; error?: { code: string; message: string 
 async function pollRun(owner: Client, runId: string): Promise<RunSnapshot> {
   let snap: RunSnapshot = { status: 'pending' };
   for (let i = 0; i < 80; i++) {
-    const r = await owner.get(`/runs/${runId}`);
+    const r = await owner.get<RunSnapshot>(`/runs/${runId}`);
     expect(r.status, JSON.stringify(r.body)).toBe(200);
-    snap = r.body as RunSnapshot;
+    snap = r.body;
     if (snap.status === 'completed' || snap.status === 'failed' || snap.status === 'cancelled' || snap.status.startsWith('waiting')) break;
     await new Promise((res) => setTimeout(res, 25));
   }
@@ -179,9 +200,9 @@ async function pollRun(owner: Client, runId: string): Promise<RunSnapshot> {
 
 interface BundleEvent { type?: string; nodeId?: string; payload?: Record<string, unknown> }
 async function bundleEvents(owner: Client, runId: string): Promise<BundleEvent[]> {
-  const b = await owner.get(`/runs/${runId}/debug-bundle`);
+  const b = await owner.get<{ events?: BundleEvent[] }>(`/runs/${runId}/debug-bundle`);
   expect(b.status, JSON.stringify(b.body)).toBe(200);
-  return ((b.body as { events?: BundleEvent[] }).events) ?? [];
+  return b.body.events ?? [];
 }
 function completedOutputs(events: BundleEvent[], nodeSuffix: string): Record<string, unknown> {
   const ev = events.find((e) => e.type === 'node.completed' && e.nodeId?.endsWith(`_${nodeSuffix}`));
@@ -193,9 +214,9 @@ describe('finance.month-end-close — real executor, honest failure at checklist
   it('seeds a real KB doc, reads it for real (org-scoped, BUG-2 fix), then fails cleanly at checklist (no AI provider configured)', async () => {
     const { owner, orgId } = await ownerOrg();
 
-    const col = await owner.post(kbPath(orgId, '/collections'), { name: 'Close Support Docs' });
+    const col = await owner.post<{ collectionId: string }>(kbPath(orgId, '/collections'), { name: 'Close Support Docs' });
     expect(col.status, JSON.stringify(col.body)).toBe(201);
-    const collectionId = (col.body as { collectionId: string }).collectionId;
+    const collectionId = col.body.collectionId;
     const doc = await owner.post(kbPath(orgId, `/collections/${encodeURIComponent(collectionId)}/documents`), {
       title: 'June close support doc',
       text: 'Month-end close supporting documents include the bank reconciliation, the AP subledger tie-out, and the payroll accrual review for the period.',
@@ -208,9 +229,9 @@ describe('finance.month-end-close — real executor, honest failure at checklist
     const expanded = expandChain(found!.chain, { params });
     registerWorkflow(expanded);
 
-    const create = await owner.post('/runs', { workflowId: expanded.workflowId, inputs: params });
+    const create = await owner.post<{ runId: string }>('/runs', { workflowId: expanded.workflowId, inputs: params });
     expect(create.status, JSON.stringify(create.body)).toBe(201);
-    const runId = (create.body as { runId: string }).runId;
+    const runId = create.body.runId;
 
     const snap = await pollRun(owner, runId);
     expect(snap.status).toBe('failed');
@@ -267,22 +288,19 @@ beforeAll(async () => {
 
 interface WalkOutcome {
   results: Record<string, NodeResult>;
-  /** The port-keyed inputs map BUILT for each node before invoking its impl —
+  /** The port-keyed inputs map the REAL `buildNodeInputs` produced for each node —
    *  captured separately from `results` so a fan-in assertion doesn't depend
    *  on what a particular node impl happens to do with its inputs. */
   inputsByShortId: Record<string, Record<string, unknown>>;
 }
 
 /**
- * Walk the expanded chain definition with the SAME port semantics as the real
- * scheduler's `buildNodeInputs` (`executor/scheduler.ts`) + the SAME single-
- * key "Back-compat" unwrap as the real executor (`executor/executor.ts`,
- * `Object.keys(mergedInputsByPort).length === 1 && 'input' in
- * mergedInputsByPort`) — reproduced here, not approximated, so a fan-in node's
- * built inputs in this harness are EXACTLY what the real executor would
- * build. `ctx.callAI` is the only faked host primitive; `ctx.suspend` is the
- * REAL `executor/suspendSignal.js` mechanism (mirrors `workflow-chain-
- * marketing-execution.test.ts`'s `walkChain`).
+ * Walk the expanded chain definition with the REAL scheduler primitives
+ * (`buildGraph`, `freshSnapshot`, `evaluateTrigger`, `buildNodeInputs`). Only two
+ * executor steps are reproduced, both quoted from `executor/executor.ts` exactly as
+ * `workflow-chain-inbox-execution.test.ts` does: the single-`input` back-compat
+ * unwrap and the `node.inputs`-wins merge. `ctx.callAI` is the only faked host
+ * primitive; `ctx.suspend` is the REAL `executor/suspendSignal.js` mechanism.
  */
 async function walkChain(
   chainId: string,
@@ -291,53 +309,64 @@ async function walkChain(
 ): Promise<WalkOutcome> {
   const chain = getChain(chainId)!.chain;
   const def = expandChain(chain, { params });
-  const outputs = new Map<string, Record<string, unknown>>();
-  const state = new Map<string, 'completed' | 'other'>();
+  const graph = buildGraph(def);
+  const snapshot: SchedulerSnapshot = freshSnapshot(def);
+  const byId = new Map(def.nodes.map((nd) => [nd.nodeId, nd]));
   const results: Record<string, NodeResult> = {};
   const inputsByShortId: Record<string, Record<string, unknown>> = {};
   const shortId = (nodeId: string): string => nodeId.slice(nodeId.lastIndexOf('_') + 1);
 
-  for (const node of def.nodes) {
-    const inbound = (def.edges ?? []).filter((e) => e.targetNodeId === node.nodeId);
-    if (inbound.length > 0 && !inbound.every((e) => state.get(e.sourceNodeId) === 'completed')) continue; // an upstream branch never completed — this node never becomes ready
-
-    const builtInputs: Record<string, unknown> = {};
-    if (inbound.length === 0) {
-      builtInputs.input = params;
-    } else {
-      for (const e of inbound) {
-        const src = outputs.get(e.sourceNodeId) ?? {};
-        const sourcePort = e.sourceOutput ?? 'output';
-        const targetPort = e.targetInput ?? 'input';
-        builtInputs[targetPort] = Object.prototype.hasOwnProperty.call(src, sourcePort) ? src[sourcePort] : src;
+  let progressed = true;
+  while (progressed) {
+    progressed = false;
+    for (const nodeId of snapshot.order) {
+      const state = snapshot.nodeState.get(nodeId);
+      if (state !== 'pending' && state !== 'ready') continue;
+      const verdict = evaluateTrigger(nodeId, graph, snapshot);
+      if (verdict === 'wait') continue;
+      progressed = true;
+      if (verdict === 'skip') {
+        snapshot.nodeState.set(nodeId, 'skipped');
+        continue;
       }
-    }
-    const shortNodeId = shortId(node.nodeId);
-    inputsByShortId[shortNodeId] = builtInputs;
-    const ctxInputs: unknown = Object.keys(builtInputs).length === 1 && 'input' in builtInputs ? builtInputs.input : builtInputs;
+      const node = byId.get(nodeId)!;
+      const inputsByPort = buildNodeInputs(nodeId, graph, snapshot, params);
+      // executor.ts — the back-compat unwrap.
+      const baseInputs: unknown =
+        Object.keys(inputsByPort).length === 1 && 'input' in inputsByPort ? inputsByPort.input : inputsByPort;
+      // executor.ts — `node.inputs` (already frozen by expandChain) wins on conflict.
+      const fixture = (node.inputs ?? {}) as Record<string, unknown>;
+      const ctxInputs: unknown = Object.keys(fixture).length === 0
+        ? baseInputs
+        : baseInputs && typeof baseInputs === 'object' && !Array.isArray(baseInputs)
+          ? { ...(baseInputs as Record<string, unknown>), ...fixture }
+          : fixture;
 
-    const impl = miniNodes[node.typeId];
-    expect(impl, `node impl for ${node.typeId}`).toBeTruthy();
-    let result: NodeResult;
-    try {
-      result = await impl!({
-        nodeId: node.nodeId,
-        inputs: ctxInputs,
-        config: node.config ?? {},
-        features: deps.features,
-        callAI: deps.callAI,
-        suspend: makeSuspendFn(node.nodeId, undefined),
-      });
-    } catch (err) {
-      if (err instanceof SuspendSignal) {
-        result = { status: 'suspended' };
-      } else {
-        throw err;
+      const impl = miniNodes[node.typeId];
+      expect(impl, `node impl for ${node.typeId}`).toBeTruthy();
+      let result: NodeResult;
+      try {
+        result = await impl!({
+          nodeId,
+          inputs: ctxInputs,
+          config: node.config ?? {},
+          features: deps.features,
+          callAI: deps.callAI,
+          suspend: makeSuspendFn(nodeId, undefined),
+        });
+      } catch (err) {
+        if (err instanceof SuspendSignal) {
+          result = { status: 'suspended' };
+        } else {
+          throw err;
+        }
       }
+      const short = shortId(nodeId);
+      inputsByShortId[short] = inputsByPort;
+      results[short] = result;
+      snapshot.nodeOutputs.set(nodeId, result.outputs ?? {});
+      snapshot.nodeState.set(nodeId, result.status === 'success' ? 'completed' : result.status === 'suspended' ? 'suspended' : 'failed');
     }
-    results[shortNodeId] = result;
-    state.set(node.nodeId, result.status === 'success' ? 'completed' : 'other');
-    if (result.status === 'success') outputs.set(node.nodeId, result.outputs ?? {});
   }
   return { results, inputsByShortId };
 }
@@ -346,9 +375,9 @@ describe('finance.month-end-close — mini-scheduler (real KB read + real ctx.su
   it('variance receives checklist/docs on TWO DISTINCT ports (not clobbered) and the walk reaches a genuine suspended-at-gate terminal state', async () => {
     const { owner, orgId, tenantId } = await ownerOrg();
 
-    const col = await owner.post(kbPath(orgId, '/collections'), { name: 'Variance KB' });
+    const col = await owner.post<{ collectionId: string }>(kbPath(orgId, '/collections'), { name: 'Variance KB' });
     expect(col.status, JSON.stringify(col.body)).toBe(201);
-    const collectionId = (col.body as { collectionId: string }).collectionId;
+    const collectionId = col.body.collectionId;
     const doc = await owner.post(kbPath(orgId, `/collections/${encodeURIComponent(collectionId)}/documents`), {
       title: 'Payroll accrual variance note',
       text: 'The payroll accrual variance this period is driven by a late benefits invoice from the vendor.',

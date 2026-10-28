@@ -1,6 +1,18 @@
 /**
  * ADR 0368 Phase 5 — tour progress rows: toggle-gated, tenant-scoped,
- * upsert-by-key (one row per tenant×tour), input-validated.
+ * upsert-by-key (one row per tenant×tour), input-validated; ADR 0378 P3 —
+ * per-user rows (the resume-hijack fix) with a legacy tenant-level fallback;
+ * the funnel (status counts, stall step, WALK-A1 skips).
+ *
+ * TWO FENCES on the list read: the tenant prefix + field filter, and the
+ * per-user `userId` filter. A per-user row is hidden from another tenant by
+ * BOTH, so case 1 reads a LEGACY (no-userId) row of tenant A from tenant B —
+ * the only row the tenant fence alone decides (round-1 probe wp-tenant: vacuous
+ * when every row carried a userId).
+ * Witnessed (grade-tests w63): status validation dropped / a non-deterministic
+ * key → case 1 red; the per-user filter dropped → cases 2–3 red; the legacy
+ * shadow dropped → case 3 red; the legacy-id union dropped or the cancelled
+ * bucket dropped → the funnel case red; the skip predicate inverted → case 5 red.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -12,6 +24,7 @@ import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { seedDemoWalkthroughs } from '../src/host/demoWalkthroughsSeed.js';
 import { CAMPAIGN_STUDIO_WALKTHROUGH_ID } from '../src/features/walkthroughs/walkthroughIds.js';
 import { bareRunId } from './support/bareRunId.js';
+import { putWalkthroughProgress } from '../src/features/walkthroughs/progressStore.js';
 
 let BASE: string;
 let server: http.Server;
@@ -40,22 +53,29 @@ function client() {
 }
 const PROG = '/host/openwop-app/walkthroughs/progress';
 
+
 describe('guided-tour progress (ADR 0368 P5)', () => {
   it('upserts one row per tenant×tour, lists tenant-scoped, validates input', async () => {
+    const tenantA = `org:tp-a-${Date.now()}-${n++}`;
+    const tenantB = `org:tp-b-${Date.now()}-${n++}`;
     const a = client();
-    expect((await a.post('/host/openwop-app/test/login', { email: `tp-${Date.now()}-${n++}@acme.test` })).status).toBe(201);
+    expect((await a.post('/host/openwop-app/test/login', { email: `tp-a-${n}@acme.test`, tenantId: tenantA })).status).toBe(201);
 
     expect((await a.post(PROG, { walkthroughId: 't1', status: 'nope', runId: 'r1' })).status).toBe(400);
     expect((await a.post(PROG, { walkthroughId: 't1', status: 'started', runId: 'r1' })).status).toBe(200);
     expect((await a.post(PROG, { walkthroughId: 't1', status: 'completed', runId: 'r1' })).status).toBe(200);
 
     const rows = (await a.get(PROG)).body.progress as Array<{ walkthroughId: string; status: string }>;
-    expect(rows).toHaveLength(1); // upsert, not append
+    expect(rows).toHaveLength(1); // upsert, not append (read BEFORE the legacy fence row below)
     expect(rows[0]).toMatchObject({ walkthroughId: 't1', status: 'completed' });
 
-    // Tenant isolation: a second tenant sees nothing.
+    // Tenant isolation, decided by the TENANT fence: a legacy (no-userId) row in
+    // tenant A is visible to A's members (positive control) and never to B.
+    await putWalkthroughProgress({ tenantId: tenantA, walkthroughId: 'w-fence', status: 'started', runId: 'run-fence', updatedAt: new Date().toISOString() });
+    const aIds = ((await a.get(PROG)).body.progress as Array<{ walkthroughId: string }>).map((r) => r.walkthroughId).sort();
+    expect(aIds).toEqual(['t1', 'w-fence']);
     const b = client();
-    expect((await b.post('/host/openwop-app/test/login', { email: `tp-${Date.now()}-${n++}@acme.test` })).status).toBe(201);
+    expect((await b.post('/host/openwop-app/test/login', { email: `tp-b-${n}@acme.test`, tenantId: tenantB })).status).toBe(201);
     expect(((await b.get(PROG)).body.progress as unknown[])).toHaveLength(0);
   });
 
@@ -82,7 +102,6 @@ describe('guided-tour progress (ADR 0368 P5)', () => {
     expect((await dave.post('/host/openwop-app/test/login', { email: `dave-${n}@acme.test`, tenantId })).status).toBe(201);
 
     // Seed a pre-P3 tenant-level row directly through the store (no userId).
-    const { putWalkthroughProgress } = await import('../src/features/walkthroughs/progressStore.js');
     await putWalkthroughProgress({ tenantId, walkthroughId: 'w-legacy', status: 'started', runId: 'run-legacy', updatedAt: new Date().toISOString() });
 
     // Both members see the legacy row (fallback).
@@ -117,10 +136,12 @@ describe('guided-tour progress (ADR 0368 P5)', () => {
     expect(r1.status, JSON.stringify(r1.body)).toBe(201);
     const r2 = await a.post('/runs', { workflowId: WID, inputs: {} });
     expect(r2.status).toBe(201);
-    // Cancel the second — an abandoned walkthrough.
-    const run2 = (r2.body as { runId?: string }).runId ?? (r2.body as { run?: { runId: string } }).run?.runId;
-    expect(run2).toBeTruthy();
-    await a.post(`/runs/${run2}:cancel`, {});
+    // Cancel the second — an abandoned walkthrough. (This used to POST
+    // `/runs/<id>:cancel`, a route that does not exist, and never checked the
+    // answer — so nothing was ever cancelled.)
+    const run2 = String((r2.body as { runId: string }).runId);
+    const cancel = await a.post(`/runs/${encodeURIComponent(run2)}/cancel`, {});
+    expect(cancel.status, JSON.stringify(cancel.body)).toBe(200);
 
     // Grade-pass: a PRE-RENAME run (legacy builtin id — runs are immutable for
     // replay) must be counted in the NEW id's funnel via the legacy union.
@@ -129,9 +150,17 @@ describe('guided-tour progress (ADR 0368 P5)', () => {
 
     const f = await a.get(`/host/openwop-app/walkthroughs/funnel?walkthroughId=${WID}`);
     expect(f.status).toBe(200);
-    expect(f.body).toMatchObject({ walkthroughId: WID, started: 3, completed: 0 }); // 2 new-id + 1 legacy-id
+    // 2 new-id + 1 legacy-id started; one cancelled, two still active.
+    expect(f.body).toMatchObject({ walkthroughId: WID, started: 3, completed: 0, cancelled: 1, active: 2, failed: 0 });
+    // MEASURED (grade-tests w63 r2): exactly the two ACTIVE runs stall — the
+    // cancelled run's interrupt is closed, so it reports no stall. The new-id run
+    // stalls on `t1`; the legacy-id run's expanded node id ends in `_t1`.
     const stalled = f.body.stalledByNode as Record<string, number>;
-    expect(stalled.t1).toBeGreaterThanOrEqual(2); // non-cancelled runs stall on t1
+    expect(stalled.t1, JSON.stringify(f.body)).toBe(1);
+    const legacy = Object.keys(stalled).filter((k) => k !== 't1');
+    expect(legacy.length, JSON.stringify(stalled)).toBe(1);
+    expect(legacy[0]!.endsWith('_t1')).toBe(true);
+    expect(stalled[legacy[0]!]).toBe(1);
   });
 
   /**
@@ -183,9 +212,9 @@ describe('guided-tour progress (ADR 0368 P5)', () => {
     expect((f.body.skippedByNode as Record<string, number>)[checkpointNode!]).toBe(1);
   });
 
-  it('a walkthrough with NO checkpoint reports zero skips and does no extra reads', async () => {
-    // The bounded-read property: skips can only originate at a checkpoint, so a
-    // checkpoint-free walkthrough must add no per-run lookups at all.
+  it('a walkthrough with NO checkpoint reports zero skips', async () => {
+    // (The title used to add "and does no extra reads"; no read count is
+    // asserted, so the claim is not made here.)
     const tenantId = `org:noskip-${Date.now()}-${n++}`;
     const a = client();
     expect((await a.post('/host/openwop-app/test/login', { email: `noskip-${n}@acme.test`, tenantId })).status).toBe(201);

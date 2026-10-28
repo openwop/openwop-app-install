@@ -17,6 +17,7 @@ import { Skeleton } from '../../ui/Skeleton.js';
 import { SelectField, TextField } from '../../ui/Field.js';
 import { IconButton } from '../../ui/IconButton.js';
 import { toast } from '../../ui/toast.js';
+import { GateChecklist, type GateReport } from '../experiments/GateChecklist.js';
 import { ActivityIcon, PlayIcon, PlusIcon, StopIcon, TrashIcon, XIcon } from '../../ui/icons/index.js';
 import {
   createExperiment,
@@ -30,6 +31,7 @@ import {
   type ExperimentStatus,
   type PageExperiment,
   type PageVersion,
+  experimentGates,
 } from './cmsClient.js';
 
 /** Experiment status → §5.3 chip variant (the status word rides alongside). */
@@ -132,7 +134,18 @@ export function PageExperimentsPanel({ orgId, pageId, versions, onLoadVersions, 
     } catch (e) { toast.error(e instanceof Error ? e.message : t('expActionFailed')); }
   };
   const promote = async (exp: PageExperiment, variantKey: string): Promise<void> => {
-    if (!(await confirm({ title: t('expPromoteConfirmTitle', { key: variantKey }), body: t('expPromoteConfirmBody'), confirmLabel: t('expPromote') }))) return;
+    // ADR 0950 P0 — show the promotion gates in the confirm. They warn and do not
+    // block a manual promote; an unreadable checklist says so instead of hiding.
+    let gates: GateReport | null = null;
+    try { gates = await experimentGates(orgId, pageId, exp.experimentId); } catch { gates = null; }
+    const body = (
+      <div className="u-grid u-gap-2">
+        <p className="u-m-0">{t('expPromoteConfirmBody')}</p>
+        {gates ? <GateChecklist report={gates} /> : <p className="u-m-0">{t('expGatesUnavailable')}</p>}
+        {gates && !gates.allPass ? <p className="u-m-0"><strong>{t('expGatesWarn')}</strong></p> : null}
+      </div>
+    );
+    if (!(await confirm({ title: t('expPromoteConfirmTitle', { key: variantKey }), body, confirmLabel: t('expPromote') }))) return;
     try {
       const r = await promoteExperiment(orgId, pageId, exp.experimentId, variantKey);
       replaceExp(r.experiment);
@@ -190,6 +203,12 @@ export function PageExperimentsPanel({ orgId, pageId, versions, onLoadVersions, 
                   {r.unattributed && r.unattributed.legacy + r.unattributed.dropped > 0 ? (
                     <Notice variant="warning">{t('expUnattributedNotice', { legacy: formatNumber(r.unattributed.legacy), dropped: formatNumber(r.unattributed.dropped) })}</Notice>
                   ) : null}
+                  {/* ADR 0949 P0 (E-4) — a broken split withholds every verdict. */}
+                  {r.significanceWithheld === 'srm' ? (
+                    <Notice variant="warning">{t('expSrmNotice')}</Notice>
+                  ) : null}
+                  {/* ADR 0949 P0 (E-1) — the verdict is fixed-horizon: say so wherever it shows. */}
+                  {r.health?.stopEarly ? <p className="u-label-sm muted u-m-0">{t('expStopEarlyNote')}</p> : null}
                   {r.variants.some((v) => v.insufficientSample) ? (
                     <Notice variant="info">{t('expInsufficientNotice', { min: formatNumber(r.minSessionsPerVariant) })}</Notice>
                   ) : null}
@@ -204,7 +223,8 @@ export function PageExperimentsPanel({ orgId, pageId, versions, onLoadVersions, 
                           conversions: formatNumber(v.conversions),
                           rate: formatPercent(v.conversionRate, { maximumFractionDigits: 1 }),
                         })}
-                        {v.zScore !== null ? ` · z ${formatNumber(v.zScore, { maximumFractionDigits: 2 })}` : ''}
+                        {/* ADR 0949 P0 — a broken split makes z meaningless too: show neither. */}
+                        {v.zScore !== null && r.significanceWithheld !== 'srm' ? ` · z ${formatNumber(v.zScore, { maximumFractionDigits: 2 })}` : ''}
                       </span>
                       {v.significant === true ? <span className="chip chip--success">{t('expSignificantChip')}</span> : null}
                       {v.significant === false ? <span className="chip chip--muted">{t('expNotSignificantChip')}</span> : null}

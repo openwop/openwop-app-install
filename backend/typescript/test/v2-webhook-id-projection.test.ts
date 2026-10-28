@@ -16,12 +16,14 @@
  * projection was wrong — the defect was a missing CALL SITE, so only a test that
  * reads the emitted body can see it.
  *
- * THE SECOND CASE IS THE SAFETY PROPERTY, not a nicety. `protocolMajor` absent
- * MUST read as major 1, so every subscription registered before the column
- * existed keeps the bare id it has always received. Projecting unconditionally
- * would silently rewrite the identifiers live v1 subscribers correlate on —
- * the same defect, aimed at the other set of receivers. If the fail-safe leg
- * ever goes red, the fix has become the bug.
+ * §Correction (grade-tests w63): this header used to call a second case "the
+ * safety property" — major 1 keeping the bare id. That leg was deleted with
+ * major 1 (ADR 0812 P3c-0): after the cut a major-1 subscriber is not delivered
+ * to at all (`deliverToSubscribers` returns before enqueue). What remains is
+ * the major-2 projection, the v2 event vocabulary, and `protocolMajor`
+ * persisting (absent reads as 1, which is what makes that skip fire).
+ * Witnessed: the unprojected runId → case 1 red; `wireType = event.type` →
+ * the two vocabulary cases red.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -39,10 +41,18 @@ async function seedRun(): Promise<void> {
     workflowId: 'wf-noop',
     status: 'completed',
     tenantId: TENANT,
+    inputs: {},
+    metadata: {},
+    configurable: {},
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
-  } as RunRecord;
+  };
   await storage.insertRun(run);
+}
+
+/** An in-process event exactly as the executor appends it (host v1 dialect). */
+function ev(type: string, eventId: string, sequence: number): EventRecord {
+  return { type, runId: RUN_ID, eventId, sequence, payload: null, timestamp: new Date().toISOString() };
 }
 
 async function register(subscriptionId: string, protocolMajor?: 1 | 2, events: string[] = ['run.completed']): Promise<void> {
@@ -81,7 +91,7 @@ beforeAll(async () => {
 describe('v2 webhook id projection (ADR 0629; versioning.md §5)', () => {
   it('a subscription registered under major 2 receives the TENANT-BOUND runId', async () => {
     await register('sub-v2', 2);
-    const event = { type: 'run.completed', runId: RUN_ID, eventId: 'e1', sequence: 1 } as unknown as EventRecord;
+    const event = ev('run.completed', 'e1', 1);
     await __deliverToSubscribersForTests(storage, event);
 
     // The whole point: what the SUBSCRIBER sees, not what toWireRunId returns.
@@ -94,9 +104,9 @@ describe('v2 webhook id projection (ADR 0629; versioning.md §5)', () => {
     await register('sub-roundtrip', 2);
     expect((await storage.getWebhook('sub-roundtrip'))?.protocolMajor).toBe(2);
     await register('sub-roundtrip-v1', 1);
-    // 1 is stored as NULL-or-1 and read back as "not 2" — the read rule is what
-    // matters, so assert the behaviour rather than the storage representation.
-    expect((await storage.getWebhook('sub-roundtrip-v1'))?.protocolMajor).not.toBe(2);
+    // 1 is stored as NULL-or-1; the delivery rule reads it as `protocolMajor ?? 1`,
+    // so assert THROUGH that rule — exactly 1, which is what skips delivery.
+    expect((await storage.getWebhook('sub-roundtrip-v1'))?.protocolMajor ?? 1).toBe(1);
   });
 });
 
@@ -111,7 +121,7 @@ describe('v2 webhook event VOCABULARY (ADR 0647 correction, 2026-09-10 — schem
 
   it('a major-2 subscription registered with the v2 spelling matches the v1-spelled in-process event, and receives the v2 spelling', async () => {
     await register('sub-v2-vocab', 2, [RENAMED_V2]);
-    const event = { type: RENAMED_V1, runId: RUN_ID, eventId: 'e-vocab-1', sequence: 5 } as unknown as EventRecord;
+    const event = ev(RENAMED_V1, 'e-vocab-1', 5);
     await __deliverToSubscribersForTests(storage, event);
     const got = await deliveredEventType('sub-v2-vocab');
     expect(got.body).toBe(RENAMED_V2);
@@ -121,14 +131,14 @@ describe('v2 webhook event VOCABULARY (ADR 0647 correction, 2026-09-10 — schem
   // ADR 0812 P3c-0 — the "major-1 subscription keeps the v1 spelling" leg was deleted with major 1.
   it('a major-2 subscription registered with the v1 spelling (bare through the overlap) still matches and still receives the v2 spelling', async () => {
     await register('sub-v2-v1spelling', 2, [RENAMED_V1]);
-    const event = { type: RENAMED_V1, runId: RUN_ID, eventId: 'e-vocab-3', sequence: 7 } as unknown as EventRecord;
+    const event = ev(RENAMED_V1, 'e-vocab-3', 7);
     await __deliverToSubscribersForTests(storage, event);
     expect((await deliveredEventType('sub-v2-v1spelling')).body).toBe(RENAMED_V2);
   });
 
   it('an unmapped host-extension type is delivered to a major-2 subscriber under its only spelling (fan-out is tolerant, never dropped)', async () => {
     await register('sub-v2-hostext', 2, ['openwop-app.crm.contact-triaged']);
-    const event = { type: 'openwop-app.crm.contact-triaged', runId: RUN_ID, eventId: 'e-vocab-4', sequence: 8 } as unknown as EventRecord;
+    const event = ev('openwop-app.crm.contact-triaged', 'e-vocab-4', 8);
     await __deliverToSubscribersForTests(storage, event);
     expect((await deliveredEventType('sub-v2-hostext')).body).toBe('openwop-app.crm.contact-triaged');
   });

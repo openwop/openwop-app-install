@@ -9,6 +9,21 @@
  *   - SR-1: a secret-shaped arg never survives into the hash preimage
  *
  * @see RFCS/0064-tool-invocation-hooks-and-authorization.md
+ *
+ * Protected (authz fail-closed, rate limit, SR-1). Wave 61:
+ *   - the forbidden fixture holds ONE of TWO required scopes, so `every` and
+ *     `some` give different answers (probe th-every);
+ *   - the bucket case proves the key is per-(principal, tool) and that the
+ *     window resets at exactly 60 000 ms, on a pinned literal clock;
+ *   - SR-1 case 1 hashes through the product's `computeArgsHash` and compares
+ *     with a sha256 computed here over a hand-written preimage, instead of
+ *     re-running the scrub + canonicalize pipeline itself (probe
+ *     th-sr1-preimage only reddened case 2 before).
+ *   - HONEST DOUBLE GUARD (probe th-undefined, vacuous by design): in
+ *     "scopes unevaluable", `grantedScopes !== undefined` is redundant with
+ *     `required.every(granted.has)` over the EMPTY Set `new Set(undefined ?? [])`
+ *     — either alone refuses. The shared piece both feed, `if (!holdsAll)`, is
+ *     probed by th-gate.
  */
 
 import { describe, expect, it, beforeEach } from 'vitest';
@@ -19,8 +34,7 @@ import {
   extractToolErrorCode,
   deriveToolErrorCode,
 } from '../src/host/toolHooks.js';
-import { canonicalize } from '../src/providers/llmCacheKey.js';
-import { sanitizeFreeTextDeep } from '../src/byok/textRedaction.js';
+import { createHash } from 'node:crypto';
 
 beforeEach(() => {
   resetToolHookBuckets();
@@ -49,7 +63,8 @@ describe('RFC 0064 — evaluateToolHook', () => {
     const r = evaluateToolHook({
       principal: 'user:bob',
       toolName: 'delete',
-      requiredScopes: ['tools.delete'],
+      // Holds one of the two required scopes: ALL are required, not any.
+      requiredScopes: ['tools.delete', 'tools.read'],
       grantedScopes: ['tools.read'],
       args: {},
     });
@@ -90,6 +105,17 @@ describe('RFC 0064 — evaluateToolHook', () => {
     const statuses = Array.from({ length: 6 }, call);
     expect(statuses.slice(0, 5)).toEqual(['ok', 'ok', 'ok', 'ok', 'ok']);
     expect(statuses[5]).toBe('rate_limited');
+    // The bucket is keyed on the PAIR: the same principal on another tool, and
+    // another principal on the same tool, each still have their own budget.
+    expect(evaluateToolHook({ principal: 'p', toolName: 't2', args: {} }).toolReturned.status).toBe('ok');
+    expect(evaluateToolHook({ principal: 'p2', toolName: 't', args: {} }).toolReturned.status).toBe('ok');
+    // The window: on a pinned clock, still limited 1 ms before 60 s, refilled at 60 s.
+    const T0 = 1_700_000_000_000;
+    const at = (now: number): string =>
+      evaluateToolHook({ principal: 'pw', toolName: 'tw', args: {} }, now).toolReturned.status;
+    expect([T0, T0, T0, T0, T0].map(at)).toEqual(['ok', 'ok', 'ok', 'ok', 'ok']);
+    expect(at(T0 + 59_999)).toBe('rate_limited');
+    expect(at(T0 + 60_000)).toBe('ok');
   });
 
   it('§F error: a ran-and-threw failure carries status:error + populated error + durationMs (it ran)', () => {
@@ -146,10 +172,11 @@ describe('RFC 0064 §F — tool-error code classifiers', () => {
 describe('RFC 0064 — SR-1 content-free argsHash', () => {
   it('redacts a secret-shaped arg before hashing (preimage carries no secret)', () => {
     const secret = 'sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123';
-    const redacted = sanitizeFreeTextDeep({ apiKey: secret });
-    const preimage = canonicalize(redacted);
-    expect(preimage).not.toContain(secret);
-    expect(preimage).toContain('sk-***');
+    const sha256 = (s: string): string => createHash('sha256').update(s, 'utf8').digest('hex');
+    // The hash is over the hand-written REDACTED preimage, and not over the raw one.
+    const got = computeArgsHash({ apiKey: secret });
+    expect(got).toBe(sha256('{"apiKey":"sk-***"}'));
+    expect(got).not.toBe(sha256(`{"apiKey":"${secret}"}`));
   });
 
   it('argsHash with a secret equals argsHash with the redacted placeholder', () => {

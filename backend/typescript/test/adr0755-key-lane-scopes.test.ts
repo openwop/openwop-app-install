@@ -14,6 +14,16 @@
  *
  * Default posture (RFC 0049 membership enforcement OFF) throughout: key narrowing
  * is unconditional, so it must hold here.
+ *
+ * Red when (wave 60 probes, tracker TST-BRA-3): a single route's scope gate is
+ * removed (webhooks `resolveWebhookTenant`, trigger-subscription list, ingest
+ * `runs:create`, prompts read/write, annotations create/list), or
+ * `keyDeclarationPermits` stops honouring `*` or stops narrowing.
+ *
+ * D3 is a DOUBLE GUARD, recorded: the token projection is refused by
+ * `decideTokenProjector`'s `base` (`holdsProtocolScope('approvals:respond')`) AND by
+ * `holdsDecideFloor`, which re-reads the key declaration for an approval interrupt
+ * (both `routes/interrupts.ts`). Dropping only `base` stays green by design.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -71,19 +81,19 @@ function challengeScope(res: Response): string[] {
   return (/scope="([^"]*)"/.exec(h)?.[1] ?? '').split(' ');
 }
 
-// [label, method, path, body, required scope]
-const GATES: Array<[string, string, string, unknown, string]> = [
-  ['webhook list', 'GET', '/webhooks', undefined, 'webhooks:manage'],
-  ['webhook register', 'POST', '/webhooks', { url: 'https://example.com/hook', events: ['run.completed'] }, 'webhooks:manage'],
-  ['webhook rotate', 'POST', `/webhooks/${NO_SUCH}/rotate-secret`, {}, 'webhooks:manage'],
-  ['webhook delete', 'DELETE', `/webhooks/${NO_SUCH}`, undefined, 'webhooks:manage'],
-  ['trigger-subscription list', 'GET', '/trigger-subscriptions', undefined, 'webhooks:manage'],
-  ['trigger-subscription register', 'POST', '/trigger-subscriptions', { source: 'webhook', workflowId: 'openwop-app.uppercase' }, 'webhooks:manage'],
-  ['trigger ingest', 'POST', `/trigger-subscriptions/${NO_SUCH}/ingest`, {}, 'runs:create'],
-  ['prompt list', 'GET', '/prompts', undefined, 'prompts:read'],
-  ['prompt create', 'POST', '/prompts', {}, 'prompts:write'],
-  ['annotation create', 'POST', `/runs/${NO_SUCH}/annotations`, { signal: { kind: 'flag' } }, 'runs:annotate'],
-  ['annotation list', 'GET', `/runs/${NO_SUCH}/annotations`, undefined, 'runs:read'],
+// [label, method, path, body, required scope, the CONTROL key's status past the gate (measured)]
+const GATES: Array<[string, string, string, unknown, string, number]> = [
+  ['webhook list', 'GET', '/webhooks', undefined, 'webhooks:manage', 200],
+  ['webhook register', 'POST', '/webhooks', { url: 'https://example.com/hook', events: ['run.completed'] }, 'webhooks:manage', 201],
+  ['webhook rotate', 'POST', `/webhooks/${NO_SUCH}/rotate-secret`, {}, 'webhooks:manage', 404],
+  ['webhook delete', 'DELETE', `/webhooks/${NO_SUCH}`, undefined, 'webhooks:manage', 404],
+  ['trigger-subscription list', 'GET', '/trigger-subscriptions', undefined, 'webhooks:manage', 200],
+  ['trigger-subscription register', 'POST', '/trigger-subscriptions', { source: 'webhook', workflowId: 'openwop-app.uppercase' }, 'webhooks:manage', 201],
+  ['trigger ingest', 'POST', `/trigger-subscriptions/${NO_SUCH}/ingest`, {}, 'runs:create', 404],
+  ['prompt list', 'GET', '/prompts', undefined, 'prompts:read', 200],
+  ['prompt create', 'POST', '/prompts', {}, 'prompts:write', 400],
+  ['annotation create', 'POST', `/runs/${NO_SUCH}/annotations`, { signal: { kind: 'flag' } }, 'runs:annotate', 404],
+  ['annotation list', 'GET', `/runs/${NO_SUCH}/annotations`, undefined, 'runs:read', 404],
 ];
 
 describe('ADR 0755 D1 — every advertised scope refuses a key that did not declare it', () => {
@@ -95,11 +105,12 @@ describe('ADR 0755 D1 — every advertised scope refuses a key that did not decl
     expect(challengeScope(res)).toEqual([scope]);
   });
 
-  it.each(GATES)('%s: CONTROL — a key holding the scope is not refused for scope', async (_l, method, path, body, scope) => {
+  it.each(GATES)('%s: CONTROL — a key holding the scope is not refused for scope', async (_l, method, path, body, scope, expected) => {
     const res = await call(method, path, await key([scope]), body);
     // Past the gate the request fails or succeeds on its own merits (404 unknown
-    // id, 400 body, 501 capability…) — but never a scope 403.
-    expect(res.status === 403 && /insufficient_scope/.test(res.headers.get('www-authenticate') ?? ''), `${method} ${path} → ${res.status}`).toBe(false);
+    // id, 400 body…) — the exact status, so a host refusing every key (401/403) cannot pass.
+    expect(res.status, `${method} ${path}`).toBe(expected);
+    expect(res.headers.get('www-authenticate') ?? '').not.toMatch(/insufficient_scope/);
   });
 });
 

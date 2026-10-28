@@ -8,6 +8,11 @@
  *    scaffold + caller identity anchor
  *  (The loadTurns fold-cache characterization this header once claimed lives
  *  in `load-turns-fold.test.ts` — GC-CHAT-1 made the claim true, elsewhere.)
+ *
+ * Tracker TST-BKY-3. Red when the reverse scan runs without its opt-in, the
+ * reverse cache never expires or is bypassed, a roster read crosses tenants,
+ * an unknown agent stops naming the `persona` degradation, or the caller
+ * anchor is dropped — each sabotage-witnessed (w65).
  */
 import { describe, expect, it, beforeAll, afterAll, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -45,36 +50,44 @@ describe('CS-XC-1 — resolveAgentIdentity', () => {
   });
 
   it('reverse form (registry agentId) requires the EXPLICIT allowReverseScan opt-in', async () => {
-    const entry = await createRosterEntry({ tenantId: 'default', persona: 'Reverse Probe Member', agentRef: { agentId: 'probe.seams.ident' } });
+    // A case-unique agent with exactly ONE roster binding, so the reverse scan's
+    // answer is pinnable to it.
+    getAgentRegistry().register({
+      agentId: 'probe.seams.reverse', persona: 'Reverse Probe', modelClass: 'chat',
+      systemPrompt: 'x', toolAllowlist: [], packName: 'test.seams', packVersion: '0.0.1',
+    });
+    const entry = await createRosterEntry({ tenantId: 'default', persona: 'Reverse Probe Member', agentRef: { agentId: 'probe.seams.reverse' } });
     __clearAgentIdentityCache();
-    const gated = await resolveAgentIdentity('default', 'probe.seams.ident');
-    const opened = await resolveAgentIdentity('default', 'probe.seams.ident', { allowReverseScan: true });
+    const gated = await resolveAgentIdentity('default', 'probe.seams.reverse');
+    const opened = await resolveAgentIdentity('default', 'probe.seams.reverse', { allowReverseScan: true });
     // Without the opt-in the reverse scan must not run (no roster binding
-    // surfaces); with it the roster projection resolves.
+    // surfaces); with it the roster projection resolves to THIS entry.
     expect(gated?.rosterId ?? null).toBeNull();
-    expect([entry.rosterId, opened?.rosterId]).toContain(opened?.rosterId); // resolved to A roster binding
-    expect(opened?.rosterId).toBeTruthy();
+    expect(opened?.rosterId).toBe(entry.rosterId);
   });
 
   it('the reverse cache is TTL-bound: a new roster entry is invisible until expiry (then visible)', async () => {
     __clearAgentIdentityCache();
     vi.useFakeTimers({ now: Date.now(), toFake: ['Date'] });
-    getAgentRegistry().register({
-      agentId: 'probe.seams.ttl', persona: 'TTL Probe', modelClass: 'chat',
-      systemPrompt: 'x', toolAllowlist: [], packName: 'test.seams', packVersion: '0.0.1',
-    });
-    // Prime the tenant's reverse cache (no binding for the ttl agent yet).
-    const before = await resolveAgentIdentity('default', 'probe.seams.ttl', { allowReverseScan: true });
-    expect(before?.rosterId ?? null).toBeNull();
-    await createRosterEntry({ tenantId: 'default', persona: 'TTL Member', agentRef: { agentId: 'probe.seams.ttl' } });
-    // Within TTL — the stale cache still answers (the documented trade).
-    const stale = await resolveAgentIdentity('default', 'probe.seams.ttl', { allowReverseScan: true });
-    expect(stale?.rosterId ?? null).toBeNull();
-    // Past TTL (30s) — the rescan sees the binding.
-    vi.setSystemTime(Date.now() + 31_000);
-    const fresh = await resolveAgentIdentity('default', 'probe.seams.ttl', { allowReverseScan: true });
-    expect(fresh?.rosterId).toBeTruthy();
-    vi.useRealTimers();
+    try {
+      getAgentRegistry().register({
+        agentId: 'probe.seams.ttl', persona: 'TTL Probe', modelClass: 'chat',
+        systemPrompt: 'x', toolAllowlist: [], packName: 'test.seams', packVersion: '0.0.1',
+      });
+      // Prime the tenant's reverse cache (no binding for the ttl agent yet).
+      const before = await resolveAgentIdentity('default', 'probe.seams.ttl', { allowReverseScan: true });
+      expect(before?.rosterId ?? null).toBeNull();
+      await createRosterEntry({ tenantId: 'default', persona: 'TTL Member', agentRef: { agentId: 'probe.seams.ttl' } });
+      // Within TTL — the stale cache still answers (the documented trade).
+      const stale = await resolveAgentIdentity('default', 'probe.seams.ttl', { allowReverseScan: true });
+      expect(stale?.rosterId ?? null).toBeNull();
+      // Past TTL (30s) — the rescan sees the binding.
+      vi.setSystemTime(Date.now() + 31_000);
+      const fresh = await resolveAgentIdentity('default', 'probe.seams.ttl', { allowReverseScan: true });
+      expect(fresh?.rosterId).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('cross-tenant fail-closed: another tenant cannot resolve this tenant roster binding', async () => {
@@ -82,6 +95,8 @@ describe('CS-XC-1 — resolveAgentIdentity', () => {
     __clearAgentIdentityCache();
     const other = await resolveAgentIdentity('tenant-b', entry.rosterId);
     expect(other?.rosterId ?? null).toBeNull();
+    // Owner control: the same id resolves in its own tenant.
+    expect((await resolveAgentIdentity('default', entry.rosterId))?.rosterId).toBe(entry.rosterId);
   });
 });
 

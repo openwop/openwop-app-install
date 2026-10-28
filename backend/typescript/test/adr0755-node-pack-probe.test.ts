@@ -8,6 +8,12 @@
  * `core.ai.structuredOutput` — while every test stayed green. This drives the
  * real probe against a real `pack.json` in the per-worker pack dir. Its own file
  * because the resolver is a process-global.
+ *
+ * Red when (wave 60 probes, tracker TST-BRA-4): the parked-dir filter is dropped,
+ * the index is not rebuilt when the dir set changes, or `isResolvable` stops
+ * consulting `packEntryFor`. NOT claimed: the index entry's VALUE (the dir name)
+ * is read only by the async loader (`loadPackFromManifest`), never by
+ * `isResolvable`, so corrupting it stays green here (w60g2-npp-manifest-nodes).
  */
 import { afterAll, describe, expect, it } from 'vitest';
 import { mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
@@ -15,7 +21,7 @@ import { join } from 'node:path';
 import { resolveDefaultPackDir } from '../src/packs/registryInstaller.js';
 import { ensureNodePackResolverInstalled } from '../src/bootstrap/nodePackResolver.js';
 import { getNodeRegistry } from '../src/executor/nodeRegistry.js';
-import type { Storage } from '../src/storage/storage.js';
+import { openStorage } from '../src/storage/index.js';
 
 const TYPE_ID = 'vendor.adr0755.probe.node';
 const DIR = join(resolveDefaultPackDir(), 'vendor.adr0755.probe');
@@ -27,8 +33,8 @@ afterAll(() => {
 });
 
 describe('ADR 0755 (WIT-FIX-4) — nodePackResolver probe', () => {
-  it('an installed manifest declaring the typeId makes it resolvable; parking the pack withdraws it', () => {
-    ensureNodePackResolverInstalled({} as Storage);
+  it('an installed manifest declaring the typeId makes it resolvable; parking the pack withdraws it', async () => {
+    ensureNodePackResolverInstalled(await openStorage('memory://'));
     const registry = getNodeRegistry();
     expect(registry.has(TYPE_ID), 'premise: not registered in-process').toBe(false);
     expect(registry.isResolvable(TYPE_ID), 'nothing installed yet').toBe(false);

@@ -35,7 +35,13 @@
  *   node scripts/ads-sandbox-verify.mjs --dry meta conversion   # print the request, send nothing
  *
  * Checks: `conversion` (meta, tiktok — P0), `metrics` (tiktok, linkedin — P2)
- * and `google-upload` (P3), all through the adapter's own builders.
+ * `google-upload` (P3) and `delivery-status` (ADR 0952 D1: meta, google — PAUSED
+ * only; Google validateOnly, Meta on a named TEST campaign), `aigc-disclosure` (ADR 0945
+ * D6: tiktok, READ-ONLY — reads back the AIGC flag value Ads Manager stores on a TEST
+ * ad, needs _ACCOUNT_ID and _AD_ID), `catalog-push` (ADR 0952 D6: meta, google —
+ * upserts ONE test item `sandbox-verify-item` into a TEST catalog / Merchant data
+ * source; meta needs _CATALOG_ID, google _MERCHANT_ACCOUNT_ID and
+ * _MERCHANT_DATA_SOURCE), all through the adapter's own builders.
  */
 import { createRequire } from 'node:module';
 import { writeFileSync } from 'node:fs';
@@ -52,7 +58,7 @@ const outIdx = args.indexOf('--out');
 const outPath = outIdx >= 0 ? args[outIdx + 1] : undefined;
 const [platform, check] = args.filter((a, i) => !a.startsWith('--') && (outIdx < 0 || i !== outIdx + 1));
 
-const CHECKS = { meta: ['conversion'], tiktok: ['conversion', 'metrics'], linkedin: ['metrics'], google: ['google-upload'] };
+const CHECKS = { meta: ['conversion', 'delivery-status', 'ceiling', 'catalog-push'], tiktok: ['conversion', 'metrics', 'aigc-disclosure', 'delivery-status', 'budget'], linkedin: ['metrics', 'delivery-status', 'budget'], google: ['google-upload', 'delivery-status', 'catalog-push'] };
 
 function die(msg) {
   console.error(`ads-sandbox-verify: ${msg}`);
@@ -81,6 +87,40 @@ const gAction = env('OPENWOP_SANDBOX_GOOGLE_CONVERSION_ACTION');
 if (check === 'google-upload' && (!gCustomer || !gAction)) die('OPENWOP_SANDBOX_GOOGLE_CUSTOMER_ID and OPENWOP_SANDBOX_GOOGLE_CONVERSION_ACTION are required');
 if (check === 'google-upload' && !dry && !gDev) die('refusing to send: OPENWOP_SANDBOX_GOOGLE_DEVELOPER_TOKEN is not set');
 if (check === 'metrics' && !accountId) die(`OPENWOP_SANDBOX_${P}_ACCOUNT_ID is not set (a TEST ad account)`);
+// ADR 0952 D1 — delivery status. It writes PAUSED (the safe direction) to ONE named
+// campaign in a TEST account. Google sends validateOnly, so nothing changes; Meta has
+// no validate-only mode, so the campaign MUST be a test-account campaign.
+const campaignId = env(`OPENWOP_SANDBOX_${P}_CAMPAIGN_ID`);
+if (check === 'delivery-status' && (!accountId || !campaignId)) die(`OPENWOP_SANDBOX_${P}_ACCOUNT_ID and OPENWOP_SANDBOX_${P}_CAMPAIGN_ID are required (a TEST account and one of its campaigns)`);
+if (check === 'delivery-status' && platform === 'google' && !dry && !gDev) die('refusing to send: OPENWOP_SANDBOX_GOOGLE_DEVELOPER_TOKEN is not set');
+// ADR 0945 D6 — the TikTok AIGC flag. READ-ONLY: turn on "This ad contains
+// AI-generated content" on ONE ad in a TEST advertiser in Ads Manager, then this reads
+// back the value TikTok stores in `aigc_disclosure_type`. It passes only when that
+// value is the one the adapter sends, which is what lets an operator list `tiktok`
+// in OPENWOP_ADS_VERIFIED_AIGC_FLAGS.
+const adId = env(`OPENWOP_SANDBOX_${P}_AD_ID`);
+// ADR 0952 P2 — the Meta native ceiling. It writes `spend_cap` on ONE named TEST
+// campaign through the adapter's builder (minor units of the given currency →
+// Meta's unit), then reads it back: the PASS proves the unit, not just acceptance.
+const ceilingMinor = Number(env(`OPENWOP_SANDBOX_${P}_CEILING_MINOR`) ?? 1_000_000); // 10,000.00 in a 2-decimal currency
+const ceilingCurrency = env(`OPENWOP_SANDBOX_${P}_CURRENCY`) ?? 'USD';
+// ADR 0952 P5 — TikTok/LinkedIn writers. delivery-status writes PAUSED (the safe
+// direction) to ONE named TEST campaign (LinkedIn: a campaign GROUP); budget writes
+// a daily budget in major units to ONE named TEST campaign (LinkedIn: a campaign).
+const budgetMajor = env(`OPENWOP_SANDBOX_${P}_BUDGET_MAJOR`) ?? '10.00';
+const budgetCurrency = env(`OPENWOP_SANDBOX_${P}_CURRENCY`) ?? 'USD';
+if (check === 'budget' && (!accountId || !campaignId)) die(`OPENWOP_SANDBOX_${P}_ACCOUNT_ID and OPENWOP_SANDBOX_${P}_CAMPAIGN_ID are required (a TEST account and one of its campaigns)`);
+if (check === 'ceiling' && !campaignId) die(`OPENWOP_SANDBOX_${P}_CAMPAIGN_ID is required (a campaign in a TEST ad account)`);
+// ADR 0952 D6 (P7) — catalog push. Upserts ONE item, `sandbox-verify-item`, into a
+// TEST Meta catalog or a TEST Merchant Center data source through the adapter's own
+// builders. A PASS is what lets an operator list the platform in
+// OPENWOP_ADS_VERIFIED_CATALOG_PUSH. Delete the item afterwards in the platform UI.
+const catalogId = env(`OPENWOP_SANDBOX_${P}_CATALOG_ID`);
+const merchantAccount = env('OPENWOP_SANDBOX_GOOGLE_MERCHANT_ACCOUNT_ID');
+const merchantDataSource = env('OPENWOP_SANDBOX_GOOGLE_MERCHANT_DATA_SOURCE');
+if (check === 'catalog-push' && platform === 'meta' && !catalogId) die('OPENWOP_SANDBOX_META_CATALOG_ID is required (a catalog in a TEST business)');
+if (check === 'catalog-push' && platform === 'google' && (!merchantAccount || !merchantDataSource)) die('OPENWOP_SANDBOX_GOOGLE_MERCHANT_ACCOUNT_ID and OPENWOP_SANDBOX_GOOGLE_MERCHANT_DATA_SOURCE (accounts/<id>/dataSources/<id>) are required');
+if (check === 'aigc-disclosure' && (!accountId || !adId)) die(`OPENWOP_SANDBOX_${P}_ACCOUNT_ID and OPENWOP_SANDBOX_${P}_AD_ID are required (a TEST advertiser and one ad with the AIGC toggle ON)`);
 
 // Bundle the dependency-free wire module so this script and the adapter share
 // one builder. esbuild is a backend devDependency.
@@ -118,6 +158,62 @@ if (check === 'metrics') {
     url = wire.buildLinkedinAnalyticsUrl(wire.linkedinApiBase(), q);
     headers = { authorization: `Bearer ${token ?? '<unset>'}`, 'LinkedIn-Version': wire.LINKEDIN_VERSION, 'X-Restli-Protocol-Version': '2.0.0' };
   }
+} else if (check === 'aigc-disclosure') {
+  method = 'GET';
+  const params = new URLSearchParams({
+    advertiser_id: (accountId ?? '').replace(/[^0-9]/g, ''),
+    filtering: JSON.stringify({ ad_ids: [adId ?? ''] }),
+    fields: JSON.stringify(['ad_id', wire.TIKTOK_AIGC_FIELD]),
+  });
+  url = `${wire.tiktokApiBase()}/ad/get/?${params.toString()}`;
+  headers = { 'access-token': token ?? '<unset>' };
+} else if (check === 'ceiling') {
+  url = `${wire.metaApiBase()}/${encodeURIComponent(campaignId ?? '')}`;
+  headers = { 'content-type': 'application/json', authorization: `Bearer ${token ?? '<unset>'}` };
+  body = wire.buildMetaSpendCapBody(ceilingMinor, ceilingCurrency);
+  if (!body) die(`${ceilingCurrency} is not a Meta ad-account currency`);
+} else if (check === 'catalog-push') {
+  const item = {
+    id: 'sandbox-verify-item', title: 'OpenWOP sandbox verify item', description: 'A test item written by ads-sandbox-verify (ADR 0952 D6).',
+    link: 'https://example.com/sandbox-verify-item', image_link: 'https://example.com/sandbox-verify-item.png',
+    availability: 'in_stock', price: '1.00 USD', condition: 'new', brand: 'OpenWOP sandbox',
+  };
+  headers = { 'content-type': 'application/json', authorization: `Bearer ${token ?? '<unset>'}` };
+  if (platform === 'meta') {
+    url = `${wire.metaApiBase()}/${encodeURIComponent(catalogId ?? '')}/items_batch`;
+    body = wire.buildMetaItemsBatchBody([item]);
+  } else {
+    url = `${wire.merchantApiBase()}/accounts/${encodeURIComponent(merchantAccount ?? '')}/productInputs:insert?dataSource=${encodeURIComponent(merchantDataSource ?? '')}`;
+    body = wire.buildMerchantProductInput(item, { contentLanguage: 'en', feedLabel: 'US' });
+  }
+} else if (check === 'budget') {
+  if (platform === 'tiktok') {
+    url = `${wire.tiktokApiBase()}/campaign/update/`;
+    headers = { 'content-type': 'application/json', 'access-token': token ?? '<unset>' };
+    body = wire.buildTiktokBudgetBody(accountId ?? '', campaignId ?? '', Number(budgetMajor));
+  } else {
+    url = `${wire.linkedinApiBase()}/rest/adAccounts/${(accountId ?? '').replace(/[^0-9]/g, '')}/adCampaigns/${campaignId}`;
+    headers = { 'content-type': 'application/json', authorization: `Bearer ${token ?? '<unset>'}`, 'LinkedIn-Version': wire.LINKEDIN_VERSION, 'X-Restli-Protocol-Version': '2.0.0', 'X-RestLi-Method': 'PARTIAL_UPDATE' };
+    body = wire.buildLinkedinBudgetPatch(budgetMajor, budgetCurrency);
+  }
+} else if (check === 'delivery-status' && platform === 'tiktok') {
+  url = `${wire.tiktokApiBase()}/campaign/status/update/`;
+  headers = { 'content-type': 'application/json', 'access-token': token ?? '<unset>' };
+  body = wire.buildTiktokStatusBody(accountId ?? '', campaignId ?? '', 'paused');
+} else if (check === 'delivery-status' && platform === 'linkedin') {
+  url = `${wire.linkedinApiBase()}/rest/adAccounts/${(accountId ?? '').replace(/[^0-9]/g, '')}/adCampaignGroups/${campaignId}`;
+  headers = { 'content-type': 'application/json', authorization: `Bearer ${token ?? '<unset>'}`, 'LinkedIn-Version': wire.LINKEDIN_VERSION, 'X-Restli-Protocol-Version': '2.0.0', 'X-RestLi-Method': 'PARTIAL_UPDATE' };
+  body = wire.buildLinkedinStatusPatch('paused');
+} else if (check === 'delivery-status') {
+  if (platform === 'meta') {
+    url = `${wire.metaApiBase()}/${encodeURIComponent(campaignId ?? '')}`;
+    headers = { 'content-type': 'application/json', authorization: `Bearer ${token ?? '<unset>'}` };
+    body = wire.buildMetaStatusBody('paused');
+  } else {
+    url = `${wire.googleApiBase()}/customers/${(accountId ?? '').replace(/[^0-9]/g, '')}/campaigns:mutate`;
+    headers = { 'content-type': 'application/json', authorization: `Bearer ${token ?? '<unset>'}`, 'developer-token': gDev ?? '<unset>' };
+    body = wire.buildGoogleStatusBody(accountId ?? '', campaignId ?? '', 'paused', { validateOnly: true });
+  }
 } else if (check === 'google-upload') {
   url = `${wire.googleApiBase()}/customers/${(gCustomer ?? '').replace(/[^0-9]/g, '')}:uploadClickConversions`;
   headers = { 'content-type': 'application/json', authorization: `Bearer ${token ?? '<unset>'}`, 'developer-token': gDev ?? '<unset>' };
@@ -147,12 +243,22 @@ if (dry) {
 
 const res = await fetch(url, { method, headers, ...(body ? { body: JSON.stringify(body) } : {}) });
 let json;
-try { json = await res.json(); } catch { json = null; }
-const ok = res.ok && (platform !== 'tiktok' || json?.code === 0) && !(check === 'google-upload' && json?.partialFailureError);
+try { json = await res.json(); } catch { json = null; } // a LinkedIn PARTIAL_UPDATE answers 204 with no body
+const aigcValue = check === 'aigc-disclosure' ? json?.data?.list?.[0]?.[wire.TIKTOK_AIGC_FIELD] : undefined;
+const ok = res.ok && (platform !== 'tiktok' || json?.code === 0)
+  && !(check === 'aigc-disclosure' && aigcValue !== wire.TIKTOK_AIGC_SELF_DISCLOSURE) && !(check === 'google-upload' && json?.partialFailureError) && !(check === 'delivery-status' && platform === 'meta' && json?.success !== true)
+  && !(check === 'catalog-push' && platform === 'meta' && (!(json?.handles?.length > 0) || (json?.validation_status ?? []).some((v) => v?.errors?.length)));
 transcript.response = { status: res.status, body: json };
-transcript.verdict = ok ? 'PASS' : 'FAIL';
+let okFinal = ok && !(check === 'ceiling' && json?.success !== true);
+if (check === 'ceiling' && okFinal) {
+  const back = await fetch(`${url}?fields=spend_cap`, { headers: { authorization: headers.authorization } });
+  let bj; try { bj = await back.json(); } catch { bj = null; }
+  transcript.readBack = { status: back.status, body: bj };
+  okFinal = back.ok && Number(bj?.spend_cap) === body.spend_cap;
+}
+transcript.verdict = okFinal ? 'PASS' : 'FAIL';
 
 const text = JSON.stringify(transcript, null, 2);
 if (outPath) writeFileSync(outPath, `${text}\n`);
 console.log(text);
-process.exit(ok ? 0 : 1);
+process.exit(okFinal ? 0 : 1);

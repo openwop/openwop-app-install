@@ -17,20 +17,89 @@ import { listAngles, persistAngles, deleteAngle, validateAngleCandidate, type An
 import { emitCandidateHooks, listHooks, type HookStatus, HOOK_STATUSES } from './hookBankService.js';
 import { getTargetingPack, listTargetingPacks, persistTargetingPack, validateTargetingCandidate, isTargetingPlatform, type TargetingCandidateInput } from './targetingService.js';
 import { OpenwopError } from '../../types.js';
-import type { MessagingKernel } from './types.js';
+import { runOrgScopeFilter } from '../../host/accessControlService.js';
+import type { Scope } from '../../host/accessControlService.js';
+import type { CampaignBrief, MessagingKernel } from './types.js';
 
 export function buildCampaignBriefSurface(scope: BundleScope): FeatureSurface {
   const tenantId = scope.tenantId;
+  // Org scoping (the ADR 0832 floor, extended to rows named by id). Briefs, personas,
+  // evidence, angles and targeting packs belong to ONE org, but every by-id read here
+  // used to be tenant-only: in an agency workspace a run for client A could read,
+  // ground on, or write client B's brief. The seam's floor only fires when a method
+  // receives `orgId`, and these take an id instead. So:
+  //  - `orgId` given: the seam has already checked the run's person against it; the
+  //    row must ALSO belong to it, else a uniform not-found;
+  //  - `orgId` absent: the run's person (actor, else causing member) must hold the
+  //    scope in the ROW's org, else the same uniform not-found;
+  //  - no person (an actorless, causeless run): unchanged, the seam's own rule.
+  //    ACCEPTED RESIDUAL (security review of this fix, 2026-10-20): a scheduled or
+  //    system run with neither an actor nor a causing member stays TENANT-WIDE here
+  //    (`if (!subject) return true`), exactly as the ADR 0832 floor treats every
+  //    surface. It is by design, not an oversight: there is no person to scope to,
+  //    and such runs are host- or operator-authored. Do not "fix" it here alone; a
+  //    change belongs to the seam, for every surface at once.
+  const subject = scope.actingUserId ?? scope.orgScopeSubject;
+  const cause = !scope.actingUserId && !!scope.orgScopeSubject;
+  const mayUseOrg = async (rowOrgId: string, argsOrgId: string | undefined, needed: Scope): Promise<boolean> => {
+    if (argsOrgId) return rowOrgId === argsOrgId;
+    if (!subject) return true;
+    return (await runOrgScopeFilter(tenantId, subject, [rowOrgId], needed, { cause })).has(rowOrgId);
+  };
+  /** A list with no `orgId`: keep only the orgs the run's person may read. */
+  const visibleOrgs = async <T extends { orgId: string }>(rows: T[], argsOrgId: string | undefined): Promise<T[]> => {
+    if (argsOrgId || !subject) return rows;
+    const allowed = await runOrgScopeFilter(tenantId, subject, rows.map((r) => r.orgId), 'workspace:read', { cause });
+    return rows.filter((r) => allowed.has(r.orgId));
+  };
+  /** The brief named by `args.briefId`, or null when absent OR out of scope. */
+  const scopedBrief = async (briefId: string, orgId: string | undefined, needed: Scope = 'workspace:read'): Promise<CampaignBrief | null> => {
+    const brief = await getBrief(tenantId, briefId);
+    if (!brief) return null;
+    return (await mayUseOrg(brief.orgId, orgId, needed)) ? brief : null;
+  };
+  const notFound = (briefId: string): OpenwopError => new OpenwopError('not_found', `Brief '${briefId}' not found.`, 404);
   return {
-    listPersonas: async (args) => ({ personas: await listPersonas(tenantId, optStr(args.orgId), optStr(args.brandId)) }),
-    getPersona: async (args) => ({ persona: (await getPersona(tenantId, str(args.personaId))) ?? null }),
+    listPersonas: async (args) => ({ personas: await visibleOrgs(await listPersonas(tenantId, optStr(args.orgId), optStr(args.brandId)), optStr(args.orgId)) }),
+    getPersona: async (args) => {
+      const persona = await getPersona(tenantId, str(args.personaId));
+      return { persona: persona && (await mayUseOrg(persona.orgId, optStr(args.orgId), 'workspace:read')) ? persona : null };
+    },
 
-    listBriefs: async (args) => ({ briefs: await listBriefs(tenantId, optStr(args.orgId)) }),
-    getBrief: async (args) => ({ brief: (await getBrief(tenantId, str(args.briefId))) ?? null }),
+    listBriefs: async (args) => ({ briefs: await visibleOrgs(await listBriefs(tenantId, optStr(args.orgId)), optStr(args.orgId)) }),
+    getBrief: async (args) => ({ brief: await scopedBrief(str(args.briefId), optStr(args.orgId)) }),
+
+    /** ADR 0956 D5 — the ONE tracked-URL helper for outbound links: stamps the
+     *  brief's UTM schema (the owner of `BriefUtm`) plus the variant key and ad
+     *  reference, and — when Campaign Intelligence is on for the tenant — lints
+     *  the result against the brief's client-org UTM policy. A caller must not
+     *  publish a link with violations (`utm_policy_violation`). */
+    trackedUrl: async (args) => {
+      const briefId = str(args.briefId);
+      // Org-scoped like every by-id method here: a brief outside the run's org (or
+      // outside the orgs the run's person may read) is the same not-found as a
+      // missing one, so a run for client A cannot mint client B's tracked link or
+      // read B's UTM policy verdict.
+      const brief = await scopedBrief(briefId, optStr(args.orgId));
+      if (!brief) throw notFound(briefId);
+      const { buildTrackedUrl } = await import('../../host/trackedUrl.js');
+      const url = buildTrackedUrl(str(args.url), brief.utm, {
+        fallbackCampaign: briefId,
+        ...(optStr(args.variantKey) ? { variantKey: optStr(args.variantKey) } : {}),
+        ...(optStr(args.adRef) ? { adRef: optStr(args.adRef) } : {}),
+      });
+      const { resolveOne } = await import('../../host/featureToggles/service.js');
+      const intel = await resolveOne('campaign-intel', { tenantId });
+      if (!intel?.enabled) return { url, linted: false, violations: [] };
+      // Fail closed: a policy that cannot be read is an error, never "no violations".
+      const { lintUrls } = await import('../campaign-intel/utmGovernance.js');
+      const out = await lintUrls(tenantId, brief.orgId, [url]);
+      return { url, linted: true, policyVersion: out.policyVersion, violations: out.results[0]?.violations ?? [] };
+    },
 
     /** Validate completeness + the enabled channel set (drives 0158 fan-out). */
     validateBrief: async (args) => {
-      const brief = await getBrief(tenantId, str(args.briefId));
+      const brief = await scopedBrief(str(args.briefId), optStr(args.orgId));
       if (!brief) return { valid: false, issues: [{ field: 'briefId', message: 'Brief not found.' }], enabledChannels: [] };
       return { ...validateBrief(brief) };
     },
@@ -40,9 +109,10 @@ export function buildCampaignBriefSurface(scope: BundleScope): FeatureSurface {
      * the metadata the node needs to add the brand-voice + KB grounding legs.
      */
     assembleContext: async (args) => {
-      const brief = await getBrief(tenantId, str(args.briefId));
+      const brief = await scopedBrief(str(args.briefId), optStr(args.orgId));
       if (!brief) return { found: false };
-      const personas = (await Promise.all(brief.personaIds.map((id) => getPersona(tenantId, id)))).filter((p): p is NonNullable<typeof p> => p !== null);
+      // Only the brief's own org's personas, whatever ids the row carries.
+      const personas = (await Promise.all(brief.personaIds.map((id) => getPersona(tenantId, id)))).filter((p): p is NonNullable<typeof p> => p !== null && p.orgId === brief.orgId);
       return {
         found: true,
         brief: {
@@ -81,6 +151,9 @@ export function buildCampaignBriefSurface(scope: BundleScope): FeatureSurface {
     /** Persist a generated kernel (the node calls this after ctx.callAI). */
     setKernel: async (args) => {
       const kernel = args.kernel as MessagingKernel;
+      // A refusal is a typed failure, as for the other writes: returning
+      // `{brief:null}` let the kernel node report success with nothing saved.
+      if (!(await scopedBrief(str(args.briefId), optStr(args.orgId), 'workspace:write'))) throw notFound(str(args.briefId));
       const updated = await setKernel(tenantId, str(args.briefId), kernel);
       return { brief: updated ?? null };
     },
@@ -89,6 +162,7 @@ export function buildCampaignBriefSurface(scope: BundleScope): FeatureSurface {
 
     /** VOC evidence for a brief (quote-level, citation-carrying). */
     listVocEvidence: async (args) => {
+      if (!(await scopedBrief(str(args.briefId), optStr(args.orgId)))) return { evidence: [] };
       const sentiment = optStr(args.sentiment);
       return {
         evidence: await listVocEvidence(tenantId, str(args.briefId), {
@@ -106,8 +180,8 @@ export function buildCampaignBriefSurface(scope: BundleScope): FeatureSurface {
      */
     persistVoc: async (args) => {
       const briefId = str(args.briefId);
-      const brief = await getBrief(tenantId, briefId);
-      if (!brief) throw new OpenwopError('not_found', `Brief '${briefId}' not found.`, 404);
+      const brief = await scopedBrief(str(args.briefId), optStr(args.orgId), 'workspace:write');
+      if (!brief) throw notFound(briefId);
       const raw = Array.isArray(args.candidates) ? (args.candidates as VocEvidenceInput[]) : [];
       const findings: ReturnType<typeof validateVocCandidate>[] = raw.map((c, i) => validateVocCandidate(c, i));
       const valid = findings.flatMap((f) => (f.ok ? [f.item] : []));
@@ -120,7 +194,7 @@ export function buildCampaignBriefSurface(scope: BundleScope): FeatureSurface {
     },
 
     /** Ad angles for a brief (each grounded in proofRefs → voc-evidence). */
-    listAngles: async (args) => ({ angles: await listAngles(tenantId, str(args.briefId)) }),
+    listAngles: async (args) => ({ angles: (await scopedBrief(str(args.briefId), optStr(args.orgId))) ? await listAngles(tenantId, str(args.briefId)) : [] }),
 
     /** The org hook bank (reads; promotion is a route-only HUMAN write). */
     listHooks: async (args) => {
@@ -143,8 +217,8 @@ export function buildCampaignBriefSurface(scope: BundleScope): FeatureSurface {
      */
     persistAngles: async (args) => {
       const briefId = str(args.briefId);
-      const brief = await getBrief(tenantId, briefId);
-      if (!brief) throw new OpenwopError('not_found', `Brief '${briefId}' not found.`, 404);
+      const brief = await scopedBrief(str(args.briefId), optStr(args.orgId), 'workspace:write');
+      if (!brief) throw notFound(briefId);
       const validIds = new Set((await listVocEvidence(tenantId, briefId)).map((e) => e.id));
       const raw = Array.isArray(args.candidates) ? (args.candidates as AngleCandidateInput[]) : [];
       const findings = raw.map((c, i) => validateAngleCandidate(c, i, validIds));
@@ -186,10 +260,11 @@ export function buildCampaignBriefSurface(scope: BundleScope): FeatureSurface {
     getTargetingPack: async (args) => {
       const platform = optStr(args.platform);
       if (!isTargetingPlatform(platform)) return { pack: null };
+      if (!(await scopedBrief(str(args.briefId), optStr(args.orgId)))) return { pack: null };
       return { pack: await getTargetingPack(tenantId, str(args.briefId), platform) };
     },
 
-    listTargetingPacks: async (args) => ({ packs: await listTargetingPacks(tenantId, str(args.briefId)) }),
+    listTargetingPacks: async (args) => ({ packs: (await scopedBrief(str(args.briefId), optStr(args.orgId))) ? await listTargetingPacks(tenantId, str(args.briefId)) : [] }),
 
     /**
      * The build-targeting node's write. Closed-world: platform enum +
@@ -200,8 +275,8 @@ export function buildCampaignBriefSurface(scope: BundleScope): FeatureSurface {
      */
     persistTargeting: async (args) => {
       const briefId = str(args.briefId);
-      const brief = await getBrief(tenantId, briefId);
-      if (!brief) throw new OpenwopError('not_found', `Brief '${briefId}' not found.`, 404);
+      const brief = await scopedBrief(str(args.briefId), optStr(args.orgId), 'workspace:write');
+      if (!brief) throw notFound(briefId);
       const validIds = new Set((await listVocEvidence(tenantId, briefId)).map((e) => e.id));
       const verdict = validateTargetingCandidate((args.candidate ?? {}) as TargetingCandidateInput, validIds);
       if (!verdict.ok) {

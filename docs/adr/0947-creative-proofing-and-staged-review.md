@@ -1,6 +1,6 @@
 # ADR 0947 — Creative proofing and staged review
 
-Status: Proposed
+Status: Accepted (P0 implemented; `variant_set` waits on ADR 0946)
 
 Date: 2026-10-19
 
@@ -123,6 +123,60 @@ visibility?: 'internal' | 'shared';                     // the client sees `shar
   to `accessControl` (the follow-up ADR 0933 D8 recorded), so a reviewer role can
   annotate and decide without edit rights.
 
+> **Correction (2026-10-20, P0 build, architect review).**
+> - **The scope is `host:comments:write`, not a protocol scope.** D2 asked for a
+>   `comments:write` *protocol* scope. `PROTOCOL_SCOPES` is the RFC 0049
+>   vocabulary: RFC 0154 delegated credentials validate against it, and ADR 0078
+>   records that adding to it is a wire change. P0 instead adds a third,
+>   host-only scope class to `accessControlService`, `DELEGABLE_HOST_SCOPES`:
+>   - The scopes are `host:`-prefixed, so not wire and never in
+>     `scopes_supported`.
+>   - Unlike the management scopes, a custom role and a developer key may carry
+>     them, because they administer nothing.
+>   - The built-in editor, admin and owner roles hold `host:comments:write`.
+>     `workspace:write` implies it, one direction only, through ONE expansion
+>     (`withImpliedScopes`). Role unions use it, and so does a developer key's
+>     narrowing declaration, so a key that declared `workspace:write` keeps
+>     commenting. That gap was a `/code-review` finding. So
+>     existing custom roles keep commenting, and a reviewer role
+>     (`workspace:read` + `host:comments:write` + `approvals:respond`) annotates
+>     and decides without edit rights.
+>   - All three comment-write lanes check it: the HTTP routes, the chat tool and
+>     the workflow surface. A lane left on `workspace:write` would refuse a
+>     reviewer in one place and not another. The thread's `viewer.canWrite`
+>     reports it.
+> - **`variant_set` is deferred.** No `VariantSet` exists on main because ADR
+>   0946 is unbuilt. Its resolver lands with 0946's record; until then a
+>   variant member is annotated through its `media_asset`.
+> - **Media version.** Asset bytes are immutable (an edit mints a new asset), so
+>   `subjectVersion` is the content hash, or `legacy:<assetId>` for rows uploaded
+>   before the hash existed. `updatedAt` is not used, because a metadata edit
+>   moves it.
+> - **Anchor rules.**
+>   - The shape is closed-world: unknown keys are refused, boxes must sit inside
+>     0–1 with w and h above 0, and timecodes are whole milliseconds bounded at
+>     24 h (Q5).
+>   - The anchor is checked against the subject at its CURRENT version: media
+>     takes region, point or timecode (timecode only for video or audio); a CMS
+>     page takes `element` on a section of that page version; any other type
+>     takes none.
+>   - Anchors are immutable after create.
+>   - Anchor, intent and visibility sit on a thread's root; a reply carries none.
+>   - Invalid input is a 400 with nothing stored.
+> - **Who may share (Q2).** Only a person on the HTTP lane may set
+>   `visibility: 'shared'` (`createComment` `mayShare`). The chat tool and the
+>   workflow surface cannot. P0 adds no client-facing read, so the `shared`-only
+>   filter lands with P4.
+> - **Agent and workflow anchoring is not in P0.** The chat tool and the node
+>   pack keep their input schemas (a schema change is a pack and LLM-exchange
+>   change). Agents read anchors through `comments.list`, whose projection now
+>   carries them, and the reviewer prompt says how to treat an open change
+>   request. Writing anchors from an agent lands with P1/P2, where the checklist
+>   node needs it.
+> - **Lifecycle.** Deleting a media asset prunes its threads through media's
+>   keyed `onMediaAssetDeleted` seam. Anchors, intent and visibility carry no
+>   personal data; the existing comment eraser and retention cover the rows.
+
 ### D3 — Stages are a chain of 0942 gates
 
 Chain pack `campaign-studio.creative-review` (`kind:"workflow-chain"`), composed
@@ -243,6 +297,12 @@ new is added to delivery.
 | P3 | Frontend proofing viewer + compare | `npm run build`; a11y check of pin controls |
 | P4 | Client stage through ADR 0958 grant-backed links (after 0958 P1) | Public route tests: revoked/expired/superseded → same 404; client sees `shared` only |
 | P5 | Signed-in client and vendor collaborators (after 0958 P2) | Same author field, no second write path |
+
+## Implementation record
+
+| Phase | Commit / PR | Tests |
+|---|---|---|
+| P0 | `feat/creative-proofing-0947-p0` (PR pending) | `test/adr0947-proofing-comments.test.ts` (17), each guard sabotage-witnessed (file header): `media_asset` same-org reads and writes, with another org's asset the uniform 404; anchor, intent and visibility stored on the current version; seven invalid-anchor cases → 400 with nothing stored; a reply refuses an anchor; only a person may share; a reviewer custom role annotates and resolves but cannot edit a page; a viewer can do neither; `workspace:write` implies the comment scope and never the reverse; a custom role may carry the new scope but still not a management scope; a developer key that declared `workspace:write` keeps the comment scope, and one that declared only read does not; deleting an asset prunes its threads. Updated: `comments-surface-authz` (the surface's refusal names the new scope), the frontend deep-link test (covers `media_asset`), and the comments reviewer prompt (`comments.agents` 1.0.4 → 1.0.5). |
 
 ## Alternatives weighed
 

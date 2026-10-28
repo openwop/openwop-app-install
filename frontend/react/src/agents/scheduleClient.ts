@@ -32,7 +32,7 @@ async function failure(res: Response, what: string): Promise<ApiError> {
 
 /** Why a fire produced no run (ADR 0787). `no-next-fire` is different in kind:
  *  the cadence has no FURTHER slot inside the horizon. */
-export type ScheduleSkipReason = 'budget' | 'workflow-unresolved' | 'dispatch-error' | 'feature-disabled' | 'plan-lapsed' | 'actor-inactive' | 'agent-paused' | 'policy-denied' | 'awaiting-approval' | 'goal-closed' | 'no-next-fire';
+export type ScheduleSkipReason = 'budget' | 'workflow-unresolved' | 'dispatch-error' | 'feature-disabled' | 'plan-lapsed' | 'actor-inactive' | 'agent-paused' | 'policy-denied' | 'awaiting-approval' | 'goal-closed' | 'client-inactive' | 'target-refused' | 'cadence-too-frequent' | 'no-next-fire';
 
 /** "Run now" outcome: a run, or the reason none started. */
 export interface TriggerResult {

@@ -1,0 +1,175 @@
+{
+  "name": "feature.experiments.nodes",
+  "version": "1.4.0",
+  "kind": "node",
+  "description": "Experiments feature node pack (ADR 0949 P2b) — nodes over ctx.features.experiments. Reads: `list`, `get`, `results`, `split` (a contact's arm, ADR 0949 P3); `optimize-epoch` reallocates an Optimize experiment (ADR 0949 P4); `check-gates` reports the ADR 0950 promotion gates (the Decide verdict: confidence sequences, BH q-values, SRM, coverage and the minDays/sample gates) and `power-calc`. Writes: `create-draft`, `update-draft` and `lock-plan` author and pre-register a Decide experiment; `stop` ends a running one. There is deliberately NO launch node: launching changes what the public sees, and the policy that decides when an agent may do that is ADR 0942's. Until it lands, launch is a human act in the Experiments page. Every op checks the run's actor against the org (workspace:read / workspace:write).",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "experiments", "ab-testing", "marketing", "statistics"],
+  "engines": { "openwop": ">=1.0.0 <3.0.0" },
+  "nodes": [
+    {
+      "typeId": "feature.experiments.nodes.list",
+      "version": "1.0.0",
+      "label": "Experiments List",
+      "description": "Lists the org's experiments (Decide and legacy), newest first. Inputs: orgId, kind?, ref?, status?.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.experiments.nodes.get",
+      "version": "1.0.0",
+      "label": "Experiment Get",
+      "description": "Reads one experiment (arms, status, the locked plan or the draft plan). Inputs: orgId, experimentId.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.experiments.nodes.results",
+      "version": "1.0.0",
+      "label": "Experiment Results",
+      "description": "The Decide verdict, computed from the daily rollup: verdict {kind: insufficient_data|running|srm_halt|winner|no_difference|inconclusive_at_max, arm?, reason?}, per-arm units/conversions/rate and (treatment arms) delta, always-valid confidence sequence, per-look p-value and BH q-value, the SRM test, coverage and the gates. A legacy experiment has no verdict (409 legacy_experiment). Inputs: orgId, experimentId.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.experiments.nodes.check-gates",
+      "version": "1.0.0",
+      "label": "Experiment Check Promotion Gates",
+      "description": "The ADR 0950 promotion gates for one experiment, read-only: G1 Decide mode with a locked plan; G2 duration and sample; G3 sample-ratio mismatch (whole test and units first seen in the last 7 days); G4 the verdict names a treatment winner; G5 lift at least the MDE with the confidence-sequence lower bound above 0; G6 guardrails; G7 novelty stability (trailing lift at least half the full lift, same sign, no monotone weekly decline); G8 the winner's content may be published now. Each gate is pass, fail or not_evaluable with its numbers; only all-pass promotes. The output carries the snapshot (planHash, cellsHash, computedAt), so a replay shows the same numbers. Promotes nothing. Inputs: orgId, experimentId.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.experiments.nodes.power-calc",
+      "version": "1.0.0",
+      "label": "Experiment Power Calc",
+      "description": "Units per arm needed to detect an absolute lift `mde` on a `baselineRate` at `alpha` and `power` (two-proportion, pooled null). Pure. Inputs: orgId, baselineRate, mde, alpha, power.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.experiments.nodes.split",
+      "version": "1.0.0",
+      "label": "Experiment Split",
+      "description": "A run-based unit's arm (a contact in a journey, an email recipient): assignWeightedVariant(unitKey, experiment scope, salt, the weights of the epoch in effect at the run's frozen start instant). Deterministic: a replay or a :fork assigns exactly as the source did, even after an epoch change or a stop. Only an experiment that was assigning when the run began assigns; otherwise `assigned:false` with the reason, and the unit is untested. Outputs {assigned, arm, ref, control, epoch, asOf, frozen}. Inputs: orgId, experimentId, unitKey.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.experiments.nodes.create-draft",
+      "version": "1.0.0",
+      "label": "Experiment Create Draft",
+      "description": "Authors a Decide experiment as a DRAFT on a surface (`{kind:'cms.page', ref:pageId}` or `{kind:'funnel.step', ref:'<funnelId>:<stepId>'}`), with 2–8 arms `{key, ref, weight}` (weights sum to 100; ref null = the live content) and optionally an unlocked plan. Closed-world: unknown fields are refused. SIDE-EFFECTING: each execution mints a new experiment id, so a replay must be served the recorded outcome. Inputs: orgId, name, hypothesis?, surface, arms, plan?.",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": ["side-effectful"]
+    },
+    {
+      "typeId": "feature.experiments.nodes.update-draft",
+      "version": "1.0.0",
+      "label": "Experiment Update Draft",
+      "description": "Edits a draft whose plan is not locked: name, hypothesis, arms, plan. A locked plan refuses every edit (409 plan_locked). SIDE-EFFECTING (writes durable state; a replay is served the recorded outcome). Inputs: orgId, experimentId, name?, hypothesis?, arms?, plan?.",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": ["side-effectful"]
+    },
+    {
+      "typeId": "feature.experiments.nodes.lock-plan",
+      "version": "1.0.0",
+      "label": "Experiment Lock Plan",
+      "description": "Pre-registers the plan (from `plan`, else the draft's saved plan): validates it, derives minSamplePerArm, floors minDays at 7 and stores the planHash. After this every plan field, arm and weight is immutable. Plan: {primaryMetric:{kind:'conversion',name}, guardrails:[], baselineRate, mde, alpha, power, fdrQ, minDays, maxDays}; a guardrail is refused (unsupported_metric). SIDE-EFFECTING. Inputs: orgId, experimentId, plan?.",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": ["side-effectful"]
+    },
+    {
+      "typeId": "feature.experiments.nodes.optimize-epoch",
+      "version": "1.0.0",
+      "label": "Experiment Optimize Epoch",
+      "description": "Reallocates a running Optimize experiment: Thompson sampling (Beta–Bernoulli, seeded by experimentId and epoch) over the reward, every arm kept at or above its floor. The epoch number comes from the run's frozen start instant, so a replay or a :fork finds the epoch already appended and never re-allocates. Outputs {outcome: appended|existing|too_soon, epoch, weights}; `too_soon` (the previous epoch is younger than epochMinutes) changes nothing and is not an error. SIDE-EFFECTING. Inputs: orgId, experimentId.",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": ["side-effectful"]
+    },
+    {
+      "typeId": "feature.experiments.nodes.stop",
+      "version": "1.0.0",
+      "label": "Experiment Stop",
+      "description": "Stops a running experiment (the surface stops serving its arms). Idempotent on a stopped experiment. SIDE-EFFECTING. Inputs: orgId, experimentId.",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": ["side-effectful"]
+    },
+    {
+      "typeId": "feature.experiments.nodes.require-gates",
+      "version": "1.0.0",
+      "label": "Experiment Require Promotion Gates",
+      "description": "The ADR 0950 promotion gates as a precondition: succeeds only when all eight pass (outputs the full report, including the winner and the snapshot); otherwise fails `gate_failed` naming every gate that did not pass. Read-only. Inputs: orgId, experimentId.",
+      "category": "integration",
+      "role": "read",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.experiments.nodes.policy-gate",
+      "version": "1.0.0",
+      "label": "Experiment Promotion Policy Gate",
+      "description": "Lets the campaign autonomy policy (ADR 0942, action class experiment.promote) decide a promotion: auto, notify-after, approve (approvers from the policy, never from config) or blocked. A run not bound to a campaign asks for one approval. Config: { prompt? }. Inputs: orgId. Output: { decision, ruleId? }.",
+      "category": "integration",
+      "role": "gate",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.experiments.nodes.apply-ramp",
+      "version": "1.0.0",
+      "label": "Experiment Apply Ramp Stage",
+      "description": "Applies promotion stage 1, 2 or 3 (the winner at 50%, 90%, then all but the holdout) as a monotone band layout: no unit on the winner ever moves off it. Stage 1 re-checks every gate and the winner first. Idempotent per stage; refuses any run but the experiment's promotion run. SIDE-EFFECTING. Inputs: orgId, experimentId, stage, winner? (stage 1), holdoutPct.",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": ["side-effectful"]
+    },
+    {
+      "typeId": "feature.experiments.nodes.recheck",
+      "version": "1.0.0",
+      "label": "Experiment Recheck Stage",
+      "description": "Judges the latest ramp stage on the units first exposed since it began: sample-ratio mismatch at the stage's weights, and guardrails. Outputs { outcome: pass|breach, breach, reason?, value, snapshot }; fails `stage_underpowered` when the stage has too few units, and `stage_too_soon` before 24 hours. Read-only. Inputs: orgId, experimentId.",
+      "category": "integration",
+      "role": "read",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.experiments.nodes.monitor",
+      "version": "1.0.0",
+      "label": "Experiment Monitor Promotion",
+      "description": "After the last stage, compares the winner with the long-term holdout: sample-ratio mismatch, guardrails, and the primary metric (a breach when the winner is reliably worse). Same outputs and failures as recheck. Read-only. Inputs: orgId, experimentId.",
+      "category": "integration",
+      "role": "read",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.experiments.nodes.finalize",
+      "version": "1.0.0",
+      "label": "Experiment Finalize Promotion",
+      "description": "Ships the winner as the surface's own content (a CMS page publishes the winning version through its own approval rules; a funnel step points at the winning page) and records what it replaced, so a rollback can restore it. Idempotent; refuses any run but the experiment's promotion run. SIDE-EFFECTING. Inputs: orgId, experimentId.",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": ["side-effectful"]
+    },
+    {
+      "typeId": "feature.experiments.nodes.rollback",
+      "version": "1.0.0",
+      "label": "Experiment Roll Back Promotion",
+      "description": "Puts every unit back on the control and restores the content the promotion replaced. Never blocked by policy. Idempotent; refuses any run but the experiment's promotion run. SIDE-EFFECTING. Inputs: orgId, experimentId, reason?.",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": ["side-effectful"]
+    }
+  ],
+  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+}

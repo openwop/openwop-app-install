@@ -20,7 +20,7 @@
 
 import { DurableCollection } from './hostExtPersistence.js';
 import { createLogger } from '../observability/logger.js';
-import { makeEmailAdapter } from './emailAdapter.js';
+import { makeEmailAdapter, resolveEmailProvider } from './emailAdapter.js';
 import type { Storage } from '../storage/storage.js';
 import { OpenwopError } from '../types.js';
 import { registerSubjectEraser } from './subjectErasure.js';
@@ -28,6 +28,8 @@ import { subjectKeyForms } from './subjectErasureRedaction.js';
 import { signVoterBinding } from './interruptVoterBinding.js';
 import { listTenantMembers } from './accessControlService.js';
 import { vendorPublicBase } from '../features/featureRoute.js';
+import { renderTransactional } from './transactionalEmail.js';
+import { APPROVAL_NOTICE_KIND, type ApprovalNoticeData } from './approvalNoticeTemplates.js';
 
 const log = createLogger('host.emailApprovalDelivery');
 
@@ -161,37 +163,35 @@ export async function deliverApprovalEmail(storage: Storage, input: ApprovalEmai
     }
 
     const inboxUrl = `${base}/inbox`;
-    let text: string;
+    // ADR 0905 D6 — the copy is the registered `approval.notice` kind (4 locales, host
+    // default locale); the links are composed here exactly as before.
+    let links: { approveUrl: string; rejectUrl: string } | undefined;
     if (input.interruptToken && tokenAllowed) {
       // Grade-code H1 — each recipient's links are HMAC-bound to THEIR voter
       // id (interruptVoterBinding). The token alone can no longer name other
       // approvers on the confirm page or the quorum lane.
       const sig = encodeURIComponent(signVoterBinding(input.interruptToken, input.recipientUserId));
-      const approve = `${vendorPublicBase(base)}/interrupt-action?token=${encodeURIComponent(input.interruptToken)}&action=approve&voter=${encodeURIComponent(input.recipientUserId)}&sig=${sig}`;
-      const reject = `${vendorPublicBase(base)}/interrupt-action?token=${encodeURIComponent(input.interruptToken)}&action=reject&voter=${encodeURIComponent(input.recipientUserId)}&sig=${sig}`;
-      text = [
-        input.message,
-        '',
-        `Approve: ${approve}`,
-        `Reject:  ${reject}`,
-        '',
-        'The links open a confirmation page (nothing happens until you confirm there).',
-        `Or review in the app: ${inboxUrl}`,
-        'Links expire with the request.',
-      ].join('\n');
-    } else {
-      text = [input.message, '', `Review in the app: ${inboxUrl}`].join('\n');
+      links = {
+        approveUrl: `${vendorPublicBase(base)}/interrupt-action?token=${encodeURIComponent(input.interruptToken)}&action=approve&voter=${encodeURIComponent(input.recipientUserId)}&sig=${sig}`,
+        rejectUrl: `${vendorPublicBase(base)}/interrupt-action?token=${encodeURIComponent(input.interruptToken)}&action=reject&voter=${encodeURIComponent(input.recipientUserId)}&sig=${sig}`,
+      };
     }
+    const notice = renderTransactional<ApprovalNoticeData>(APPROVAL_NOTICE_KIND, { title: input.title, message: input.message, inboxUrl, ...(links ?? {}) });
+    const text = notice.text;
 
     // ADR 0655 D1 (review B1) — this was the FOURTH egress path, calling
     // `sendViaSmtp` directly and bypassing the adapter's floor. It now rides the
-    // adapter as a transactional send (a bounced address still gets its approval
-    // notice; an erased one does not). A notification send is host-attributed:
+    // adapter as a transactional send (marketing opt-out alone does not block it;
+    // erasure, bounces, complaints and manual holds do). A notification is host-attributed:
     // tenant-scope connection only (no acting user ⇒ the broker withholds user/org
     // connections — the fail-closed default is exactly right here).
+    // ADR 0994 D1 — was hard-wired to `smtp`, so a workspace whose only email account
+    // was Postmark got no approval email. Now the first WORKSPACE-scoped Connection in
+    // transactional order (no acting user / org ⇒ the broker offers only those).
+    const provider = (await resolveEmailProvider({ tenantId: input.tenantId, purpose: 'transactional' })) ?? 'smtp';
     const result = await makeEmailAdapter({ storage, tenantId: input.tenantId, runId: `notify:${input.notificationId}` }).send({
-      from, to: pref.email, subject: input.title, text,
-      provider: 'smtp', purpose: 'transactional',
+      from, to: pref.email, subject: notice.subject, text,
+      provider, purpose: 'transactional',
       idempotencyKey: `notify-email:${input.notificationId}:${input.recipientUserId}`,
     });
     if (!result.sent) {

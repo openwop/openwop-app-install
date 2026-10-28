@@ -18,6 +18,10 @@
  *      port for a HOSTNAME origin);
  *   3. the HTTP registration route — createApp + app.listen, POST /webhooks at
  *      major 2, exactly what the conformance row does.
+ *
+ * The URL predicate and the connector read ONE key function
+ * (`webhookOriginKey`), so the probes aim at it, the parser, the connector
+ * branch and the route's `honorDevFlag` (/grade-tests 8f W5, 8fw5g6-whd19-*).
  */
 import http, { type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -54,6 +58,12 @@ const EGRESS_REFUSAL_PROBES: ReadonlyArray<readonly [string, string]> = [
  *  be a number the allowlist names. Chosen high and fixed so a sabotage run
  *  reads the same every time. */
 const P = 47_919;
+
+/** undici wraps a connector refusal in a top-level TypeError whose `cause` carries the code. */
+function causeCode(e: unknown): string | undefined {
+  if (!(e instanceof Error) || typeof e.cause !== 'object' || e.cause === null || !('code' in e.cause)) return undefined;
+  return String(e.cause.code);
+}
 
 const savedAllowPrivate = process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE;
 const savedAllowOrigins = process.env[WEBHOOK_ALLOW_ORIGINS_ENV];
@@ -135,7 +145,9 @@ describe('assertEgressUrlAllowed with the allowlist set — exactly one socket o
 
   it.each(EGRESS_REFUSAL_PROBES)('still refuses the egress-refusal probe: %s', (_cls, url) => {
     setOrigins(`http://127.0.0.1:${P}`);
-    expect(disposition(url)).not.toBe('ACCEPTED');
+    // The exact refusal class, so an unrelated throw (`other:…`) cannot pass as a
+    // refusal: the one plain-http probe is refused on scheme, every https one on host.
+    expect(disposition(url)).toBe(url.startsWith('http:') ? 'insecure_scheme' : 'denied_host');
   });
 
   it('a strict site (A2A push, honorDevFlag:false) ignores the allowlist entirely', () => {
@@ -180,8 +192,7 @@ describe('the connect-time connector — the arm that can see a PORT for a hostn
       const r = await undiciFetch(url, { dispatcher: webhookEgressDispatcher(), redirect: 'error' });
       return `${r.status} ${await r.text()}`;
     } catch (e) {
-      const cause = (e as { cause?: { code?: string } }).cause;
-      return cause?.code ?? `other:${String(e)}`;
+      return causeCode(e) ?? `other:${String(e)}`;
     }
   }
 
@@ -203,7 +214,7 @@ describe('the connect-time connector — the arm that can see a PORT for a hostn
       await undiciFetch(`http://localhost:${portA}/`, { dispatcher: agent });
       expect.fail('safeFetch reached an origin only the WEBHOOK allowlist names');
     } catch (e) {
-      expect((e as { cause?: { code?: string } }).cause?.code).toBe('OPENWOP_WEBHOOK_EGRESS_DENIED');
+      expect(causeCode(e)).toBe('OPENWOP_WEBHOOK_EGRESS_DENIED');
     } finally {
       await agent.close();
     }
@@ -257,7 +268,7 @@ describe('POST /webhooks (major 2) under the allowlist — what the conformance 
     const code = typeof json.error === 'string'
       ? json.error
       : typeof json.error === 'object' && json.error !== null && 'code' in json.error
-        ? String((json.error as { code: unknown }).code)
+        ? String(json.error.code)
         : String(json.code);
     return `${res.status} ${code}`;
   }

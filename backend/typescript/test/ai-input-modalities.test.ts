@@ -3,6 +3,9 @@
  * (text/image/document/audio) pass the guard; an unadvertised one (video) is
  * rejected with `unsupported_modality` rather than silently dropped. `audio` was
  * added in ADR 0085 Phase 1 (notebook audio/video source transcription).
+ *
+ * TST-BNM-2. Red when: `audio` leaves INPUT_MODALITIES, `file` stops mapping to
+ * `document`, or the unadvertised-modality check is skipped.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -27,12 +30,12 @@ describe('callAI input modalities (A9)', () => {
   });
 
   it('rejects an unadvertised modality (video) with unsupported_modality', () => {
-    try {
-      // `video` parts are not mapped in PART_TO_MODALITY → modality 'video', unadvertised.
-      assertModalitiesAdvertised(req([{ type: 'video', mimeType: 'video/mp4', dataBase64: 'AAA' } as never]));
-      expect.unreachable('should have thrown');
-    } catch (err) {
-      expect((err as { code?: string }).code).toBe('unsupported_modality');
-    }
+    // `video` is not a ContentPart type: it arrives as untyped wire JSON, which is
+    // exactly the input this guard exists for. Not mapped in PART_TO_MODALITY →
+    // modality 'video', unadvertised.
+    const parts: AiCallRequest['messages'][number]['content'] = JSON.parse('[{"type":"video","mimeType":"video/mp4","dataBase64":"AAA"}]');
+    expect(() => assertModalitiesAdvertised(req(parts))).toThrow(
+      expect.objectContaining({ code: 'unsupported_modality', details: { capability: 'aiProviders.input', modality: 'video' } }),
+    );
   });
 });

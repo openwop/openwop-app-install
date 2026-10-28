@@ -57,7 +57,9 @@ export const campaignStudioDefinition: CanvasEditorDefinition<CampaignDoc, Frame
   touchSupport: 'view',
   toggleId: 'campaign-studio',
   clientBasePath: '/host/openwop-app/campaign-studio',
-  editorPath: '/campaign-studio',
+  // ADR 0941 D5 — plans live under `/campaign-studio/plans`; `/campaign-studio`
+  // itself is the console hub, and its one-segment children are reserved.
+  editorPath: '/campaign-studio/plans',
   i18nNamespace: 'campaign-studio',
   Renderer: CampaignContentView,
   coerceDoc: coerceCampaign,

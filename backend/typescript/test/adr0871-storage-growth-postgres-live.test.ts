@@ -10,6 +10,9 @@
  *     equal `kvCount('hostsurf:')`;
  *   - the pgvector stats probe counts (tenant, namespace) groups and reads the
  *     extension version from the live database.
+ *
+ * Tracker TST-BFC-7. Live-infra: skipped in `npm run ci`
+ * (OPENWOP_SKIP_TESTCONTAINERS=1), so it is not sabotage-probed in the gate.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { execSync } from 'node:child_process';
@@ -81,8 +84,8 @@ describe.skipIf(!available)('ADR 0871 gauge SQL on real Postgres', () => {
 
   it('the pgvector probe counts (tenant, namespace) groups and reads the live extension version', async () => {
     const run = async (sql: string, params: unknown[]) => ({ rows: (await client!.query(sql, params)).rows });
-    const t1 = createPgVectorVector({ tenantId: 't1' } as never, { run, dim: 3, table: TABLE });
-    const t2 = createPgVectorVector({ tenantId: 't2' } as never, { run, dim: 3, table: TABLE });
+    const t1 = createPgVectorVector({ tenantId: 't1' }, { run, dim: 3, table: TABLE });
+    const t2 = createPgVectorVector({ tenantId: 't2' }, { run, dim: 3, table: TABLE });
     await t1.upsert({ namespace: 'docs', items: [1, 2, 3].map((i) => ({ id: `d${i}`, vector: [i, 1, 0] })) });
     await t1.upsert({ namespace: 'notes', items: [{ id: 'n1', vector: [0, 1, 0] }] });
     await t2.upsert({ namespace: 'docs', items: [{ id: 'd1', vector: [1, 0, 0] }, { id: 'd2', vector: [0, 0, 1] }] });

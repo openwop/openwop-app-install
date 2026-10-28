@@ -18,20 +18,26 @@
  *
  * This moves the whole class from runtime to CI, where a broken schema is a red
  * build naming the tool instead of a guard that quietly stopped guarding.
+ *
+ * CORRECTED 2026-10-23 (wave 61): the first paragraph above is history. Since
+ * ADR 0547 D1/D2, `agentDispatch.resolveAgentTools` (`:547`) DROPS a tool whose
+ * schema does not compile (`toolSchemaCompiles`), and both callers compile
+ * through ONE instance, `host/toolSchemaValidation.ts`, which strips `$id` for
+ * both (D4). This file used to hand-copy that Ajv config into a local instance
+ * and keep a "$id kept" MCP leg for a code path that no longer exists. It now
+ * calls the product's own validator: `toolSchemaCompiles` (the chat offer gate)
+ * and `compileToolSchema` (what `mcpSemantics.ts:200` compiles on `tools/call`).
+ * Floor MEASURED 2026-10-23: 211 registered tools after createApp.
  */
 import { describe, expect, it, beforeAll } from 'vitest';
-import Ajv2020 from 'ajv/dist/2020.js';
 import { createApp } from '../src/index.js';
 import { builtinAgentTool, builtinAgentToolIds } from '../src/host/agentToolProvider.js';
+import { compileToolSchema, toolSchemaCompiles } from '../src/host/toolSchemaValidation.js';
 
-/** Mirrors both runtime call sites: `mcpServerRouter` compiles the schema as-is;
- *  `agentDispatch` strips `$id` first. Identical Ajv config on both. */
-const ajv = new Ajv2020({ strict: false, allErrors: true });
-
-function compileErr(schema: Record<string, unknown>, stripId: boolean): string | undefined {
+/** The MCP router's compile (`mcpSemantics.ts` → `compileToolSchema`), with its error text. */
+function mcpCompileErr(schema: Record<string, unknown>): string | undefined {
   try {
-    const { $id: _drop, ...rest } = schema;
-    ajv.compile(stripId ? rest : schema);
+    compileToolSchema(schema);
     return undefined;
   } catch (err) {
     return err instanceof Error ? err.message : String(err);
@@ -63,15 +69,21 @@ describe('ADR 0547 — every tool inputSchema compiles', () => {
     // The vacuity floor. A bare import yields single digits; the real surface is
     // in the hundreds. If this ever drops, the ratchet has stopped ratcheting and
     // must be fixed rather than re-baselined downward.
-    expect(ids.length, 'feature tools did not register — every assertion below is vacuous').toBeGreaterThan(100);
+    expect(ids.length, 'feature tools did not register — every assertion below is vacuous').toBeGreaterThanOrEqual(207);
   });
 
   it('has teeth — a known-bad schema is actually rejected by this check', () => {
-    // Self-sabotage. Without this, a bug that made `compileErr` always return
-    // undefined would render the whole file green and meaningless.
-    expect(compileErr({ type: 'object', properties: { a: { $ref: '#/definitions/nope' } } }, true)).toBeDefined();
-    expect(compileErr({ type: 'object', properties: { a: { type: 'string', pattern: '[' } } }, true)).toBeDefined();
-    expect(compileErr({ type: 'object', properties: { a: { type: 'strin' } } }, true)).toBeDefined();
+    // Self-sabotage. Without this, a product validator that always said "fine"
+    // would render the whole file green and meaningless.
+    const bad: Array<Record<string, unknown>> = [
+      { type: 'object', properties: { a: { $ref: '#/definitions/nope' } } },
+      { type: 'object', properties: { a: { type: 'string', pattern: '[' } } },
+      { type: 'object', properties: { a: { type: 'strin' } } },
+    ];
+    expect(bad.map((b) => toolSchemaCompiles(b))).toEqual([false, false, false]);
+    expect(bad.map((b) => mcpCompileErr(b) !== undefined)).toEqual([true, true, true]);
+    // …and a good schema passes, so `false` above is not the only answer.
+    expect(toolSchemaCompiles({ type: 'object', properties: { a: { type: 'string' } } })).toBe(true);
   });
 
   it('every registered tool declares an inputSchema object', () => {
@@ -83,19 +95,17 @@ describe('ADR 0547 — every tool inputSchema compiles', () => {
   });
 
   it('every registered inputSchema compiles on the CHAT path ($id stripped)', () => {
-    const failures = ids
-      .map((id) => ({ id, err: compileErr(builtinAgentTool(id)!.def.inputSchema, true) }))
-      .filter((r) => r.err)
-      .map((r) => `${r.id}: ${r.err}`);
+    // `toolSchemaCompiles` is the exact gate `resolveAgentTools` offers a tool through.
+    const failures = ids.filter((id) => !toolSchemaCompiles(builtinAgentTool(id)!.def.inputSchema));
     expect(failures, 'these tools run with NO argument validation on the chat path').toEqual([]);
   });
 
-  it('every registered inputSchema compiles on the MCP path ($id kept)', () => {
+  it('every registered inputSchema compiles on the MCP path (compileToolSchema)', () => {
     // MCP fails CLOSED on a compile error, so a failure here is a tool that is
     // uncallable over MCP rather than unvalidated — a different symptom of the
     // same defect, and worth naming separately.
     const failures = ids
-      .map((id) => ({ id, err: compileErr(builtinAgentTool(id)!.def.inputSchema, false) }))
+      .map((id) => ({ id, err: mcpCompileErr(builtinAgentTool(id)!.def.inputSchema) }))
       .filter((r) => r.err)
       .map((r) => `${r.id}: ${r.err}`);
     expect(failures, 'these tools are uncallable over MCP — inputSchema compile fails').toEqual([]);

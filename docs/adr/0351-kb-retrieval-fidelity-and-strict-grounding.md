@@ -88,6 +88,13 @@ RBAC unchanged (org-scoped, fail-closed). No public surface.
 - **Managed embeddings NOT offered** (open Q1 resolved): the managed sample provider rejects
   embedding mode; only the tenant's BYOK default (openai/google) qualifies. Zero-config tenants
   stay on `local-hash` (labeled).
+  > **Correction (2026-10-17, ADR 0904 D1).** This refused the *managed sample LLM provider* as an
+  > embedder, because it has no embeddings mode — and that still holds. It is not a refusal of an
+  > operator-funded embedder, which is a different thing: a deployment-level default with its own
+  > daily budget line. ADR 0904 D1 adds one (`OPENWOP_KB_HOST_EMBEDDER=vertex:gemini-embedding-001`,
+  > ADC, off unless set, refused at boot without `OPENWOP_EMBED_BUDGET_TOKENS_PER_DAY`, never for
+  > `anon:` tenants). With it set, a collection that made no embedder choice uses it instead of
+  > `local-hash`; with it unset, zero-config tenants stay on `local-hash` as written above.
 - **Revision history is a COMPACT log** (hash/title/when — `kb:docrev`, cap 20), not retained
   full-text rows: a 400k-char body ×20 would strain the durable store for what staleness needs.
 - **Contextual enrichment shipped DETERMINISTIC-only** (`heading-path` — `[title > nearest

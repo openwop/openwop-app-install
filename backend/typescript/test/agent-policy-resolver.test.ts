@@ -1,21 +1,17 @@
 /**
  * Agent-profile policy enforcement (ADR 0036).
  *
- * Two layers of coverage:
+ * The pure resolver (`resolveAgentPolicy`) — the single composition point.
+ * permissions.never → deny; hitl → review (regardless of level); auto +
+ * withinPolicyActions allowlist → auto only for listed action classes
+ * (off-list → review; an EMPTY/absent allowlist does not restrict);
+ * and composition with the ADR 0033 readiness gate (most-restrictive wins).
  *
- *  A. The pure resolver (`resolveAgentPolicy`) — the single composition point.
- *     permissions.never → deny; hitl → review (regardless of level); auto +
- *     withinPolicyActions allowlist → auto only for listed action classes
- *     (off-list / empty allowlist → review); and composition with the ADR 0033
- *     readiness gate (most-restrictive wins).
+ * The two enforcement seams that consult it are covered in their own files:
+ * agent-policy-heartbeat.test.ts and agent-policy-assistant-enqueue.test.ts.
  *
- *  B. The two enforcement seams that consult it:
- *     - the heartbeat pick (`runHeartbeatOnce`): a `never` workflow is skipped
- *       (neither run nor proposed); a `hitl` workflow is proposed; an `auto`
- *       agent runs only allowlisted workflows (off-list → propose); an un-ready
- *       required connection forces a proposal.
- *     - the assistant action enqueue (`enqueueActionWithApproval`): a `never`
- *       action kind is forbidden (403, nothing drafted).
+ * TST-BLP-3. Red when: the never or hitl check is skipped, the allowlist stops
+ * restricting, the readiness reason is lost, or an empty allowlist fails closed.
  *
  * @see docs/adr/0036-agent-profile-policy-enforcement.md
  */
@@ -53,12 +49,12 @@ function profile(over: Partial<AgentProfile> = {}): AgentProfile {
   };
 }
 
-function verdict(p: AgentProfile | null, actionClass: string, readiness: ConnectionReadiness = READY, level?: PolicyVerdict): PolicyVerdict {
+function verdict(p: AgentProfile | null, actionClass: string, readiness: ConnectionReadiness = READY, level?: 'auto' | 'guided' | 'review'): PolicyVerdict {
   return resolveAgentPolicy({
     profile: p,
     actionClass,
     readiness,
-    ...(level && level !== 'deny' ? { level: level as 'auto' | 'guided' | 'review' } : {}),
+    ...(level ? { level } : {}),
   }).verdict;
 }
 

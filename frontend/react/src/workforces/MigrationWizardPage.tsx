@@ -15,6 +15,7 @@ import { Notice } from '../ui/Notice.js';
 import { ArrowLeftIcon, ArrowRightIcon, BuildingIcon, CheckIcon, XIcon } from '../ui/icons/index.js';
 import {
   getMigrationJourney,
+  getMigrationTargets,
   getWorkforce,
   getWorkforceGovernance,
   getWorkforceShadow,
@@ -22,7 +23,9 @@ import {
   runWorkforceEval,
   updateWorkforceStatus,
   EvalNotEnabledError,
+  isUnresolvedTarget,
   type MigrationJourney,
+  type MigrationTarget,
   type MigrationStageKey,
   type ShadowEvalSummary,
   type Workforce,
@@ -53,6 +56,9 @@ export function MigrationWizardPage(): JSX.Element {
   const [journey, setJourney] = useState<MigrationJourney | null>(null);
   const [governance, setGovernance] = useState<WorkforceGovernance | null>(null);
   const [shadow, setShadow] = useState<ShadowEvalSummary | null>(null);
+  // ARWF-15 — the picker offers only workflows the server says resolve for
+  // this tenant; `null` = the list could not be read.
+  const [targets, setTargets] = useState<MigrationTarget[] | null>(null);
   const [evalResult, setEvalResult] = useState<WorkforceEvalSummary | null>(null);
   const [evalState, setEvalState] = useState<'idle' | 'running' | 'unavailable'>('idle');
   const [loading, setLoading] = useState(true);
@@ -91,15 +97,17 @@ export function MigrationWizardPage(): JSX.Element {
       getMigrationJourney(workforceId).catch(() => null),
       getWorkforceGovernance(workforceId).catch(() => null),
       getWorkforceShadow(workforceId).catch(() => null),
+      getMigrationTargets(workforceId).catch(() => null),
     ])
-      .then(([w, j, g, s]) => {
+      .then(([w, j, g, s, tg]) => {
         if (cancelled) return;
         setWf(w);
         setJourney(j);
         setGovernance(g);
         setShadow(s);
+        setTargets(tg);
         if (j?.target) setTarget(j.target);
-        else if (w) setTarget({ workflowId: w.workflowCatalog[0] ?? '', targetOutcome: w.purpose.statement });
+        else if (w) setTarget({ workflowId: tg?.[0]?.workflowId ?? '', targetOutcome: w.purpose.statement });
         if (j?.dataManifest) setDataManifest(j.dataManifest);
         setError(null);
       })
@@ -116,7 +124,9 @@ export function MigrationWizardPage(): JSX.Element {
       setJourney(updated);
       if (advance) setActive((a) => Math.min(a + 1, STAGES.length - 1));
     } catch (e: unknown) {
-      setStageError(writeErrorMessage(e, t('common:error_forbidden'), t('workforceChangedReload')));
+      setStageError(isUnresolvedTarget(e)
+        ? t('targetUnresolved')
+        : writeErrorMessage(e, t('common:error_forbidden'), t('workforceChangedReload')));
       // ADR 0775 P4 — load the other editor's journey; the typed form is kept for the retry.
       if (isStaleWrite(e)) await getMigrationJourney(workforceId).then(setJourney).catch(() => undefined);
     } finally {
@@ -143,6 +153,9 @@ export function MigrationWizardPage(): JSX.Element {
   }
 
   const stage = STAGES[active]!;
+  // A target saved before ARWF-15 can name a workflow that no longer exists.
+  // Say so, and make the user pick a live one rather than showing it as valid.
+  const savedTargetMissing = targets !== null && Boolean(target.workflowId) && !targets.some((o) => o.workflowId === target.workflowId);
   const status = (k: MigrationStageKey): string => journey.stageStatus[k];
   const markDone = (k: MigrationStageKey, advance = true): Promise<void> => save({ stageStatus: { [k]: 'done' } }, advance);
 
@@ -176,15 +189,19 @@ export function MigrationWizardPage(): JSX.Element {
         {stage.key === 'target' ? (
           <div className="migwiz-form-grid">
             <label>{t('targetWorkflow')}
-              <select value={target.workflowId} onChange={(e) => setTarget({ ...target, workflowId: e.target.value })} className="u-block u-w-full">
-                {wf.workflowCatalog.map((id) => <option key={id} value={id}>{id}</option>)}
+              <select value={savedTargetMissing ? '' : target.workflowId} onChange={(e) => setTarget({ ...target, workflowId: e.target.value })} className="u-block u-w-full" disabled={!targets?.length}>
+                <option value="" disabled>{t('targetChoose')}</option>
+                {(targets ?? []).map((o) => <option key={o.workflowId} value={o.workflowId}>{o.name === o.workflowId ? o.name : `${o.name} (${o.workflowId})`}</option>)}
               </select>
             </label>
+            {targets === null ? <Notice variant="error">{t('targetsUnreadable')}</Notice> : null}
+            {targets?.length === 0 ? <Notice variant="info">{t('targetsNone')}</Notice> : null}
+            {savedTargetMissing ? <Notice variant="warning">{t('targetSavedMissing', { id: target.workflowId })}</Notice> : null}
             <label>{t('targetOutcome')}
               <textarea value={target.targetOutcome} onChange={(e) => setTarget({ ...target, targetOutcome: e.target.value })} rows={2} className="u-block u-w-full" />
             </label>
             <div className="action-bar">
-              <Button variant="primary" disabled={readOnly || busy || !target.workflowId} onClick={() => void save({ target, stageStatus: { target: 'done' } })}>{t('saveAndContinue')}</Button>
+              <Button variant="primary" disabled={readOnly || busy || !target.workflowId || savedTargetMissing} onClick={() => void save({ target, stageStatus: { target: 'done' } })}>{t('saveAndContinue')}</Button>
             </div>
           </div>
         ) : null}

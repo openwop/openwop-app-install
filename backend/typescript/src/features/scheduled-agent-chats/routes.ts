@@ -22,9 +22,11 @@ import { resolveCallerUser } from '../users/usersGuards.js';
 import { OpenwopError } from '../../types.js';
 import { resolveAgentForTenant } from '../../host/agentVisibility.js';
 import { getConversationMeta } from '../../host/conversationStore.js';
+import { hostExtStorage } from '../../host/hostExtPersistence.js';
 import { isVisibleToAsync } from '../../host/conversationVisibility.js';
 import { assertChannelManage, isChannelAgentMember, getChannel } from '../channels/channelService.js';
 import { channelAuthorityOf } from '../../host/channelAuthority.js';
+import { deleteMyChatSchedule, listMyChatSchedules, setMyChatScheduleEnabled } from './chatToolSchedules.js';
 import { canSeeScheduledChat, createScheduledChat, deleteScheduledChat, deleteScheduledChatsForAgent, getScheduledChat, listScheduledChatsWithStatus, setScheduledChatEnabled, SCHEDULED_AGENT_CHATS_TOGGLE, type ScheduledChat } from './scheduledChatService.js';
 
 const FEATURE = { toggleId: SCHEDULED_AGENT_CHATS_TOGGLE, label: 'Scheduled agent chats' } as const;
@@ -53,6 +55,16 @@ async function visibleOrgChat(req: Request, tenantId: string, orgId: string, cha
   return chat;
 }
 
+/** ADR 0985 D5 — a pause/resume says which. A missing or non-boolean `enabled` used
+ *  to RESUME (`enabled !== false`), so an empty POST to `…/pause` re-armed a schedule. */
+function requireEnabledFlag(req: Request): boolean {
+  const enabled = (req.body as { enabled?: unknown } | undefined)?.enabled;
+  if (typeof enabled !== 'boolean') {
+    throw new OpenwopError('validation_error', 'Field `enabled` MUST be a boolean (false pauses, true resumes).', 400, { field: 'enabled' });
+  }
+  return enabled;
+}
+
 export function registerScheduledChatRoutes(deps: RouteDeps): void {
   const { app } = deps;
   const ORG = '/host/openwop-app/scheduled-chats/orgs/:orgId/chats';
@@ -77,9 +89,10 @@ export function registerScheduledChatRoutes(deps: RouteDeps): void {
       const body = (req.body ?? {}) as Record<string, unknown>;
       // D6 — validate the target BEFORE binding a job: the agent must exist, and the
       // caller must be able to SEE the conversation they bind — closing the IDOR of
-      // scheduling into another user's PRIVATE conversation. (A legacy/unowned/absent
+      // scheduling into another user's PRIVATE conversation. A legacy unowned
       // conversation is tenant-visible by the isVisibleTo contract, so it stays
-      // bindable — harmless: the reply just posts to an empty/own surface.)
+      // bindable. ADR 0985 (architect M8) — an ABSENT one is refused: every slot of
+      // it would be skipped `target-refused` (`not_in_tenant`), so it is not harmless.
       // Normalize ONCE and bind the canonical values, so the access check reads the
       // SAME id the service stores — else a padded `conversationId` (" foreign-id")
       // would miss the exact-match lookup (null → tenant-visible → check passes) yet
@@ -88,7 +101,8 @@ export function registerScheduledChatRoutes(deps: RouteDeps): void {
       const conversationId = requireString(body.conversationId, 'conversationId').trim();
       await assertAgentResolves(tenantId, agentId);
       const meta = await getConversationMeta(tenantId, conversationId);
-      if (!(await isVisibleToAsync(meta, tenantId, actingUserOf(req)))) {
+      const session = await hostExtStorage().getChatSession(tenantId, conversationId);
+      if (!session || !(await isVisibleToAsync(meta, tenantId, actingUserOf(req)))) {
         throw new OpenwopError('not_found', 'Conversation not found.', 404, { conversationId });
       }
       // ADR 0879 D7 (architect C3) — a channel is posted to through the channel's own
@@ -111,8 +125,15 @@ export function registerScheduledChatRoutes(deps: RouteDeps): void {
   app.post(`${ORG}/:chatId/pause`, async (req, res, next) => {
     try {
       const { orgId, tenantId } = await authorizeOrgScope(req, FEATURE, 'workspace:write');
-      const enabled = (req.body as { enabled?: unknown })?.enabled !== false; // default re-enable; {enabled:false} pauses
-      await visibleOrgChat(req, tenantId, orgId, req.params.chatId);
+      const enabled = requireEnabledFlag(req);
+      const chat = await visibleOrgChat(req, tenantId, orgId, req.params.chatId);
+      // ADR 0985 D5 (grade-code SC2CD-7) — a resume re-asks create's question: the
+      // agent must still resolve, or every slot would fail. Any `workspace:write`
+      // member who can see the conversation may resume an org schedule; it still
+      // posts as its creator, whom the fire gate re-checks each slot.
+      if (enabled && !(await resolveAgentForTenant(chat.agentId, tenantId))) {
+        throw new OpenwopError('conflict', `Agent "${chat.agentId}" no longer exists — delete this schedule and create it again.`, 409, { chatId: chat.chatId, code: 'agent_missing' });
+      }
       res.json({ chat: await setScheduledChatEnabled(tenantId, { orgId }, req.params.chatId, enabled) });
     } catch (err) { next(err); }
   });
@@ -122,6 +143,33 @@ export function registerScheduledChatRoutes(deps: RouteDeps): void {
       const { orgId, tenantId } = await authorizeOrgScope(req, FEATURE, 'workspace:write');
       await visibleOrgChat(req, tenantId, orgId, req.params.chatId);
       await deleteScheduledChat(tenantId, { orgId }, req.params.chatId);
+      res.status(204).end();
+    } catch (err) { next(err); }
+  });
+
+  // ── MINE — the caller's schedules created from chat (ADR 0985 D6) ────────────
+  // The chat tools' jobs belong to the person, not to an org, so they are listed
+  // apart from the org picker. Ownership is the predicate (`chatToolSchedules.ts`).
+  const MINE = '/host/openwop-app/scheduled-chats/mine';
+  app.get(MINE, async (req, res, next) => {
+    try {
+      await requireFeatureEnabled(req, FEATURE.toggleId, FEATURE.label);
+      res.json({ schedules: await listMyChatSchedules(req) });
+    } catch (err) { next(err); }
+  });
+
+  app.post(`${MINE}/:jobId/pause`, async (req, res, next) => {
+    try {
+      await requireFeatureEnabled(req, FEATURE.toggleId, FEATURE.label);
+      const enabled = requireEnabledFlag(req);
+      res.json({ schedule: await setMyChatScheduleEnabled(req, req.params.jobId, enabled) });
+    } catch (err) { next(err); }
+  });
+
+  app.delete(`${MINE}/:jobId`, async (req, res, next) => {
+    try {
+      await requireFeatureEnabled(req, FEATURE.toggleId, FEATURE.label);
+      await deleteMyChatSchedule(req, req.params.jobId);
       res.status(204).end();
     } catch (err) { next(err); }
   });
@@ -180,7 +228,7 @@ export function registerScheduledChatRoutes(deps: RouteDeps): void {
     try {
       const { tenantId, userId, channelId } = await channelCaller(req);
       await assertChannelManage(tenantId, channelId, userId, await channelAuthorityOf(req)); // owner-or-admin + workspace:write (ADR 0879 D1/D3)
-      const enabled = (req.body as { enabled?: unknown })?.enabled !== false;
+      const enabled = requireEnabledFlag(req);
       res.json({ chat: await setScheduledChatEnabled(tenantId, { channelId }, req.params.chatId, enabled) });
     } catch (err) { next(err); }
   });

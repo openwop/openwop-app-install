@@ -38,6 +38,7 @@ import { getAssetByIdForTenant, viewAsset, listAssetsForTenant, type MediaAsset 
 import { listDocumentsForTenant } from '../features/documents/documentsService.js';
 import { getRunArtifact, listRunArtifactsForTenant, type RunArtifactRecord, listRunArtifactsForRun } from './runArtifactStore.js';
 import type { Subject } from './subject.js';
+import { canReadChatArtifact } from './chatArtifactScope.js';
 
 export type ArtifactSource = 'document' | 'media' | 'run-event';
 
@@ -238,7 +239,9 @@ async function resolveRunArtifact(tenantId: string, subject: string | undefined,
   // artifact is the linked media:/document: owner; never project it as run-event.
   if (row.linkedArtifactId) return null;
   const access = await resolveEffectiveAccess(tenantId, { ...(subject ? { subject } : {}), orgId: row.orgId });
-  return access.scopes.includes('workspace:read') ? row : null;
+  if (!access.scopes.includes('workspace:read')) return null;
+  // ADR 0996 — a chat-tool artifact is as private as its conversation.
+  return (await canReadChatArtifact(row, subject)) ? row : null;
 }
 
 // ── authorization + composition ─────────────────────────────────────────
@@ -402,10 +405,24 @@ export async function listArtifacts(tenantId: string, subject: string | undefine
     // ADR 0838 D3 — THE document read predicate (was a second copy).
     return (await canReadDocument(tenantId, d, subject)) ? d : null;
   }))).filter((d): d is NonNullable<typeof d> => d !== null);
+  // ADR 0996 — a chat-tool artifact (`chat-code:` / `chat-viz:`) is as
+  // private as the conversation it came from; every row is org-scoped to the
+  // tenant, so the org gate alone listed a private chat's output to every member.
+  // Each conversation is asked once. Fail-closed per row, logged (as ART-3).
+  const chatMemo = new Map<string, Promise<boolean>>();
+  const visibleRuns = (await Promise.all(runs.map(async (r) => {
+    if (!canRead.get(r.orgId)) return null;
+    try {
+      return (await canReadChatArtifact(r, subject, chatMemo)) ? r : null;
+    } catch (err) {
+      log.warn('artifact_library_chat_access_failed', { tenantId, error: err instanceof Error ? err.message : String(err) });
+      return null;
+    }
+  }))).filter((r): r is NonNullable<typeof r> => r !== null);
   const projections: ArtifactProjection[] = [
     ...visibleDocs.map(documentToArtifact),
     ...assets.filter((a) => canRead.get(a.orgId)).map(mediaToArtifact),
-    ...runs.filter((r) => canRead.get(r.orgId)).map(runArtifactToArtifact),
+    ...visibleRuns.map(runArtifactToArtifact),
   ].filter(isLibraryAsset);
   // Stable newest-first ordering, tie-broken by id, so the ART-1 keyset cursor is well-defined.
   return projections.sort((a, b) => {

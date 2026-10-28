@@ -8,30 +8,32 @@
  *   - a kind NOT forbidden enqueues normally (always proposes — the path's
  *     existing behavior; execution waits on a human approve).
  *
+ * TST-BLP-1. Red when: the `deny` branch is skipped (the action enqueues), or
+ * the deny fires only AFTER a PendingAction was drafted (the read-back of
+ * `listPendingActions` / `listApprovals` below catches the leftover row).
+ *
  * @see docs/adr/0036-agent-profile-policy-enforcement.md
  */
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { __clearToggleStore } from '../src/host/featureToggles/service.js';
 import { __resetAssistantStore } from '../src/features/assistant/assistantService.js';
 import { __resetApprovalStore } from '../src/host/approvalService.js';
 import { enqueueActionWithApproval } from '../src/features/assistant/actionApproval.js';
+import { listPendingActions, type PendingActionKind } from '../src/features/assistant/assistantService.js';
+import { listApprovals } from '../src/host/approvalService.js';
 import { ensureAssistantAgent } from '../src/features/assistant/capability.js';
 import { upsertAgentProfile, __resetAgentProfileStore } from '../src/host/agentProfileService.js';
 import { __resetConnectionsStore } from '../src/features/connections/connectionsService.js';
 
-let server: { close(cb?: () => void): void };
 const TENANT = 'default';
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
-  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+  // The boot wires the assistant capability + stores; no HTTP is used.
+  await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await __clearToggleStore();
-  server = app.listen(0, '127.0.0.1');
-});
-afterAll(async () => {
-  await new Promise<void>((res) => server.close(() => res()));
 });
 beforeEach(async () => {
   await __resetAssistantStore();
@@ -40,9 +42,9 @@ beforeEach(async () => {
   await __resetConnectionsStore();
 });
 
-function draft(kind: string) {
+function draft(kind: PendingActionKind) {
   return {
-    kind: kind as 'email.send',
+    kind,
     payload: { to: ['dana@example.com'] },
     draft: 'Hi Dana — following up.',
     riskLevel: 'medium' as const,
@@ -58,7 +60,14 @@ describe('enqueueActionWithApproval — agentProfile policy (ADR 0036)', () => {
       autonomy: { specLevel: 'recommend' },
     });
 
-    await expect(enqueueActionWithApproval(TENANT, draft('email.send'))).rejects.toMatchObject({ status: 403 });
+    await expect(enqueueActionWithApproval(TENANT, draft('email.send'))).rejects.toMatchObject({
+      status: 403,
+      code: 'forbidden',
+      message: expect.stringContaining("forbidden by the agent's policy (permissions.never)"),
+    });
+    // Nothing drafted, enqueued, or made approvable.
+    expect(await listPendingActions(TENANT)).toEqual([]);
+    expect(await listApprovals(TENANT)).toEqual([]);
   });
 
   it('enqueues normally for a kind NOT on permissions.never', async () => {
@@ -72,6 +81,9 @@ describe('enqueueActionWithApproval — agentProfile policy (ADR 0036)', () => {
     const action = await enqueueActionWithApproval(TENANT, draft('email.send'));
     expect(action.actionId).toBeTruthy();
     expect(action.approvalId).toBeTruthy();
+    // Positive control for the read-back the forbid case relies on.
+    expect((await listPendingActions(TENANT)).map((a) => a.actionId)).toEqual([action.actionId]);
+    expect((await listApprovals(TENANT)).map((a) => a.approvalId)).toEqual([action.approvalId]);
   });
 
   it('is ungated when the acting agent has no profile (back-compat: enqueues)', async () => {

@@ -108,6 +108,14 @@ async function warmTenantIndexes(): Promise<void> {
     new DurableCollection<{ activityId: string; tenantId: string }>('crm:activity', (a) => a.activityId, undefined, (a) => a.tenantId),
     new DurableCollection<{ sendId: string; tenantId: string }>('email:sendlog', (s) => s.sendId, undefined, (s) => s.tenantId),
   ]) await c.ensureTenantIndex();
+  // ADR 0905 D7 — the topic opt-out merge union reads its tenant slice (indexed).
+  await new DurableCollection<{ tenantId: string; orgId: string; subjectKey: string; topicId: string }>(
+    'consent:topic-optout', (r) => JSON.stringify([r.tenantId, r.orgId, r.subjectKey, r.topicId]), undefined, (r) => r.tenantId,
+  ).ensureTenantIndex();
+  // ADR 0955 Q7 — the per-client SMS grant merge reads its tenant slice the same way (indexed).
+  await new DurableCollection<{ tenantId: string; orgId: string; subjectKey: string; channel: string }>(
+    'consent:client-channel', (r) => JSON.stringify([r.tenantId, r.orgId, r.subjectKey, r.channel]), undefined, (r) => r.tenantId,
+  ).ensureTenantIndex();
 }
 
 describe('CRM-11 — a contact merge reads only its own tenant', () => {

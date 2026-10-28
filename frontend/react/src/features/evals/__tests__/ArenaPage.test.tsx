@@ -1,25 +1,20 @@
 /**
- * ArenaPage (ADR 0123 Phase 4c) — the head-to-head contract:
- *  - both panes dispatch NORMAL conversation runs with the model pinned at
- *    session-open (one-chat compliance: the existing transport, no bespoke path);
- *  - the vote posts {modelA, modelB, winner} to the arena route and shows the
- *    returned Elo ratings;
- *  - a failed pane renders the designed keys-hint error (never throws);
- *  - the a9 port pin: replies render through the SHARED `MessageBubble` and the
- *    prompt is driven by the SHARED `ChatInput` — a re-hand-rolled arena bubble
- *    (inline MSG/USER_MSG styling) or a raw `<input type="text">` composer would
- *    fail the two regression tests at the bottom.
+ * ArenaPage (ADR 0123 Phase 4c, ADR 0986 D7) — the blind, run-bound head-to-head:
+ *  - each pane is a NORMAL conversation run pinned to its contestant's model AND the
+ *    credential the caller holds for that provider (architect B2: without one, the
+ *    host answered both panes with the managed tier);
+ *  - a contestant with no credential is refused with the keys hint, and nothing runs;
+ *  - sides are assigned at random and hidden until the vote; the vote posts the two
+ *    RUN ids and the server's reply names the models (the reveal);
+ *  - a failed pane renders the keys hint and blocks voting;
+ *  - replies ride the SHARED `MessageBubble`, the prompt the SHARED `ChatInput`.
  *
- * Witnessed (wave 25 probes): pinning the wrong model at session-open, voting the
- * wrong winner, swapping modelA/modelB in the capture, dropping a returned rating,
- * swallowing a pane error, dropping the pane-error gate on the vote bar (the
- * LATER-turn case — on a first-turn failure the empty pane hides the bar anyway),
- * a hand-rolled bubble, and a raw-input composer each red a case.
- * Mocks are typed against the real transport/client signatures; the turn fixture is
- * a real `ConversationTurn` (role 'agent', not the non-union 'assistant').
+ * Witnessed: dropping the credential at session-open, ignoring a missing key,
+ * printing the contestant in the pane header, posting model names instead of run
+ * ids, swapping the run ids, and dropping the pane-error gate each red a case.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, waitFor, fireEvent } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { render, waitFor, fireEvent, screen, within, cleanup } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
 import type { SendResult } from '../../../chat/conversationTransport.js';
@@ -42,14 +37,23 @@ vi.mock('../../../chat/conversationTransport.js', async (importOriginal) => {
 });
 
 const captureArenaMatch = vi.fn<EvalsClient['captureArenaMatch']>();
-vi.mock('../../../client/evalsClient.js', () => ({
+vi.mock('../../../client/evalsClient.js', async (importOriginal) => ({
+  // The real EvalsHttpError, so a refusal reason reaches the page as it would.
+  EvalsHttpError: (await importOriginal<EvalsClient>()).EvalsHttpError,
   captureArenaMatch: (...a: Parameters<EvalsClient['captureArenaMatch']>) => captureArenaMatch(...a),
-  fetchArenaRating: vi.fn().mockResolvedValue(1500),
   listOrgs: vi.fn().mockResolvedValue([{ orgId: 'org-1', name: 'Acme' }]),
 }));
+let storedRefs: string[] = ['byok:openai', 'byok:google'];
+vi.mock('../../../byok/lib/byokClient.js', () => ({ listStoredRefs: () => Promise.resolve(storedRefs) }));
 
-// Arena is enabled; developer-tools OFF so the shared bubble stays minimal (no
-// EnvelopeInspector) — mirrors the production default.
+// The shared composer's @-mention and / pickers read agents, boards and workflows;
+// mocked so the arena tests make no live call (ADR 0661).
+vi.mock('../../../client/agentsClient.js', () => ({ listAgents: () => Promise.resolve([]) }));
+vi.mock('../../../features/advisory-board/advisoryBoardClient.js', () => ({ listBoards: () => Promise.resolve([]) }));
+vi.mock('../../../workflows/workflowsClient.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../workflows/workflowsClient.js')>()),
+  listWorkflowSummaries: () => Promise.resolve([]),
+}));
 vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
   useFeatureAccess: (feature: string) => makeFeatureAccess({ enabled: feature === 'evals', loading: false }),
 }));
@@ -65,6 +69,7 @@ vi.mock('../../../chat/ModelSwitcher.js', () => ({
 }));
 
 import { ArenaPage } from '../ArenaPage.js';
+import { EvalsHttpError } from '../../../client/evalsClient.js';
 
 const turnFor = (text: string): SendResult => {
   const turns: ConversationTurn[] = [
@@ -74,87 +79,145 @@ const turnFor = (text: string): SendResult => {
   return { turns, lastSeq: 2 };
 };
 
+let random: ReturnType<typeof vi.spyOn>;
 beforeEach(() => {
+  storedRefs = ['byok:openai', 'byok:google'];
   openSession.mockReset();
   sendTurn.mockReset();
   captureArenaMatch.mockReset();
+  closeSession.mockClear();
   let n = 0;
   openSession.mockImplementation(() => Promise.resolve({ runId: `run-${++n}`, nodeId: 'gate' }));
   sendTurn.mockImplementation((_r, _n2, input) => Promise.resolve(turnFor(typeof input.content === 'string' ? input.content : '')));
+  random = vi.spyOn(Math, 'random').mockReturnValue(0.9); // ≥ 0.5 ⇒ contestant 2 is side A
 });
+afterEach(() => { random.mockRestore(); cleanup(); });
 
-async function driveMatch() {
-  const utils = render(<MemoryRouter><ArenaPage /></MemoryRouter>);
-  const { getAllByText, getByPlaceholderText } = utils;
-  // pick model A (first switcher) + model B (second switcher)
-  fireEvent.click(getAllByText('pick-gpt')[0]!);
-  fireEvent.click(getAllByText('pick-gemini')[1]!);
-  // The shared composer (ChatInput) is a textarea; Enter (no modifier) submits.
-  const composer = getByPlaceholderText(/ask both models/i);
-  fireEvent.change(composer, { target: { value: 'which is better?' } });
+async function send(text: string): Promise<void> {
+  const composer = screen.getByPlaceholderText(/ask both models/i);
+  fireEvent.change(composer, { target: { value: text } });
   fireEvent.keyDown(composer, { key: 'Enter' });
-  await waitFor(() => expect(getAllByText(/reply to which is better\?/)).toHaveLength(2));
-  return utils;
+}
+
+async function driveMatch(): Promise<void> {
+  render(<MemoryRouter><ArenaPage /></MemoryRouter>);
+  await waitFor(() => expect(screen.getAllByText('pick-gpt')).toHaveLength(2)); // stored refs read
+  await new Promise((r) => setImmediate(r));
+  fireEvent.click(screen.getAllByText('pick-gpt')[0]!);
+  fireEvent.click(screen.getAllByText('pick-gemini')[1]!);
+  await send('which is better?');
+  await waitFor(() => expect(screen.getAllByText(/reply to which is better\?/)).toHaveLength(2));
 }
 
 describe('ArenaPage', () => {
-  it('dispatches TWO normal runs with the model pinned at session-open', async () => {
+  it('opens each side with its model AND the caller\'s credential for that provider, sides assigned at random', async () => {
     await driveMatch();
     expect(openSession).toHaveBeenCalledTimes(2);
-    expect(openSession).toHaveBeenCalledWith({ provider: 'openai', model: 'gpt-test' });
-    expect(openSession).toHaveBeenCalledWith({ provider: 'google', model: 'gemini-test' });
-    expect(sendTurn).toHaveBeenCalledTimes(2);
+    // Math.random() = 0.9 ⇒ contestant 2 (gemini) became side A, opened first.
+    expect(openSession.mock.calls[0]![0]).toEqual({ provider: 'google', model: 'gemini-test', credentialRef: 'byok:google' });
+    expect(openSession.mock.calls[1]![0]).toEqual({ provider: 'openai', model: 'gpt-test', credentialRef: 'byok:openai' });
   });
 
-  it('the vote posts {modelA, modelB, winner} and shows the returned Elo', async () => {
-    captureArenaMatch.mockResolvedValue({ ratingA: 1484, ratingB: 1516 });
-    const { getByText, findByRole } = await driveMatch();
-    fireEvent.click(getByText(/b is better/i));
-    await waitFor(() => expect(captureArenaMatch).toHaveBeenCalledWith('org-1', { modelA: 'gpt-test', modelB: 'gemini-test', winner: 'B' }));
-    const status = await findByRole('status');
-    expect(status.textContent).toContain('1484');
-    expect(status.textContent).toContain('1516');
+  it('refuses a contestant the caller holds no credential for, and runs nothing', async () => {
+    storedRefs = ['byok:openai'];
+    render(<MemoryRouter><ArenaPage /></MemoryRouter>);
+    await new Promise((r) => setImmediate(r));
+    fireEvent.click(screen.getAllByText('pick-gpt')[0]!);
+    fireEvent.click(screen.getAllByText('pick-gemini')[1]!);
+    await send('hi');
+    expect(await screen.findByText(/don’t have a key for google/i)).toBeTruthy();
+    expect(openSession).not.toHaveBeenCalled();
   });
 
-  it('a failed pane renders the keys-hint error, not a crash, and blocks voting', async () => {
+  it('hides which model is which until the vote, posts the run ids, and reveals from the server', async () => {
+    captureArenaMatch.mockResolvedValue({ match: { modelA: 'gemini-test', modelB: 'gpt-test', winner: 'B' }, ratingA: 1484, ratingB: 1516 });
+    await driveMatch();
+    for (const label of ['Model A', 'Model B']) {
+      const pane = screen.getByRole('region', { name: label });
+      expect(within(pane).queryByText(/gpt-test|gemini-test/)).toBeNull();
+      expect(within(pane).getByText('Hidden until you vote')).toBeTruthy();
+    }
+    fireEvent.click(screen.getByText(/b is better/i));
+    await waitFor(() => expect(captureArenaMatch).toHaveBeenCalledWith('org-1', { runIdA: 'run-1', runIdB: 'run-2', winner: 'B' }));
+    expect(await screen.findByText(/Recorded: gpt-test.*1,516/)).toBeTruthy();
+    // The verdict ends the match: a further send goes nowhere until "New match".
+    expect(screen.getByText(/This match is decided/)).toBeTruthy();
+    const sent = sendTurn.mock.calls.length;
+    await send('one more?');
+    expect(sendTurn.mock.calls.length).toBe(sent);
+    expect(within(screen.getByRole('region', { name: 'Model A' })).getByText('gemini-test')).toBeTruthy();
+  });
+
+  it('a repeat vote on the same pair says so', async () => {
+    captureArenaMatch.mockResolvedValue({ match: { modelA: 'gemini-test', modelB: 'gpt-test', winner: 'A' }, ratingA: 1516, ratingB: 1484, replayed: true });
+    await driveMatch();
+    fireEvent.click(screen.getByText(/b is better/i));
+    expect(await screen.findByText(/Your earlier vote on this pair stands/)).toBeTruthy();
+  });
+
+  it('a refused verdict says why, instead of "retry"', async () => {
+    captureArenaMatch.mockRejectedValue(new EvalsHttpError('conflict: x', 409, 'arena_prompt_mismatch'));
+    await driveMatch();
+    fireEvent.click(screen.getByText(/b is better/i));
+    expect(await screen.findByText(/didn’t answer the same prompts/)).toBeTruthy();
+    expect(screen.queryByText(/vote again to retry/i)).toBeNull();
+    // …and the refusal ends the match: the buttons can't repeat it.
+    expect(screen.queryByText(/b is better/i)).toBeNull();
+  });
+
+  it('the per-model vote cap is a refusal with its own sentence, not "retry"', async () => {
+    captureArenaMatch.mockRejectedValue(new EvalsHttpError('rate_limited: x', 429, 'arena_rater_cap'));
+    await driveMatch();
+    fireEvent.click(screen.getByText(/b is better/i));
+    expect(await screen.findByText(/limit of arena votes/)).toBeTruthy();
+    expect(screen.queryByText(/vote again to retry/i)).toBeNull();
+  });
+
+  it('refuses two picks of the same model before anything runs', async () => {
+    render(<MemoryRouter><ArenaPage /></MemoryRouter>);
+    await new Promise((r) => setImmediate(r));
+    fireEvent.click(screen.getAllByText('pick-gpt')[0]!);
+    fireEvent.click(screen.getAllByText('pick-gpt')[1]!);
+    await send('hi');
+    expect(await screen.findByText(/Pick two different models/)).toBeTruthy();
+    expect(openSession).not.toHaveBeenCalled();
+  });
+
+  it('closes both runs when you leave the page', async () => {
+    await driveMatch();
+    cleanup();
+    await waitFor(() => expect(closeSession).toHaveBeenCalledTimes(2));
+  });
+
+  it('a failed pane renders the keys hint and blocks voting', async () => {
     sendTurn.mockImplementationOnce(() => Promise.reject(new Error('provider_auth 401')));
-    const { getAllByText, getByPlaceholderText, queryByText, findByText } = render(<MemoryRouter><ArenaPage /></MemoryRouter>);
-    fireEvent.click(getAllByText('pick-gpt')[0]!);
-    fireEvent.click(getAllByText('pick-gemini')[1]!);
-    const composer = getByPlaceholderText(/ask both models/i);
-    fireEvent.change(composer, { target: { value: 'hi' } });
-    fireEvent.keyDown(composer, { key: 'Enter' });
-    await findByText(/could not reply/i);
-    expect(queryByText(/b is better/i)).toBeNull(); // vote bar requires both panes settled
+    render(<MemoryRouter><ArenaPage /></MemoryRouter>);
+    await new Promise((r) => setImmediate(r));
+    fireEvent.click(screen.getAllByText('pick-gpt')[0]!);
+    fireEvent.click(screen.getAllByText('pick-gemini')[1]!);
+    await send('hi');
+    await screen.findByText(/couldn’t reply/i);
+    expect(screen.queryByText(/b is better/i)).toBeNull();
   });
 
-  it('a LATER failed turn hides the vote bar even though the pane already has replies', async () => {
-    // On a first-turn failure the empty pane alone hides the bar; here pane A HAS bubbles,
-    // so only the pane-error gate can keep a verdict off a half-failed comparison.
-    const { getByText, queryByText, findByText, getByPlaceholderText } = await driveMatch();
-    expect(getByText(/b is better/i), 'precondition: the bar shows after a clean round').toBeTruthy();
+  it('a LATER failed turn ends the match: no vote bar, no further sends, and the page says why', async () => {
+    await driveMatch();
+    expect(screen.getByText(/b is better/i), 'precondition: the bar shows after a clean round').toBeTruthy();
     sendTurn.mockImplementationOnce(() => Promise.reject(new Error('provider_auth 401')));
-    const composer = getByPlaceholderText(/ask both models/i);
-    fireEvent.change(composer, { target: { value: 'and now?' } });
-    fireEvent.keyDown(composer, { key: 'Enter' });
-    await findByText(/could not reply/i);
-    await findByText(/reply to and now\?/); // pane B settled too
-    expect(queryByText(/b is better/i)).toBeNull();
+    await send('and now?');
+    await screen.findByText(/couldn’t reply/i);
+    await screen.findByText(/reply to and now\?/);
+    expect(screen.queryByText(/b is better/i)).toBeNull();
+    expect(screen.getByText(/can’t be judged/)).toBeTruthy();
+    const sent = sendTurn.mock.calls.length;
+    await send('retry?');
+    expect(sendTurn.mock.calls.length).toBe(sent);
   });
 
-  // a9 port pins — the arena's feed + composer ride the ONE chat's presentation
-  // layer, not a third hand-rolled copy of chat-bubble/composer styling.
-  it('renders replies through the SHARED chat bubble (no hand-rolled arena bubbles)', async () => {
-    const { container } = await driveMatch();
-    // The shared MessageBubble emits `.msgbubble-row`; the demolished arena
-    // bubbles used inline MSG/USER_MSG styles carrying none of these classes.
-    // user + reply in each of the two panes
-    expect(container.querySelectorAll('.msgbubble-row')).toHaveLength(4);
-  });
-
-  it('drives the prompt with the SHARED composer (ChatInput), not a raw <input type="text">', () => {
-    const { container } = render(<MemoryRouter><ArenaPage /></MemoryRouter>);
-    expect(container.querySelector('input[type="text"]')).toBeNull();
-    expect(container.querySelector('.chatinput-textarea')).not.toBeNull();
+  it('renders replies through the SHARED chat bubble and drives the prompt with the SHARED composer', async () => {
+    await driveMatch();
+    expect(document.querySelectorAll('.msgbubble-row')).toHaveLength(4);
+    expect(document.querySelector('input[type="text"]')).toBeNull();
+    expect(document.querySelector('.chatinput-textarea')).not.toBeNull();
   });
 });

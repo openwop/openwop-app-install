@@ -17,6 +17,11 @@ import type { BYOKActiveConfig } from '../../../byok/lib/useBYOKConfig.js';
 // deck-minted tab has no BE row, so its first history read 404s and the session
 // re-keys to a fresh id. Off by default; the re-key test turns it on.
 const rekey = vi.hoisted(() => ({ on: false, done: new Set<string>() }));
+// ADR 0978 D4 — the deck resolves the active workspace before it restores.
+vi.mock('../../../client/workspaceClient.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../client/workspaceClient.js')>()),
+  listMyWorkspaces: async () => ({ workspaces: [], active: 'ws-test', personal: 'ws-test' }),
+}));
 vi.mock('../TabSession.js', async () => {
   const { useEffect } = await import('react');
   return {

@@ -2,8 +2,16 @@
  * Site-config routes (ADR 0027) — the runtime, superadmin-managed public
  * front-page pointer that replaces the build-time VITE_OPENWOP_FRONTPAGE_* env.
  * Drives over HTTP: the PUBLIC unauthed read, the superadmin gate on read/write,
- * and orgId validation. Superadmin = the wildcard bearer (admin key), matching
- * test/feature-toggles-superadmin.test.ts.
+ * and the superadmin on/off toggle. (The route no longer takes an orgId — the
+ * pointer is the fixed `host-site` org — so there is no orgId validation to
+ * test; an older header promised one.) Superadmin = the wildcard bearer (admin
+ * key), matching test/feature-toggles-superadmin.test.ts.
+ *
+ * What breaks it (sabotage-witnessed, /grade-tests wave 61, 8fw3g1-scf-*): either
+ * `requireSuperadmin` call (the refusal is asserted by exact code + message, so a
+ * 403 from another guard cannot stand in), the public pointer ignoring the
+ * switch, or the pointer's fixed org/slug. The toggle case restores `enabled`
+ * in `finally`, so a mid-case failure cannot leave the public case red.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -63,20 +71,31 @@ describe('site-config — public read (unauthenticated)', () => {
 describe('site-config — superadmin gate', () => {
   it('a non-superadmin is forbidden on read and write (403)', async () => {
     const call = await normalClient();
-    expect((await call('GET', '/host/openwop-app/site-config')).status).toBe(403);
-    expect((await call('PUT', '/host/openwop-app/site-config', { enabled: false })).status).toBe(403);
+    const refusal = { error: 'forbidden', message: 'Site configuration requires a superadmin principal.' };
+    const read = await call('GET', '/host/openwop-app/site-config');
+    expect(read.status).toBe(403);
+    expect(await j(read)).toMatchObject(refusal);
+    const write = await call('PUT', '/host/openwop-app/site-config', { enabled: false });
+    expect(write.status).toBe(403);
+    expect(await j(write)).toMatchObject(refusal);
+    // …and the refused write changed nothing.
+    expect(await j(await pub())).toEqual({ enabled: true, orgId: 'host-site', slug: 'home' });
   });
 });
 
 describe('site-config — superadmin toggle', () => {
   it('toggles the on/off switch; public pointer follows', async () => {
-    // disable → public pointer hides
-    expect((await admin('PUT', '/host/openwop-app/site-config', { enabled: false })).status).toBe(200);
-    expect(await j(await pub())).toEqual({ enabled: false });
-    expect((await j<{ enabled: boolean }>(await admin('GET', '/host/openwop-app/site-config'))).enabled).toBe(false);
+    try {
+      // disable → public pointer hides
+      expect((await admin('PUT', '/host/openwop-app/site-config', { enabled: false })).status).toBe(200);
+      expect(await j(await pub())).toEqual({ enabled: false });
+      expect((await j<{ enabled: boolean }>(await admin('GET', '/host/openwop-app/site-config'))).enabled).toBe(false);
 
-    // re-enable → fixed system pointer returns
-    expect((await admin('PUT', '/host/openwop-app/site-config', { enabled: true })).status).toBe(200);
-    expect(await j(await pub())).toEqual({ enabled: true, orgId: 'host-site', slug: 'home' });
+      // re-enable → fixed system pointer returns
+      expect((await admin('PUT', '/host/openwop-app/site-config', { enabled: true })).status).toBe(200);
+      expect(await j(await pub())).toEqual({ enabled: true, orgId: 'host-site', slug: 'home' });
+    } finally {
+      await admin('PUT', '/host/openwop-app/site-config', { enabled: true });
+    }
   });
 });

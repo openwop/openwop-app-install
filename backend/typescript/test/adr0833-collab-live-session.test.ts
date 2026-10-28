@@ -6,6 +6,16 @@
  * disabled, epoch-revoked or removed member still opened the workspace's canvas
  * rooms (Yjs read AND write) until the cookie's `exp`; and with a cross-site
  * cookie and no allowlist, any Origin was admitted (CSWSH).
+ *
+ * The REMOVED-member refusal is a DOUBLE guard in host/collab/collabServer.ts:
+ * the cookie lane's `cookieSession.repinned` check (403 'forbidden') AND, since
+ * the session still names the workspace, the canvas lane's
+ * `assertTenantScope(…, 'workspace:write')` (403 'forbidden'). Removing one alone
+ * stays green (w62 probe); removing both reds the case.
+ *
+ * Tracker TST-BCL-1. Sabotage-witnessed (w62): red when the cookie lane stops
+ * asking `assertSessionSubjectLive` (disabled, signed out), both removed-member
+ * guards are dropped, or the credentialed-origin check admits any Origin.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -62,13 +72,13 @@ async function login(subject: string, tenantId: string, sharedWorkspace: boolean
   const body = (await res.json()) as { user: { userId: string } };
   return { cookie, userId: body.user.userId };
 }
-interface Result { open: boolean; status?: number }
+interface Result { open: boolean; status?: number; reason?: string }
 function connect(canvasId: string, headers: Record<string, string>): Promise<Result> {
   return new Promise((resolve) => {
     const ws = new WebSocket(`${WSBASE}/host/openwop-app/canvas-collab/${encodeURIComponent(canvasId)}`, { headers });
     const done = (r: Result): void => { try { ws.terminate(); } catch { /* ignore */ } resolve(r); };
     ws.on('open', () => done({ open: true }));
-    ws.on('unexpected-response', (_req, res) => done({ open: false, status: res.statusCode }));
+    ws.on('unexpected-response', (_req, res) => done({ open: false, status: res.statusCode, reason: res.statusMessage }));
     ws.on('error', () => resolve({ open: false }));
   });
 }
@@ -96,19 +106,19 @@ describe('S1 / D1 — the cookie lane asks the session authority', () => {
   it('a DISABLED account is refused (401)', async () => {
     const m = await memberOfWorkspace();
     await setUserStatus(m.userId, 'disabled', { reason: 'admin' });
-    expect(await connect(m.canvasId, { cookie: m.cookie, origin: ORIGIN })).toEqual({ open: false, status: 401 });
+    expect(await connect(m.canvasId, { cookie: m.cookie, origin: ORIGIN })).toEqual({ open: false, status: 401, reason: 'unauthenticated' });
   });
 
   it('a "sign out everywhere" (epoch bump) is refused (401)', async () => {
     const m = await memberOfWorkspace();
     await bumpSessionEpoch(m.userId);
-    expect(await connect(m.canvasId, { cookie: m.cookie, origin: ORIGIN })).toEqual({ open: false, status: 401 });
+    expect(await connect(m.canvasId, { cookie: m.cookie, origin: ORIGIN })).toEqual({ open: false, status: 401, reason: 'unauthenticated' });
   });
 
   it('a member REMOVED from the workspace is refused (403)', async () => {
     const m = await memberOfWorkspace();
     await deleteMember(m.memberId);
-    expect(await connect(m.canvasId, { cookie: m.cookie, origin: ORIGIN })).toEqual({ open: false, status: 403 });
+    expect(await connect(m.canvasId, { cookie: m.cookie, origin: ORIGIN })).toEqual({ open: false, status: 403, reason: 'forbidden' });
   });
 });
 
@@ -122,7 +132,7 @@ describe('S4 / D4 — no allowlist + a cross-site cookie ⇒ same-origin only, o
     const m = await memberOfWorkspace();
     delete process.env.OPENWOP_CORS_ORIGINS;
     process.env.OPENWOP_COOKIE_SECURE = 'true';
-    expect(await connect(m.canvasId, { cookie: m.cookie, origin: 'https://evil.example' })).toEqual({ open: false, status: 403 });
+    expect(await connect(m.canvasId, { cookie: m.cookie, origin: 'https://evil.example' })).toEqual({ open: false, status: 403, reason: 'forbidden origin' });
     expect(await connect(m.canvasId, { cookie: m.cookie, origin: BASE })).toEqual({ open: true });
   });
 });

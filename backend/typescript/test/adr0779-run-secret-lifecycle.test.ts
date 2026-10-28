@@ -14,17 +14,20 @@
  *    ROTATED key; a key deleted during the wait does not fail a tail that never
  *    needs it (tolerant); cancel releases.
  *
- * Sabotage record (on committed code):
- *   - `persistSnapshot` without `stripKnownRunSecrets`       → leg 1
- *   - drop `clearRunSecrets` after the suspend persist        → leg 2
- *   - drop the resume-time `prepareRunSecrets`                → leg 3
- *   - resume prepare with `tolerant: false`                   → leg 4
- *   - drop `clearRunSecrets` in `cancelRunAndCascade`         → leg 5
+ * Tracker: TST-BBK-4 (/grade-tests wave 60). Probe-witnessed sabotages:
+ *   - red when `persistSnapshot` skips `stripKnownRunSecrets`, when the
+ *     variable-bag persist skips it, or when the scrub matches whole strings
+ *     only (no embedded key)                                         → leg 1
+ *   - red when `clearRunSecrets` after the suspend persist is dropped → leg 2
+ *   - red when the resume-time `prepareRunSecrets` is dropped         → legs 3, 4
+ *   - red when the resume prepare runs with `tolerant: false`         → leg 4
+ *   - red when `clearRunSecrets` in `cancelRunAndCascade` is dropped  → leg 5
+ *   - red when the pause-path `clearRunSecrets` is dropped            → leg 6
  */
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import { setEventLogBackend } from '../src/executor/eventLog.js';
 import { setSuspendBackend } from '../src/executor/suspendManager.js';
@@ -70,7 +73,7 @@ beforeAll(() => {
   getNodeRegistry().register({
     typeId: 'test.b779.leak', version: '1.0.0', sideEffecting: false,
     async execute(ctx: NodeContext): Promise<NodeOutcome> {
-      const key = (ctx.secrets as Record<string, string>)[REF] ?? '';
+      const key = ctx.secrets[REF] ?? '';
       // The realistic leak: the key EMBEDDED in a larger string (a provider
       // error echoing the header), and parked in the run's variable bag.
       ctx.variables?.set('lastAuth', `Authorization: Bearer ${key}`);
@@ -80,28 +83,28 @@ beforeAll(() => {
   getNodeRegistry().register({
     typeId: 'test.b779.probe', version: '1.0.0', sideEffecting: false,
     async execute(ctx: NodeContext): Promise<NodeOutcome> {
-      const key = (ctx.secrets as Record<string, string>)[REF];
+      const key = ctx.secrets[REF];
       return { status: 'success', outputs: { present: typeof key === 'string', rotated: key === ROTATED } };
     },
   });
   getNodeRegistry().register({
     typeId: 'test.b779.probe2', version: '1.0.0', sideEffecting: false,
     async execute(ctx: NodeContext): Promise<NodeOutcome> {
-      return { status: 'success', outputs: { present: typeof (ctx.secrets as Record<string, string>)[REF2] === 'string' } };
+      return { status: 'success', outputs: { present: typeof ctx.secrets[REF2] === 'string' } };
     },
   });
   const gate = { nodeId: 'gate', typeId: 'core.approvalGate', config: { prompt: 'Approve?' } };
   const defs: WorkflowDefinition[] = [
-    { workflowId: LEAK_WF, name: 'leak', version: '1.0.0',
+    { workflowId: LEAK_WF,
       nodes: [{ nodeId: 'leak', typeId: 'test.b779.leak', config: {} }, gate, { nodeId: 'after', typeId: 'core.noop', config: {} }],
       edges: [{ edgeId: 'e1', sourceNodeId: 'leak', targetNodeId: 'gate' }, { edgeId: 'e2', sourceNodeId: 'gate', targetNodeId: 'after' }] },
-    { workflowId: PROBE_WF, name: 'probe', version: '1.0.0',
+    { workflowId: PROBE_WF,
       nodes: [gate, { nodeId: 'probe', typeId: 'test.b779.probe', config: {} }],
       edges: [{ edgeId: 'e1', sourceNodeId: 'gate', targetNodeId: 'probe' }] },
-    { workflowId: TAIL_WF, name: 'tail', version: '1.0.0',
+    { workflowId: TAIL_WF,
       nodes: [gate, { nodeId: 'after', typeId: 'test.b779.probe2', config: {} }],
       edges: [{ edgeId: 'e1', sourceNodeId: 'gate', targetNodeId: 'after' }] },
-  ] as unknown as WorkflowDefinition[];
+  ];
   for (const d of defs) registerHostWorkflow(d);
 });
 
@@ -135,16 +138,16 @@ describe('ADR 0779 D4/D5 — run secrets across suspend, resume and cancel', () 
     await setSecret(REF, ORIGINAL, { tenantId: TENANT });
     const run = await startToGate(LEAK_WF);
     const row = await storage.getRun(run.runId);
-    const snap = JSON.stringify((row as unknown as { schedulerSnapshot?: unknown }).schedulerSnapshot ?? '');
+    const snap = row?.schedulerSnapshot ?? '';
     expect(snap.length, 'the run must have persisted a snapshot').toBeGreaterThan(10);
     expect(snap, 'scheduler_snapshot carries the provider key in plaintext').not.toContain(ORIGINAL);
     expect(snap).toContain(`<<redacted:${REF}>>`);
     // Embedded occurrences are removed too, and the text around them survives.
     expect(snap).toContain(`401 Unauthorized for key <<redacted:${REF}>> (rotate it)`);
     // The run's variable bag is persisted as well (`runvars:<runId>`).
-    await new Promise((r) => setTimeout(r, 25)); // the bag write is fire-and-forget
+    // The bag write is fire-and-forget: wait for it to land rather than sleep.
+    await vi.waitFor(async () => expect(await storage.kvGet(`runvars:${run.runId}`), 'the variable bag must have been persisted').toBeTruthy());
     const bag = await storage.kvGet(`runvars:${run.runId}`);
-    expect(bag, 'the variable bag must have been persisted').toBeTruthy();
     expect(String(bag), 'runvars carries the provider key in plaintext').not.toContain(ORIGINAL);
   });
 
@@ -157,6 +160,9 @@ describe('ADR 0779 D4/D5 — run secrets across suspend, resume and cancel', () 
   it('leg 3 (D5): the resume re-resolves — works with an empty store, and sees a ROTATED key', async () => {
     await setSecret(REF, ORIGINAL, { tenantId: TENANT });
     const run = await startToGate(PROBE_WF);
+    // The in-process store is empty across the wait (as after a restart), so
+    // whatever the probe node sees after the resume was re-resolved.
+    expect(getRunSecrets(run.runId)).toEqual({});
     await setSecret(REF, ROTATED, { tenantId: TENANT });
     await approve(run.runId);
     expect((await storage.getRun(run.runId))!.status).toBe('completed');

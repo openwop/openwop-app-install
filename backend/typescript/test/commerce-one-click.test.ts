@@ -22,6 +22,7 @@ import type { Product } from '../src/features/commerce/commerceService.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
+import { publishedFunnel } from './helpers/publishedFunnel.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { setSecret } from '../src/byok/secretResolver.js';
 import {
@@ -29,6 +30,7 @@ import {
   deleteSavedPaymentMethodsForContact, listChildOrders,
 } from '../src/features/commerce/commerceService.js';
 import { mintOneClickToken } from '../src/features/commerce/oneClickToken.js';
+import { mintFunnelOfferToken } from '../src/features/funnels/offerDecisions.js';
 
 /** The bound TCP port, narrowed without a cast (`address()` is `string | AddressInfo | null`). */
 function portOf(s: { address(): string | AddressInfo | null }): number {
@@ -137,7 +139,9 @@ interface OneClickBody extends Partial<ApiError> {
 }
 interface LoginBody { user?: { userId: string; tenantId?: string }; tenantId?: string }
 
-async function paidParentWithSavedPm() {
+/** A paid parent with a saved card. `viaFunnel`: bought through a funnel checkout,
+ *  so it is extended only through the funnel's offer capability (ADR 0948 P2c). */
+async function paidParentWithSavedPm(opts: { viaFunnel?: boolean } = {}) {
   const owner = client();
   const login = await owner.post<LoginBody>('/host/openwop-app/test/login', { email: `oc-${Date.now()}-${n++}@acme.test` });
   const tenantId: string = login.body.user?.tenantId ?? '';
@@ -153,12 +157,18 @@ async function paidParentWithSavedPm() {
   const upsell3 = await owner.post<Product>(c('/products'), { type: 'digital', name: 'Extra B', price: 10, currency: 'USD' });
   const upsell4 = await owner.post<Product>(c('/products'), { type: 'digital', name: 'Extra C', price: 10, currency: 'USD' });
 
+  // ADR 0948 D2 — the funnel ref names a REAL published checkout step of this org.
+  const fn = await publishedFunnel(tenantId, orgId, [
+    { kind: 'checkout', offer: { productIds: [main.body.productId] } },
+    { kind: 'upsell', offer: { productIds: [upsell.body.productId], oneClickProductId: upsell.body.productId } },
+  ]);
+  const funnelRef = { funnelId: fn.funnelId, stepId: fn.stepIds[0]! };
   // guest checkout WITH consent — live mode creates the session (mock stripe)
   const guest = client();
   const email = `buyer-${n++}@x.test`;
   const co = await guest.post<CheckoutBody>(`/host/openwop-app/public-store/${encodeURIComponent(orgId)}/checkout`, {
     email, lines: [{ productId: main.body.productId, quantity: 1 }], savePaymentMethod: true,
-    funnel: { funnelId: 'fn-oc', stepId: 'st-co' },
+    ...(opts.viaFunnel ? { funnel: funnelRef } : {}),
   });
   expect(co.status).toBe(201);
   const orderId: string = co.body.orderId;
@@ -170,7 +180,8 @@ async function paidParentWithSavedPm() {
   expect(captured).toBe(true);
   // ADR 0875 D2 — the capability the success URL carries for THIS order.
   const oc = mintOneClickToken(tenantId, orgId, orderId);
-  return { guest, oc, tenantId, orgId, orderId, contactId: order!.contactId!, mainId: main.body.productId, upsellId: upsell.body.productId, extras: [upsell2.body.productId, upsell3.body.productId, upsell4.body.productId] };
+  const ft = mintFunnelOfferToken(tenantId, orgId, orderId, fn.funnelId);
+  return { guest, oc, ft, tenantId, orgId, orderId, contactId: order!.contactId!, mainId: main.body.productId, upsellId: upsell.body.productId, extras: [upsell2.body.productId, upsell3.body.productId, upsell4.body.productId], funnelRef, upsellStepRef: { funnelId: fn.funnelId, stepId: fn.stepIds[1]! } };
 }
 
 const oneClick = (orgId: string, orderId: string): string =>
@@ -203,7 +214,7 @@ describe('ADR 0296 P2/P3 — saved PM + one-click chains', () => {
     expect(await getSavedPaymentMethodForOrder(tenantId, orgId, co.body.orderId)).toBeNull();
   });
 
-  it('one-click success: server-priced child, upsell origin, parent link, inherited funnelRef, idempotency key', async () => {
+  it('one-click success: server-priced child, upsell origin, parent link, idempotency key', async () => {
     process.env.OPENWOP_COMMERCE_OFFSESSION_ENABLED = 'true';
     intentOutcome = 'succeeded';
     const { guest, oc, tenantId, orgId, orderId, upsellId } = await paidParentWithSavedPm();
@@ -217,7 +228,9 @@ describe('ADR 0296 P2/P3 — saved PM + one-click chains', () => {
     expect(child?.status).toBe('paid');
     expect(child?.items[0]?.origin).toBe('upsell');
     expect(child?.total).toBe(50); // server-resolved price, never the client's
-    expect(child?.funnelRef).toEqual({ funnelId: 'fn-oc', stepId: 'st-co' }); // inherited
+    // A storefront purchase carries no funnel stamp. (A FUNNEL purchase is never
+    // extended through `oc` at all since ADR 0948 P2c: see the next test.)
+    expect(child?.funnelRef).toBeUndefined();
     const intentCall = stripeCalls.find((c) => c.path === '/v1/payment_intents');
     expect(intentCall?.idem).toBe(`oneclick:${orderId}:${upsellId}`);
     const form = new URLSearchParams(intentCall?.body ?? '');
@@ -256,6 +269,28 @@ describe('ADR 0296 P2/P3 — saved PM + one-click chains', () => {
     } finally {
       intentOutcome = 'succeeded';
     }
+  });
+
+  it('ADR 0948 D2 — naming a funnel step, one-click charges only that step\'s offered product', async () => {
+    process.env.OPENWOP_COMMERCE_OFFSESSION_ENABLED = 'true';
+    intentOutcome = 'succeeded';
+    const { guest, oc, ft, tenantId, orgId, orderId, upsellId, extras, funnelRef, upsellStepRef } = await paidParentWithSavedPm({ viaFunnel: true });
+    // ADR 0948 P2c — a funnel purchase is never extended through the storefront's
+    // `oc`, with or without a funnel ref: only the funnel's own capability works.
+    expect((await guest.post<OneClickBody>(oneClick(orgId, orderId), { oc, productId: upsellId })).status).toBe(404);
+    expect((await guest.post<OneClickBody>(oneClick(orgId, orderId), { oc, productId: upsellId, funnel: upsellStepRef })).status).toBe(404);
+    // Not the step's one-click product → refused before anything reaches Stripe.
+    stripeCalls = [];
+    const bad = await guest.post<OneClickBody>(oneClick(orgId, orderId), { ft, productId: extras[0], funnel: upsellStepRef });
+    expect([bad.status, bad.body.details?.code]).toEqual([400, 'one_click_not_offered']);
+    expect(stripeCalls.some((c) => c.path.endsWith('/payment_intents'))).toBe(false); // Stripe's own API path
+    // A checkout step is not an upsell step: the same uniform 400 as an unknown one.
+    const wrongKind = await guest.post<OneClickBody>(oneClick(orgId, orderId), { ft, productId: upsellId, funnel: funnelRef });
+    expect([wrongKind.status, wrongKind.body.details?.code]).toEqual([400, 'funnel_step_not_found']);
+    // The offered product on the named upsell step is accepted, stamped with that step.
+    const ok = await guest.post<OneClickBody>(oneClick(orgId, orderId), { ft, productId: upsellId, funnel: upsellStepRef });
+    expect(ok.status).toBe(201);
+    expect((await getOrder(tenantId, orgId, ok.body.orderId ?? ''))?.funnelRef).toEqual(upsellStepRef);
   });
 
   it('caps the chain at 3 non-canceled children and 404s foreign/unpaid orders', async () => {

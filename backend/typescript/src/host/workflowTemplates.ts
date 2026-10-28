@@ -110,6 +110,20 @@ export const WORKFLOW_TEMPLATE_CHAIN_IDS: readonly string[] = [
   'tmpl.comms.all-hands-prep',
 ];
 
+const MOCK_ARCHIVE_IDS: ReadonlySet<string> = new Set(WORKFLOW_TEMPLATE_CHAIN_IDS);
+
+/**
+ * ADR 0963 D8 — whether `workflowId` is one of the 44 Work-Twin mock-AI
+ * archives above. They "do work" by fabricating it (`local.sample.demo.mock-ai`,
+ * ADR 0939 § Context), so the autonomous work loop must never run or propose
+ * one on its own: the user paused their schedules for exactly that reason
+ * (ADR 0939). Keyed on THIS list — the SSoT the pack registration uses — never
+ * on a `tmpl.` prefix guess.
+ */
+export function isWorkTwinMockArchive(workflowId: string | undefined): boolean {
+  return workflowId !== undefined && MOCK_ARCHIVE_IDS.has(workflowId);
+}
+
 /**
  * ADR 0775 P2 (the replay note) — restore a migrated template's expansion to the
  * EXACT pre-migration definition. `expandChain` prefixes every node id

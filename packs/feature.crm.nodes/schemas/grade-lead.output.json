@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.crm.nodes/1.15.0/grade-lead.output.json",
+  "title": "CrmGradeLeadOutput",
+  "type": "object",
+  "required": [
+    "success",
+    "recorded",
+    "outcome",
+    "band",
+    "score",
+    "modelId",
+    "modelVersion"
+  ],
+  "properties": {
+    "success": {
+      "type": "boolean",
+      "const": true
+    },
+    "recorded": {
+      "type": "boolean"
+    },
+    "outcome": {
+      "type": "string",
+      "enum": [
+        "recorded",
+        "superseded"
+      ]
+    },
+    "band": {
+      "type": "string",
+      "enum": [
+        "A",
+        "B",
+        "C",
+        "D",
+        "E",
+        "F"
+      ]
+    },
+    "score": {
+      "type": "number"
+    },
+    "modelId": {
+      "type": "string"
+    },
+    "modelVersion": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "truncated": {
+      "type": "boolean"
+    }
+  },
+  "additionalProperties": false
+}

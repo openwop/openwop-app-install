@@ -20,6 +20,10 @@ import { openStorage } from '../src/storage/index.js';
  * TCP DSN — the socket form, which is what PRODUCTION uses, appeared in no
  * test at all. That is the gap this file closes.
  */
+function errMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 describe('OPENWOP_STORAGE_DSN guard', () => {
   /** The exact shape every Cloud SQL guide shows, and the one production uses.
    *  `new URL()` throws on its empty host; the driver does not. */
@@ -39,7 +43,14 @@ describe('OPENWOP_STORAGE_DSN guard', () => {
       () => null,
       (e: unknown) => e,
     );
-    const msg = String((err as Error)?.message ?? err ?? '');
+    // It MUST fail (no socket here), and with the DRIVER's error: every
+    // message `openStorage` itself throws starts with the env name or the
+    // scheme refusal, the driver's connect error never does. Without the
+    // first two lines a different guard message (or any refusal) passed.
+    expect(err).toBeInstanceOf(Error);
+    const msg = errMessage(err);
+    expect(msg).not.toBe('');
+    expect(msg).not.toMatch(/^OPENWOP_STORAGE_DSN|Unsupported storage DSN scheme/);
     expect(msg).not.toMatch(/not parseable by the driver/);
     expect(msg).not.toMatch(/not a parseable URL/);
   });
@@ -47,7 +58,7 @@ describe('OPENWOP_STORAGE_DSN guard', () => {
   it('REJECTS a DSN the driver genuinely cannot parse, and redacts the password', async () => {
     // An unencoded `/` in the password — the case the guard was written for.
     const err = await openStorage('postgresql://u:pw/x@host:5432/db').catch((e: unknown) => e);
-    const msg = String((err as Error)?.message ?? err);
+    const msg = errMessage(err);
     expect(msg).toMatch(/not parseable by the driver/);
     expect(msg).toMatch(/Percent-encode/);
     expect(msg).not.toMatch(/pw\/x/); // the password never reaches the message
@@ -55,7 +66,7 @@ describe('OPENWOP_STORAGE_DSN guard', () => {
 
   it('does NOT advise inserting a localhost placeholder — that advice broke a working DSN', async () => {
     const err = await openStorage('postgresql://u:pw/x@host:5432/db').catch((e: unknown) => e);
-    const msg = String((err as Error)?.message ?? err);
+    const msg = errMessage(err);
     // The message may MENTION localhost (to warn against it); it must never
     // instruct the operator to insert one, which is what corrupted a correct
     // Cloud SQL DSN for two days.

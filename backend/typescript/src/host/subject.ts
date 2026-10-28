@@ -20,8 +20,9 @@
  *  memory/knowledge already accept it (forward-compatible). `'board'` (ADR 0278)
  *  is an ADVISORY board (Board of Advisors — never host.kanban), giving each
  *  board ONE canonical conversation via `subjectConversationId`. The "what it
- *  can DO" axis (cognition / advisor / …) lives separately on `capabilities[]`. */
-export type SubjectKind = 'agent' | 'user' | 'project' | 'board';
+ *  can DO" axis (cognition / advisor / …) lives separately on `capabilities[]`.
+ *  `'org'` (ADR 0944 D1) is a CLIENT org's shared agent memory, `org:<orgId>`. */
+export type SubjectKind = 'agent' | 'user' | 'project' | 'board' | 'org';
 
 /** The owner of a work surface — a `kind` + an opaque `id`. */
 export interface Subject {
@@ -54,4 +55,11 @@ export function personSubject(userId: string): Subject {
 /** A standing roster agent as a Subject (ADR 0045). */
 export function rosterSubject(rosterId: string): Subject {
   return { kind: 'agent', id: rosterId };
+}
+
+/** A client org as a Subject (ADR 0944 D1) — the ONE constructor for the shared
+ *  per-client agent memory namespace `org:<orgId>`. Like every Subject it confers
+ *  no authority: whoever reads or writes it must already hold scope on that org. */
+export function orgSubject(orgId: string): Subject {
+  return { kind: 'org', id: orgId };
 }

@@ -36,6 +36,10 @@ export function MemoryInspectorPage(): JSX.Element {
   const { t } = useTranslation('memory');
   const [entries, setEntries] = useState<MemoryEntry[] | null>(null);
   const [memoryRef, setMemoryRef] = useState<string>('');
+  // ADR 0979 D1/D4 — what the server says this caller sees and may delete. A
+  // missing field (another host) keeps today's behaviour: everything, deletable.
+  const [ownRunsOnly, setOwnRunsOnly] = useState(false);
+  const [canDelete, setCanDelete] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [tag, setTag] = useState('');
@@ -50,6 +54,8 @@ export function MemoryInspectorPage(): JSX.Element {
       const res = await listMemory({ limit: 200, ...(tag ? { tag } : {}) });
       setEntries(res.entries);
       setMemoryRef(res.memoryRef);
+      setOwnRunsOnly(res.visibility === 'own-runs');
+      setCanDelete(res.canDelete !== false);
     } catch (err) {
       // TWIN-8 — a FAILED read used to resolve to `[]`, i.e. an empty ledger,
       // which is a claim ("you have no memories") the read never established.
@@ -121,16 +127,16 @@ export function MemoryInspectorPage(): JSX.Element {
       sortValue: (e) => (e.createdAt ? Date.parse(e.createdAt) : 0),
       render: (e) => <MemoryCreated entry={e} />,
     },
-    {
+    ...(canDelete ? [{
       key: 'actions',
       header: '',
-      align: 'right',
-      render: (e) => (
+      align: 'right' as const,
+      render: (e: MemoryEntry) => (
         <Button variant="secondary" size="sm" onClick={() => { void onDelete(e); }} title={t('deleteEntryTitle')} aria-label={t('deleteEntryAria', { id: e.id })}>
           <TrashIcon size={13} />
         </Button>
       ),
-    },
+    }] : []),
   ];
 
   // Shared empty node — rendered for BOTH the grid and the list so the two views
@@ -151,7 +157,7 @@ export function MemoryInspectorPage(): JSX.Element {
       <PageHeader
         eyebrow={t('eyebrow')}
         title={t('inspectorTitle')}
-        lede={<>{t('inspectorLedePrefix')}{memoryRef && <> {t('inspectorLedeShowing')} <code>{memoryRef}</code>.</>}</>}
+        lede={<>{t('inspectorLede')}{ownRunsOnly && <> {t('inspectorOwnRunsOnly')}</>}</>}
         actions={<Button variant="secondary" onClick={() => { void refresh(); }}>{t('common:refresh')}</Button>}
       />
       <div className="surface-card">
@@ -192,7 +198,7 @@ export function MemoryInspectorPage(): JSX.Element {
             ) : view === 'grid' ? (
               <div className="card-grid">
                 {filtered.map((e) => (
-                  <MemoryCard key={e.id} entry={e} onDelete={(x) => { void onDelete(x); }} />
+                  <MemoryCard key={e.id} entry={e} {...(canDelete ? { onDelete: (x: MemoryEntry) => { void onDelete(x); } } : {})} />
                 ))}
               </div>
             ) : (
@@ -202,14 +208,16 @@ export function MemoryInspectorPage(): JSX.Element {
                 columns={columns}
                 caption={t('tableCaption')}
                 initialSort={{ key: 'created', dir: 'desc' }}
-                selectable
-                selected={selected}
-                onSelectionChange={setSelected}
-                bulkActions={(rows) => (
-                  <Button variant="secondary" size="sm" onClick={() => { void onBulkDelete(rows); }}>
-                    <TrashIcon size={13} /> {t('deleteSelected')}
-                  </Button>
-                )}
+                {...(canDelete ? {
+                  selectable: true,
+                  selected,
+                  onSelectionChange: setSelected,
+                  bulkActions: (rows: MemoryEntry[]) => (
+                    <Button variant="secondary" size="sm" onClick={() => { void onBulkDelete(rows); }}>
+                      <TrashIcon size={13} /> {t('deleteSelected')}
+                    </Button>
+                  ),
+                } : {})}
                 empty={emptyCard}
               />
             )}

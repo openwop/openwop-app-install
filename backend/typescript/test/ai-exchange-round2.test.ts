@@ -7,6 +7,11 @@
  *    fallback (which previously shipped raw prose on the first miss);
  *  - XCH-RAG-1: rag multi-query prefers provider-native JSON (result.data),
  *    keeping the line-split as the text fallback.
+ *
+ * TST-BNX-1. Red when: a repair's reply is discarded, the corrected plan/kernel
+ * is not what gets persisted (savePlan / setKernel arguments are captured), the
+ * extract repair's data is ignored or its fallback stops being confidence 0, or
+ * multi-query stops preferring `result.data`.
  */
 import { describe, expect, it } from 'vitest';
 import { planGenerate } from '../../../packs/feature.production.nodes/index.mjs';
@@ -23,19 +28,24 @@ describe('production.plan-generate bounded repair (XCH-PROD-2)', () => {
   };
 
   it('repairs once with the failure named, then persists the corrected plan', async () => {
+    const saved: Array<Record<string, unknown>> = [];
+    const spyFeatures = { production: { ...features.production, savePlan: async (p: Record<string, unknown>) => { saved.push(p); return { planId: 'plan-1', ...p }; } } };
     const calls: Array<{ messages: Array<{ role: string; content: string }> }> = [];
     const replies = [
       { data: { nope: true } }, // invalid — no strategySummary
       { data: { strategySummary: 'Fixed.', recommendations: [] } },
     ];
     const ctx = {
-      features,
+      features: spyFeatures,
       inputs: { orgId: 'o1', channels: ['email'] },
       callAI: async (req: { messages: Array<{ role: string; content: string }> }) => { calls.push(req); return replies[calls.length - 1]; },
     };
     const r = await planGenerate(ctx);
     expect(r.status).toBe('success');
     expect(calls.length).toBe(2);
+    // The REPAIRED plan is what reached the store.
+    expect(saved).toHaveLength(1);
+    expect(saved[0]).toMatchObject({ orgId: 'o1', strategySummary: 'Fixed.', recommendations: [] });
     const feedback = calls[1]!.messages[calls[1]!.messages.length - 1]!.content;
     expect(feedback).toContain('INVALID');
     expect(feedback).toContain('strategySummary');
@@ -59,13 +69,15 @@ describe('campaign-brief.generate-kernel bounded repair (XCH-CB-3)', () => {
   };
 
   it('repairs once and persists the corrected kernel', async () => {
+    const kernels: Array<{ briefId: string; kernel: { headline: string } }> = [];
+    const spyFeatures = { 'campaign-brief': { ...features['campaign-brief'], setKernel: async (a: { briefId: string; kernel: { headline: string } }) => { kernels.push(a); return { ok: true }; } } };
     let calls = 0;
     const replies = [
       { data: { headline: 42 } }, // invalid — headline not a string
       { data: { headline: 'H', supportingStatement: 'S', proofPoints: [], primaryCta: 'Go', tone: 'bold' } },
     ];
     const ctx = {
-      features,
+      features: spyFeatures,
       inputs: { briefId: 'b1' },
       callAI: async () => replies[Math.min(calls++, 1)],
     };
@@ -73,6 +85,9 @@ describe('campaign-brief.generate-kernel bounded repair (XCH-CB-3)', () => {
     expect(r.status).toBe('success');
     expect(calls).toBe(2);
     expect((r.outputs?.kernel as { headline: string }).headline).toBe('H');
+    // The REPAIRED kernel is what was persisted on the brief.
+    expect(kernels).toHaveLength(1);
+    expect(kernels[0]).toMatchObject({ briefId: 'b1', kernel: { headline: 'H', supportingStatement: 'S', primaryCta: 'Go', tone: 'bold' } });
   });
 });
 
@@ -94,13 +109,15 @@ describe('core.ai.extract bounded repair (XCH-CORE-6)', () => {
   });
 
   it('still falls back honestly (confidence 0) when the repair also fails', async () => {
+    let calls = 0;
     const ctx = {
       config: { schema: { type: 'object' } },
       inputs: { text: 'x' },
-      callAI: async () => ({ content: 'not json, twice' }),
+      callAI: async () => { calls += 1; return { content: 'not json, twice' }; },
     };
     const r = await extract(ctx);
-    expect(r.outputs?.confidence).toBe(0);
+    expect(calls).toBe(2); // ONE bounded repair, no more
+    expect(r.outputs).toEqual({ value: 'not json, twice', confidence: 0 });
   });
 });
 

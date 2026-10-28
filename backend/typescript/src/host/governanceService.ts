@@ -81,6 +81,10 @@ export interface GovernancePolicy {
    *  governance route. */
   adSpend?: {
     approvalThresholdMinor?: number;
+    /** ADR 0952 residual (a) — the ISO-4217 currency `approvalThresholdMinor` is
+     *  in. Absent ⇒ USD (the field's only meaning before this). A budget in another
+     *  account currency is never compared against it (no FX): it asks for approval. */
+    approvalThresholdCurrency?: string;
   };
   /** Ecommerce gap plan §5B B3 — commerce order/refund-value governance. When
    *  `orderApprovalThresholdMinor` is set, an AGENT-PATH order create (workflow

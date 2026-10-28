@@ -18,6 +18,8 @@ vi.mock('../../../client/kicktodoIntegrationsClient.js', async (orig) => ({
   ...(await orig<typeof import('../../../client/kicktodoIntegrationsClient.js')>()),
   ...api,
 }));
+// The Factory key card has its own test; here it would only add network reads.
+vi.mock('../FactoryKeyCard.js', () => ({ FactoryKeyCard: () => null }));
 
 import { AiConnectionsPage } from '../AiConnectionsPage.js';
 

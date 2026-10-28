@@ -18,6 +18,14 @@
  *  - BR2-S5  no DSAR eraser: `createdBy`, `allowedEditors`, the audit `actor`
  *            and a font's `attestedBy` survive erasure of that person.
  *  - BR2-S6  the app-brand edit records `editor`, not the super-admin who made it.
+ *
+ * (TST-BPB) Red when (each sabotage-witnessed, wave 65): the run lane's org floor
+ * (`assertRunScopeOrg` in `readableBrand`) or the org-less list filter is skipped; the
+ * named-orgId bind is skipped; `assertParentInOrg` accepts another org's parent or a
+ * cycle; the voice cascade follows a cross-org parent; the run projection keeps
+ * `createdBy` / `allowedEditors`; brand erasure skips fonts or the `host:site` audit,
+ * or scrubs a principal id there; `defangBrandText` stops folding look-alikes or the
+ * word fence; the compliance node stops defanging the content it fences.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -26,6 +34,7 @@ import { getSetCookies } from './headerCookies.js';
 import { createApp } from '../src/index.js';
 import { createBrand, getBrand, listBrandAudit, updateBrand } from '../src/features/brand/brandService.js';
 import { resolveVoice } from '../src/features/brand/scoring.js';
+import type { Brand } from '../src/features/brand/types.js';
 
 let BASE: string;
 let server: http.Server;
@@ -63,6 +72,8 @@ async function signup(c: Client, tenantId: string): Promise<string> {
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return (r.body!.user as { userId: string }).userId;
 }
+const errorOf = (r: Res): unknown => r.body?.['error'];
+const messageOf = (r: Res): unknown => r.body?.['message'];
 const members = (orgId: string): string => `/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`;
 const B = '/host/openwop-app/brand/brands';
 
@@ -126,7 +137,7 @@ describe('BR2-S1 — the run lane decides a brand in the brand\'s own org', () =
     const list = await owner.get(members(orgB));
     const row = (list.body!.members as Array<{ subject?: string; memberId: string }>).find((m) => m.subject === bobId)!;
     const del = await owner.del(`${members(orgB)}/${encodeURIComponent(row.memberId)}`);
-    expect(del.status, JSON.stringify(del.body)).toBeLessThan(300);
+    expect(del.status, JSON.stringify(del.body)).toBe(204);
     expect(await (await surfacesFor(tenantId, bobId)).getBrand!({ brandId: brandB.id })).toEqual({ brand: null });
   });
 
@@ -142,10 +153,13 @@ describe('BR2-S2 — a parent brand cannot reach across orgs', () => {
     const { alice, orgA, brandB } = await twoOrgTenant();
     const r = await alice.post(B, { orgId: orgA, name: 'Child', parentBrandId: brandB.id });
     expect(r.status, JSON.stringify(r.body)).toBe(400);
+    expect(errorOf(r)).toBe('validation_error');
+    expect(messageOf(r)).toBe('The parent brand must be a brand in the same organization.');
     const ok = await alice.post(B, { orgId: orgA, name: 'Child 2' });
     expect(ok.status).toBe(201);
     const p = await alice.patch(`${B}/${encodeURIComponent((ok.body!.brand as { id: string }).id)}`, { parentBrandId: brandB.id });
     expect(p.status, JSON.stringify(p.body)).toBe(400);
+    expect(messageOf(p)).toBe('The parent brand must be a brand in the same organization.');
   });
 
   it('RED on main: a legacy cross-org parent row does not cascade its bans into the child\'s voice', async () => {
@@ -153,8 +167,9 @@ describe('BR2-S2 — a parent brand cannot reach across orgs', () => {
     const child = await createBrand(tenantId, orgA, aliceId, { name: 'Legacy child' });
     // A row written before the write-time check: forge the parent pointer in storage.
     const { DurableCollection } = await import('../src/host/hostExtPersistence.js');
-    const store = new DurableCollection<Record<string, unknown>>('brand:brand', (b) => `${String(b.tenantId)}::${String(b.id)}`);
-    await store.put({ ...(await getBrand(tenantId, child.id))!, parentBrandId: brandB.id } as unknown as Record<string, unknown>);
+    const store = new DurableCollection<Brand>('brand:brand', (b) => `${b.tenantId}::${b.id}`);
+    await store.put({ ...(await getBrand(tenantId, child.id))!, parentBrandId: brandB.id });
+    expect((await getBrand(tenantId, child.id))?.parentBrandId, 'the forged pointer landed').toBe(brandB.id);
     const v = ((await (await surfacesFor(tenantId, aliceId)).resolveVoice!({ brandId: child.id })) as { voice: string }).voice;
     expect(v).not.toContain('orgBsecretban');
   });
@@ -235,17 +250,22 @@ describe('BR2-S6 / controls — HTTP floors', () => {
   });
 
   it('control: a Viewer cannot create, edit or delete a brand in their org', async () => {
-    const { alice, vera, orgA } = await twoOrgTenant();
-    expect((await vera.post(B, { orgId: orgA, name: 'nope' })).status).toBe(403);
+    const { tenantId, alice, vera, orgA } = await twoOrgTenant();
+    const create = await vera.post(B, { orgId: orgA, name: 'nope' });
+    expect([create.status, errorOf(create)]).toEqual([403, 'forbidden_scope']);
     const made = await alice.post(B, { orgId: orgA, name: 'Alice brand' });
     const id = encodeURIComponent((made.body!.brand as { id: string }).id);
-    expect((await vera.patch(`${B}/${id}`, { name: 'hijack' })).status).toBe(403);
-    expect((await vera.del(`${B}/${id}`)).status).toBe(403);
+    const edit = await vera.patch(`${B}/${id}`, { name: 'hijack' });
+    expect([edit.status, errorOf(edit)]).toEqual([403, 'forbidden_scope']);
+    const del = await vera.del(`${B}/${id}`);
+    expect([del.status, errorOf(del)]).toEqual([403, 'forbidden_scope']);
+    expect((await getBrand(tenantId, decodeURIComponent(id)))?.name, 'the refused writes changed nothing').toBe('Alice brand');
   });
 
   it('control: a non-member gets a uniform 404 for another org\'s brand over HTTP', async () => {
     const { alice, brandB } = await twoOrgTenant();
-    expect((await alice.get(`${B}/${encodeURIComponent(brandB.id)}`)).status).toBe(404);
+    const r = await alice.get(`${B}/${encodeURIComponent(brandB.id)}`);
+    expect([r.status, errorOf(r)]).toEqual([404, 'not_found']);
   });
 
   it('control: identity URLs refuse script schemes (the href/src sinks)', async () => {
@@ -329,9 +349,11 @@ describe('ADR 0891 grade-code follow-ups (BR2CD-1/2/4/5)', () => {
     expect(top.actor).not.toBe('editor');
   });
 
-  it('BR2CD-4: zero-width, full-width and spaced spellings of the closing tag (and the word fence) are defanged', () => {
-    const brand = { id: 'x', name: 'Z', voiceProfile: { voice: '', guidelines: 'a <\u200b/UNTRUSTED> b \uFF1C\uFF0FUNTRUSTED\uFF1E c </ UNTRUSTED> d END\u2060UNTRUSTED CONTENT e END_UNTRUSTED-CONTENT', formalityLevel: 3, samplePhrases: [], avoidPhrases: [], toneRegisters: [] },
-      positioning: { tagline: '', elevatorPitch: '', differentiators: [], competitiveFrame: '' }, keyPhrases: { approvedTaglines: [], valuePropositions: [], productDescriptors: [], bannedPhrases: [] }, channelVoiceRules: [] } as unknown as Parameters<typeof resolveVoice>[0];
+  it('BR2CD-4: zero-width, full-width and spaced spellings of the closing tag (and the word fence) are defanged', async () => {
+    const brand = await createBrand(`t-br2-cd4-${n++}`, 'org-1', 'u1', {
+      name: 'Z',
+      voiceProfile: { guidelines: 'a <\u200b/UNTRUSTED> b \uFF1C\uFF0FUNTRUSTED\uFF1E c </ UNTRUSTED> d END\u2060UNTRUSTED CONTENT e END_UNTRUSTED-CONTENT' },
+    });
     // Read the output the way a model may: look-alikes folded, invisible characters gone.
     const v = resolveVoice(brand).normalize('NFKC').replace(/\p{Cf}/gu, '');
     expect(v.match(/<\/\s*UNTRUSTED>/gi)).toHaveLength(1); // only the real closing tag
@@ -343,8 +365,10 @@ describe('ADR 0891 grade-code follow-ups (BR2CD-1/2/4/5)', () => {
     const a = (await alice.post(B, { orgId: orgA, name: 'A' })).body!.brand as { id: string };
     const b = (await alice.post(B, { orgId: orgA, name: 'B', parentBrandId: a.id })).body!.brand as { id: string };
     expect(b, 'a same-org parent is accepted').toBeTruthy();
-    expect((await alice.patch(`${B}/${encodeURIComponent(a.id)}`, { parentBrandId: a.id })).status).toBe(400);
-    expect((await alice.patch(`${B}/${encodeURIComponent(a.id)}`, { parentBrandId: b.id })).status).toBe(400);
+    const self = await alice.patch(`${B}/${encodeURIComponent(a.id)}`, { parentBrandId: a.id });
+    expect([self.status, messageOf(self)]).toEqual([400, 'A brand cannot be its own parent.']);
+    const cycle = await alice.patch(`${B}/${encodeURIComponent(a.id)}`, { parentBrandId: b.id });
+    expect([cycle.status, messageOf(cycle)]).toEqual([400, 'That parent would make a cycle.']);
   });
 
   it('BR2CD-5: a causing member (actorless run) is answered by membership in the org-less list', async () => {

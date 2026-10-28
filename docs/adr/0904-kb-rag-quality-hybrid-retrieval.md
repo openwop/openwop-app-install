@@ -373,3 +373,182 @@ adversarial reviewer re-read every cited file; every finding below was verified 
 **RFC (Track B):** confirmed host-extension. `ctx.knowledge` keeps its shape (fields added, none
 changed); nothing is advertised in `/.well-known/openwop`; no envelope or event.
 **Verdict:** Accepted as a plan. A4 is designed into P0, A1 into P1a, A3 into P5 (before any operator spend).
+
+## P3 recovery correction — shared lexical freshness (2026-10-25)
+
+The original P3 branch and its two recovery prototypes are retained as merge
+ancestry. Their process-local complete/dirty sets and upsert-only mirror were
+insufficient: another replica could miss an ingest, and a paused rebuild could
+restore deleted text. This corrects D9's publication mechanism, not the KB's
+source owner or retrieval contract.
+
+The existing Postgres pool owns the derived lexical table and its content-free
+state rows. Before changing a durable document, the KB invalidates its stable
+collection generation and records a bounded operation claim. Acknowledged
+primary writes clear only their own claim. Uncertain operations leave the index
+unavailable across restarts/replicas; reads use authoritative BM25. They do not
+clear another caller's claim or certify an incomplete index.
+
+A rebuild reads durable documents after taking its generation, then replaces
+the complete namespace under the matching, non-pending SQL owner row. Empty
+rebuilds delete stale rows too. Search readiness and ranked candidates share
+one SQL snapshot. Bounded primary document reads validate every returned
+chunk's identity, text, title and trust rather than accepting copied metadata.
+SQL errors or stale candidates fall back to the existing BM25 channel.
+
+Collection deletion retires the owner before purging active, staging and legacy
+lexical namespaces. Document deletion invalidates before deleting every stored
+chunk for the document, including old chunker tails. Tenant teardown retires a
+content-free tenant row, waits for earlier publishers, then deletes content with
+a fresh SQL snapshot. Opaque retirement rows remain to fence late publishers;
+they retain no document text or subject attribution. Configured-index maintenance
+continues after a vector-backend switch, matching the existing purge registry.
+
+Architecture review: Track A; existing KB service/document primaries, adapter
+runner, durable collection writer and tenant/namespace purge registry remain
+the owners. No second pool, source document store, workflow, provider, public
+endpoint or wire shape is added. New SQL and service race/lost-ack witnesses
+are authored; focused checks, the real Postgres lane and canonical CI must pass
+before this recovery is a release claim.
+
+P3 ranking correction: the first real Postgres run passed all five structural
+and concurrency cases but measured only 0.25 mean top-five overlap with BM25
+(required ≥ 0.5). `ts_rank_cd` does not preserve inverse document frequency.
+The derived index now stores term frequencies and corpus length totals with
+the same generation-fenced publication, and SQL applies the existing BM25
+formula (k1=1.5, b=.75), stable id tiebreak and existing score saturation. GIN
+selects candidate rows and counts matching documents per term; raw corpus
+text and aggregate corpus statistics are not reloaded on each query. This
+corrects D9's ranker choice. Additive columns preserve any prototype data,
+while a format stamp prevents old readiness from certifying missing statistics.
+The original failed result and unchanged quality gate remain in recovery
+evidence; the revised live lane must pass before release.
+
+P3 validation checkpoint (2026-10-25): revised backend TypeScript and all 40
+focused regression files / 294 cases pass on qualified-lead main `100756d50`.
+The native Postgres fixture passes all 7 cases: full replacement/isolation,
+cross-replica delete fencing, lost acknowledgements, collection retirement,
+actual SQL lock contention during tenant teardown, additive prototype upgrade
+and the unchanged 60-query ranking comparison (mean overlap ≥ 0.5). Fixture
+shutdown is verified; peak owned memory 0.41 GiB with no swap growth. The first
+failed 0.25 run remains retained. Canonical full CI is still required.
+
+The two original recovery parity branches are preserved as merge ancestry.
+Their only branch-local changes regenerated the parity fixture against stale
+SLA/qualification source. The current main fixture has 302 asserted pairs and
+0 `knownDrift`, and correctly classifies the repaired methods. Both history
+merges retain that current fixture byte-for-byte; no old opaque-method
+allowance or stale line inventory is restored.
+
+## P4/P5 source recovery checkpoint (2026-10-25, not a release)
+
+Original P4/P5 ancestry is retained in a separate integration branch. The P3
+source generation/retirement fences and revised BM25 ranker are preserved.
+The existing embedusage counter now has a pre-dispatch CAS reservation path;
+unknown commit acknowledgements refuse provider dispatch and retain possible
+spend. Hydrate, query, reindex and enrichment call sites use that path, with
+real SQLite last-slot/lost-ack/malformed-output witnesses authored. Vertex
+vectors additionally require finite numeric values before normalization.
+
+These phases are NOT ready to merge: enrichment cache publication must move
+under the live document's CAS so deletion/erasure cannot be followed by a late
+raw prefix write. Cache identity must include provider, model and exact title
+plus prompt document/chunk hashes. Operator embedding retries and non-KB
+consumers also need the same counter at each actual paid transport attempt,
+without double charging the outer KB batch. Do not enable the operator flag or
+claim the daily cap is complete until those seams and tests are green. The
+original default-off flags, positive-cap boot guard and tenant-BYOK boundary
+remain intact. All new source and tests here are unvalidated.
+
+P4/P5 budget repair checkpoint (source authored, not validated): the existing
+KB daily counter now supplies a concrete admission callback to the shared host
+embedder. Every actual Vertex transport attempt, including retries and non-KB
+consumers, must reserve through that owner before dispatch. Outer KB batches
+only preflight the host budget and do not charge it twice; BYOK embeddings and
+enrichment reserve before their own calls. A missing callback refuses spending.
+SQLite witnesses cover last-slot writers, lost acknowledgements, malformed
+outputs, retry admission and a host embedder used outside KB. Finite vector
+entries and overflow-safe normalization are required. These changes still need
+types, focused tests and canonical CI; raw enrichment cache publication remains
+a release blocker until it is fenced by the live document primary.
+
+
+P4/P5 recovery correction (2026-10-25): the earlier raw-cache blocker is now
+addressed in source. New prefixes live only on the document primary, under an
+internal incarnation and exact-row CAS. Provider/model, title and prompt
+content hashes define each immutable cached response. Late responses cannot
+recreate a deleted document or cross an identical-id replacement; public
+projections omit both internal fields. Dense-vector metadata omits raw prefixes.
+The legacy independent cache is deletion-only. SQL lexical readiness now also
+fences the resolved enrichment/chunker revision within a physical namespace.
+This extends the existing primary and SQL index, without another store or queue.
+
+Backend types and 44 focused files/323 cases pass, including real SQLite
+last-slot contention, lost acknowledgements, deletion/erasure interleaves,
+provider/title/org identity and non-KB host spending. Cancellation still forbids
+vector/cursor publication, while a provider attempt already dispatched retains
+its budget reservation. Canonical CI and frontend verification remain required;
+no operator flag, IAM permission, API or production budget has been enabled.
+
+
+P6/P7 source recovery checkpoint (2026-10-25, not validated): original parsing
+and ranking ancestry is preserved alongside the P4/P5 repair. Each operator API
+now reserves its existing daily usage row with expected-row CAS immediately
+before dispatch. Unknown acknowledgements refuse the call and retain possible
+spend; HTTP, timeout and malformed responses do not refund attempts. Anonymous
+tenants cannot use these operator-funded arms. No new budget store or process
+mutex is introduced. Ranking responses require unique input ids and finite
+0–1 scores; layout page spans are bounded by the online page limit and actual
+file count. PDF page-count probes release their parser document in `finally`.
+SQLite concurrency/restart/failure witnesses are authored but not yet executed.
+Both flags remain off, no API/IAM/spend is enabled, and the >15-page batch path
+is still explicitly unimplemented. These changes are not release-qualified.
+
+
+P7 control and replay review checkpoint (2026-10-25, unvalidated): the existing
+retrieval-config PATCH and quality report now back a reranker selector, with
+server-derived availability and the same optimistic/failure handling as the
+other controls. Provider choices are absent unless available (an already-stored
+unavailable choice remains visible but disabled). Copy is translated in all four
+KB locales. Backend policy excludes anonymous operator-funded selections.
+
+The prototype's statement that `role:action` makes KB reads replay recorded
+outputs is incorrect: the executor consults the derived side-effect served set,
+not the action role (see the ADR 0645 correction in `featureSurfaces.ts`). Search
+can now perform contextual model and operator-ranking calls. A real HTTP
+run/fork test is authored for both search and RAG, changing model identity after
+the source run to make cache-only reasoning insufficient. This follow-up must
+pass, with zero new provider attempts and identical recorded outputs, before the
+recovered paid retrieval paths are deployed. No replay coverage is claimed yet.
+
+
+Paid-retrieval replay correction (2026-10-25): real HTTP source/fork probes
+failed for both KB search and RAG because the action reads re-executed after a
+model change and returned different outputs. `feature.kb.nodes` 1.3.0 retains
+the action role and adds the protocol's existing `side-effectful` capability to
+these two nodes. The generated floor and served set now include both; no manual
+classifier list or new replay store is added. The pack's schema ids and
+reviewed content digest are regenerated. Both probes now pass with identical
+recorded outputs, one live ranking call and two live enrichment calls, and zero
+additional calls after the fork. List collections remains a current-state read.
+Unclassified replay entry paths refuse headless paid reservations before even
+mutating their counters, using the existing run-effect context/backstop.
+
+P6/P7 backend types and 41 operator/PDF cases pass, including real SQLite
+contention and uncertain-spend witnesses. The PDF cleanup initially exposed
+unpdf typings that described a removed proxy method; the patched pdf.js source
+owns cleanup at `document.loadingTask.destroy()`, which is now exercised by
+successful scanned-PDF ingest and both fallback paths. Frontend and complete
+canonical qualification of this follow-up remain pending. Both operator flags
+remain disabled and the online parser still explicitly excludes batch parsing.
+
+
+Provider-contract cross-check (2026-10-25): Google's
+[ranking API documentation](https://docs.cloud.google.com/generative-ai-app-builder/docs/ranking)
+states the 0–1 score range and still lists the prototype's pinned
+`semantic-ranker-default-004` as supported; the recovery does not switch to a
+moving model alias. The
+[Document API reference](https://docs.cloud.google.com/document-ai/docs/reference/rest/v1/Document#LayoutPageSpan)
+defines integer page spans. Unspecified/zero spans retain their text without
+inventing a page citation; negative, fractional or out-of-limit spans refuse
+the provider response. These are static contract checks, not live qualification.

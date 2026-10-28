@@ -15,6 +15,13 @@
  * forwards — every entry in the SSoT has a codec, a profile id, and a card
  * shape. Deleting it and moving on would have retired the guard at exactly the
  * moment it started being able to catch something.
+ *
+ * Tracker TST-BG1-8. Red when (probe-witnessed, wave 58): `a2aProfileIdFor`
+ * stops naming the legacy profile; `servesA2AVersion` accepts anything; an
+ * absent header stops resolving to 0.3 for operations or for the card; the 1.0
+ * card grows a top-level `url` or lists the preferred interface last; the 0.3
+ * card pins a literal `protocolVersion`. The source-grep case is an honest
+ * ceiling: a literal equal to the derived value is invisible to behaviour.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -32,7 +39,7 @@ import {
   servesA2AVersion,
 } from '../src/host/a2aProfile.js';
 import { buildA2aCard03, buildA2aCard10 } from '../src/host/a2aCard.js';
-import { STORED_TASK_STATES, toWireState10 } from '../src/host/a2aCodec10.js';
+import { STORED_TASK_STATES, projectTaskRecordToA2aTask10 } from '../src/host/a2aCodec10.js';
 
 describe('ADR 0552 P0/P2 — the served A2A profile is explicit', () => {
   it('advertises exactly what it serves, preferred first', () => {
@@ -51,8 +58,14 @@ describe('ADR 0552 P0/P2 — the served A2A profile is explicit', () => {
     // negative gave, extended to versions nobody has thought of yet.
     for (const v of A2A_SUPPORTED_VERSIONS) {
       expect(A2A_PROFILES, `no profile id for A2A ${v}`).toContain(a2aProfileIdFor(v));
-      const card = v === LEGACY_A2A_PROTOCOL_VERSION ? buildA2aCard03('https://h.test') : buildA2aCard10('https://h.test');
-      expect(card, `no card shape for A2A ${v}`).toBeTruthy();
+      // The card shape for `v` must actually NAME `v`: the 0.3 card in its
+      // top-level `protocolVersion`, the 1.0 card in `supportedInterfaces[]`.
+      if (v === LEGACY_A2A_PROTOCOL_VERSION) {
+        expect(buildA2aCard03('https://h.test').protocolVersion, `no card shape for A2A ${v}`).toBe(v);
+      } else {
+        const ifaces = buildA2aCard10('https://h.test').supportedInterfaces as Array<{ protocolVersion: string }>;
+        expect(ifaces.map((i) => i.protocolVersion), `no card shape for A2A ${v}`).toContain(v);
+      }
       // The codec the route dispatches to for an explicit header of `v`.
       expect(codecVersionFor(dispositionForA2AVersionHeader(v)), `no codec for A2A ${v}`).toBe(v);
     }
@@ -103,9 +116,13 @@ describe('ADR 0552 P0/P2 — the served A2A profile is explicit', () => {
 
   it('P2 — the D.4 state bijection is total over the stored vocabulary', () => {
     // Guards the one thing a codec split can silently lose: a stored state with
-    // no 1.0 spelling would render `status.state: undefined` on the wire.
+    // no 1.0 spelling would render `status.state: undefined` on the wire. The
+    // table's own totality is `a2a-codec-1-0.test.ts`; this pins that the WIRE
+    // projection (`projectTaskRecordToA2aTask10` → `statusOf10`) renders it.
     for (const s of STORED_TASK_STATES) {
-      expect(toWireState10(s), `no 1.0 spelling for stored state ${s}`).toMatch(/^TASK_STATE_[A-Z_]+$/);
+      const task = projectTaskRecordToA2aTask10({ taskId: 'run_p', runId: 'run_p', tenantId: 't', state: s, updatedAt: '2026-08-16T00:00:00.000Z' });
+      const wire = (task.status as { state?: unknown }).state;
+      expect(wire, `no 1.0 spelling on the wire for stored state ${s}`).toMatch(/^TASK_STATE_[A-Z_]+$/);
     }
   });
 });

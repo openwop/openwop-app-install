@@ -788,4 +788,9 @@ export const messages = {
   pricingContactUrlAria: 'Enlace de contacto para planes sin precio',
   pricingContactUrlPlaceholder: 'Enlace de contacto para planes sin precio (p. ej. /p/contact)',
   pricingCompareSwipeHint: 'Desliza la tabla hacia los lados para ver todos los planes →',
+  // ADR 0949 P0 — legacy result honesty (SRM, fixed-horizon).
+  expSrmNotice: "El reparto del tráfico no coincide con los pesos que configuraste, así que no se muestra ningún veredicto. Algo envía visitantes a una versión más que a la otra (una redirección, una caché o un filtro de bots). Corrígelo y empieza una prueba nueva.",
+  expStopEarlyNote: "Este veredicto supone que lo lees una sola vez, al final. Consultarlo una y otra vez y detenerte la primera vez que diga \"significativo\" hace mucho más probables los ganadores falsos. Decide cuánto tiempo durará antes de empezar y mantenlo ese tiempo.",
+  expGatesUnavailable: "No se pudieron leer las comprobaciones de promoción ahora.",
+  expGatesWarn: "Algunas comprobaciones de promoción no se cumplen. Aún puedes promover a mano; una promoción automática se negaría.",
 } as const;

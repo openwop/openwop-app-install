@@ -1,7 +1,8 @@
 /**
- * ADR 0112 Phase 1 — conversation-search engine unit tests.
- * Text extraction + scoping + facets + drift-free self-heal, against the
- * in-memory `db.search` surface + a `memory://` chat store.
+ * ADR 0112 / ADR 0997 — conversation-search engine unit tests: scoping, facets,
+ * title hits, query semantics (every word, substring, Unicode) and the candidate
+ * cap, against a `memory://` chat store. Search reads the message rows at request
+ * time (ADR 0997 D1); there is no index to seed or reset.
  *
  * Scoping is pinned at BOTH layers: the engine's visible-set post-filter
  * (`searchConversations`) and the ADR 0043 visibility resolution in
@@ -10,9 +11,10 @@
  *
  * Breaks if: the visible-set post-filter, the visibility predicate call, the role
  * facet, the title-hit loop, the empty-query guard or the freshness watermark
- * regresses (sabotage probes w24g1-eng-* / -r2, /grade-tests wave 24).
+ * regresses (sabotage probes w24g1-eng-* / -r2, /grade-tests wave 24), or the
+ * ADR 0997 D3 semantics (all words, substring, Unicode tokens, `truncated`) do.
  */
-import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -24,8 +26,8 @@ import type { Storage } from '../src/storage/storage.js';
 import {
   searchConversations,
   searchVisibleConversations,
-  extractText,
-  __resetSearchEngine,
+  queryTokens,
+  CANDIDATE_LIMIT,
   type SearchScope,
 } from '../src/features/conversation-search/searchEngine.js';
 
@@ -65,38 +67,13 @@ beforeAll(async () => {
   initHostExtPersistence(storage); // conversation metas (ADR 0043) live in host-ext persistence
 });
 
-beforeEach(() => {
-  __resetSearchEngine();
-});
-
-describe('extractText', () => {
-  it('passes through a plain string', () => {
-    expect(extractText('hello world')).toBe('hello world');
-  });
-  it('extracts {content: "..."}', () => {
-    expect(extractText(JSON.stringify({ role: 'user', content: 'find the invoice' }))).toBe('find the invoice');
-  });
-  it('joins a content parts array', () => {
-    const c = JSON.stringify({ content: [{ type: 'text', text: 'alpha' }, { type: 'text', text: 'beta' }] });
-    // Exact: a parts array must yield ONLY the text parts — not the `type` values
-    // (`toContain` passed with the `text` branch removed: "text alpha text beta").
-    expect(extractText(c)).toBe('alpha beta');
-  });
-  it('falls back to the raw string on malformed JSON', () => {
-    expect(extractText('{not json')).toBe('{not json');
-  });
-  it('returns empty for empty', () => {
-    expect(extractText('')).toBe('');
-  });
-});
-
 describe('searchConversations', () => {
   it('finds a message by content and returns conversation + snippet + jump anchor', async () => {
     await seedConversation('c-quarterly', 'Quarterly planning', [
       { role: 'user', content: 'What is our pipeline forecast?' },
       { role: 'assistant', content: 'The forecast shows a strong Q3 with growing revenue.' },
     ]);
-    const hits = await searchConversations(storage, scope({
+    const { hits } = await searchConversations(storage, scope({
       visibleConversationIds: ['c-quarterly'],
       titleById: new Map([['c-quarterly', 'Quarterly planning']]),
     }), 'forecast');
@@ -112,9 +89,9 @@ describe('searchConversations', () => {
     // Index c-private FIRST (positive control), so the surface really holds its doc.
     // Without this the conversation was never indexed and the post-filter under
     // test never ran (wave-24 probe: vacuous).
-    expect(await searchConversations(storage, scope({ visibleConversationIds: ['c-private'] }), 'platypus')).toHaveLength(1);
+    expect((await searchConversations(storage, scope({ visibleConversationIds: ['c-private'] }), 'platypus')).hits).toHaveLength(1);
     // Now platypus is IN the index, but c-private is not in this caller's visible set.
-    const hits = await searchConversations(storage, scope({ visibleConversationIds: ['c-other'] }), 'platypus');
+    const { hits } = await searchConversations(storage, scope({ visibleConversationIds: ['c-other'] }), 'platypus');
     expect(hits).toHaveLength(0);
   });
 
@@ -122,10 +99,10 @@ describe('searchConversations', () => {
     await seedConversation('c-owned', 'Owned', [{ role: 'user', content: 'the quokka plan' }]);
     await ensureConversationMeta(TENANT, 'c-owned', { type: 'group', ownerUserId: 'u-owner' });
     // Owner sees it (positive control) …
-    const own = await searchVisibleConversations(storage, TENANT, 'u-owner', 'quokka');
+    const { hits: own } = await searchVisibleConversations(storage, TENANT, 'u-owner', 'quokka');
     expect(own.map((h) => h.conversationId)).toEqual(['c-owned']);
     // … a same-tenant user who is neither owner nor participant does not.
-    expect(await searchVisibleConversations(storage, TENANT, 'u-stranger', 'quokka')).toEqual([]);
+    expect((await searchVisibleConversations(storage, TENANT, 'u-stranger', 'quokka')).hits).toEqual([]);
   });
 
   it('applies the role facet', async () => {
@@ -134,17 +111,17 @@ describe('searchConversations', () => {
       { role: 'assistant', content: 'unicorn answer from the assistant' },
     ]);
     const visible = { visibleConversationIds: ['c-roles'] };
-    const all = await searchConversations(storage, scope(visible), 'unicorn');
+    const { hits: all } = await searchConversations(storage, scope(visible), 'unicorn');
     expect(all).toHaveLength(1); // best hit per conversation
-    const assistantOnly = await searchConversations(storage, scope({ ...visible, role: 'assistant' }), 'unicorn');
+    const { hits: assistantOnly } = await searchConversations(storage, scope({ ...visible, role: 'assistant' }), 'unicorn');
     expect(assistantOnly[0]!.role).toBe('assistant');
-    const userOnly = await searchConversations(storage, scope({ ...visible, role: 'user' }), 'unicorn');
+    const { hits: userOnly } = await searchConversations(storage, scope({ ...visible, role: 'user' }), 'unicorn');
     expect(userOnly[0]!.role).toBe('user');
   });
 
   it('returns a title-only hit when the query matches the title but no message', async () => {
     await seedConversation('c-budget', 'Budget review 2026', [{ role: 'user', content: 'unrelated chatter' }]);
-    const hits = await searchConversations(storage, scope({
+    const { hits } = await searchConversations(storage, scope({
       visibleConversationIds: ['c-budget'],
       titleById: new Map([['c-budget', 'Budget review 2026']]),
     }), 'budget');
@@ -157,24 +134,71 @@ describe('searchConversations', () => {
     // A title map is supplied so the guard is load-bearing: every title `includes('')`,
     // so without the early return the title loop would emit a hit.
     await seedConversation('c-empty-q', 'Empty query probe', [{ role: 'user', content: 'anything' }]);
-    const hits = await searchConversations(storage, scope({
+    const { hits } = await searchConversations(storage, scope({
       visibleConversationIds: ['c-empty-q'],
       titleById: new Map([['c-empty-q', 'Empty query probe']]),
     }), '   ');
     expect(hits).toHaveLength(0);
   });
 
-  it('self-heals: a newly appended message becomes searchable (watermark rebuild)', async () => {
+  it('a newly appended message is searchable on the next query', async () => {
     await seedConversation('c-heal', 'Heal', [{ role: 'user', content: 'initial message' }]);
     const visible = { visibleConversationIds: ['c-heal'] };
-    expect(await searchConversations(storage, scope(visible), 'pterodactyl')).toHaveLength(0);
+    expect((await searchConversations(storage, scope(visible), 'pterodactyl')).hits).toHaveLength(0);
     await storage.appendChatMessage({
       messageId: 'c-heal-m9', sessionId: 'c-heal', role: 'assistant',
       content: 'now mentioning a pterodactyl', meta: null, authorSubject: null,
       createdAt: new Date().toISOString(),
     });
-    const hits = await searchConversations(storage, scope(visible), 'pterodactyl');
+    const { hits } = await searchConversations(storage, scope(visible), 'pterodactyl');
     expect(hits).toHaveLength(1);
     expect(hits[0]!.snippet.toLowerCase()).toContain('pterodactyl');
+  });
+});
+
+describe('ADR 0997 D3 — query semantics', () => {
+  it('tokenises Unicode letters and numbers, lower-cased and de-duplicated', () => {
+    expect(queryTokens('Café  crème, CAFÉ 42!')).toEqual(['café', 'crème', '42']);
+    expect(queryTokens('  ,,  ')).toEqual([]);
+    expect(queryTokens('a b c d e f g h i j')).toHaveLength(8);
+  });
+
+  it('every word must match, as a substring, within one message', async () => {
+    await seedConversation('c-and', 'And semantics', [
+      { role: 'user', content: 'the deployment window is friday' },
+      { role: 'assistant', content: 'rollback plan attached' },
+    ]);
+    const visible = { visibleConversationIds: ['c-and'] };
+    // Substring: "deploy" finds "deployment".
+    expect((await searchConversations(storage, scope(visible), 'deploy friday')).hits).toHaveLength(1);
+    // AND, per message: "deployment" and "rollback" are in DIFFERENT messages.
+    expect((await searchConversations(storage, scope(visible), 'deployment rollback')).hits).toHaveLength(0);
+  });
+
+  it('matches non-ASCII text', async () => {
+    await seedConversation('c-cafe', 'Notes', [{ role: 'user', content: JSON.stringify({ role: 'user', content: 'Réunion au café demain' }) }]);
+    const { hits } = await searchConversations(storage, scope({ visibleConversationIds: ['c-cafe'] }), 'café');
+    expect(hits.map((h) => h.conversationId)).toEqual(['c-cafe']);
+    expect(hits[0]!.snippet).toContain('café');
+  });
+
+  it('a row tombstoned by meta alone is not searchable', async () => {
+    await seedConversation('c-meta-del', 'Meta delete', [{ role: 'user', content: 'ocelot sighting' }]);
+    await storage.updateChatMessageContent('c-meta-del', 'c-meta-del-m0', 'ocelot sighting', JSON.stringify({ deletedAt: new Date().toISOString() }));
+    expect((await searchConversations(storage, scope({ visibleConversationIds: ['c-meta-del'] }), 'ocelot')).hits).toEqual([]);
+    // …and messageView's placeholder ("_(message deleted)_") is not searchable text:
+    // a row whose own words also say "message deleted" must not surface by it.
+    await seedConversation('c-meta-del2', 'Meta delete 2', [{ role: 'user', content: 'that message deleted itself' }]);
+    await storage.updateChatMessageContent('c-meta-del2', 'c-meta-del2-m0', 'that message deleted itself', JSON.stringify({ deletedAt: new Date().toISOString() }));
+    expect((await searchConversations(storage, scope({ visibleConversationIds: ['c-meta-del2'] }), 'message deleted')).hits).toEqual([]);
+  });
+
+  it('reports truncated when the candidate cap is reached, and not below it', async () => {
+    const many = Array.from({ length: CANDIDATE_LIMIT }, () => ({ role: 'user', content: 'heron' }));
+    await seedConversation('c-cap', 'Cap', many);
+    const visible = { visibleConversationIds: ['c-cap'] };
+    expect((await searchConversations(storage, scope(visible), 'heron')).truncated).toBe(true);
+    await seedConversation('c-under', 'Under', [{ role: 'user', content: 'kestrel' }]);
+    expect((await searchConversations(storage, scope({ visibleConversationIds: ['c-under'] }), 'kestrel')).truncated).toBe(false);
   });
 });

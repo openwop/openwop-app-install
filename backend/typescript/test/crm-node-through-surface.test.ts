@@ -1,5 +1,5 @@
 /**
- * ADR 0627 D1 (`CRMWF-5`) — all 29 `feature.crm.nodes` (27 + ADR 0837's get-contact / record-triage) driven THROUGH the real
+ * ADR 0627 D1 (`CRMWF-5`) — all 36 `feature.crm.nodes` (27 + ADR 0837's get-contact / record-triage + ADR 0954's grade-lead / route-lead / sla-deadline / check-first-touch / sla-rung / lead-evidence / assess-lead) driven THROUGH the real
  * `buildCrmSurface` (via the production `buildHostSurfaceBundle`) on a seeded
  * tenant, with the pack's OWN `nodes` map. The `profiles-node-through-surface`
  * shape: the pack→surface edge is crossed for every node, so a key drift on
@@ -131,6 +131,23 @@ describe('feature.crm.nodes through the REAL ctx.features.crm surface (CRMWF-5)'
     expect(done.outputs).toEqual({ success: true, recorded: true, outcome: 'recorded' });
     expect((await getContact(contactId))!.lastTriage).toMatchObject({ runId: RUN, score: 55, priority: 'normal', variant: 'enriched' });
     await expect(run('feature.crm.nodes.record-triage', { contactId, triage: { variant: 'basic' } })).rejects.toMatchObject({ code: 'validation_error' });
+  });
+
+  it('ADR 0954 P1: grade-lead is a TYPED refusal on a run not started to grade that lead (or with the sub-toggle off)', async () => {
+    // Its success path needs a grading run the lead route started (stamp + pending
+    // run); `adr0954-p1-lead-grade.test.ts` drives that end to end through the chain.
+    await expect(run('feature.crm.nodes.grade-lead', { orgId: 'org-x', contactId })).rejects.toMatchObject({ code: expect.stringMatching(/^(forbidden|forbidden_scope)$/) });
+    // ADR 0954 P2 — route-lead refuses the same way (no lead stamp on this run).
+    await expect(run('feature.crm.nodes.route-lead', { orgId: 'org-x', contactId, routingEpoch: 1 })).rejects.toMatchObject({ code: expect.stringMatching(/^(forbidden|forbidden_scope)$/) });
+    // ADR 0954 P3 — the clock's surface nodes refuse the same way; the pure
+    // deadline node with no recorded clock inputs ends the clock.
+    await expect(run('feature.crm.nodes.check-first-touch', { orgId: 'org-x', contactId, routingEpoch: 1 })).rejects.toMatchObject({ code: expect.stringMatching(/^(forbidden|forbidden_scope)$/) });
+    await expect(run('feature.crm.nodes.sla-rung', { orgId: 'org-x', contactId, routingEpoch: 1, rung: 1 })).rejects.toMatchObject({ code: expect.stringMatching(/^(forbidden|forbidden_scope)$/) });
+    expect((await run('feature.crm.nodes.sla-deadline', { sla: null })).outputs).toEqual({ hasSla: false });
+    // ADR 0954 P4 — lead-evidence refuses the same way; assess-lead with no
+    // criteria is a typed failure before any model call.
+    await expect(run('feature.crm.nodes.lead-evidence', { orgId: 'org-x', contactId, modelId: 'v0', modelVersion: 0 })).rejects.toMatchObject({ code: expect.stringMatching(/^(forbidden|forbidden_scope)$/) });
+    await expect(run('feature.crm.nodes.assess-lead', { orgId: 'org-x', contactId, modelId: 'v0', modelVersion: 0 })).rejects.toMatchObject({ code: expect.stringMatching(/^(forbidden|forbidden_scope)$/) });
   });
 
   it('a foreign-tenant or empty contactId is a TYPED refusal crossing the edge (never a success-with-empty)', async () => {
@@ -302,7 +319,13 @@ describe('feature.crm.nodes through the REAL ctx.features.crm surface (CRMWF-5)'
     expect((await getGmailSync(T, sync.syncId))!.cursor).toBe(new Date(internalDate - 1000).toISOString());
   });
 
-  it('every one of the 29 manifest nodes was exercised through the real surface (no vacuous coverage)', () => {
+  it('the terminal routing projection preserves the recorded result without another host operation', async () => {
+    const route = { success: true, replayed: false, chosen: 'recorded-owner', unassigned: false };
+    const out = await run('feature.crm.nodes.routing-result', { route });
+    expect(out.status).toBe('success'); expect(out.outputs).toEqual(route);
+  });
+
+  it('every manifest node was exercised (no vacuous coverage)', () => {
     const declared = manifest.nodes.map((n) => n.typeId).sort();
     expect([...exercised].sort()).toEqual(declared);
   });

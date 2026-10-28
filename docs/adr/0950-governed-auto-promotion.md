@@ -1,6 +1,6 @@
 # ADR 0950 — Governed auto-promotion: gated, staged, reversible, replayable
 
-Status: Proposed
+Status: Accepted (P0, P1 and P2 implemented 2026-10-20; P3 and P4 open)
 
 Date: 2026-10-19
 
@@ -213,6 +213,130 @@ chain's `apply-ramp` node). Rollback is not a policy class (see below):
 | P3 | Full-auto opt-in with veto windows; CMS gate mapping (D4) | Veto ends the run `vetoed`; CMS-gated org refuses full auto |
 | P4 | Email and ads adapters (with 0955/0952); cockpit explain view (0960) | Email remainder send uses the winner; ad stages respect caps |
 
+## Implementation record
+
+| Phase | Commit / PR | Tests |
+|---|---|---|
+| P0 | branch `feat/0950-p0-promotion-gates` (stacked on ADR 0949 P4b #5116) | `adr0950-p0-gates.test.ts`: a clean winner passes all eight gates, deterministically and independent of cell order (**the P0 exit, first half**); each gate fails for its own reason; a gate it cannot compute is `not_evaluable`, never a pass; **over the real CMS route a 3-session arm shows a red G2 (the P0 exit)**, and the experiments route serves the same report; another org is a 404. FE `promoteGates.test.tsx` (the CMS promote confirm lists the gates, warns and still promotes; an unreadable checklist says so) and the experiment page's checklist. Sabotage-witnessed: not_evaluable counted as pass, G2's sample leg, the hash order, the checklist removed from the confirm, a failing checklist that blocks |
+| P1 | branch `feat/0950-p1-ramp-rollback` (stacked on #5121) | `adr0950-p1-ramp-rollback.test.ts`: **the 100k-key monotone witness** over four launch layouts (winner last, in the middle, uneven) across stages 50 → 90 → 98 with a 2% holdout: no unit leaves the winner, launch winners stay, no holdout unit sees the winner; a ramp is idempotent per stage, never shrinks or goes back, and drives the public CMS assignment; **finalize ships the winner's version and rollback restores the recorded baseline** (and is idempotent); a funnel step swaps its page and back; every action appends `experiment.decision` and the chain verifies. Sabotage-witnessed: the original low-end re-layout reds all four witness cases; stage idempotency; the baseline restore; the decision log |
+| P2 | branch `feat/0950-p2-promote-chain` (stacked on ADR 0942 P2 `feat/autonomy-0942-p2` and this ADR's P1) | `adr0950-p2-promote-chain.test.ts`, through the real loader, starter, executor, node pack and surface: **the P2 exit, a fixture winner passes the gates, takes one approval (an unbound run is `legacy`), ramps 50 → 90 → 98 with a 2% holdout, each stage rechecked on its own units, is monitored and finalizes** (decision log ramp, ramp, ramp, finalize; a replay fork applies nothing); **a guardrail breach at stage 2 rolls back** (control 100, `rolled_back`, stage 3 never applied); only the claimed run may ramp, finalize or roll back; a second start is `promotion_in_progress`; failing gates refuse to start; the route is sub-toggle gated, refuses a viewer and is a 404 from another org. Pack `feature.experiments.nodes` 1.4.0; chain pack `core.openwop.workflows.experiments` 1.1.0 |
+
+> **Correction 2026-10-20 (P0 architect review + build) — the gates as built.**
+>
+> 1. **One observation path.** The rollup rebuild moved from the experiments
+>    service into `host/experiments/observe.ts`, so the experiments routes, the
+>    gates and the CMS promote path share one implementation.
+> 2. **The gates are pure and recorded.** `host/experiments/gates.ts`
+>    `evaluateGates` takes the cells, the verdict and the instant, and reads no
+>    clock. Every gate carries its status, a machine reason and the numbers it
+>    read; the report carries `{planHash, cellsHash, computedAt}`. The
+>    `check-gates` node (pack `feature.experiments.nodes` 1.3.0, role action)
+>    records it all, so a replay shows the same numbers.
+> 3. **`not_evaluable` is not a pass.** A gate that cannot be computed (no
+>    winner for G5/G7/G8, a surface with no content check for G8) is
+>    `not_evaluable`, and only an all-`pass` checklist can promote.
+> 4. **"Recent" is cohort-based.** Cells are keyed by first-exposure day, so G3's
+>    last 7 days and G7's trailing lift mean units first seen in the last 7 days.
+>    Recent cohorts have had less time to convert, which biases both arms alike;
+>    G7 compares signs and ratios, never absolute rates.
+> 5. **A plan-less experiment is held to floors.** G2 for a legacy CMS test uses
+>    7 days and 30 units per arm (labelled `default_floors`), so the CMS manual
+>    promote can show a red G2; G1 is always red for it (relaunch with a plan).
+>    G2 names both legs when both fail.
+> 6. **G8 is the surface's call.** A new optional adapter method,
+>    `checkPromotable`: CMS checks the winner version exists, carries the review
+>    stamp where the gate needs one, and passes the publish blockers; a funnel
+>    step checks the variant page is published.
+> 7. **No toggle in P0.** The checklist is read-only; the sub-toggle
+>    `experiments.auto-promote` lands with P2. The CMS manual promote shows the
+>    checklist in its confirm and never blocks on it.
+
+> **Correction 2026-10-20 (P1 build) — the ramp grows the winner's OWN band;
+> D3's "low end" layout was not monotone.** D3 said to order the bands "so the
+> winner's band grows from the low end and the holdout band stays fixed at the
+> top". At launch the winner's band is wherever its arm order put it (for an A/B
+> test, `[50, 100)`), so re-laying the bands as `[winner | control]` moves every
+> existing winner unit above the new edge back to control at the first stage:
+> exactly what D3 forbids. Measured: that layout reds all four cases of the 100k
+> witness. `rampLayout` (in `host/variantAssignment.ts`) instead keeps every unit
+> on its launch arm and grows the winner's launch band from its own edges, first
+> away from the holdout, then toward it, never into it. The holdout is a fixed
+> band at whichever end the winner's launch band does not touch (the low end
+> when it can). A ramp epoch stores its band layout (`layout`, a key may repeat),
+> and assignment for a ramped experiment (CMS pages, funnel steps, contacts)
+> reads the layout. `applyRamp` is keyed by `stage`. `finalize` asks the surface
+> to ship the winner and records what it replaced (CMS: the latest published
+> version; funnel: the step's page); `rollback` restores it, puts every unit on
+> control with a `rollback` epoch and is never blocked by policy. Each action is
+> an `experiment.decision` entry on the tenant hash chain with ids and numbers
+> only. The CMS manual promote, finalize and rollback now share one
+> publish-a-version composition, so they cannot differ.
+>
+> **Code-review fixes (P1).** The holdout size is fixed for a promotion
+> (`holdout_changed`): a different size moves the band edge and sends winner
+> units back to control. Every ramp refusal is decided inside the CAS, not on the
+> pre-read. `finalize` claims the row (CAS) before the surface ships anything, so
+> two concurrent finalizers publish once and log once; a failed ship releases the
+> claim, and a rollback that lands mid-ship is honoured when the ship finishes.
+> The CMS baseline is the newest `origin: 'publish'` snapshot: the newest row of
+> any origin can be a `seed` offer or a `submit` capture that was never live.
+>
+> **Grade-workflows fixes (P1, replay).** A rolled-back experiment now counts as
+> assigning for any run that began before the rollback (`assigningAt`), the same
+> rule as a stop: before this, a `:fork` of such a run assigned every unit to
+> "untested" while its source had assigned them to arms. A stage retried with
+> different numbers is refused (`stage_mismatch`) instead of silently reported as
+> `existing`: a replay repeats its inputs exactly, so a difference is a caller bug.
+
+> **Correction 2026-10-20 (P2 architect review + build) — the promotion chain, as built.**
+>
+> 1. **One run may promote an experiment, and every step checks it.** D1 put
+>    "one live promotion per experiment" in the service. The architect review
+>    found that insufficient: a chain in the gallery can be instantiated by hand
+>    with any `experimentId` and would skip the service's checks. So
+>    `startPromotion` CLAIMS the experiment for a fresh run id (CAS on
+>    `promotionRunId`, before the run starts; released if the start is refused)
+>    and `apply-ramp`, `finalize` and `rollback` refuse any other run
+>    (`not_the_promotion_run`). A new start is refused while the previous
+>    promotion run is still live (its status is read, so a crashed run never
+>    wedges the experiment). The chain is `internal`, owned by the sub-toggle
+>    `experiments.auto-promote` (default OFF; the route AND-gates `experiments`).
+> 2. **Stage 1 re-checks every gate.** The approval can take days; the data can
+>    drift into an SRM or a breach meanwhile. `apply-ramp` stage 1 re-evaluates
+>    G1–G8 and refuses `gate_failed` (or `winner_changed`) before anything moves.
+> 3. **The policy gate is the experiments pack's own node over the SAME host
+>    decision.** D1 drew `policy-gate(0942)`; reusing
+>    `feature.campaign-orchestration.nodes.autonomy-gate` would make every
+>    promotion depend on the campaign-orchestration feature and pack (the node
+>    throws `host_capability_missing` without that surface). The decision is
+>    host code (`host/autonomyPolicy` `decideGate`), so `ctx.features.experiments
+>    .policyResolve` calls it with `experiment.promote`, and
+>    `feature.experiments.nodes.policy-gate` acts on the verdict exactly as the
+>    campaign node does (the same `kind:'approval'` interrupt, the same
+>    `data.autonomy` block, the same refusals; listed in
+>    `APPROVAL_GATE_TYPE_IDS`). The two node bodies are small and duplicated
+>    because a pack cannot import host code; the decision is not duplicated.
+>    A promotion run is not campaign-bound in P2 (the ADR 0941 run tag is
+>    stamped by the campaign feature, which this package does not import), so
+>    the policy resolves `legacy`: one approval, the `core.approvalGate`
+>    posture. Binding a promotion to its campaign, and with it the full policy
+>    and the CMS gate mapping, is P3.
+> 4. **Rechecks look at the stage's own units, against the stage's weights.** A
+>    stage's cohort is the units first exposed since its epoch (cells are keyed
+>    by first-exposure day). SRM is computed against the stage's weights: the
+>    launch weights would call an SRM on every ramp. Not enough units yet is
+>    `stage_underpowered`, a typed stop with the experiment held at its stage
+>    (safe and monotone; a new promotion run resumes, since applied stages are
+>    `existing`). A stage is judged no sooner than 24 hours after it applied
+>    (`stage_too_soon`); only a test may shorten that (`NODE_ENV === 'test'`).
+> 5. **Monitoring is one look in P2.** After the last stage a monitoring window
+>    runs, then `monitor` checks SRM, guardrails and the primary metric against
+>    the holdout (a breach when the winner's confidence sequence is wholly below
+>    zero). The repeated 6-hourly looks of D5 need a scheduled job and land with
+>    the holdout's end-of-life in a later phase.
+> 6. **Rollback has three nodes, one per breach point.** A node with several
+>    incoming conditional edges would wait on edges that never fire.
+
 ## Alternatives weighed
 
 - **Promote from Optimize (bandit) results.** Rejected: a bandit has no error
@@ -261,3 +385,94 @@ interrupt and RFC 0021 lanes. Nothing is advertised.
   holdout and guardrail rechecks, monitors after promotion and rolls back automatically
   on breach. Every decision is a hash-chained audit entry, and "why it won" replays the
   decision run. Sub-toggle `experiments.auto-promote` (OFF, tenant). Host-ext, no RFC.
+
+### Recovery review correction — promotion ownership, 2026-10-21
+
+The recovered P2 implementation treated a missing run as dead immediately after
+reserving its id, so a concurrent request could steal the reservation before the
+starter inserted the first run. A reservation now records its creation time:
+missing runs retain a five-minute startup grace, terminal runs release at once,
+and a corrupt reservation timestamp fails closed. A legacy missing timestamp
+starts its grace on the first CAS-guarded observation of a missing run. A crash
+before insert therefore has a bounded recovery window without stealing a live
+starter's reservation. The starter also pins the trusted chain-backed definition
+hash, refusing a changed catalog definition or an old tenant-owned published pin.
+
+The surface's ownership read is also repeated inside each ramp, finalization and
+rollback CAS. A competing claim or release between the surface read and the write
+must refuse the stale operation. The original P1 trusted service calls remain valid
+when the experiment has no promotion-run binding. Deterministic race witnesses and
+full canonical validation are pending; this correction is not a shipping claim.
+
+The recovery review also found that filtering daily cells from the stage's date
+included units exposed before the ramp earlier that same day. Stage observations
+now filter exact first-exposure timestamps before folding cells, while rebuilding
+the shared full-experiment cache from all units. Partial source coverage cannot
+pass a stage. A same-day mixed-allocation witness also checks the full cache stays
+intact; execution remains pending the serial validation slot.
+
+Recovery correction (2026-10-24): a thrown starter can follow a committed run
+and dispatch outbox. It no longer releases that run's promotion authority. A
+normal null refusal still releases immediately; missing-run recovery uses the
+existing startup grace. An inserted-run/lost-read witness covers the ambiguous
+acknowledgement. The replay witness now requires an actual 201 fork, a completed
+child and the source parent id, instead of accepting an HTTP refusal as coverage.
+These witnesses await executable validation alongside the original P2 exits.
+
+Recovery correction (2026-10-24): the initial promotion reservation also freezes
+its elected winner and gate hashes. A new run continuing a held ramp checks that
+same winner, plan and holdout against the current stage's allocation and exact
+cohort (including current content publishability), rather than testing mixed
+ramp history against launch weights. The reservation CAS rejects a changed
+status, plan, stage or epoch after the checks. Both the starter and the claimed
+run's require-gates surface follow this path. A real stage-2 underpowered run,
+new observations and continuation witness also assert that no epoch repeats and
+the original holdout survives. Execution is pending; finalization/rollback
+receipts and replay of the original preflight decision remain release blockers.
+
+### Recovery correction — surface receipts (2026-10-24, in progress)
+
+The P1 claim above that a thrown ship means "nothing shipped" is invalid: a primary write can commit and its acknowledgement fail. The same issue applies to rollback, whose status must not be mistaken for evidence that baseline restoration completed. Publication receipts therefore belong to the surface, atomically with its own content pointer, and are keyed by the experiment rather than the caller's attempt. The engine must reconcile them on retry and only record final completion after the surface confirms it.
+
+The funnel surface now stores its original baseline and finalized/rolled-back receipt on the same funnel primary row as the step pointer. All existing funnel updates use an expected-row CAS so a stale editor/lifecycle/experiment writer cannot erase a committed receipt. A rollback can close an unfinalized receipt, fencing a paused finalizer; a committed finalize or restore with a lost acknowledgement reconciles after restart. Manual edits after publication cause a conflict rather than being silently overwritten. Receipts remain at funnel scope across step edits/removal and are deleted with the funnel. Four file-backed SQLite witnesses cover commit/ack loss, rollback-before-finalize-CAS and stale editor writes. These witnesses are authored but not yet executed. CMS receipts, the engine's final acknowledgement and frozen preflight replay remain release blockers.
+
+Recovery implementation (2026-10-24, unvalidated): the source run now records the actual gate/stage report per executing node with the existing atomic, never-overwrite run metadata merge. Replay inherits these host-owned reports; dashboard reads remain live, current org access still applies, and publication/ramp authority is never inherited from a report. Public and scheduler admissions strip the entire evidence-key prefix. SQLite's conditional metadata merge now compares exact top-level keys rather than interpreting dotted names as JSON paths, matching Postgres. Seven direct storage/surface witnesses cover immutable reports, a lost acknowledgement, mismatched experiments/operations, missing replay evidence, caller forgery and ordinary live reads; the existing real fork completion witness remains.
+
+The engine now records finalization only after the surface confirms its durable receipt, retains pending-approval truth on retries, and retries content restoration even after traffic/status already rolled back. It never treats an exception as proof that no content committed. CMS must still implement its own primary-row receipt before this draft can pass or merge. All new source and witnesses remain pending executable validation.
+
+CMS receipt implementation (2026-10-24, unvalidated): a promotion now pins one immutable original-content capture in the existing page-version owner before its first page change. This internal capture makes no publish/review claim, is hidden from editor history, cannot be an experiment arm and survives ordinary50-version pruning. The page's primary kernel row holds its baseline/public reference, capture reference, winner, owned version/status and phase. Restore and transition advance that phase in the SAME page CAS; a stale editor write cannot erase it, nor can a paused finalizer pass a rollback's closed phase. Existing content blockers, current approval toggle, review queue, self-approval and restore/transition owners remain in force. A never-published original restores to its original draft content and stays offline instead of interpreting null as a no-op. Closed/superseded captures are removed on reconciliation; a capture left by a failed initial prepare remains with its page owner and is deleted with the page. Ten file-backed SQLite cases are authored for restart/ack loss, rollback-before-content-CAS, later human edits, review queueing, history retention and engine retry after traffic/status changed but content restoration failed; execution is pending. Primary content receipts do not strengthen the existing best-effort lifecycle/audit delivery contract.
+
+
+### Recovery correction: real timer completion and stop races (2026-10-24)
+
+The loader deliberately freezes non-prompt chain config at expansion. Run inputs
+could not shorten the promotion chain's 24-hour timers; the ineffective internal
+shortening options were removed. The end-to-end fixture advances the existing
+timer sweep's explicit clock to the persisted deadline and drives the production
+preclaimed resume continuation. The core flow wait node now wraps that resolution
+in its declared successful `{resumed, payload}` output rather than returning a
+raw payload that the loader rejects. The pack patch is `1.1.4`.
+
+Stopping or abandoning an experiment after its content commit but before the
+engine acknowledgement must restore the original baseline through the same
+surface receipt. A retry after acknowledgement loss also reconciles that receipt
+before refusing the stopped promotion. Two file-backed SQLite interleavings
+cover the normal response and a lost response, with restart, unchanged stopped
+status and no false `finalizedAt`. These changes still await their focused and
+canonical gates.
+
+
+Recovery validation checkpoint (2026-10-24): all 277 cases across 21 focused
+backend files pass, including the original promotion exits and completed replay
+fork, thirteen CMS receipt/lifecycle cases, seven frozen-read cases and four
+funnel cases. CMS managed lifecycle changes now also use the engine CAS, so a
+stop cannot erase a concurrent promotion reservation or intent. The replay
+fixture explicitly resolves its reopened human approval before checking that no
+publication or allocation repeats. Test observations are frozen at their epoch
+instant, within the actual as-of bound.
+
+The wait repair already exists in PR #5110; its original head and dedicated real
+timer/executor witness are integrated rather than publishing a second body for
+the same 1.1.4 version. The unknown-route page is loaded on demand under the
+existing router Suspense boundary (ADR 0874); its entry size still needs the canonical build gate.
+Canonical validation and signed registry publication remain required.

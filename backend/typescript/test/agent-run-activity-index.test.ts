@@ -8,6 +8,13 @@
  *     (the index row is immutable; status reflects a later updateRun)
  *   - the query is index-scoped: a non-attributed run never appears even if it's
  *     the most recent run in the tenant
+ *
+ * TST-BLR-2. Red when: the roster or status filter is dropped from the sqlite
+ * query, or `agent_run_activity.run_id` loses its PRIMARY KEY (re-recording
+ * then duplicates). The "no rosterId" case is a recorded DOUBLE guard: the
+ * extractor returns undefined AND the `roster_id NOT NULL` constraint refuses
+ * the row (its throw is caught + logged by `recordRunAttribution`), so removing
+ * either one alone stays green.
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -43,6 +50,10 @@ describe('agent run activity index', () => {
       runId: 'sched', status: 'failed', createdAt: '2026-06-02T11:00:00.000Z',
       metadata: { schedule: { rosterId: 'host:priya', agentId: 'a2', source: 'schedule' } },
     }));
+    await insertAndIndex(run({
+      runId: 'kan', status: 'completed', createdAt: '2026-06-02T11:30:00.000Z',
+      metadata: { kanban: { rosterId: 'host:kim', source: 'kanban' } },
+    }));
     // No attribution → must NOT be indexed even though it is the newest run.
     await insertAndIndex(run({ runId: 'orphan', createdAt: '2026-06-02T13:00:00.000Z', metadata: {} }));
 
@@ -50,7 +61,8 @@ describe('agent run activity index', () => {
     expect(sally.map((r) => r.runId)).toEqual(['hb']);
 
     const all = await storage.listAgentRunActivity({ tenantId: 't1' });
-    expect(all.map((r) => r.runId).sort()).toEqual(['hb', 'sched']); // orphan excluded
+    // Newest first (ORDER BY created_at DESC); orphan excluded.
+    expect(all.map((r) => r.runId)).toEqual(['hb', 'kan', 'sched']);
 
     // status filter (failures view)
     const failed = await storage.listAgentRunActivity({ tenantId: 't1', status: 'failed' });

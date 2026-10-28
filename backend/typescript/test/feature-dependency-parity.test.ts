@@ -295,6 +295,125 @@ describe('ADR 0439 — feature dependency graph integrity', () => {
     // unconnected tenant. A lock would wrongly make commerce-connect
     // undisableable for every store. The off-leg is pinned by
     // `adr0877-live-checkout-eligibility.test.ts` ("toggle is OFF falls back to demo").
-    ).toBeLessThanOrEqual(99);
+    // 99 → 100 (ADR 0941 P1, 2026-10-20): `campaign-orchestration → commerce`.
+    // A campaign's `productRefs[]` are validated against the product on PATCH and
+    // listed on the campaign's links read, and a product delete detaches the ref
+    // through the commerce `onProductDeleted` seam — the edge is the point of D3.
+    // Deliberately left UNDECLARED for the standing reason: `dependsOn` is a
+    // disable-LOCK, and campaigns must not make commerce undisableable. With
+    // commerce OFF the PATCH refuses product refs (`requireFeatureEnabled`) and
+    // the links read reports the section `unavailable: feature_off`, pinned by
+    // `adr0941-p1-campaign-links.test.ts` ("a feature that is off as unavailable").
+    // 100 → 103 (ADR 0941 P2, 2026-10-20): `campaign-orchestration → email`,
+    // `→ campaign-studio` and `→ campaign-ops`. The campaign's links read lists
+    // each child that points up at it (email sends, plan links, ops assets)
+    // through the child's owner — the back-link read is the point of P2.
+    // Deliberately left UNDECLARED for the standing reason: `dependsOn` is a
+    // disable-LOCK, and a campaign must not make any of the three undisableable.
+    // With one OFF its section reports `unavailable: feature_off` and is never
+    // read, pinned by `adr0941-p2-back-links.test.ts` ("… OFF, its links section
+    // is unavailable, never read").
+    // 103 → 104 (ADR 0922 P0b, 2026-10-19): `campaign-ops → email`. The email-draft
+    // destination IS an ADR 0905 template version, read and written through the
+    // email service (ADR 0922 D5: no second draft store), so the edge is the point
+    // of the design. DECLARED as `recommends`, deliberately NOT `dependsOn`: a lock
+    // would make email undisableable for every agency, and with email OFF the
+    // adapter refuses `destination_unavailable` while CMS assets keep working.
+    // The off-leg is pinned by `campaign-ops-email-adapter.test.ts`.
+    // 104 → 107 (ADR 0948 P0, 2026-10-20): three read edges, each the point of a
+    // decision, all left undeclared (a `dependsOn` lock would make a sibling
+    // undisableable; each reader is vacuous-when-off):
+    //  - `funnels → campaign-orchestration`: a funnel's `campaignId` must name a
+    //    campaign of the SAME org (D1). A plain store read: it does not consult the
+    //    campaigns toggle, and an unlinked funnel works exactly as before.
+    //  - `funnels → commerce-connect`: the client-settlement publish guard (D8,
+    //    David #5038) asks the ONE settlement resolver, never re-derives the lane.
+    //  - `commerce → funnels`: a public checkout that names a funnel step sells
+    //    only what that step offers (D2). A plain store read (no toggle check): with
+    //    funnels off no funnel page serves, so a funnel-ref checkout can only come
+    //    from an old link, and it still sells only what the step offered. Without a
+    //    funnel ref the plain storefront is unchanged.
+    // 107 → 110 (ADR 0957 P0, 2026-10-20): `campaign-ops → campaign-connectors`,
+    // `→ campaign-intel`, `→ email`, `→ campaign-orchestration`. A client report
+    // is a frozen copy of numbers those features already compute (D1, "reporting
+    // adds no metric math"): `kpiSummary`, `buildAttribution`, `engagementStats`
+    // (after `getCampaign` proves the email campaign is the client's), and the
+    // campaign lookup that proves a named campaign is the client's. All are lazy
+    // reads, called only when a section of that kind runs. Left UNDECLARED for
+    // the reason above: source reads check their live feature gates, so a
+    // `dependsOn` lock would make optional source features undisableable.
+    // 110 → 111 (ADR 0956 D5, 2026-10-20): `campaign-brief → campaign-intel`. The
+    // brief surface's `trackedUrl` lints the stamped link against the client org's
+    // UTM policy, which campaign-intel owns. Deliberately left UNDECLARED for the
+    // standing reason: `dependsOn` is a disable-LOCK, and with campaign-intel OFF
+    // `trackedUrl` checks `resolveOne` first and returns the link UNLINTED (no
+    // policy read), so existing publishes are not newly blocked. The off-leg is
+    // pinned by `adr0956-utm-governance.test.ts` ("unlinted while campaign-intel is off").
+    // Other open PRs raise this count too; the train re-derives it.
+    // 111 → 112 (ADR 0956 D6, 2026-10-20): `campaign-intel → funnels`. The AdMap
+    // resolves an ad's landing page to the funnel steps that render it
+    // (`listFunnels`, read through the owning service). Deliberately left
+    // UNDECLARED for the standing reason: `dependsOn` is a disable-LOCK, and with
+    // funnels OFF AdMap does not read the retained funnel rows; a landing page
+    // resolves to its CMS page with no funnel steps. The off-leg is tested.
+    // 112 → 113 (ADR 0944 P2, recovery measured 2026-10-25): campaign-ops
+    // reads documents for approved client decisions. KB, projects and the
+    // team-intent-ledger are always-on and add no toggleable edge; brand was
+    // already recommended. Source access is checked before materialization
+    // and on every frozen read; no disable lock. Exact measured count = 113.
+    // 113 → 114 (ADR 0924 D5 P1, 2026-10-19, rebased 2026-10-25): `sharing →
+    // campaign-ops`. The client approver link is a sharing `campaign_approval`
+    // resolver, because ADR 0448 D3 puts every link-shaped capability in a sharing
+    // resolver and never in a token store of its own. A resolver row imports its
+    // owner's validate/load hooks (the `sign_request` → crm precedent). The import
+    // is STATIC and safe: campaign-ops reaches sharing only through dynamic
+    // imports, so no cycle. Deliberately left UNDECLARED for the standing reason:
+    // `dependsOn` is a disable-LOCK. The resolver's `toggleId`
+    // (`campaign-ops-client-portal`) darkens every approval link while campaign ops
+    // is off; pinned by `campaign-ops-client-portal.test.ts` ("Turning the portal
+    // off darkens the link").
+    // 114 → 115 (ADR 0955 D1, recovery measured 2026-10-25, re-measured on main 06f799ce5):
+    // campaign-journeys → campaign-ops reads the ONE client owner for enrollment
+    // scope and the run's client stamp. The feature already recommends it.
+    // Client service reads remain available while its UI is off; declaring a
+    // hard dependency would incorrectly lock that UI on. The real enrollment
+    // off-leg, including refusal of an absent client, is pinned by
+    // adr0955-p0-channel-eligibility.test.ts. No other edge or slack is admitted.
+    // Exact measured count on the merge with main 06f799ce5 = 115 (both 114 edges).
+    // 115 → 116 (ADR 0952 D6 / P7, measured on the 2026-10-25 integration of the
+    // 0952 stack onto 7981e512c): campaign-connectors → commerce. The catalog feed
+    // is GENERATED from the one commerce catalog (`listProducts`, no second product
+    // store). It is a domain read with its own per-org switch (the feed is off until
+    // enabled, and a disabled or rotated feed answers 404); declaring `dependsOn`
+    // would lock commerce ON for every connectors tenant. Off-leg (INTWF-1, fixed
+    // in the same integration): while the store does not serve (commerce off, or the
+    // owner lapsed), the public feed answers 404 and a push refuses `commerce_off`
+    // with no call, never an empty feed that would delete the platform catalog;
+    // pinned by ads-catalog-feed.test.ts. Exact measured count = 116.
+    // 116 → 118 (ADR 0945 D1 + ADR 0946 P0, recovery measured 2026-10-25 on the
+    // merge with main 7981e512c, edge lists diffed; re-measured 118 on the merge
+    // with main 6e1b8df18 = main's 116 plus exactly these two):
+    //  - `creative-briefs → commerce`: grounded creative may depict a product only
+    //    from the catalog's own imagery (`resolveProductMedia`). Every entry point
+    //    asks `featureAccessRefusal('commerce')` first
+    //    (`assertProductGroundedEnabled`); off-leg pinned by
+    //    adr0945-p5-read-routes.test.ts ("is refused when commerce is off").
+    //  - `campaign-orchestration → creative-briefs`: a variant member's `renderId`
+    //    is validated against the creative-briefs render owner. The variant routes
+    //    require `creative-briefs` on, so with it off the whole surface 404s;
+    //    pinned by adr0946-variant-sets.test.ts ("refuses a render reference when
+    //    Creative Briefs is disabled").
+    // Both stay UNDECLARED for the standing reason: `dependsOn` is a disable-LOCK.
+    // 118 → 121 (ADR 0948 integration, 2026-10-26; measured on the merge with main
+    // 7009245df = main's 118 plus exactly these three, all owned by funnels):
+    //  - `funnels → campaign-brief` (P3a `generateService`): a blueprint is
+    //    generated only from a CONFIRMED brief; a missing brief (feature off or not
+    //    found) is the typed `brief_not_found` refusal, never a run.
+    //  - `funnels → webinars` and `funnels → crm` (P4a `stepOutcome`): a webinar
+    //    step's server-derived outcome reads the marketing event and the CRM
+    //    attendance activity. Absent either, the outcome is `undefined` and routing
+    //    stays sequential (navigation, not authorization).
+    // All three UNDECLARED for the standing reason: `dependsOn` is a disable-LOCK.
+    ).toBeLessThanOrEqual(121);
   });
 });

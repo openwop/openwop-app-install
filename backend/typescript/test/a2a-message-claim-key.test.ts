@@ -2,7 +2,12 @@
  * The A2A message-claim key must be storable in Postgres: no 0x00 byte.
  * The raw `${tenant}\0${principal}\0${messageId}` key failed every A2A 1.0
  * SendMessage on a Postgres host (-32603 "invalid byte sequence for encoding
- * UTF8: 0x00", app.openwop.dev 2026-09-28); memory and SQLite hid it.
+ * UTF8: 0x00", app.openwop.dev 2026-09-28); memory and SQLite hid it. Fixed in
+ * #4219. The claim is the ADR 0552 P2 / RFC 0150 §A messageId idempotency key.
+ *
+ * Tracker TST-BG1-7. Red when (probe-witnessed, wave 58): `claimKeyFor`
+ * returns the raw NUL-joined triple, or hashes the triple without separators
+ * (so `a`+`bc` and `ab`+`c` collide).
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { claimKeyFor, getA2aMessageClaim, setA2aMessageClaim } from '../src/host/a2aTaskStore.js';

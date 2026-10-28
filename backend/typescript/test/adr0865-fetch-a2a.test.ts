@@ -3,6 +3,19 @@
  * (loopback provider, `OPENWOP_WEBHOOK_ALLOW_PRIVATE`, as in the ADR 0783 data
  * source tests); only the peer is a stub: an A2A 1.0 JSON-RPC agent that records
  * every request it receives, so each witness reads what was actually SENT.
+ *
+ * Tracker TST-BFB-2. Red when: `isWithinBase` stops comparing origins (case 3;
+ * it is a double guard, checked on the card's endpoint in `fetchA2A` AND on
+ * every request in `brokeredTransport`, so the shared helper is what is
+ * probed); a base with a path is accepted; a read-only provider sends; a
+ * duplicate with no confirmed task id, or a message-only duplicate, is re-read
+ * or re-sent; the messageId is not derived from the ledger key; a `url` part or
+ * metadata reaches the result; INPUT_REQUIRED gets another code; a missing
+ * idempotencyKey reaches the peer; the ledger reservation is not a CAS.
+ *
+ * Determinism ceiling: the deadline cases use real 1 s deadlines, 3 s peer
+ * delays and wall-clock bounds. The bound IS the claim (the deadline is not
+ * escaped), so a fake clock would remove what is tested.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';
@@ -59,6 +72,7 @@ function taskBody(id: string): Record<string, unknown> {
   }
 }
 
+const savedAllowPrivate = process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE;
 beforeAll(async () => {
   process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE = 'true';
   app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
@@ -124,6 +138,8 @@ beforeAll(async () => {
 }, 60_000);
 
 afterAll(async () => {
+  if (savedAllowPrivate === undefined) delete process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE;
+  else process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE = savedAllowPrivate;
   _resetKmsForTesting();
   peer.closeAllConnections();
   await new Promise<void>((r) => peer.close(() => r()));
@@ -342,6 +358,9 @@ describe('ADR 0865 P2 — fetchA2A', () => {
     expect(sends()).toHaveLength(3);
   });
 
+  // The race is not forced: both callers do card I/O before the one CAS in
+  // `reserveSend`, so they reach it together in practice. A blind reservation
+  // (no CAS) reds this case (probe w62g3-fa-reserve, witnessed).
   it('two concurrent sends with one key reach the peer once', async () => {
     const id = await peerSource();
     const k = key();

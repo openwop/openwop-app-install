@@ -14,7 +14,8 @@
 
 import type { Express } from 'express';
 import { OpenwopError } from '../types.js';
-import { buildNodeCatalog, nodeCatalogForTenant } from '../host/nodeCatalogBuilder.js';
+import { buildNodeCatalog, localizeCatalogNode, nodeCatalogForTenant } from '../host/nodeCatalogBuilder.js';
+import { hostDefaultLocale, preferredLocale } from '../host/i18n/locale.js';
 import { resolveDisabledPacks } from '../host/packVisibility.js';
 import { tenantOf } from '../host/requestSubject.js';
 
@@ -29,7 +30,20 @@ export function registerNodeCatalogRoute(app: Express): void {
         ? buildNodeCatalog()
         : buildNodeCatalog().filter((n) => !(n.packName && disabled.has(n.packName)));
       // ADR 0917 — mark nodes whose feature surface this tenant has off.
-      const nodes = await nodeCatalogForTenant(tenantOf(req), all, req.userId);
+      const tenantNodes = await nodeCatalogForTenant(tenantOf(req), all, req.userId);
+      // ADR 0937 — pack text in the reader's locale (`i18n.md` §Accept-Language).
+      const base = hostDefaultLocale();
+      const locale = preferredLocale(req.headers['accept-language'], base);
+      // `Content-Language` names the locale served (i18n.md §Accept-Language): set
+      // only when every localized node resolved the SAME overlay, else omitted.
+      const served = new Set<string>();
+      const nodes = tenantNodes.map((n) => {
+        const r = localizeCatalogNode(n, locale, base);
+        if (r.servedTag !== null) served.add(r.servedTag);
+        return r.node;
+      });
+      if (served.size === 1) res.setHeader('Content-Language', [...served][0]!);
+      res.vary('Accept-Language');
       res.json({ nodes });
     } catch (err) {
       next(err instanceof OpenwopError ? err : new OpenwopError('internal_error', String(err), 500));

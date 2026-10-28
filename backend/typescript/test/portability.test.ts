@@ -28,7 +28,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
-import { createUserTemplate } from '../src/host/promptStore.js';
+import { createTenantTemplate } from '../src/host/tenantPromptTemplates.js';
 import { createOrg } from '../src/host/accessControlService.js';
 import { createRosterEntry, listRoster } from '../src/host/rosterService.js';
 import { upsertAgentProfile } from '../src/host/agentProfileService.js';
@@ -62,12 +62,15 @@ beforeAll(async () => {
   });
 
   // The source tenant every real-export / real-import case reads.
-  createUserTemplate({ templateId: 'tpl-porta-brief', version: '1.0.0', kind: 'user', text: 'Brief {{week}}', name: 'tpl-porta-brief' });
-  await createOrg({ tenantId: TA, createdBy: 'test', name: 'Porta Org', orgId: 'o1' });
+  // ADR 0993 D5 — a user template belongs to ONE tenant now.
+  expect((await createTenantTemplate(TA, { templateId: 'tpl-porta-brief', version: '1.0.0', kind: 'user', text: 'Brief {{week}}', name: 'tpl-porta-brief' })).ok).toBe(true);
+  // ADR 0993 D7 — the prompt export answers what the EXPORTER may read, so the
+  // exporting subject is a real member of the org.
+  await createOrg({ tenantId: TA, createdBy: 'test', name: 'Porta Org', orgId: 'o1', ownerSubject: 'test' });
   const entry = await createRosterEntry({ tenantId: TA, persona: 'ops-lead', agentRef: { agentId: 'assistant' }, label: 'Ops Lead' });
   rosterId = entry.rosterId;
   await upsertAgentProfile(TA, entry.rosterId, { roleKey: 'operations', autonomy: { specLevel: 'recommend' } });
-  await createEntry(TA, 'o1', 'test', { name: 'weekly-brief', description: 'Weekly brief prompt', promptRef: 'tpl-porta-brief' });
+  await createEntry(TA, 'o1', 'test', { name: 'weekly-brief', description: 'Weekly brief prompt', promptRef: 'tpl-porta-brief', visibility: 'org' });
   const job = await registerJob({ jobId: 'sched-porta-1', tenantId: TA, cronExpr: '0 9 * * 1', enabled: true });
   if (!job.ok) throw new Error(`seed schedule failed: ${job.error.message}`);
   const chartOut = await putChart({ tenantId: TA, departments: [{ departmentId: 'd1', name: 'Ops', parentDepartmentId: null, roles: [] }], members: [] });
@@ -191,7 +194,7 @@ describe('portability — export/import seam (RFC 0098)', () => {
 
 describe('real export — the tenant\'s actual entities, refs-only', () => {
   it('exports roster/agent/prompt/schedule/org-chart/connection from real stores, self-checked refs-only', async () => {
-    const bundle = await buildExportBundle(TA);
+    const bundle = await buildExportBundle(TA, undefined, 'test');
     expect([...new Set(bundle.items.map((i) => i.kind))].sort()).toEqual(['agent', 'connection-ref', 'org-chart', 'prompt-template', 'roster', 'schedule']);
 
     // Refs-only: the connection carries a [REDACTED:<id>] ref, never material.
@@ -213,7 +216,7 @@ describe('real import — materializes via the owning services, inert + idempote
 
   it('round-trips the export into a second tenant: roster+schedule land DISABLED, connection is record-only, org-chart drops foreign members', async () => {
     const TB = 'porta-dst-roundtrip';
-    const bundle = await buildExportBundle(TA);
+    const bundle = await buildExportBundle(TA, undefined, 'test');
     const result = await applyImport(TB, 'test', bundle);
 
     expect(result.dryRun).toBe(false);
@@ -233,9 +236,13 @@ describe('real import — materializes via the owning services, inert + idempote
     expect(job?.enabled).toBe(false);
     expect(job?.tenantId).toBe(TB);
 
-    // Prompt created in the payload's org.
-    expect(byKind('prompt-template')[0]!.status).toBe('imported');
-    expect((await listEntriesUnfiltered(TB, 'o1')).map((e) => e.name)).toEqual(['weekly-brief']);
+    // ADR 0993 D7 — a prompt lands only in an org the importer may WRITE in the
+    // target tenant. `o1` is TA's org (org ids are global), so the import says so
+    // instead of writing a row into an org TB does not have, which no route could
+    // ever reach (what it did before).
+    expect(byKind('prompt-template')[0]!.status).toBe('skipped');
+    expect(byKind('prompt-template')[0]!.message).toMatch(/write access to org o1/);
+    expect(await listEntriesUnfiltered(TB, 'o1')).toEqual([]);
 
     // Connection is refs-only → record-only skip with a re-auth pointer.
     expect(byKind('connection-ref')[0]!.status).toBe('skipped');
@@ -247,7 +254,7 @@ describe('real import — materializes via the owning services, inert + idempote
 
   it('re-importing the same bundle is idempotent — skips, never duplicates', async () => {
     const TB = 'porta-dst-idempotent';
-    const bundle = await buildExportBundle(TA);
+    const bundle = await buildExportBundle(TA, undefined, 'test');
     const first = await applyImport(TB, 'test', bundle);
     expect(first.items.find((i) => i.kind === 'schedule')!.status).toBe('imported');
     const rosterBefore = (await listRoster(TB)).length;
@@ -267,13 +274,14 @@ describe('real import — materializes via the owning services, inert + idempote
   });
 
   it('per-item isolation: a bad item never aborts the rest', async () => {
-    createUserTemplate({ templateId: 'tpl-porta-iso', version: '1.0.0', kind: 'user', text: 'Iso', name: 'tpl-porta-iso' });
+    expect((await createTenantTemplate('porta-iso', { templateId: 'tpl-porta-iso', version: '1.0.0', kind: 'user', text: 'Iso', name: 'tpl-porta-iso' })).ok).toBe(true);
+    await createOrg({ tenantId: 'porta-iso', createdBy: 'test', name: 'Iso Org', orgId: 'o-iso', ownerSubject: 'test' });
     const mixed = {
       bundleVersion: '1',
       source: { origin: 'adapter:test' },
       items: [
         { kind: 'schedule', ref: 'bad-sched', payload: {} }, // no cronExpr → skipped
-        { kind: 'prompt-template', ref: 'good-pt', payload: { name: 'isolated-prompt', orgId: 'o1', promptRef: 'tpl-porta-iso' } },
+        { kind: 'prompt-template', ref: 'good-pt', payload: { name: 'isolated-prompt', orgId: 'o-iso', promptRef: 'tpl-porta-iso' } },
       ],
     };
     const result = await applyImport('porta-iso', 'test', mixed);

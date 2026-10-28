@@ -6,6 +6,12 @@
  * tenant_id; per-persona demo entities (user_agents, roster) have anon-embedded
  * or random ids, so N adopted sessions fold in as N duplicate rows. This dedups
  * BEFORE the fold: an anon row whose persona the user already has is deleted.
+ *
+ * TST-BQA-4. Red when the user-agent or the roster `seen.has(…)` match is
+ * removed, when `seen` is seeded from the anon side, or when the anon side's
+ * own first-of-persona is not recorded (`seen.add`), so a duplicate pair on
+ * the anon side would fold in as two. The SLUG-domain normalisation is
+ * witnessed by adr0379-fold-idempotency ('dedups in the SLUG domain'), not here.
  */
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -45,12 +51,15 @@ describe('dedupePersonasBeforeAdopt — user_agents', () => {
     expect((await storage.listUserAgents(USER)).map((a) => a.persona)).toEqual(['Iris']);
   });
 
-  it('is idempotent — a second run finds the anon side already drained', async () => {
+  it('an anon side holding the SAME persona twice folds in ONE copy (the first wins)', async () => {
     const USER = 'user:r2', ANON = 'anon:sid2';
-    await storage.insertUserAgent(ua(USER, 'Iris', 'own'));
     await storage.insertUserAgent(ua(ANON, 'Iris', 'a2'));
-    expect((await dedupePersonasBeforeAdopt(ANON, USER, storage)).userAgentsDropped).toBe(1);
-    expect((await dedupePersonasBeforeAdopt(ANON, USER, storage)).userAgentsDropped).toBe(0);
+    await storage.insertUserAgent(ua(ANON, 'Iris', 'b2'));
+    await storage.insertUserAgent(ua(ANON, 'Sally', 'a2'));
+    const res = await dedupePersonasBeforeAdopt(ANON, USER, storage);
+    expect(res.userAgentsDropped).toBe(1);
+    const left = (await storage.listUserAgents(ANON)).map((a) => a.persona).sort();
+    expect(left).toEqual(['Iris', 'Sally']);
   });
 
   it('a user tenant with NO agents yet keeps ALL anon agents (one copy each)', async () => {

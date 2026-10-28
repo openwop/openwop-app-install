@@ -1,6 +1,6 @@
 # ADR 0939 — Real-AI Work-Twins: agent-run chains beside the frozen mock archives
 
-Status: Proposed (adversarial `/architect` pass 2026-10-19 folded in: 4 Blockers + 5 High + 5 Medium, see § Architect pass; open USER decisions OQ-1..5, OQ-7)
+Status: Accepted (2026-10-25: every USER decision is recorded, see § Open questions; the only open item, OQ-6, is an engineering call for P1. P0–P5 are NOT started. One decision is already in force, the mock-schedule pause, see § Implementation record. Adversarial `/architect` pass 2026-10-19 folded in: 4 Blockers + 5 High + 5 Medium, see § Architect pass; OQ-1 measured, see § D6 Measured usage)
 
 - **Asked for by:** the user, directly. `backend/typescript/src/host/workflowTemplates.ts:24`
   says "Real-AI Work-Twin chains are a separate ADR". This is that ADR.
@@ -97,6 +97,10 @@ still matches byte for byte (`workflowTemplates.ts:115-148`).
       150k-token allowance for unattended work.
     - **per tenant.** This cap is **off unless `OPENWOP_MANAGED_TENANT_DAILY_TOKEN_CAP` is set**
       (`:468-471`).
+      > **CORRECTED 2026-10-19:** off is only the *code default*. **Production sets it to
+      > 1,000,000** tokens per tenant per day, as read from the live Cloud Run env that day. So
+      > the per-tenant managed bound exists in prod. A white-label deploy that leaves the variable
+      > unset still has no tenant cap.
     - **global.**
   - An `anon:` tenant fails `sign_in_required` in the `auth` posture (`:520`).
   - the autonomous-run budget of 120 runs per tenant per hour, which drops a schedule fire with
@@ -241,7 +245,7 @@ The gap is named (§ Gaps) and closed in its owning feature's node pack first.
 
 ### D3 — Reachability: listed, instantiated per tenant and twin; portfolios bind tenant-owned ids
 
-- **Listed, not `internal`.** These are real-AI chains, so ADR 0190 §Phase 6's objection does
+- **Listed, not `internal`** (decided 2026-10-19, OQ-5). These are real-AI chains, so ADR 0190 §Phase 6's objection does
   not apply. They show in the `/builder` gallery and the `/` picker, and a person instantiates
   one with `…/workflows/from-chain` (`routes/workflows.ts:1096`) and `params`. Each chain
   requires `agentId` and its domain params, so the zero-config seed never touches it
@@ -276,8 +280,8 @@ The gap is named (§ Gaps) and closed in its owning feature's node pack first.
   instantiates the twin's chains and runs the D1 member-scoped re-point. It is gated by the
   agent-area write authority (ADR 0775 D1). **Calling it is the person's authorization for that
   twin's schedules**: its jobs keep their enabled state. Deletions stay deleted, so the seed's
-  "the user's curation sticks" rule (`exampleDataSeed.ts:241-243`) holds. Whether to migrate
-  existing tenants automatically is USER decision OQ-2.
+  "the user's curation sticks" rule (`exampleDataSeed.ts:241-243`) holds. **Decided 2026-10-19
+  (OQ-2): opt-in per twin.** Existing tenants are never migrated automatically.
 - **No new toggle.** A chain is inert until something instantiates it. The switch for new seeds
   is the D5 CI gate on a code-reviewed change to the `realAi` map, not a runtime flag.
 
@@ -303,20 +307,28 @@ The gap is named (§ Gaps) and closed in its owning feature's node pack first.
   No new per-run token mechanism is built.
 - **Per-workflow and per-tenant bounds.**
   - Each seeded twin workflow gets an ADR 0482 budget row with `hardCap: true`. The default is
-    USER decision OQ-3 (proposed $0.50/day). The hard cap is checked at run start only and fails
+    **$0.50/day per seeded twin workflow** (decided 2026-10-19, OQ-3). The hard cap is checked at run start only and fails
     open (`workflowBudgets.ts:21-28`), so one run can overshoot. That is accepted because the
     per-run cost is bounded structurally.
   - The 120 runs/hour autonomous budget applies.
-  - **The managed tenant cap is off by default**, and unattended runs draw one extra tenant-level
-    bucket (§ Context). Turning on `OPENWOP_MANAGED_TENANT_DAILY_TOKEN_CAP` before the pilot
-    reaches production tenants is operator decision OQ-7. Without it, the per-tenant AI spend
-    bound is the ADR 0482 rows alone.
+  - Unattended runs draw one extra tenant-level managed bucket (§ Context). The managed tenant
+    cap bounds that bucket: `OPENWOP_MANAGED_TENANT_DAILY_TOKEN_CAP` is 1,000,000 in production
+    (§ Context correction, 2026-10-19). On a deploy that leaves it unset, the per-tenant AI spend
+    bound is the ADR 0482 rows alone. The white-label README should say so when P1 ships.
+  - **Idris's real-AI `incident-triage` runs hourly, not every 30 minutes** (decided 2026-10-19,
+    OQ-3). Its chain's seeded schedule uses an hourly cron.
 - **Schedules.** Seeded real-AI schedules start **disabled for every tenant**, not only `anon:`
   ones (`exampleDataSeed.ts:335`). ADR 0775 P3b's premise is that "a person who created a
   schedule already authorized it". A seed is not a person. The schedule stays visible, and
-  turning it on is the authorization. This is USER decision OQ-4: it changes today's behaviour
-  and amends `test/anon-seed-schedules-disabled.test.ts:39`, which asserts that every signed-in
+  turning it on is the authorization. **Decided 2026-10-19 (OQ-4): disabled for every tenant,
+  signed-in ones included.** It changes today's behaviour and amends `test/anon-seed-schedules-disabled.test.ts:39`, which asserts that every signed-in
   seeded job is enabled. Archive-bound schedules keep today's behaviour.
+
+  > **CORRECTED 2026-10-25:** "archive-bound schedules keep today's behaviour" contradicts the
+  > 2026-10-19 prod pause below, and the seed did exactly that. It went on minting **enabled**
+  > `tmpl.*` schedules for every new signed-in tenant. Since this fix, `seedAgentSchedule` seeds a
+  > schedule bound to a mock archive (`isWorkTwinMockArchive`) disabled for every tenant, on the
+  > first-seed and heal paths alike (`test/anon-seed-schedules-disabled.test.ts`).
 - **No key and no credit is a typed failure, never a pretend success.** The run fails with the
   dispatch's own code:
   - `byok_required`
@@ -374,9 +386,10 @@ The gap is named (§ Gaps) and closed in its owning feature's node pack first.
 
 ### D6 — Pilot by measured value: Ezra `daily-summary` + Ava `risk-digest`
 
-"Value" is measured from the repo. Prod usage was **not** read, because this ADR authorizes no
-prod reads; a usage measurement is USER decision OQ-1. Each bound portfolio entry is scored on
-three axes:
+"Value" was first measured from the repo only. The user then authorized a read-only prod
+measurement (OQ-1, 2026-10-19), recorded in § Measured usage below. It does not change the
+ranking: no twin shows human demand that would re-order it. Each bound portfolio entry is scored
+on three axes:
 
 1. Does a real-AI gallery chain already prove the read shape, and is it graded clean?
 2. Are all of the entry's reads **in-app**, or does it need an external Connection (ERP, HRIS,
@@ -390,7 +403,7 @@ three axes:
 | **Ava · `commercial.risk-digest`** | `crm-ops.deal-hygiene` (`list-deals`) | CRM deals | `pipeline-risk`, 1 | **Pilot** |
 | Ava · `commercial.account-brief` | `exec-ops.meeting-prep` (`get-company`) | CRM, but **which account** needs the calendar | `account-brief`, 5 | P2: needs a target-selection decision |
 | Cleo · `renewal-pack`, `risk-digest` | `csm-ops.*` | CSM + CRM | 2 | P2 |
-| Idris · `it.incident-triage` | `it-support.incident-triage` | service desk + KB | `*/30`, **336** | P3: cost exposure 56× Ezra; needs budget evidence first |
+| Idris · `it.incident-triage` | `it-support.incident-triage` | service desk + KB | `*/30`, **336** today; **hourly (168) as real AI** (OQ-3) | P3: cost exposure 34× Ezra at hourly; needs budget evidence first |
 | Felix · finance close | `finance.month-end-close` | **ERP connector** | ~1.4 | P4 (connector-gated, ADR 0033) |
 | Ren · scheduling, Ezra · `meeting-brief` | `exec-ops.meeting-prep` | **calendar connector** | 5 / 1 | P4 |
 | Pax · people | `people-hr.*` | **HRIS connector** | 1 | P4 |
@@ -400,6 +413,74 @@ Both pilot chains write only the drafted deliverable to a person (D2 step 7), so
 has no domain-write path at all**. The first gated write lands in P2. Note that
 `tmpl.commercial.risk-digest` is also Cleo's index 1. The pilot moves **Ava's** binding only,
 which is why D1 is member-scoped.
+
+### Measured usage (OQ-1, prod, 2026-10-19)
+
+The measurement was read-only (one `BEGIN TRANSACTION READ ONLY … ROLLBACK` against the prod
+Cloud SQL instance) and aggregate-only (no content, no tenant ids). Windows are 30 and 90 days.
+
+| Signal | Result |
+|---|---|
+| `tmpl.*` runs, 90 d | **5,580**: 5,568 on signed-in tenants, all `source: schedule`, and 12 on anon tenants, all heartbeat. **No run was started by a person.** All but 12 fall in the last 30 days, since the schedules were seeded about a month earlier. |
+| Run outcome | 99.7% `completed`; 17 failed (`dispatch_failed` / `dispatch_abandoned`). Prod is not the `auth` posture, so the mock node is registered and its fabricated output is recorded as success. |
+| Per entry, 30 d | Idris `incident-triage` **5,201**. Ezra `daily-summary` 75. Ava `account-brief` 75. Ren `availability-match` 75. `risk-digest` 33 (Ava + Cleo). Felix `close-checklist` 19. Pax `manager-nudge` 18. Quill `no-response-chase` 18. Ezra `meeting-brief` 15. Cleo `renewal-pack` 14. Mira `faq-update` 14. Felix `variance-note-draft` 4. |
+| Idris's share | **94% of all mock runs** and about **17% of every signed-in run in prod** (31,445 in 90 d), from the 30-minute cron across 5 signed-in tenants. |
+| Schedules | Each of the 12 scheduled `tmpl.*` workflows has 5 enabled jobs on signed-in tenants (10 for `risk-digest`, which is co-bound); about 4 of 5 fired in 30 d. The 800–1,650 anon jobs per workflow are all disabled, as designed. |
+| Roster | Each twin is seeded in 5 signed-in and about 730–805 anon tenants; none is paused. |
+| Boards | Signed-in tenants: only seed cards (4 created in 30 d), and 1 card touched after creation (Iris). Anon tenants: about 1,000–1,700 seed cards per twin in 30 d, of which only Idris (34) and Pax (14) were touched after creation, most likely by heartbeat runs. |
+| Chat | 0 assistant turns attributable to a twin agent id in 90 d. This is a **weak** signal: `chat_messages` holds only 19 assistant turns in total in that window, so it is not where most chat lands. |
+
+**What it changes:**
+
+- **The ranking is unchanged.** Prod shows no human choosing any twin, so usage cannot rank the
+  twins against each other, and feasibility and cost stay the axes.
+- **Both pilot entries are confirmed live.** Each is scheduled and firing: `daily-summary` 75
+  runs in 30 d, `risk-digest` 33.
+- **The status quo is not free.** Idris's mock triage is the largest unattended run producer
+  and draws on the 120-runs-per-hour autonomous budget, and it buys nothing.
+
+> **Prod pause, 2026-10-19 (user decision).** Every **enabled mock `tmpl.*` schedule on a
+> signed-in tenant is paused** until the real-AI twins land: **65 jobs** (12 workflows × 5
+> tenants; `risk-digest` × 10) were set to `enabled: false` at 23:30:21Z.
+>
+> - The write was one guarded transaction mirroring `updateJob(enabled:false)`:
+>   - the rows were locked with `FOR UPDATE`;
+>   - the exact row count was asserted, and each row was checked byte-for-byte against a saved
+>     before-image;
+>   - only `enabled` was flipped, and the value was re-serialized so the store's text-equality
+>     CAS keeps working;
+>   - the scheduler job-set generation token was bumped, as every `jobs.put` does.
+> - After the write: 0 enabled `tmpl.*` jobs on signed-in tenants. Anon jobs (10,491, all already
+>   disabled) were untouched.
+> - **Nothing automatic re-enables them.**
+>   - Heal restores only *missing* jobs (`exampleDataSeed.ts:594-600`).
+>   - First-seed and `ensureSeededAgentByRole` create jobs only for missing personas.
+>   - `resumeJobFromPlanPause` needs a `planPause` marker, and none of these jobs has one.
+> - Two things a person can do would bring them back: turn a schedule on again in the UI, or run
+>   a full demo clear and reseed.
+>
+> > **CORRECTED 2026-10-25: "nothing automatic re-enables them" was true only of the 65 jobs that
+> > existed.** The first seed of a **new** signed-in tenant still registered every archive-bound
+> > schedule as `enabled: true`, because the seed's guard was `!tenantId.startsWith('anon:')`
+> > alone. MEASURED read-only at 20:07Z: tenant `user:df0ae1f2…`, first seeded on 2026-10-23 at
+> > 16:28Z, had 13 enabled mock schedules, including `it.incident-triage` every 30 min. Its
+> > memory was filling with "Mock response to: …" summaries. Of 91 signed-in `tmpl.*` jobs, those
+> > 13 were the only enabled ones.
+> > - **Prod (user decision):** the 13 were set to `enabled: false` at 20:29:28Z on 2026-10-25,
+> >   using the same guarded transaction as the original pause (lock the rows, compare each
+> >   against its before-image, flip only `enabled`, bump the job-set token). After the write: 0
+> >   enabled `tmpl.*` jobs on signed-in tenants, and the 10,595 anon jobs (all already
+> >   disabled) were untouched.
+> > - **Code:** `seedAgentSchedule` now seeds a schedule bound to a mock archive disabled for
+> >   every tenant, on both the first-seed and heal paths. This closes the gap the pause left
+> >   open: without it, every sign-up would undo the pause.
+> - The archives themselves stay registered, so every historical run still replays.
+>
+> This also means that when a tenant opts into real AI (D3), the jobs re-pointed to the new
+> chains carry `enabled: false`. Turning one on is the person's authorization, consistent with
+> OQ-4.
+- **The fabrication problem is live in prod today, not hypothetical.** Every one of those 5,568
+  runs reports success with mock text on a real signed-in tenant.
 
 ### What the twin shows when it is not real yet
 
@@ -445,9 +526,19 @@ Host-only, with no new RFC. Applying the three-part test from CLAUDE.md:
 | P0 | Reserve the pack name. Land the D5(a) no-mock ratchet against an empty `work-twins` pack, and the D5(b) shrink-only ratchet at 46. Add the `realAi` map field (empty) to the seed spec. | both ratchets red on sabotage |
 | P1 | Runner G0 + G1 + G2 + G5, with the hitl-once witness. G3 for CRM and analytics. The `work-twins` pack with `twin.daily-summary` and `twin.risk-digest`. The seed's Path-A instantiation and fail-closed precondition. `repointTwinPortfolioEntry` + the opt-in route. CI witnesses 1–3 and 5–8. Then map Ezra and Ava in `realAi`. | the CI suites are green; the ratchet goes 46 → 44; a co-bound Cleo is untouched |
 | P2 | First gated write: Ava `next-step-draft` → CRM task behind the `renewal-risk` gate shape (witness 4). Cleo `renewal-pack` + `risk-digest`. Decide Ava's `account-brief` target selection. Wire the per-twin `AgentEvalSuite`. | gate-rejection witness red on sabotage |
-| P3 | KB- and documents-backed entries: Mira (comms, `faq-update`), Quill (`comparison-summary`) and Idris (`kb-recommendation`). Idris's `incident-triage` goes only with budget evidence (OQ-3) from P1/P2 ADR 0480 scores. | CI suites green; ADR 0480 online scores at or above the tenant eval-set pass bar for 14 days |
+| P3 | KB- and documents-backed entries: Mira (comms, `faq-update`), Quill (`comparison-summary`) and Idris (`kb-recommendation`). Idris's `incident-triage` runs hourly (OQ-3) and goes only with budget evidence from P1/P2 ADR 0480 scores. | CI suites green; ADR 0480 online scores at or above the tenant eval-set pass bar for 14 days |
 | P4 | Connector-dependent entries: Felix (ERP), Pax (HRIS), Ren and Ezra (calendar). Bound only where ADR 0033 `requiredConnections` is satisfied; otherwise fail-closed with a typed refusal. | connected-tenant e2e; unconnected → typed refusal |
 | P5 | Every bound entry is mapped. The ratchet reaches 0. The archives stay `internal` forever (replay law). | ratchet at 0; `work-twin-template-chains` replay witness still green |
+
+## Implementation record
+
+None of P0–P5 has started. The table records what is already in force, so that
+`Accepted` is not read as "decided but nothing done".
+
+| Step | What shipped | Commit / PR | Evidence |
+|---|---|---|---|
+| Prod pause (2026-10-19, user decision) | 65 enabled mock `tmpl.*` schedules on signed-in tenants set to `enabled: false` | prod data write, no commit | § D6 Measured usage, prod pause note |
+| Pause follow-up (2026-10-25, user decision) | 13 more found on a tenant seeded after the pause, set to `enabled: false` in prod. `seedAgentSchedule` now seeds a schedule bound to a mock archive disabled for every tenant, on the first-seed and heal paths | `b0ba5533e`, #5222 | `test/anon-seed-schedules-disabled.test.ts`, red on the base for the signed-in and heal cases |
 
 ## Alternatives weighed
 
@@ -486,24 +577,25 @@ Host-only, with no new RFC. Applying the three-part test from CLAUDE.md:
 
 ## Open questions
 
-- [ ] **OQ-1 (USER).** Authorize a read-only prod measurement of twin usage (board activity,
-  schedule enablement, chat turns per twin) to re-rank P2–P4? The pilot ranking rests on repo
-  measurements only.
-- [ ] **OQ-2 (USER).** For existing tenants: opt-in per twin through the re-point route
-  (recommended), or automatic migration once a twin's mapping lands?
-- [ ] **OQ-3 (USER).** The default ADR 0482 daily budget per seeded twin workflow (proposed
-  $0.50, `hardCap: true`). Should Idris's 30-minute triage ship at that cadence or a slower one?
-- [ ] **OQ-4 (USER).** Should seeded real-AI schedules start disabled for signed-in tenants too
-  (recommended: a seed is not a person's authorization)? This amends the enabled-by-default seed
+- [x] **OQ-1 (USER).** Authorize a read-only prod measurement of twin usage (board activity,
+  schedule enablement, chat turns per twin) to re-rank P2–P4? **Decided 2026-10-19: yes.**
+  Measured the same day (§ D6 Measured usage). The ranking is unchanged.
+- [x] **OQ-2 (USER).** For existing tenants: opt-in per twin through the re-point route, or
+  automatic migration once a twin's mapping lands? **Decided 2026-10-19: opt-in per twin.**
+- [x] **OQ-3 (USER).** The default ADR 0482 daily budget per seeded twin workflow, and Idris's
+  cadence. **Decided 2026-10-19: $0.50/day with `hardCap: true`; Idris's triage runs hourly.**
+- [x] **OQ-4 (USER).** Should seeded real-AI schedules start disabled for signed-in tenants too?
+  **Decided 2026-10-19: yes, disabled for every tenant.** This amends the enabled-by-default seed
   and its test.
-- [ ] **OQ-5 (USER).** Should the twin chains be listed in the `/builder` gallery and `/` picker
-  (recommended: they are real AI and agent-parameterized), or only on the agent workspace?
+- [x] **OQ-5 (USER).** Should the twin chains be listed in the `/builder` gallery and `/` picker,
+  or only on the agent workspace? **Decided 2026-10-19: listed in both.**
 - [ ] **OQ-6.** Should the deliverable also post into the twin's conversation (the runner's
   `conversationId` lane, under ADR 0879 D7 write authority), so that "the twin reported" shows in
   the ONE chat as well as the inbox? An engineering call, to decide in P1.
-- [ ] **OQ-7 (USER / operator).** Set `OPENWOP_MANAGED_TENANT_DAILY_TOKEN_CAP` in production
-  before twins run unattended on the managed tier? Without it, a tenant's free unattended AI is
-  bounded only by the per-subject bucket and the ADR 0482 rows.
+- [x] **OQ-7 (USER / operator).** Set `OPENWOP_MANAGED_TENANT_DAILY_TOKEN_CAP` in production
+  before twins run unattended on the managed tier? **Closed 2026-10-19 with no decision needed:
+  production already sets it to 1,000,000** (read from the live Cloud Run env). The question
+  rested on the code default being off, which is true but did not describe prod.
 
 ## Architect pass
 
@@ -521,7 +613,7 @@ folded into the decision text above. None was waived.
 | H2 | High | `escalated` succeeds with `text: ''` (`agentDispatch.ts:930-955`, `agentRunnerNode.ts:404-405`). | G1: typed `agent_escalated` |
 | H3 | High | G1 would have duplicated the dispatch's `responseSchema` / `return_schema_violation` path. | G1 rides that path |
 | H4 | High | Agent-profile `hitl` / `never` rules are keyed by workflow id and no hook re-points them (`autonomousDispatchPolicy.ts:40-50`). | D1: the re-point covers profile rules |
-| H5 | High | Unattended runs bill a bare-tenant bucket (`managedUsageScope.ts:47-49`); the tenant cap is off by default (`managedProvider.ts:468-471`); `sign_in_required` was missing. | D4 and Context rewritten; OQ-7 |
+| H5 | High | Unattended runs bill a bare-tenant bucket (`managedUsageScope.ts:47-49`); the tenant cap is off by default (`managedProvider.ts:468-471`); `sign_in_required` was missing. | D4 and Context rewritten; OQ-7. *(2026-10-19: the "off by default" half holds only for the code default; prod sets 1,000,000, see the Context correction.)* |
 | M1 | Medium | An approved hitl fire could be suspended a second time by the runner (`approvalDecision.ts:677-682`). Inferred, not run. | D4: the hitl-once witness in P1 |
 | M2 | Medium | The eval assertion vocabulary has no ordering or subset kind (`workflowEvalSets.ts:23-28`); gates suspend eval runs (`workflowEvalRunner.ts:271`); `llm-judge` needs a judge. | D5: graph-shape witness, gate resumed in-test, judge kept out of CI |
 | M3 | Medium | The 46 ratchet counted JSON while the fallback needed the `tmpl` id to survive elsewhere. | D3 `realAi` map in the same JSON; D5(b) counts unmapped entries |

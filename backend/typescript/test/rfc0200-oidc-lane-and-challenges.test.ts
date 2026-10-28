@@ -14,12 +14,20 @@
  * such a leg passes against a host enforcing either one and witnesses neither. Each leg
  * below therefore isolates ONE bound, and the sabotage record in the PR shows each one
  * going red alone.
+ *
+ * Round-2 notes. The lifetime comparisons are pinned by a BOUNDARY case (strict `>`:
+ * exactly W is accepted, W + 1 refused) instead of a grep of the verifier's source.
+ * The §A/§B helper cases run against a REAL Express request/response (a throwaway
+ * app below), so no partial `Request`/`Response` is cast into place. The audience
+ * case drives the COOKIE-ENABLED branch of `middleware/auth.ts` (the `bearerRejected`
+ * refusal), not the cookies-disabled one; round-1 probe 8fw2g1-oidc-audience was
+ * aimed at the cookies-disabled copy and was therefore vacuous (re-aimed in r2).
  */
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { OidcVerifier, OidcVerificationError, OIDC_REVOCATION_WINDOW_S } from '../src/middleware/oidcVerifier.js';
 import { prmUrlFor, resourceIdentifier, apiPathPrefixOf, setBearerChallenge, PRM_SEGMENT } from '../src/middleware/authChallenge.js';
-import type { Request, Response } from 'express';
-import { SCOPES_SUPPORTED } from '../src/host/protocolAuthorization.js';
+import express, { type Request, type Response } from 'express';
+import { scopesSupported } from '../src/host/protocolAuthorization.js';
 
 const W = OIDC_REVOCATION_WINDOW_S;
 const MARGIN = 60;
@@ -56,6 +64,37 @@ beforeAll(async () => {
   jwksUrl = `http://127.0.0.1:${(jwks!.address() as AddressInfo).port}/jwks.json`;
 });
 afterAll(async () => { if (jwks) { const s = jwks; jwks = null; await new Promise<void>((r) => s.close(() => r())); } });
+
+/**
+ * A throwaway Express app that hands the test the REAL `req`/`res` of one request.
+ * The caller reached it as `https://app.openwop.dev` (forwarded headers, which
+ * `requestOrigin` reads), so the expected URLs below are hand-written literals.
+ */
+let probe: Server | null = null;
+let probeBase = '';
+let onProbe: ((req: Request, res: Response) => void) | null = null;
+beforeAll(async () => {
+  const app = express();
+  app.use((req, res) => { onProbe?.(req, res); if (!res.headersSent) res.end(); });
+  probe = app.listen(0, '127.0.0.1');
+  await new Promise<void>((r) => probe!.once('listening', () => r()));
+  probeBase = `http://127.0.0.1:${(probe!.address() as AddressInfo).port}`;
+});
+afterAll(async () => { if (probe) { const s = probe; probe = null; await new Promise<void>((r) => s.close(() => r())); } });
+
+/** Run `fn` inside a real request to `path`; returns what it returned + the wire response. */
+async function onRealRequest(path: string, fn: (req: Request, res: Response) => string): Promise<{ value: string; res: globalThis.Response }> {
+  let value: string | undefined;
+  onProbe = (req, res) => { value = fn(req, res); };
+  try {
+    const res = await fetch(`${probeBase}${path}`, { headers: { 'x-forwarded-host': 'app.openwop.dev', 'x-forwarded-proto': 'https' } });
+    await res.text();
+    if (value === undefined) throw new Error(`the probe handler never ran for ${path}`);
+    return { value, res };
+  } finally {
+    onProbe = null;
+  }
+}
 
 const ISS = 'https://issuer.test';
 const AUD = 'test-audience';
@@ -114,13 +153,15 @@ describe('RFC 0210 — the advertised window is a bound, not a number we print',
     expect(W).toBeLessThanOrEqual(3600); // RFC 0210 §C.7 — "one hour or less"
   });
 
-  it('the verifier module names the lifetime code in its closed union', async () => {
-    const src = await import('node:fs').then((fs) =>
-      fs.readFileSync(new URL('../src/middleware/oidcVerifier.ts', import.meta.url), 'utf8'));
-    expect(src).toContain("'credential_lifetime_exceeded'");
-    // BOTH bounds, each on its own comparison. Deleting either is a sabotage leg.
-    expect(src).toContain('claims.exp - claims.iat > OIDC_REVOCATION_WINDOW_S');
-    expect(src).toContain('claims.exp - nowSeconds > OIDC_REVOCATION_WINDOW_S');
+  it('the lifetime bound is STRICT: a total lifetime of exactly W is accepted, W + 1 is refused', async () => {
+    // Replaces a grep of the verifier's source for the two comparisons (a reworded
+    // comparison read red with no behaviour change). `iat` sits behind the clock, so
+    // the REMAINING lifetime (exp − now = W − 2·MARGIN [+1]) stays inside the window
+    // and only the TOTAL bound decides each leg.
+    const now = Math.floor(Date.now() / 1000);
+    const iat = now - 2 * MARGIN;
+    expect(await present({ iat, exp: iat + W })).toBeNull();
+    expect(await present({ iat, exp: iat + W + 1 })).toBe('credential_lifetime_exceeded');
   });
 });
 
@@ -136,55 +177,47 @@ describe('RFC 0200 §A — the protected-resource metadata URL', () => {
     expect(prmUrlFor('https://h/api/')).toBe(`https://h${PRM_SEGMENT}/api`);
   });
 
-  it('derives the resource identifier from the path the caller actually used', () => {
-    const req = (originalUrl: string): Request =>
-      ({ originalUrl, url: originalUrl, get: (h: string) => (h.toLowerCase() === 'host' ? 'app.openwop.dev' : undefined), protocol: 'https' } as unknown as Request);
-    expect(apiPathPrefixOf(req('/api/v1/runs'))).toBe('/api');
-    expect(apiPathPrefixOf(req('/runs'))).toBe('');
-    expect(resourceIdentifier(req('/api/v1/runs'), '/api')).toBe('https://app.openwop.dev/api');
+  it('derives the resource identifier from the path the caller actually used', async () => {
+    expect((await onRealRequest('/api/v1/runs', (req) => apiPathPrefixOf(req))).value).toBe('/api');
+    expect((await onRealRequest('/runs', (req) => apiPathPrefixOf(req))).value).toBe('');
+    expect((await onRealRequest('/api/v1/runs', (req) => resourceIdentifier(req, '/api'))).value).toBe('https://app.openwop.dev/api');
   });
 });
 
 describe('RFC 0200 §B — the challenge', () => {
-  const headers: Record<string, string> = {};
-  const res = { setHeader: (k: string, v: string) => { headers[k] = v; } } as unknown as Response;
-  const req = { originalUrl: '/runs', url: '/runs', get: (h: string) => (h.toLowerCase() === 'host' ? 'app.openwop.dev' : undefined), protocol: 'https' } as unknown as Request;
-  beforeEach(() => { for (const k of Object.keys(headers)) delete headers[k]; });
+  const META = 'resource_metadata="https://app.openwop.dev/.well-known/oauth-protected-resource"';
+  /** The header the helper set, as it reached the wire on a real response. */
+  const challengeFor = async (opts: Parameters<typeof setBearerChallenge>[2]): Promise<string> => {
+    const { res } = await onRealRequest('/runs', (req, r) => { setBearerChallenge(req, r, opts); return 'set'; });
+    return res.headers.get('www-authenticate') ?? '';
+  };
 
-  it('a refusal with NO credential presented names Bearer and the metadata, and carries NO error', () => {
+  it('a refusal with NO credential presented names Bearer and the metadata, and carries NO error', async () => {
     // RFC 6750 §3.1: an error code describes a credential that was refused. Inventing
     // one tells a client its absent token was rejected — the §B leg that asserts this.
-    setBearerChallenge(req, res, { presented: false });
-    const v = headers['WWW-Authenticate'] ?? '';
-    expect(v.startsWith('Bearer ')).toBe(true);
-    expect(v).toContain('resource_metadata="https://app.openwop.dev/.well-known/oauth-protected-resource"');
-    expect(v).not.toContain('error=');
+    expect(await challengeFor({ presented: false })).toBe(`Bearer ${META}`);
   });
 
-  it('a refusal of a credential that WAS presented carries error="invalid_token" and the metadata', () => {
-    setBearerChallenge(req, res, { presented: true });
-    const v = headers['WWW-Authenticate'] ?? '';
-    expect(v).toContain('error="invalid_token"');
-    expect(v).toContain('resource_metadata=');
+  it('a refusal of a credential that WAS presented carries error="invalid_token" and the metadata', async () => {
+    expect(await challengeFor({ presented: true })).toBe(`Bearer error="invalid_token", ${META}`);
   });
 
-  it('a scope refusal names every scope the operation requires', () => {
-    setBearerChallenge(req, res, { presented: true, error: 'insufficient_scope', scope: ['runs:create', 'runs:read'] });
-    const v = headers['WWW-Authenticate'] ?? '';
-    expect(v).toContain('error="insufficient_scope"');
-    expect(v).toContain('scope="runs:create runs:read"');
+  it('a scope refusal names every scope the operation requires', async () => {
+    expect(await challengeFor({ presented: true, error: 'insufficient_scope', scope: ['runs:create', 'runs:read'] }))
+      .toBe(`Bearer error="insufficient_scope", scope="runs:create runs:read", ${META}`);
   });
 
-  it('§B.3 — setting a challenge NEVER writes a status or a body', () => {
+  it('§B.3 — setting a challenge NEVER writes a status or a body', async () => {
     // The negative that keeps a challenge from turning a non-disclosure 404 into a 401:
     // the helper can only set one header. If it could send, a caller could smuggle a
     // status change into a refusal that deliberately does not disclose existence.
-    const calls: string[] = [];
-    const spy = new Proxy({ setHeader: (k: string, v: string) => { headers[k] = v; } }, {
-      get(t, p) { calls.push(String(p)); return (t as Record<string, unknown>)[p as string]; },
-    }) as unknown as Response;
-    setBearerChallenge(req, spy, { presented: true });
-    expect(calls).toEqual(['setHeader']);
+    // Read on the REAL response straight after the call: status still the default,
+    // nothing sent, nothing ended.
+    const { value } = await onRealRequest('/runs', (req, res) => {
+      setBearerChallenge(req, res, { presented: true });
+      return JSON.stringify({ status: res.statusCode, headersSent: res.headersSent, ended: res.writableEnded });
+    });
+    expect(JSON.parse(value)).toEqual({ status: 200, headersSent: false, ended: false });
   });
 });
 
@@ -256,8 +289,9 @@ describe('RFC 0200 §A — served (HTTP, bearer-only posture)', () => {
       expect(prmUrlFor(String(prm['resource']))).toBe(`${app.base}${path}`);
       expect(prm['authorization_servers']).toEqual([ISS]);
       // No invented claims: exactly the enforced scopes (ADR 0745 D2 — the field was
-      // absent here while nothing enforced any), and no binding required.
-      expect(prm['scopes_supported']).toEqual([...SCOPES_SUPPORTED]);
+      // absent here while nothing enforced any), and no binding required. ADR 0972 D2:
+      // the list includes the proposal scopes once the RFC 0249 wire is on.
+      expect(prm['scopes_supported']).toEqual([...scopesSupported()]);
       expect(prm['dpop_bound_access_tokens_required']).toBeUndefined();
     }
   });
@@ -282,13 +316,16 @@ describe('RFC 0200 §A — served (HTTP, bearer-only posture)', () => {
   });
 });
 
+describe('cookie-ENABLED posture (production) — one boot shared by §B lifetime and §D audience', () => {
+let app: { base: string; stop: () => Promise<void> };
+// Both blocks below boot the identical env, so they share this one app.
+beforeAll(async () => { app = await startApp(oidcEnv()); }, 60_000);
+afterAll(async () => { if (app) await app.stop(); });
+
 describe('RFC 0210 §B — the lifetime refusal is terminal even where a fallthrough exists', () => {
-  let app: { base: string; stop: () => Promise<void> };
   // Cookies ENABLED: the posture where a stale bearer deliberately falls through to the
   // cookie path. The lifetime refusal must not take that path, or the advertised window
   // is a number we print — and the suite, which presents no cookie, would get a 201.
-  beforeAll(async () => { app = await startApp(oidcEnv()); }, 60_000);
-  afterAll(async () => { if (app) await app.stop(); });
 
   it('answers 401 with the REGISTERED code credential_lifetime_exceeded', async () => {
     const now = Math.floor(Date.now() / 1000);
@@ -314,17 +351,17 @@ describe('RFC 0210 §B — the lifetime refusal is terminal even where a fallthr
       body: JSON.stringify({ workflowId: 'noop' }),
     });
     expect(r.status, 'a credential inside the window must not be refused 401').not.toBe(401);
+    // It got PAST auth: the route itself answered (no such workflow), not an auth refusal.
+    expect(r.status).toBe(404);
+    expect(await r.json()).toEqual({ error: 'not_found', message: 'Workflow not found in this catalog.', details: { workflowId: 'noop' } });
   });
 });
 
 describe('RFC 0200 §D — audience_mismatch in the COOKIE-ENABLED posture (production)', () => {
-  let app: { base: string; stop: () => Promise<void> };
   // Cookies ENABLED, as production runs. MEASURED on a colocated boot of
   // production's image: a wrong-audience token with no session answered a
   // generic `unauthenticated` here, while the cookies-disabled boot said
   // `audience_mismatch` — the refusal code depended on posture.
-  beforeAll(async () => { app = await startApp(oidcEnv()); }, 60_000);
-  afterAll(async () => { if (app) await app.stop(); });
 
   it('a verified token for ANOTHER relying party, with no session, is 401 audience_mismatch', async () => {
     const now = Math.floor(Date.now() / 1000);
@@ -349,5 +386,9 @@ describe('RFC 0200 §D — audience_mismatch in the COOKIE-ENABLED posture (prod
       body: JSON.stringify({ workflowId: 'noop' }),
     });
     expect(r.status).not.toBe(401);
+    // It got PAST auth: the route itself answered (no such workflow), not an auth refusal.
+    expect(r.status).toBe(404);
+    expect(await r.json()).toEqual({ error: 'not_found', message: 'Workflow not found in this catalog.', details: { workflowId: 'noop' } });
   });
+});
 });

@@ -12,6 +12,13 @@
  * as happily against the broken code (a recorded lesson from the GIF-flake pass).
  * The sabotage check for this file: revert `putTutorialProgress` to a plain
  * `progress.put(...)` and the interleaved test below must go red.
+ *
+ * HOW THE RACE IS FORCED, stated precisely (grade-tests w63): there is no hold
+ * seam. Each `putTutorialProgress` runs synchronously up to its first
+ * `await progress.get(key)`, so writers issued in one `Promise.all` all read
+ * the SAME base before any CAS lands, and every writer after the first loses
+ * its CAS. Witnessed: a blind put (`8fw4g3-tpc-blindput`) and a retry that does
+ * not fold in the winner (`8fw4g3-tpc-nofold`) both turn cases 1–2 red.
  */
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
@@ -78,7 +85,10 @@ describe('concurrent progress writes never lose a completion', () => {
 
   it('RESET clears, and is never unioned back', async () => {
     await putTutorialProgress({ tenantId: T, userId: ALICE, tutorialId: TUT, completedStepIds: ['1.1', '2.1'] });
-    const r = await putTutorialProgress({ tenantId: T, userId: ALICE, tutorialId: TUT, completedStepIds: [], mode: 'clear' });
+    // The reset carries a NON-empty list on purpose: `clear` must ignore it. With
+    // `[]` here a clear and an uncontended replace store the same thing, so the
+    // case could not tell them apart (round-1 probe tpc-clear-as-replace: vacuous).
+    const r = await putTutorialProgress({ tenantId: T, userId: ALICE, tutorialId: TUT, completedStepIds: ['1.1', '2.1', '3.1'], mode: 'clear' });
     expect(r.completedStepIds).toEqual([]);
     expect(await stepsOf()).toEqual([]);
   });
@@ -96,8 +106,8 @@ describe('concurrent progress writes never lose a completion', () => {
       // A junk id must not slip in via the union path.
       putTutorialProgress({ tenantId: T, userId: ALICE, tutorialId: TUT, completedStepIds: ['1.1', 'x'.repeat(200)] }),
     ]);
-    const steps = await stepsOf();
-    expect(steps).toContain('1.1');
-    expect(steps.some((s) => s.length > 40)).toBe(false);
+    // Exactly the two real ids: the 200-char junk id is dropped on the merge path
+    // and 2.1 (the other writer's completion) survives.
+    expect(await stepsOf()).toEqual(['1.1', '2.1']);
   });
 });

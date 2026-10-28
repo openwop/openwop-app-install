@@ -12,6 +12,7 @@
  */
 
 import { DEFAULT_LOCALE } from './locales.js';
+import { minorUnitsFor } from './currencyMinorUnits.js';
 
 let activeLocale: string = DEFAULT_LOCALE;
 
@@ -133,10 +134,11 @@ export function formatCurrency(value: number, currency = 'USD', options?: Intl.N
   }
 }
 
-/** Currency amount given in MINOR units (AP2 / cents). Derives the currency's own
- *  decimal count so JPY (0) / BHD (3) format correctly — not a bare `/100`. */
+/** Currency amount given in MINOR units (AP2 / cents). Uses the currency's ISO 4217
+ *  exponent so JPY (0) / BHD (3) / HUF (2) format correctly — not a bare `/100`, and
+ *  not `Intl`'s display precision, which drifts by ICU release (ICU 78.3: HUF 0). */
 export function formatCurrencyMinor(minor: number, currency = 'USD'): string {
-  const dp = numberFmt({ style: 'currency', currency }).resolvedOptions().maximumFractionDigits ?? 2;
+  const dp = minorUnitsFor(currency);
   return formatCurrency(minor / 10 ** dp, currency);
 }
 

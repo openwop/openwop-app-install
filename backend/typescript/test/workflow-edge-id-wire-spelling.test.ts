@@ -66,24 +66,34 @@ describe('H26 — edge id spelling at the workflow ingest boundary', () => {
       }),
     );
     expect(def.edges?.[0]?.condition).toEqual({ path: 'status', op: 'eq', value: 'ok' });
+    // …and the diagnostic names the canonical id. Before this leg the claim was
+    // untested (probe 8fw5g3-eid-cond-ref came back VACUOUS).
+    expect(() =>
+      validateWorkflowDefinition(
+        defWithEdge({ id: 'e1', sourceNodeId: 'a', targetNodeId: 'b', condition: { op: 'bogus', path: 'status' } }),
+      ),
+    ).toThrow(/edge e1 uses unknown op 'bogus'/);
   });
 
   it('duplicate ids are still refused across BOTH spellings', () => {
     // The uniqueness check reads one resolved id, so mixing the spellings must
-    // not smuggle a duplicate past it.
-    expect(() =>
+    // not smuggle a duplicate past it. The two edges do NOT form a cycle, and the
+    // message is pinned, so no other refusal can satisfy this.
+    const attempt = (): unknown =>
       validateWorkflowDefinition({
         workflowId: 'test.edge-id-spelling',
         nodes: [
           { nodeId: 'a', typeId: 'core.noop' },
           { nodeId: 'b', typeId: 'core.noop' },
+          { nodeId: 'c', typeId: 'core.noop' },
         ],
         edges: [
           { id: 'dup', sourceNodeId: 'a', targetNodeId: 'b' },
-          { edgeId: 'dup', sourceNodeId: 'b', targetNodeId: 'a' },
+          { edgeId: 'dup', sourceNodeId: 'a', targetNodeId: 'c' },
         ],
-      }),
-    ).toThrow(OpenwopError);
+      });
+    expect(attempt).toThrow(OpenwopError);
+    expect(attempt).toThrow('Duplicate edgeId: dup');
   });
 
   it('an edge with NEITHER spelling is still a validation error', () => {

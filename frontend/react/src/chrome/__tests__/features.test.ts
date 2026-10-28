@@ -19,17 +19,18 @@ const route = (path: string, group: string, order?: number): FeatureRoute => ({
   nav: { group, label: path, icon, hint: '', ...(order !== undefined ? { order } : {}) },
 });
 describe('feature manifest routing', () => {
-  it('every admin parentPath resolves to a distinct visible admin destination', () => {
+  it('every parentPath resolves to a distinct visible destination in the same shell tier', () => {
     const byPath = new Map(FEATURES.map((feature) => [feature.path, feature]));
     const children = FEATURES.filter((feature) => feature.parentPath);
     expect(children.length).toBeGreaterThan(0);
     for (const child of children) {
       const parent = byPath.get(child.parentPath!);
       expect(child.parentPath).not.toBe(child.path);
-      expect(parent?.tier, `${child.path} parent must be admin-tier`).toBe('admin');
+      expect(parent?.tier, `${child.path} parent must share its shell tier`).toBe(child.tier);
       expect(parent?.nav, `${child.path} parent must be a visible destination`).toBeTruthy();
     }
     expect(byPath.get('/operations/webhooks')?.parentPath).toBe('/operations');
+    expect(byPath.get('/campaign-studio/campaigns/:campaignId')?.parentPath).toBe('/campaigns');
   });
   it('maps "/dashboard" to the Dashboard, "/" to the app-shell RootRedirect, "/chat" to chat (ADR 0487)', () => {
     // § Correction (2026-07-25, ADR 0487): '/' is the public marketing home; the

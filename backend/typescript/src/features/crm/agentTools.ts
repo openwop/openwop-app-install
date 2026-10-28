@@ -48,12 +48,16 @@ import { OpenwopError } from '../../types.js';
 import { buildCrmSurface } from './surface.js';
 import { ensureContactWithOutcome } from './contactsService.js';
 import { orgScopeGranted } from './routes.js';
+import { LEAD_INTEL_TOGGLE } from './leadIntel/constants.js';
+import { MAX_STATED_ANSWERS, parseStatedAnswers, recordStatedAnswers } from './leadIntel/statedAnswers.js';
 
 const TOGGLE_ID = 'crm';
 const log = createLogger('crm.agent-tools');
 
 /** ADR 0470 — the anon lead-intake tool id. */
 export const CRM_LEAD_CAPTURE_TOOL_ID = 'openwop:crm.lead.capture';
+/** ADR 0954 D7 — what the visitor said about the qualification questions. */
+export const CRM_LEAD_QUALIFY_TOOL_ID = 'openwop:crm.lead.qualify';
 /** A pragmatic email shape gate (not an RFC 5322 validator — that over-rejects real
  *  addresses). Requires a local part, an `@`, a dotted domain, no spaces. The tool
  *  fails TYPED on a miss so the agent asks the visitor to re-enter. */
@@ -445,6 +449,77 @@ export function registerCrmAgentTools(): void {
         // captured, already known, or erased (no contact is rebuilt for an erased
         // subject) — any difference would make this an erasure oracle.
         return { content: JSON.stringify({ success: true, message: 'Lead captured — a team member will follow up.' }) };
+      } catch (err) { return surfaceError(err); }
+    },
+  });
+
+  // ADR 0954 D7 — the widget's qualification answers. Anon-exclusive like
+  // `crm.lead.capture`, and HOLD-ONLY (`anonHitlOnly`): never auto-run. What it stores is the visitor's OWN
+  // statement, kept as evidence for the in-run assessor to cite: it is never a
+  // grade and never a signal, so the widget cannot write a grade. It has no client
+  // org (a held tool runs with the tenant and run only), so it does not check the
+  // answers against a client's model; the shape is bounded instead.
+  registerFeatureAgentTool({
+    contentTrust: 'untrusted',
+    effect: 'write',
+    // The typed email is unverified, so an auto-run grant would let anyone attach
+    // statements to an existing contact. Hold-only: an operator sees every one.
+    anonHitlOnly: true,
+    def: {
+      name: CRM_LEAD_QUALIFY_TOOL_ID,
+      description:
+        "Record what an anonymous website visitor told you in answer to the team's qualification questions, so a HUMAN can review it. "
+        + "Call it ONLY with answers the visitor actually gave, in their own terms, and ONLY after they gave their email. Pass their `email` "
+        + `and up to ${MAX_STATED_ANSWERS} \`answers\` as { criterionId, value }, using the question ids your instructions list. `
+        + 'Never guess an answer, never score or grade the visitor, and never promise a price, discount, availability or a call-back time. '
+        + 'Returns { success }.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          email: { type: 'string', description: "The visitor's email address, as they gave it." },
+          answers: {
+            type: 'array',
+            maxItems: MAX_STATED_ANSWERS,
+            items: {
+              type: 'object',
+              properties: {
+                criterionId: { type: 'string', description: 'The question id from your instructions.' },
+                value: { type: 'string', maxLength: 200, description: "The visitor's answer in their words; express a numeric answer as text." },
+              },
+              required: ['criterionId', 'value'],
+              additionalProperties: false,
+            },
+          },
+        },
+        required: ['email', 'answers'],
+        additionalProperties: false,
+      },
+    },
+    async run(input, scope) {
+      if (scope.actingUserId) {
+        return toolError('use_governed_write', 'Qualification answers from a signed-in turn are recorded by the lead assessment, not this tool.');
+      }
+      const [crmOn, intel] = await Promise.all([crmEnabled(scope.tenantId, undefined), resolveOne(LEAD_INTEL_TOGGLE, { tenantId: scope.tenantId })]);
+      if (!crmOn || !intel?.enabled) {
+        return toolError('feature_disabled', 'Lead qualification is not enabled for this workspace.');
+      }
+      const email = str(input.email);
+      if (!email || !EMAIL_RE.test(email)) {
+        return toolError('validation_error', 'Ask the visitor for a valid email address before recording their answers.', { field: 'email' });
+      }
+      let answers: Array<{ criterionId: string; value: string }>;
+      try {
+        answers = parseStatedAnswers(input.answers);
+      } catch (err) {
+        return surfaceError(err);
+      }
+      try {
+        const outcome = await ensureContactWithOutcome({ tenantId: scope.tenantId, email, leadSource: 'anon-widget', actor: 'public:anon-widget' });
+        if (outcome.erasureUnreadable) return toolError('unavailable', 'The answers could not be saved right now. Ask the visitor to try again shortly.');
+        // An erased subject gets the same answer and nothing is stored (no erasure oracle).
+        if (outcome.contact) await recordStatedAnswers(scope.tenantId, outcome.contact.contactId, answers, scope.runId ?? '');
+        else if (!outcome.erased) return toolError('validation_error', 'A valid email is required.', { field: 'email' });
+        return { content: JSON.stringify({ success: true, message: 'Answers passed to the team.' }) };
       } catch (err) { return surfaceError(err); }
     },
   });

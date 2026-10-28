@@ -11,7 +11,7 @@ import { OpenwopError } from '../../types.js';
 import { getAgentProfile } from '../../host/agentProfileService.js';
 import { resolveAgentIdentity } from '../../host/agentIdentity.js';
 import { registerSubjectEraser, type SubjectEraseReport } from '../../host/subjectErasure.js';
-import { subjectRefForms } from '../../host/conversationStore.js';
+import { subjectKeyForms } from '../../host/subjectErasureRedaction.js';
 
 export interface VoiceSession {
   sessionId: string;
@@ -137,7 +137,7 @@ export async function resolveAgentVoice(tenantId: string, agentId: string | unde
  * committed turns live in the chat, which has its own eraser), only the binding.
  */
 export async function eraseSubjectVoiceSessions(tenantId: string, subjectKey: string): Promise<SubjectEraseReport> {
-  const forms = subjectRefForms(subjectKey);
+  const forms = subjectKeyForms(subjectKey).forms;
   let rowsTouched = 0;
   for (const s of await sessions.listForTenantIndexed(tenantId)) {
     if (s.subject && forms.has(s.subject)) {

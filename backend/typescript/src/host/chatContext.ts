@@ -19,7 +19,9 @@ import { getAgentRegistry, type ResolvedAgentManifest } from '../executor/agentR
 import { resolveAgentIdentity, type AgentIdentity } from './agentIdentity.js';
 import { composeAgentSystemPrompt, firstNameOf } from './agentPromptScaffold.js';
 import { getConversationMeta, type ConversationMeta } from './conversationStore.js';
-import { composeKnowledgeForSubject, resolveAgentKnowledgeRetrieve, composeAgentKnowledgeContext, composeBorrowedRecallContext } from './agentKnowledgeComposition.js';
+import { composeKnowledgeForSubject, resolveAgentKnowledgeRetrieve, resolveDispatchMemory, degradationNotice, composeAgentKnowledgeContext, composeBorrowedRecallContext } from './agentKnowledgeComposition.js';
+import { resolveConversationMemoryClient } from './runClientOrg.js';
+import { CLIENT_MEMORY_UNAVAILABLE_LABEL } from './memoryScopeSentinel.js';
 import { getBorrowedRecallResolver } from './twinRecallSurface.js';
 import { createAgentMemoryPort } from './agentMemoryAdapter.js';
 import { resolveSubjectAccess } from './subjectAccess.js';
@@ -244,10 +246,20 @@ export async function composeChatContext(tenantId: string, input: ComposeChatCon
         // KickBot) recalls THIS caller's own `user:<id>` memory, never another
         // participant's, in a shared cohort tenant (F1). A default-scope agent
         // ignores `actor` and reads `agent:<profileId>` exactly as before.
+        // ADR 0944 D2 — a client-bound conversation recalls that client's shared
+        // `org:<orgId>` memory, re-checked live for THIS speaker. Refused (or a
+        // `per-org` agent with no client) ⇒ the empty sentinel, and the model is
+        // told rather than left to present a failed read as an empty one.
+        const memoryCtx = { userId: callerUserId, client: await resolveConversationMemoryClient(tenantId, convMeta?.client?.orgId, callerUserId) };
         const retrieve = await resolveAgentKnowledgeRetrieve(
-          tenantId, identity.profileId, createAgentMemoryPort(tenantId), { userId: callerUserId },
+          tenantId, identity.profileId, createAgentMemoryPort(tenantId), memoryCtx,
         );
-        return retrieve ? await composeAgentKnowledgeContext(retrieve, seed) : '';
+        if (!retrieve) return '';
+        const block = await composeAgentKnowledgeContext(retrieve, seed);
+        if (!(await resolveDispatchMemory(tenantId, identity.profileId, memoryCtx)).unavailable) return block;
+        degraded.push('client_memory');
+        const notice = degradationNotice([CLIENT_MEMORY_UNAVAILABLE_LABEL]);
+        return block ? `${notice}\n\n${block}` : notice;
       } catch (err) {
         logger.warn('context_degraded', { block: 'agent_knowledge', agentId, reason: err instanceof Error ? err.message : String(err) });
         degraded.push('agent_knowledge');

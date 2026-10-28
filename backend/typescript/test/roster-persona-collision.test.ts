@@ -5,9 +5,23 @@
  * The chat @-mention picker keys on persona text, so a rename that takes
  * another same-tenant agent's (case-insensitive) persona would make mentions
  * ambiguous — and would let a user-renamed agent (KickBot) impersonate an
- * existing coworker. Covers: collision refused (service throw + route 409),
- * case-insensitive matching, self-rename no-op allowed, unique rename allowed,
+ * existing coworker. Covers: collision refused (service throw), case-
+ * insensitive matching, self-rename no-op allowed, unique rename allowed,
  * and rename continuity (rosterId/roleKey untouched by a successful rename).
+ * The ROUTE half (PersonaCollisionError → 409 `conflict` with the message, and
+ * the row unchanged) is in test/roster.test.ts 'refuses a PATCH rename onto
+ * another member's persona with 409' — that file already boots the app.
+ *
+ * Breaks it: `personaKey` without trim/lowercase (8fw2g2-rpc-case), the throw
+ * removed (rpc-throw), listing siblings across tenants (rpc-tenant).
+ *
+ * DOUBLE GUARD on "self-rename allowed" (`rosterService.ts` applyRosterPatch):
+ * the OUTER `personaKey(patch) !== personaKey(entry)` skips the sibling scan for
+ * a case tweak, and the INNER `s.rosterId !== rosterId` would also exempt self.
+ * Either alone keeps the case green (round-1 8fw2g2-rpc-self, inner removed,
+ * was VACUOUS by design). The inner copy is reachable only if the sibling list
+ * read races a concurrent rename, so it is not witnessable here; the probe is on
+ * the shared piece — both removed (8fw2g2-rpc-self-both-r2).
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';

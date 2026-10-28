@@ -34,6 +34,7 @@ import { ConversationView } from '../ConversationView.js';
 import { ConversationLineup } from '../conversations/ConversationLineup.js';
 // Entry-weight (deck parity with ChatSidebar): the strip pulls the review-card
 // tree — lazy keeps it out of the entry chunk.
+const ClientMemoryChip = lazy(() => import('../ClientMemoryChip.js').then((m) => ({ default: m.ClientMemoryChip })));
 const ConversationReviewsStrip = lazy(() => import('../reviews/ConversationReviewsStrip.js').then((m) => ({ default: m.ConversationReviewsStrip })));
 import { useChannelRoster, CHANNEL_READ_ONLY_COPY } from '../conversations/useChannelRoster.js';
 import { useChannelMessageActions } from '../conversations/useChannelMessageActions.js';
@@ -60,6 +61,8 @@ import { useRecordDecision } from '../decisions/useRecordDecision.js';
 // ADR 0117 Phase 3 — the read-only side-by-side compare view; lazy (zero entry-budget),
 // mirrors ChatSidebar.
 const CompareView = lazy(() => import('../CompareView.js').then((m) => ({ default: m.CompareView })));
+// ADR 0992 D9 — the ChatGPT-archive picker, lazy (only an archive import opens it).
+const ImportArchivePicker = lazy(() => import('../ImportArchivePicker.js').then((m) => ({ default: m.ImportArchivePicker })));
 // ADR 0896 IL2UX-2 — the mission contract (deck parity with ChatHeader's Mission
 // button): without it a draft the assistant writes here has nowhere to be approved.
 const IntentLedgerModal = lazy(() => import('../../intentLedger/IntentLedgerModal.js'));
@@ -85,6 +88,8 @@ export interface TabSessionProps {
   /** ADR 0711 OQ1 — false when `config` is the effective managed default, not a choice.
    *  This render site is why `stored` is a REQUIRED prop on the card: it was missed. */
   byokStored: boolean;
+  /** Scopes ONLY local UI keys (the composer draft). The deck passes the signed-in
+   *  uid, exactly as ChatSidebar does (CS-FE-6, ADR 0978 D5); feeds no API call. */
   tenantId?: string;
   /** The conversation's server-side participants (from the deck's single
    *  `useChatSessions()`), used to restore the agent lineup. Undefined for a
@@ -116,6 +121,8 @@ export interface TabSessionProps {
   /** The conversation's owning subject (ADR 0140 G3) — when it's a `project:<id>`, a bare
    *  `@@` convenes that project's team in this tab. Undefined for a plain tab. */
   ownerSubject?: { kind: string; id: string };
+  /** ADR 0944 D2 — the client this conversation's agent memory is bound to. */
+  client?: { orgId: string; name: string };
   /** Scope this tab to an agent on mount (the `?agent=` deep-link, ADR 0140 G3). */
   scopeAgentId?: string;
   onReconfigureBYOK: () => void;
@@ -139,7 +146,7 @@ export interface TabSessionProps {
 }
 
 function TabSessionImpl({
-  sessionId, config, byokStored, tenantId = 'demo', participants, conversationType, boardId, onSessionIdChange, onStreamingChange, onActivity, onAddParticipant, onRemoveParticipant, onAttachBoard, ownerSubject, scopeAgentId, onReconfigureBYOK, onWorkflowRuns, onSources, onOpenConversation, refreshConversations, onRequestClose, onOpenArtifact,
+  sessionId, config, byokStored, tenantId = 'anon', participants, conversationType, boardId, onSessionIdChange, onStreamingChange, onActivity, onAddParticipant, onRemoveParticipant, onAttachBoard, ownerSubject, client, scopeAgentId, onReconfigureBYOK, onWorkflowRuns, onSources, onOpenConversation, refreshConversations, onRequestClose, onOpenArtifact,
 }: TabSessionProps): JSX.Element {
   const { t } = useTranslation('chat');
   const handleSessionIdChange = useCallback((newId: string) => onSessionIdChange(sessionId, newId), [onSessionIdChange, sessionId]);
@@ -258,11 +265,12 @@ function TabSessionImpl({
   // ADR 0140 parity — the SHARED per-conversation actions (branch · branch-from · import ·
   // export · share + compare state), identical to ChatSidebar (same hook). The deck opens a
   // result as a tab (onOpenConversation → open-or-focus) and refreshes the deck's one list.
-  const { onBranch, onBranchFrom, onImport, onExport, onShare, compareOpen, openCompare, closeCompare } = useConversationActions({
+  const { onBranch, onBranchFrom, onImport, onExport, onShare, compareOpen, openCompare, closeCompare, archiveEntries, onPickArchiveConversation, closeArchive } = useConversationActions({
     sessionId, refreshList: refreshConversations, onOpenConversation,
   });
-  // Feature gates mirror ChatSidebar: export/import are always-on; share gates on `sharing`.
-  const exportAccess = { enabled: true };
+  // Export/import/share are always-on, as in ChatSidebar: `sharing` graduated off its
+  // toggle (its feature.ts), and owner-only minting is enforced server-side. (ADR 0992
+  // removed the `exportAccess = { enabled: true }` constant that gated nothing.)
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const hasTurns = session.messages.length > 0;
   const [showChannelDetails, setShowChannelDetails] = useState(false); // ADR 0154 FU-1 (deck parity)
@@ -287,13 +295,13 @@ function TabSessionImpl({
     ...(hasTurns ? [{ id: 'branch', label: t('branch'), title: t('branchConversationTitle'), onSelect: () => { void onBranch(); } }] : []),
     ...(hasTurns ? [{ id: 'compare', label: t('compare'), title: t('compareTitle'), onSelect: openCompare }] : []),
     ...(hasTurns ? [{ id: 'mission', label: t('mission', { defaultValue: 'Mission' }), title: t('missionTitle', { defaultValue: 'Mission contract' }), onSelect: () => setMissionOpen(true) }] : []),
-    ...(hasTurns && exportAccess.enabled ? [
+    ...(hasTurns ? [
       { id: 'export', label: t('export'), title: t('exportConversationTitle'), onSelect: () => { void onExport('md'); } },
       { id: 'export-json', label: t('exportAsJson'), onSelect: () => { void onExport('json'); } },
     ] : []),
-    ...(exportAccess.enabled ? [{ id: 'import', label: t('import'), title: t('importConversationTitle'), onSelect: () => importInputRef.current?.click() }] : []),
+    { id: 'import', label: t('importConversation'), title: t('importConversationTitle'), onSelect: () => importInputRef.current?.click() },
     ...(hasTurns ? [{ id: 'share', label: t('share', { defaultValue: 'Share link' }), title: t('shareConversationTitle', { defaultValue: 'Create a public read-only link to this conversation' }), onSelect: () => { void onShare(); } }] : []),
-  ], [hasTurns, conversationType, exportAccess.enabled, onBranch, openCompare, onExport, onShare, t]);
+  ], [hasTurns, conversationType, onBranch, openCompare, onExport, onShare, t]);
 
   // ADR 0140 — the next-turn composer modifiers (web · tools · capability scope) + the
   // per-exchange model switcher + the ⋯ actions menu, assembled into the ONE composer
@@ -398,6 +406,11 @@ function TabSessionImpl({
       {compareOpen ? (
         <Suspense fallback={null}>
           <CompareView currentSessionId={sessionId} onClose={closeCompare} />
+        </Suspense>
+      ) : null}
+      {archiveEntries ? (
+        <Suspense fallback={null}>
+          <ImportArchivePicker entries={archiveEntries} onPick={(i) => { void onPickArchiveConversation(i); }} onClose={closeArchive} />
         </Suspense>
       ) : null}
       {missionOpen ? (
@@ -557,6 +570,7 @@ function TabSessionImpl({
             <Suspense fallback={null}>
               <ConversationReviewsStrip conversationId={sessionId} isSending={isSending} />
             </Suspense>
+            {client ? <Suspense fallback={null}><ClientMemoryChip client={client} /></Suspense> : null}
             {conveneProjectId && conveneAgentCount > 0 ? (
           <div className="u-flex u-items-center u-wrap u-gap-2 u-pad-2-4 u-fs-12 muted">
             <Button variant="secondary" size="sm" disabled={isSending} onClick={() => void conveneProject('')}>

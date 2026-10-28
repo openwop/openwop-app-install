@@ -137,6 +137,13 @@ needed. This one guard buys four properties at once:
 
 ### D4 — Restore with a reason, and fail safe
 
+> **CORRECTED 2026-10-19 (ADR 0963 D3/A2).** Every restore now HOLDS the card: the work loop
+> does not pick a To Do card carrying the `[auto:run-restore]` mark until a person clears the
+> note. That includes `cancelled`, which now writes a neutral note ("its run was cancelled")
+> instead of none: with no note, a person who cancelled an autonomous run saw it restart on
+> the next pass (`WS2WF-2`), and a failing card re-ran every interval (`WS2WF-3`). The
+> objection below was to blaming a person, not to recording the stop.
+
 On a **failed / dead-lettered** run: move the card back to the column it was picked from
 (To Do) and record why on the card — reuse the existing `blockerNote` field
 (`host/kanbanService.ts:106`) rather than adding one. The note carries the run's error code

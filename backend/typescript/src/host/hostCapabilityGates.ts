@@ -67,9 +67,11 @@ export async function requireCapabilityFeature(scope: CapabilityGateScope, capab
 export const ADS_METHOD_FEATURE: Record<keyof AdsAdapter, string> = {
   publishAd: 'campaign-channels',
   updateBudget: 'campaign-channels',
+  setDeliveryStatus: 'campaign-channels',
   listDispatches: 'campaign-connectors',
   getMetrics: 'campaign-connectors',
   getAccountMetrics: 'campaign-connectors',
+  getCampaignBudget: 'campaign-connectors',
   syncAudience: 'campaign-connectors',
   sendConversion: 'campaign-connectors',
 };
@@ -87,9 +89,11 @@ export function gateAdsAdapter(adapter: AdsAdapter, scope: CapabilityGateScope):
   return {
     publishAd: call('publishAd'),
     updateBudget: call('updateBudget'),
+    setDeliveryStatus: call('setDeliveryStatus'),
     listDispatches: call('listDispatches'),
     getMetrics: call('getMetrics'),
     getAccountMetrics: call('getAccountMetrics'),
+    getCampaignBudget: call('getCampaignBudget'),
     syncAudience: call('syncAudience'),
     sendConversion: call('sendConversion'),
   };

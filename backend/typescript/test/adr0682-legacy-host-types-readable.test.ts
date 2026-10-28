@@ -12,6 +12,15 @@
  * through the production `seedEra2EventLog` seam. It is proved per READER (poll,
  * SSE, fork) rather than once at the storage function — the SSE writer uses
  * `res.write`, and a fix that only covered the JSON readers has shipped before.
+ * All three readers go through ONE translation point today
+ * (`storage/eventEraAdapter.ts` `listEvents` → `toContractVocabulary`), so one
+ * sabotage there reds all three; the per-reader legs guard against a reader that
+ * stops going through it.
+ *
+ * Tracker TST-BGF-9. Red when: the `HOST_LEGACY_READ_ROWS` lookup in
+ * `toContractVocabulary` is skipped (poll/SSE/fork) or made tolerant of any
+ * type (the refusal leg); the map gains a corpus name; or the vendor passthrough
+ * is removed.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -141,7 +150,8 @@ describe('the legacy map is read-only and cannot shadow the protocol', () => {
     for (const [legacy, vendor] of hostLegacyReadRows()) {
       expect(toStorageVocabulary(vendor, 2)).toBe(vendor);
       expect(toStorageVocabulary(vendor, 3)).toBe(vendor);
-      // ...and the v1 read of the vendor spelling is not inverted to the old one.
+      // ...and the HOST-dialect read (`contract: 1`, still read by fork and the workers,
+      // e.g. `executor/forkInterrupts.ts`) of the vendor spelling is not inverted to the old one.
       expect(toContractVocabulary(vendor, 2, 1)).toBe(vendor);
       expect(toContractVocabulary(vendor, 3, 1)).toBe(vendor);
       // The legacy name on the v1 wire stays what was stored.

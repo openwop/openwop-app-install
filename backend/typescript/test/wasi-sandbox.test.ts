@@ -4,13 +4,26 @@
  * host-escape class that sank the reverted Pyodide path (#902/#904) is absent by construction.
  *
  * Unlike the Pyodide suite, this checks the FFI vectors directly (`import js`, subprocess, ctypes),
- * not just `os.environ`/`open()`. Requires the vendored runtime — run `scripts/sync-pythonwasm.sh`
- * first (CI/Docker do). The suite fails LOUD (not skip) if the asset is missing — a gate must run.
+ * not just `os.environ`/`open()`.
+ *
+ * WHAT RUNS WHERE (CORRECTED wave 63 — this header used to say the suite "fails LOUD (not skip)"
+ * when the asset is missing; the code SKIPS):
+ *  - The execution, escape, output-cap and wall-clock blocks need the vendored runtime
+ *    `vendor/python-3.12.0.wasm` (`scripts/sync-pythonwasm.sh`). Without it they are
+ *    `describe.skip` with a console warning on a plain checkout. MEASURED 2026-10-23: the asset
+ *    was absent from the local checkouts and `npm run ci` did not sync it, so the escape suite
+ *    never ran in the gate (WASI-GATE-1). DECIDED 2026-10-24 (user): the gate fetches it.
+ *    `scripts/ci.sh` and the Tracegate daemon run `scripts/sync-pythonwasm.sh` and set
+ *    OPENWOP_REQUIRE_WASI=1, under which a missing asset FAILS this file instead of skipping it.
+ *  - The selection/advertisement and input-validation cases need no runtime and run in every gate
+ *    (the first describe below). The endpoint-precedence case points OPENWOP_CODE_EXEC_WASM_PATH
+ *    at an existing stand-in file so WASI counts as enabled without executing anything.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { runWasiSandboxedCode, wasiRuntimeEnabled, wasiAllowedLanguages, wasmPath } from '../src/host/wasiSandbox.js';
-import { createSandboxRunner, allowedLanguages } from '../src/host/sandboxAdapter.js';
+import { selectSandboxExecutor, allowedLanguages } from '../src/host/sandboxAdapter.js';
 
 const T = 30_000;
 
@@ -23,7 +36,14 @@ if (!wasmPresent) {
   // eslint-disable-next-line no-console -- deliberate: the skip must be loud in local output
   console.warn(`⚠ wasi-sandbox suite SKIPPED — CPython-WASI asset missing at ${wasmPath()}; run scripts/sync-pythonwasm.sh to enable the escape gate locally.`);
 }
+// The gate requires the runtime (WASI-GATE-1): there, a missing asset is a broken sync, and a
+// skip would record this security gate as green without running it.
+if (!wasmPresent && process.env.OPENWOP_REQUIRE_WASI === '1') {
+  throw new Error(`OPENWOP_REQUIRE_WASI=1 but the CPython-WASI asset is missing at ${wasmPath()} — run scripts/sync-pythonwasm.sh`);
+}
 const describeIfWasm = wasmPresent ? describe : describe.skip;
+/** Any existing file: `wasiRuntimeEnabled()` only checks existence, and these cases never execute. */
+const STAND_IN_WASM = fileURLToPath(import.meta.url);
 
 beforeEach(() => {
   delete process.env.OPENWOP_CODE_EXEC_ENDPOINT;
@@ -32,34 +52,56 @@ beforeEach(() => {
   delete process.env.OPENWOP_CODE_EXEC_LANGUAGES;
 });
 
-describeIfWasm('wasi sandbox — selection precedence & honest advertisement', () => {
+describeIfWasm('wasi sandbox — the vendored default path', () => {
   it('ON BY DEFAULT: asset present, no endpoint ⇒ runner wired, advertises python ONLY', () => {
     expect(wasiRuntimeEnabled()).toBe(true);                 // default-on (ADR 0146 OQ-1 reversed)
-    expect(typeof createSandboxRunner()).toBe('function');
+    expect(typeof selectSandboxExecutor()).toBe('function');
     expect(allowedLanguages()).toEqual(['python']);          // Phase 3 — advertise only what WASI honors
   });
+});
 
+describe('wasi sandbox — selection precedence & honest advertisement (no runtime needed)', () => {
   it('explicit opt-OUT: OPENWOP_CODE_EXEC_RUNTIME=off ⇒ honest-off, polyglot advertisement', () => {
+    process.env.OPENWOP_CODE_EXEC_WASM_PATH = STAND_IN_WASM;  // a runtime IS present, so the opt-out is what turns it off
     process.env.OPENWOP_CODE_EXEC_RUNTIME = 'off';
     expect(wasiRuntimeEnabled()).toBe(false);
-    expect(createSandboxRunner()).toBeUndefined();
+    expect(selectSandboxExecutor()).toBeUndefined();
     expect(allowedLanguages()).toContain('javascript');      // back to the external-adapter default list
   });
 
   it('asset MISSING ⇒ honest-off (no false advertisement)', () => {
     process.env.OPENWOP_CODE_EXEC_WASM_PATH = '/nonexistent/python.wasm';
     expect(wasiRuntimeEnabled()).toBe(false);
-    expect(createSandboxRunner()).toBeUndefined();
+    expect(selectSandboxExecutor()).toBeUndefined();
   });
 
   it('external endpoint wins over the WASI default (strong-isolation path)', () => {
+    process.env.OPENWOP_CODE_EXEC_WASM_PATH = STAND_IN_WASM;  // WASI enabled, so the precedence is real
+    expect(wasiRuntimeEnabled(), 'precondition: WASI counts as enabled').toBe(true);
     process.env.OPENWOP_CODE_EXEC_ENDPOINT = 'https://sandbox.example/exec';
-    expect(typeof createSandboxRunner()).toBe('function');
+    expect(typeof selectSandboxExecutor()).toBe('function');
     expect(allowedLanguages()).toContain('go');              // external polyglot default, not the WASI [python]
   });
 
   it('Python is the only advertised wasi language', () => {
     expect(wasiAllowedLanguages()).toEqual(['python']);
+  });
+
+  // Input caps: each is refused BEFORE any runtime load (`wasiSandbox.ts:187-191`), so these
+  // need no asset and run in every gate.
+  it('rejects a non-Python language (allowlist)', async () => {
+    await expect(runWasiSandboxedCode({ language: 'javascript', code: 'console.log(1)' }))
+      .rejects.toMatchObject({ code: 'validation_error', message: expect.stringContaining('language "javascript" is not supported') });
+  });
+
+  it('rejects oversized code (size cap)', async () => {
+    await expect(runWasiSandboxedCode({ language: 'python', code: 'x'.repeat(200_001) }))
+      .rejects.toMatchObject({ code: 'content_too_long', message: expect.stringContaining('200000-byte cap') });
+  });
+
+  it('rejects empty code', async () => {
+    await expect(runWasiSandboxedCode({ language: 'python', code: '' }))
+      .rejects.toMatchObject({ code: 'validation_error', message: expect.stringContaining('`code` is required.') });
   });
 });
 
@@ -184,18 +226,4 @@ describeIfWasm('wasi sandbox — wall-clock & input caps', () => {
     expect(r.exitCode).toBe(124);
   }, T);
 
-  it('rejects a non-Python language (allowlist)', async () => {
-    await expect(runWasiSandboxedCode({ language: 'javascript', code: 'console.log(1)' }))
-      .rejects.toMatchObject({ code: 'validation_error' });
-  });
-
-  it('rejects oversized code (size cap)', async () => {
-    await expect(runWasiSandboxedCode({ language: 'python', code: 'x'.repeat(200_001) }))
-      .rejects.toMatchObject({ code: 'content_too_long' });
-  });
-
-  it('rejects empty code', async () => {
-    await expect(runWasiSandboxedCode({ language: 'python', code: '' }))
-      .rejects.toMatchObject({ code: 'validation_error' });
-  });
 });

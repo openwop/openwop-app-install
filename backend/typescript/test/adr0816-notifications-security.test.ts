@@ -16,6 +16,19 @@
  *       read / archive / delete never changes it for anyone else.
  *
  * Every refusal leg re-reads state, so a 4xx from an unrelated gate cannot pass.
+ * Tracker: TST-BNC-2.
+ *
+ * Delivery is asynchronous, so every NEGATIVE ("not delivered") is asserted only
+ * after a POSITIVE control in the same case has been observed (`vi.waitFor`).
+ *
+ * Red when (wave 60 probes w60g4-ntf-*): a role notice is materialised for a
+ * non-holder; the owner is not an operator; a removed member's device is still
+ * pushed to; device preferences are ignored; a plain-http or private-address
+ * endpoint is accepted; a key's or a wildcard caller's notification subject is
+ * resolved wrongly.
+ * DOUBLE GUARD: a role-addressed notice in a `ws:` tenant is materialised per
+ * holder (D1, `audience.ts`) BEFORE the push lane's own role filter
+ * (`webPush.ts`) sees it, so breaking the push filter alone stays green here.
  */
 import http from 'node:http';
 import https from 'node:https';
@@ -26,7 +39,8 @@ import { join } from 'node:path';
 import { createECDH, randomBytes } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 import webpush from 'web-push';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import express, { type Request } from 'express';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
@@ -52,7 +66,19 @@ let pushServer: https.Server;
 const hits = new Map<string, number>();
 const hitsOn = (path: string): number => hits.get(path) ?? 0;
 
-interface Res { status: number; body: any }
+interface Body {
+  error?: string;
+  message?: string;
+  details?: { reason?: string };
+  members?: M[];
+  token?: string;
+  workspaceId?: string;
+  subscriptionId?: string;
+  subscriptions?: Array<{ subscriptionId: string; endpoint: string }>;
+  notifications?: Array<{ notificationId: string; status: string; title: string }>;
+  preferences?: { types: Array<{ type: string; muted?: boolean; desktop?: boolean }> } & Record<string, unknown>;
+}
+interface Res { status: number; body: Body }
 
 function client() {
   let cookie = '';
@@ -63,7 +89,7 @@ function client() {
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
     for (const ck of getSetCookies(res.headers)) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]!; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    return { status: res.status, body: (res.status === 204 ? {} : await res.json().catch(() => ({}))) as Body };
   };
   return {
     call,
@@ -86,7 +112,7 @@ interface M { memberId: string; roles: string[]; subject?: string; email?: strin
 async function members(c: Client, ws: string): Promise<M[]> {
   const r = await c.get(membersPath(ws));
   expect(r.status, JSON.stringify(r.body)).toBe(200);
-  return r.body.members as M[];
+  return r.body.members ?? [];
 }
 
 async function joinAs(owner: Client, ws: string, role: string): Promise<{ c: Client; m: M }> {
@@ -107,7 +133,7 @@ async function fixture() {
   await signIn(owner, `r816-owner-${n++}@acme.test`);
   const ws = await owner.post(`${H}/workspaces`, { name: `R816 ${n++}` });
   expect(ws.status, JSON.stringify(ws.body)).toBe(201);
-  const id = ws.body.workspaceId as string;
+  const id = ws.body.workspaceId ?? '';
   expect((await owner.post(`${H}/workspaces/${encodeURIComponent(id)}/switch`)).status).toBe(200);
   const { c: admin, m: adminMember } = await joinAs(owner, id, 'admin');
   const { c: viewer, m: viewerMember } = await joinAs(owner, id, 'viewer');
@@ -127,18 +153,22 @@ function subscription(path: string) {
 async function subscribe(c: Client, path: string): Promise<string> {
   const r = await c.post(`${N}/push/subscribe`, subscription(path));
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  return r.body.subscriptionId as string;
+  return r.body.subscriptionId ?? '';
 }
 
-/** Push delivery is fire-and-forget off the emit; wait for it to settle. */
-async function settle(): Promise<void> {
-  await new Promise((r) => setTimeout(r, 300));
+/** Push delivery is fire-and-forget off the emit: wait for the POSITIVE control. */
+async function untilHits(path: string, n: number): Promise<void> {
+  await vi.waitFor(() => expect(hitsOn(path)).toBe(n), { timeout: 3000, interval: 10 });
+}
+/** …and for a stream frame. */
+async function untilTitle(titles: readonly string[], title: string): Promise<void> {
+  await vi.waitFor(() => expect(titles).toContain(title), { timeout: 3000, interval: 10 });
 }
 
 async function inbox(c: Client, query = ''): Promise<Array<{ notificationId: string; status: string; title: string }>> {
   const r = await c.get(`${N}${query}`);
   expect(r.status, JSON.stringify(r.body)).toBe(200);
-  return r.body.notifications;
+  return r.body.notifications ?? [];
 }
 
 /** Open the SSE stream as `c` and collect every notification frame's title. */
@@ -227,7 +257,7 @@ describe('ADR 0816 S1 — a role-addressed notice reaches only role-holders', ()
       tenantId: ws, recipientRole: 'admin', type: 'workflow.failed', priority: 'high',
       title: 'S1 operator notice', message: 'payroll-sync failed: secret gate prompt',
     });
-    await settle();
+    await untilHits(a, 1);
     expect(hitsOn(a), 'the role-holder\'s device is told').toBe(1);
     expect(hitsOn(v), 'a viewer\'s device must not receive an admin-addressed notice').toBe(0);
     // The inbox already default-denies; the device lane must agree with it.
@@ -243,7 +273,7 @@ describe('ADR 0816 S1 — a role-addressed notice reaches only role-holders', ()
       tenantId: ws, recipientRole: 'admin', type: 'workflow.failed', priority: 'high',
       title: 'S1 owner notice', message: 'm',
     });
-    await settle();
+    await untilHits(o, 1);
     expect((await inbox(owner)).some((x) => x.title === 'S1 owner notice')).toBe(true);
     expect(hitsOn(o)).toBe(1);
   });
@@ -258,7 +288,7 @@ describe('ADR 0816 S2 — removal stops delivery', () => {
     await subscribe(owner, o);
     expect((await owner.del(`${membersPath(ws)}/${encodeURIComponent(viewerMember.memberId)}`)).status).toBeLessThan(300);
     await getNotificationEmitter().emit({ tenantId: ws, type: 'system.alert', priority: 'normal', title: 'S2 after removal', message: 'm' });
-    await settle();
+    await untilHits(o, 1);
     expect(hitsOn(o), 'a remaining member is still told').toBe(1);
     expect(hitsOn(v), 'the removed member\'s device must not be').toBe(0);
   });
@@ -266,14 +296,17 @@ describe('ADR 0816 S2 — removal stops delivery', () => {
   it('a removed member\'s OPEN stream stops receiving the workspace\'s notices', async () => {
     const { owner, viewer, viewerMember, ws } = await fixture();
     const stream = openStream(viewer);
+    const ownerStream = openStream(owner);
     await stream.ready;
+    await ownerStream.ready;
     await getNotificationEmitter().emit({ tenantId: ws, type: 'system.alert', priority: 'normal', title: 'S2 before', message: 'm' });
-    await settle();
-    expect(stream.titles).toContain('S2 before');
+    await untilTitle(stream.titles, 'S2 before');
     expect((await owner.del(`${membersPath(ws)}/${encodeURIComponent(viewerMember.memberId)}`)).status).toBeLessThan(300);
     await getNotificationEmitter().emit({ tenantId: ws, type: 'system.alert', priority: 'normal', title: 'S2 after', message: 'm' });
-    await settle();
+    // Positive control: a remaining member's stream got the frame.
+    await untilTitle(ownerStream.titles, 'S2 after');
     stream.close();
+    ownerStream.close();
     expect(stream.titles).not.toContain('S2 after');
   });
 });
@@ -281,9 +314,18 @@ describe('ADR 0816 S2 — removal stops delivery', () => {
 describe('ADR 0816 S3 — push subscriptions', () => {
   it('refuses an endpoint on a private / metadata address (SSRF)', async () => {
     const { viewer } = await fixture();
-    for (const endpoint of ['http://169.254.169.254/computeMetadata/', 'http://10.0.0.5/internal', 'https://localhost:8443/x']) {
+    // https on 443, so the private/reserved-address check is the ONE that
+    // refuses (an http or odd-port endpoint is refused earlier, for that).
+    for (const endpoint of ['https://169.254.169.254/computeMetadata/', 'https://10.0.0.5/internal', 'https://localhost/x']) {
       const r = await viewer.post(`${N}/push/subscribe`, { ...subscription('/x'), endpoint });
       expect(r.status, endpoint).toBe(400);
+      expect(r.body.message, endpoint).toBe('Push endpoint refused: endpoint host is a private or reserved address.');
+    }
+    // …and the earlier refusals keep their own reasons.
+    for (const [endpoint, why] of [['http://10.0.0.5/internal', 'endpoint must be https'], ['https://localhost:8443/x', 'endpoint must use port 443']] as const) {
+      const r = await viewer.post(`${N}/push/subscribe`, { ...subscription('/x'), endpoint });
+      expect(r.status, endpoint).toBe(400);
+      expect(r.body.message, endpoint).toBe(`Push endpoint refused: ${why}.`);
     }
   });
 
@@ -291,6 +333,7 @@ describe('ADR 0816 S3 — push subscriptions', () => {
     const { viewer } = await fixture();
     const r = await viewer.post(`${N}/push/subscribe`, { ...subscription('/x'), endpoint: 'http://fcm.googleapis.com/fcm/send/abc' });
     expect(r.status).toBe(400);
+    expect(r.body.message).toBe('Push endpoint refused: endpoint must be https.');
   });
 
   it('another tenant cannot re-home an existing endpoint into its own workspace', async () => {
@@ -300,24 +343,24 @@ describe('ADR 0816 S3 — push subscriptions', () => {
     const other = client();
     await signIn(other, `r816-intruder-${n++}@evil.test`);
     const r = await other.post(`${N}/push/subscribe`, subscription(path));
-    expect(r.status).toBeGreaterThanOrEqual(400);
+    expect(r.status).toBe(409);
+    expect(r.body.details?.reason).toBe('push_endpoint_taken');
     // The victim's device still belongs to the victim's workspace.
     const subs = await storage.listPushSubscriptions(ws);
     expect(subs.some((s) => s.endpoint === `${PUSH}${path}`)).toBe(true);
     await getNotificationEmitter().emit({ tenantId: ws, type: 'system.alert', priority: 'normal', title: 'S3 still mine', message: 'm' });
-    await settle();
-    expect(hitsOn(path)).toBe(1);
+    await untilHits(path, 1);
   });
 
   it('a member lists only their OWN devices, and cannot delete another member\'s', async () => {
     const { owner, viewer } = await fixture();
     const ownerSub = await subscribe(owner, `/s3-owner-${n++}`);
     const viewerSub = await subscribe(viewer, `/s3-viewer-${n++}`);
-    const listed = (await viewer.get(`${N}/push/subscriptions`)).body.subscriptions as Array<{ subscriptionId: string }>;
+    const listed = (await viewer.get(`${N}/push/subscriptions`)).body.subscriptions ?? [];
     expect(listed.map((s) => s.subscriptionId)).toContain(viewerSub);
     expect(listed.map((s) => s.subscriptionId)).not.toContain(ownerSub);
     expect((await viewer.del(`${N}/push/subscriptions/${ownerSub}`)).status).toBe(404);
-    const ownerListed = (await owner.get(`${N}/push/subscriptions`)).body.subscriptions as Array<{ subscriptionId: string }>;
+    const ownerListed = (await owner.get(`${N}/push/subscriptions`)).body.subscriptions ?? [];
     expect(ownerListed.map((s) => s.subscriptionId)).toContain(ownerSub);
   });
 });
@@ -380,7 +423,7 @@ describe('ADR 0816 D3 — a second person on the SAME browser may rebind (proof 
     expect((await viewer.post(`${N}/push/subscribe`, sub)).status, 'same browser, same keys').toBe(201);
     const rows = (await storage.listPushSubscriptions(ws)).filter((s) => s.endpoint === `${PUSH}${path}`);
     expect(rows).toHaveLength(1);
-    const ownerListed = (await owner.get(`${N}/push/subscriptions`)).body.subscriptions as Array<{ endpoint: string }>;
+    const ownerListed = (await owner.get(`${N}/push/subscriptions`)).body.subscriptions ?? [];
     expect(ownerListed.some((s) => s.endpoint === `${PUSH}${path}`)).toBe(false);
   });
 });
@@ -393,8 +436,9 @@ describe('ADR 0816 D5 — device push honours the person\'s preferences', () => 
     await subscribe(viewer, v);
     await subscribe(owner, o);
     const current = (await viewer.get(`${N}/preferences`)).body.preferences;
+    if (!current) throw new Error('setup: the viewer has preferences');
     const types = [
-      ...current.types.filter((t: { type: string }) => t.type !== 'system.alert' && t.type !== 'workflow.failed'),
+      ...current.types.filter((t) => t.type !== 'system.alert' && t.type !== 'workflow.failed'),
       { type: 'system.alert', muted: false, desktop: false },
       { type: 'workflow.failed', muted: true, desktop: true },
     ];
@@ -402,24 +446,23 @@ describe('ADR 0816 D5 — device push honours the person\'s preferences', () => 
     expect(put.status, JSON.stringify(put.body)).toBe(200);
     await getNotificationEmitter().emit({ tenantId: ws, type: 'system.alert', priority: 'normal', title: 'D5 desktop off', message: 'm' });
     await getNotificationEmitter().emit({ tenantId: ws, type: 'workflow.failed', priority: 'high', title: 'D5 muted', message: 'm' });
-    await settle();
+    await untilHits(o, 2); // the owner did not opt out
     expect(hitsOn(v), 'the viewer opted out of both device toasts').toBe(0);
-    expect(hitsOn(o), 'the owner did not').toBe(2);
     expect((await inbox(viewer)).some((x) => x.title === 'D5 desktop off'), 'muting is not erasing').toBe(true);
   });
 });
 
 describe('ADR 0816 D8 — `self` never addresses someone who left the workspace', () => {
   it('a removed member\'s still-running scheduled run is refused, not delivered', async () => {
-    const { owner, viewer, viewerMember, ws } = await fixture();
+    const { owner, viewerMember, ws } = await fixture();
     const subject = (await members(owner, ws)).find((m) => m.memberId === viewerMember.memberId)!.subject!;
     expect((await owner.del(`${membersPath(ws)}/${encodeURIComponent(viewerMember.memberId)}`)).status).toBeLessThan(300);
-    const surface = buildNotificationsSurface({ tenantId: ws, actingUserId: subject, runId: `r816-${n++}` } as BundleScope);
+    const scope: BundleScope = { tenantId: ws, actingUserId: subject, runId: `r816-${n++}` };
+    const surface = buildNotificationsSurface(scope);
     const r = await surface.emit({ audience: 'self', title: 'D8 after removal', message: 'm' });
     expect(r).toMatchObject({ emitted: false, reason: 'acting_user_not_member' });
     expect(await storage.listNotifications({ tenantId: ws, recipientUserId: subject, limit: 50 }))
       .not.toEqual(expect.arrayContaining([expect.objectContaining({ title: 'D8 after removal' })]));
-    void viewer;
   });
 });
 
@@ -427,19 +470,22 @@ describe('ADR 0816 D4 — delivery re-checks presence on the lanes D1 does not c
   it('an UNADDRESSED frame (a signal) never reaches a removed member\'s open stream — the removal ends it', async () => {
     const { owner, viewer, viewerMember, ws } = await fixture();
     const stream = openStream(viewer);
+    const ownerStream = openStream(owner);
     await stream.ready;
+    await ownerStream.ready;
     getNotificationEmitter().signal({ tenantId: ws, type: 'system.alert', priority: 'low', title: 'D4 signal before', message: '' });
-    await settle();
-    expect(stream.titles).toContain('D4 signal before');
+    await untilTitle(stream.titles, 'D4 signal before');
     expect((await owner.del(`${membersPath(ws)}/${encodeURIComponent(viewerMember.memberId)}`)).status).toBeLessThan(300);
     getNotificationEmitter().signal({ tenantId: ws, type: 'system.alert', priority: 'low', title: 'D4 signal after', message: '' });
-    await settle();
+    // Positive control: a remaining member's stream got the signal.
+    await untilTitle(ownerStream.titles, 'D4 signal after');
     stream.close();
+    ownerStream.close();
     expect(stream.titles).not.toContain('D4 signal after');
   });
 
   it('Web Push skips a device whose owner is no longer a member, even for an unaddressed record', async () => {
-    const { owner, viewer, viewerMember, ws } = await fixture();
+    const { owner, viewerMember, ws } = await fixture();
     const v = `/d4-stale-${n++}`;
     const o = `/d4-owner-${n++}`;
     const viewerSubject = (await members(owner, ws)).find((m) => m.memberId === viewerMember.memberId)!.subject!;
@@ -460,20 +506,20 @@ describe('ADR 0816 D4 — delivery re-checks presence on the lanes D1 does not c
     });
     expect(hitsOn(o)).toBe(1);
     expect(hitsOn(v)).toBe(0);
-    void viewer;
   });
 });
 
 describe('ADR 0816 D0 — one notification subject per request', () => {
-  const req = (over: Record<string, unknown>) => over as unknown as Parameters<typeof notificationSubject>[0];
+  /** A real express request object carrying only what `notificationSubject` reads. */
+  const req = (over: Pick<Partial<Request>, 'tenantId' | 'userId' | 'principal'>): Request => Object.assign(Object.create(express.request) as Request, over);
   it('ws: an unbound OIDC member (no userId) reads as the principal it was admitted under, never unfiltered', () => {
-    expect(notificationSubject(req({ tenantId: 'ws:a', principal: { principalId: 'oidc:abc', tenants: ['ws:a'], auth: { kind: 'subject' } } }))).toBe('oidc:abc');
+    expect(notificationSubject(req({ tenantId: 'ws:a', principal: { principalId: 'oidc:abc', tenants: ['ws:a'], token: '', auth: { kind: 'subject' } } }))).toBe('oidc:abc');
   });
   it('ws: an owk_ key reads as its issuer', () => {
-    expect(notificationSubject(req({ tenantId: 'ws:a', principal: { principalId: 'apikey:k1', tenants: ['ws:a'], auth: { kind: 'api-key', issuer: 'user:u1', scopes: [] } } }))).toBe('user:u1');
+    expect(notificationSubject(req({ tenantId: 'ws:a', principal: { principalId: 'apikey:k1', tenants: ['ws:a'], token: '', auth: { kind: 'api-key', issuer: 'user:u1', scopes: [] } } }))).toBe('user:u1');
   });
   it('a wildcard principal keeps the unfiltered view; a personal tenant keeps req.userId', () => {
-    expect(notificationSubject(req({ tenantId: 'ws:a', principal: { principalId: 'admin', tenants: ['*'] } }))).toBeUndefined();
-    expect(notificationSubject(req({ tenantId: 'user:h', userId: 'user:u1', principal: { principalId: 'user:u1', tenants: ['user:h'] } }))).toBe('user:u1');
+    expect(notificationSubject(req({ tenantId: 'ws:a', principal: { principalId: 'admin', tenants: ['*'], token: '' } }))).toBeUndefined();
+    expect(notificationSubject(req({ tenantId: 'user:h', userId: 'user:u1', principal: { principalId: 'user:u1', tenants: ['user:h'], token: '' } }))).toBe('user:u1');
   });
 });

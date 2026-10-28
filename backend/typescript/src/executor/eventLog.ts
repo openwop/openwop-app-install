@@ -55,14 +55,15 @@ export function getEventLog() {
      * which forwards a timestamp, so this is not a forgery seam for workflow
      * code — it is a copy seam for one host-side loop.
      */
-    async append(input: { runId: string; type: string; nodeId?: string; payload?: unknown; causationId?: string; timestamp?: string }): Promise<EventRecord> {
+    async append(input: { runId: string; type: string; nodeId?: string; payload?: unknown; causationId?: string; timestamp?: string; eventId?: string }): Promise<EventRecord> {
       if (!backend) throw new Error('EventLog backend not installed');
       const closedBy = closedRuns.get(input.runId);
       if (closedBy !== undefined && isForwardExecutionEvent(input.type)) {
         throw new RunLogClosedError(input.runId, input.type, closedBy);
       }
       const record = await backend.appendEvent({
-        eventId: randomUUID(),
+        // Host-only retry seam. Node emitters never forward a caller eventId.
+        eventId: input.eventId ?? randomUUID(),
         runId: input.runId,
         type: input.type,
         nodeId: input.nodeId,

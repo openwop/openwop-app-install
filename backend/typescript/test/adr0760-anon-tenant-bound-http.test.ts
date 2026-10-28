@@ -8,6 +8,11 @@
  * ADR 0704 left these ids bare; `@openwop/cli`'s v2 audit (openwop-cli#46)
  * measured it live. The sibling for personal workspaces is
  * `adr0726-personal-tenant-http.test.ts`.
+ *
+ * Red when (wave 60 probes, tracker TST-BRA-6): `toWireTenant` stops passing an
+ * `anon:` tenant through (the id leaves as `x-<hex>/…`); `DECODED_BOUND_ID` loses
+ * its `anon:` prefix (the decoded spelling 404s); the colon-op split takes the FIRST
+ * colon (`anon:` + `:fork` misread); or the `id_tenant_mismatch` refusal is skipped.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';
@@ -30,9 +35,21 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
 
-async function req(method: string, path: string, cookie: string, body?: unknown) {
+/** The run, run-list, fork and error bodies these cases read. */
+interface RunBody {
+  runId?: string;
+  status?: string;
+  sourceRunId?: string;
+  error?: string;
+  runs?: Array<{ runId: string }>;
+  items?: Array<{ runId: string }>;
+}
+
+async function req(method: string, path: string, cookie: string, body?: unknown): Promise<{ status: number; json: RunBody; text: string }> {
   const res = await fetch(`${base}${path}`, { method, headers: { cookie, 'OpenWOP-Version': '2', 'Content-Type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-  const text = await res.text(); let json: any; try { json = JSON.parse(text); } catch { json = undefined; }
+  const text = await res.text();
+  let json: RunBody = {};
+  try { json = JSON.parse(text) as RunBody; } catch { /* non-JSON: assert on `text` */ }
   return { status: res.status, json, text };
 }
 
@@ -47,7 +64,7 @@ describe('ADR 0760 — anonymous tenant on the major-2 wire', () => {
 
     const list = await req('GET', '/runs', me.cookie);
     expect(list.status, list.text.slice(0, 200)).toBe(200);
-    const ids = ((list.json.runs ?? list.json.items ?? []) as Array<{ runId: string }>).map((r) => r.runId);
+    const ids = (list.json.runs ?? list.json.items ?? []).map((r) => r.runId);
     expect(ids, 'the list carries the bound form').toContain(bound);
     expect(ids.every((id) => id.includes('/')), `no bare id in a major-2 list: ${ids.join(',')}`).toBe(true);
   });
@@ -55,7 +72,7 @@ describe('ADR 0760 — anonymous tenant on the major-2 wire', () => {
   it('the projected, raw and decoded spellings all resolve for the owner; another visitor is refused', async () => {
     const me = anonCookie();
     const created = await req('POST', '/runs', me.cookie, { workflowId: 'conformance-noop', inputs: {} });
-    const bound = created.json.runId as string;
+    const bound = String(created.json.runId);
 
     const projected = await req('GET', `/runs/${projectBoundId(bound)}`, me.cookie);
     expect(projected.status, projected.text.slice(0, 200)).toBe(200);
@@ -80,20 +97,20 @@ describe('ADR 0760 — anonymous tenant on the major-2 wire', () => {
     const other = anonCookie();
     const foreign = await req('GET', `/runs/${projectBoundId(bound)}`, other.cookie);
     expect(foreign.status).toBe(403);
-    expect(foreign.json?.error).toBe('id_tenant_mismatch');
+    expect(foreign.json.error).toBe('id_tenant_mismatch');
   });
 
   it('`:fork` of an anonymous run: the op splits off a tenant that itself contains `:`, and the 201 carries BOUND ids', async () => {
     const me = anonCookie();
     const created = await req('POST', '/runs', me.cookie, { workflowId: 'conformance-noop', inputs: {} });
-    const bound = created.json.runId as string;
+    const bound = String(created.json.runId);
     for (let i = 0; i < 50; i++) {
       const s = await req('GET', `/runs/${projectBoundId(bound)}`, me.cookie);
-      if (['completed', 'failed', 'cancelled'].includes(String(s.json?.status))) break;
+      if (['completed', 'failed', 'cancelled'].includes(String(s.json.status))) break;
       await new Promise((r) => setTimeout(r, 20));
     }
     const fork = await req('POST', `/runs/${projectBoundId(bound)}:fork`, me.cookie, { mode: 'replay' });
-    expect(fork.json?.error, 'the tenant guard must not misread `anon:` + `:fork`').not.toBe('id_tenant_mismatch');
+    expect(fork.json.error, 'the tenant guard must not misread `anon:` + `:fork`').not.toBe('id_tenant_mismatch');
     expect(fork.status, fork.text.slice(0, 200)).toBe(201);
     expect(String(fork.json.runId).startsWith(`${me.tenant}/`), `forked runId bound: ${fork.json.runId}`).toBe(true);
     expect(fork.json.sourceRunId).toBe(bound);

@@ -5,8 +5,31 @@
  * a missing connection / bad blob fail-close gracefully; and the SHARED `email:sent`
  * ledger dedups a replay (no second transport call). A fake transporter is injected
  * so no socket is opened.
+ *
+ * The sealed blob names a HOSTNAME (`mail.smtp.test`) that the mocked resolver
+ * maps to 127.0.0.1, so "dials the pinned IP" can tell `host: pinned.address`
+ * from `host: cfg.host`, and the SNI `servername` branch is reached. With the
+ * old `host: '127.0.0.1'` blob the two were equal and swapping them stayed green
+ * (8fw3g1-smtps-pin, round-1 vacuous).
+ *
+ * What breaks it (sabotage-witnessed, /grade-tests wave 61, 8fw3g1-smtps-*):
+ * requireTLS on 587, the pinned-IP dial + SNI, the malformed-blob refusal, the
+ * shared-ledger dedup, smtp dispatch + the configured default.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+
+// Only `mail.smtp.test` is faked; every other lookup reaches the real resolver.
+vi.mock('node:dns', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:dns')>();
+  // `dns.lookup` is an overload set; the wrapper forwards whatever it was given,
+  // so it is typed as the original (the one cast in this file, on the mock).
+  const lookup = ((host: string, ...rest: unknown[]): void => {
+    const cb = rest[rest.length - 1] as (e: Error | null, a: unknown) => void;
+    if (host === 'mail.smtp.test') { cb(null, [{ address: '127.0.0.1', family: 4 }]); return; }
+    Reflect.apply(actual.lookup, actual, [host, ...rest]);
+  }) as typeof actual.lookup;
+  return { ...actual, lookup, default: { ...actual, lookup } };
+});
 import net from 'node:net';
 import { createApp } from '../src/index.js';
 import type { Storage } from '../src/storage/storage.js';
@@ -16,7 +39,7 @@ import { makeEmailAdapter, emailSendProviders } from '../src/host/emailAdapter.j
 import { __resetConnectionsStore, createSecretConnection } from '../src/features/connections/connectionsService.js';
 
 const blob = (over: Record<string, unknown> = {}): string =>
-  JSON.stringify({ host: '127.0.0.1', port: 587, secure: false, user: 'mailer@x.com', pass: 's3cret-pw', ...over });
+  JSON.stringify({ host: 'mail.smtp.test', port: 587, secure: false, user: 'mailer@x.com', pass: 's3cret-pw', ...over });
 
 describe('SMTP transport + adapter dispatch (ADR 0201)', () => {
   it('the REAL nodemailer transport accepts our SmtpDialOptions subset (v10 runtime pin — no dial)', async () => {
@@ -128,16 +151,20 @@ describe('SMTP transport + adapter dispatch (ADR 0201)', () => {
     return { async sendMail(msg) { lastMail = msg; sendCount++; return { messageId: 'smtp-msg-1' }; } };
   };
 
+  let savedAllowPrivate: string | undefined;
   beforeAll(async () => {
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
+    savedAllowPrivate = process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE;
     process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE = 'true'; // reach the 127.0.0.1 dial target in tests
     const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
     storage = app.locals.storage;
     await __resetConnectionsStore();
     await createSecretConnection({ tenantId: 'tsmtp', provider: 'smtp', kind: 'basic', secret: blob(), scope: 'user', userId: 'u1' });
-    await storage.insertRun({ runId: 'run-smtp', workflowId: 'w', tenantId: 'tsmtp', status: 'pending', inputs: null, metadata: {}, configurable: {}, createdAt: 'x', updatedAt: 'x' });
+    await storage.insertRun({ runId: 'run-smtp', workflowId: 'w', tenantId: 'tsmtp', status: 'pending', inputs: null, metadata: {}, configurable: {}, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' });
   });
-  afterAll(() => { delete process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE; });
+  afterAll(() => {
+    if (savedAllowPrivate === undefined) delete process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE; else process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE = savedAllowPrivate;
+  });
 
   it('resolves the sealed blob, forces STARTTLS on 587, dials the pinned IP, sends, stamps + records', async () => {
     sendCount = 0;
@@ -145,6 +172,8 @@ describe('SMTP transport + adapter dispatch (ADR 0201)', () => {
     expect(out).toEqual({ sent: true, provider: 'smtp', messageId: 'smtp-msg-1' });
     // dial security: pinned IP as host, STARTTLS forced (secure:false → requireTLS), creds passed.
     expect(lastOpts).toMatchObject({ host: '127.0.0.1', port: 587, secure: false, requireTLS: true, auth: { user: 'mailer@x.com', pass: 's3cret-pw' } });
+    // TLS still verifies against the NAME the operator configured, not the IP.
+    expect(lastOpts?.servername).toBe('mail.smtp.test');
     expect(lastMail).toMatchObject({ from: 'a@x.com', to: ['b@y.com'], subject: 'hi', text: 'body' });
     // provenance stamped on the run
     const meta = (await storage.getRun('run-smtp'))?.metadata as Record<string, unknown> | undefined;
@@ -178,8 +207,12 @@ describe('SMTP transport + adapter dispatch (ADR 0201)', () => {
 
   it('emailSendProviders() includes smtp and honors it as the configured default', () => {
     expect(emailSendProviders()).toContain('smtp');
-    process.env.OPENWOP_EMAIL_DEFAULT_PROVIDER = 'smtp';
-    expect(emailSendProviders()[0]).toBe('smtp');
-    delete process.env.OPENWOP_EMAIL_DEFAULT_PROVIDER;
+    const saved = process.env.OPENWOP_EMAIL_DEFAULT_PROVIDER;
+    try {
+      process.env.OPENWOP_EMAIL_DEFAULT_PROVIDER = 'smtp';
+      expect(emailSendProviders()[0]).toBe('smtp');
+    } finally {
+      if (saved === undefined) delete process.env.OPENWOP_EMAIL_DEFAULT_PROVIDER; else process.env.OPENWOP_EMAIL_DEFAULT_PROVIDER = saved;
+    }
   });
 });

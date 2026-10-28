@@ -248,8 +248,11 @@ describe('D8 — the Factory names its own key', () => {
     };
     walk(src);
     expect(hits.length).toBeGreaterThan(0);
-    // Readiness only REPORTS whether the ref exists (D10); it never chooses or defaults one.
-    const REPORTS_ONLY = new Set(['features/kicktodo-core/readinessService.ts']);
+    // ADR 0975 D2 — `features/kicktodoFactoryAi.ts` is the ONE definition of the
+    // Factory's key and its provider choice, read by the Factory's pre-flight and by
+    // readiness (D10) so the two cannot disagree. It selects for the Factory only;
+    // chat still never reaches it (it is not on any chat/active-config path).
+    const REPORTS_ONLY = new Set(['features/kicktodoFactoryAi.ts']);
     expect(hits.filter((h) => !h.startsWith('features/kicktodo-creator/') && !REPORTS_ONLY.has(h))).toEqual([]);
   });
 });

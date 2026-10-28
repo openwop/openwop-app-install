@@ -10,6 +10,7 @@ import { describe, it, expect } from 'vitest';
 import {
   tabDeckReducer,
   selectEvictionVictim,
+  canOpenTab,
   emptyTabDeck,
   MAX_TABS_DEFAULT,
   HARD_MAX_TABS,
@@ -122,13 +123,23 @@ describe('tabDeckModel — the hard ceiling', () => {
     expect(next.activeSessionId).toBe('overflow');
   });
 
-  it('does NOT evict a streaming tab even at the hard ceiling (allows growth)', () => {
+  it('REFUSES the open when every tab is protected at the hard ceiling — never grows, never evicts (ADR 0978 D2)', () => {
+    const s = deckOf(Array.from({ length: HARD_MAX_TABS }, (_, i) => `t${i}`), 100);
+    const allBusy = new Set(s.tabs.map((t) => t.sessionId));
+    expect(selectEvictionVictim(s, { maxTabs: 4, protectedIds: allBusy })).toEqual({ kind: 'refuse' });
+    expect(canOpenTab(s, 'overflow', { maxTabs: 4, protectedIds: allBusy })).toBe(false);
+    const next = tabDeckReducer(s, { type: 'open', sessionId: 'overflow', maxTabs: 4, protectedIds: allBusy });
+    expect(next).toBe(s); // unchanged — the ceiling is absolute (round-1 MTCC-1 grew to 25)
+    // An already-open id can always be opened (it focuses).
+    expect(canOpenTab(s, 't0', { maxTabs: 4, protectedIds: allBusy })).toBe(true);
+  });
+
+  it('a protected (running / waiting-on-you) PINNED tab is never the hard-wall sacrifice (ADR 0978 D1)', () => {
     let s = deckOf(Array.from({ length: HARD_MAX_TABS }, (_, i) => `t${i}`), 100);
-    const allStreaming = new Set(s.tabs.map((t) => t.sessionId));
-    const victim = selectEvictionVictim(s, { maxTabs: 4, protectedIds: allStreaming });
-    expect(victim).toBeNull(); // degenerate: nothing sacrificable → grow rather than kill a live run
-    const next = tabDeckReducer(s, { type: 'open', sessionId: 'overflow', maxTabs: 4, protectedIds: allStreaming });
-    expect(next.tabs.length).toBe(HARD_MAX_TABS + 1);
+    for (const t of s.tabs) if (t.sessionId !== s.activeSessionId) s = tabDeckReducer(s, { type: 'setPinned', sessionId: t.sessionId, pinned: true });
+    // t0 is the LRU pinned-idle tab — but it is blocked on a HITL interrupt.
+    const victim = selectEvictionVictim(s, { maxTabs: 4, protectedIds: new Set(['t0']) });
+    expect(victim).toEqual({ sessionId: 't1', kind: 'hard' });
   });
 });
 

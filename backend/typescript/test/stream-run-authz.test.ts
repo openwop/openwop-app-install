@@ -27,15 +27,19 @@ import type { Storage } from '../src/storage/storage.js';
 // ── Unit: the gate logic in isolation ─────────────────────────────────────
 
 function fakeReq(opts: { tenantId?: string; tenants?: string[] }): Request {
-  return {
+  // `loadReadableRun` reads only these members; one widening cast, no `unknown` hop.
+  const r: Partial<Request> = {
     tenantId: opts.tenantId,
-    principal: opts.tenants ? { principalId: 'p', tenants: opts.tenants } : undefined,
+    principal: opts.tenants ? { principalId: 'p', tenants: opts.tenants, token: 'tok' } : undefined,
     query: {},
-  } as unknown as Request;
+  };
+  return r as Request;
 }
 
-function stubStorage(run: RunRecord | null): Storage {
-  return { getRun: async (id: string) => (run && run.runId === id ? run : null) } as unknown as Storage;
+function stubStorage(...runs: RunRecord[]): Storage {
+  // The gate calls only `getRun` on this path.
+  const s: Pick<Storage, 'getRun'> = { getRun: async (id: string) => runs.find((r) => r.runId === id) ?? null };
+  return s as Storage;
 }
 
 // ADR 0812 P3c-0 — long enough for the v2 opaque-id grammar (16–128), so it can be tenant-bound on the wire.
@@ -44,6 +48,13 @@ const RUN_A: RunRecord = {
   runId: RUN_A_ID, workflowId: 'wf', tenantId: 'tenant-A', status: 'completed',
   inputs: {}, metadata: {}, configurable: {}, createdAt: 'now', updatedAt: 'now',
 };
+
+// Cases 1–3 below are TWINS of `src/host/__tests__/runAccess.test.ts` (owner,
+// cross-tenant 404, wildcard). Kept on purpose (protected security dedupe,
+// grade-tests wave 61 ruling): this file is the one that ALSO pins the HTTP
+// wiring, and its unit half must stay readable on its own.
+const RUN_A_EVENT_MARKER = 'run-A-event-marker';
+const RUN_DEFAULT: RunRecord = { ...RUN_A, runId: 'run-D-0123456789abcdef', tenantId: 'default' };
 
 describe('loadReadableRun (unit)', () => {
   it('returns the run for the owning tenant', async () => {
@@ -67,9 +78,12 @@ describe('loadReadableRun (unit)', () => {
   });
 
   it('falls back to "default" tenant when req carries none', async () => {
-    // A run owned by a real tenant must NOT be readable by a tenant-less caller.
-    await expect(loadReadableRun(fakeReq({}), stubStorage(RUN_A), RUN_A_ID))
-      .rejects.toMatchObject({ httpStatus: 404 });
+    // A run owned by a real tenant must NOT be readable by a tenant-less caller...
+    await expect(loadReadableRun(fakeReq({}), stubStorage(RUN_A, RUN_DEFAULT), RUN_A_ID))
+      .rejects.toMatchObject({ code: 'run_not_found', httpStatus: 404 });
+    // ...and the fallback IS `default`: the same caller reads a `default` run.
+    const run = await loadReadableRun(fakeReq({}), stubStorage(RUN_A, RUN_DEFAULT), RUN_DEFAULT.runId);
+    expect(run.runId).toBe(RUN_DEFAULT.runId);
   });
 });
 
@@ -86,6 +100,8 @@ beforeAll(async () => {
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   storage = app.locals.storage as Storage;
   await storage.insertRun({ ...RUN_A });
+  // One event, so the events paths' 200 carries something of run-A's to check.
+  await storage.appendEvent({ eventId: 'ev-run-A-1', runId: RUN_A_ID, type: 'run.started', payload: { marker: RUN_A_EVENT_MARKER }, timestamp: '2026-01-01T00:00:00.000Z' });
   await new Promise<void>((res) => {
     server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
   });
@@ -121,6 +137,13 @@ describe('run-read paths reject a cross-tenant caller (HTTP)', () => {
       // The wildcard dev-token's request tenant is `default`.
       const res = await fetch(`${BASE}${runPath('default', tail)}`, { headers: { accept, authorization: 'Bearer dev-token', 'OpenWOP-Version': '2' }, signal: ac.signal });
       expect(res.status, `${label} must be routed and serve run-A`).toBe(200);
+      if (accept === 'application/json') {
+        // The body is run-A's, not an empty 200: it names run-A's id or carries
+        // run-A's seeded event.
+        const text = await res.text();
+        const namesRunA = [RUN_A_ID, toWireRunId(RUN_A_ID, 'default'), RUN_A_EVENT_MARKER].some((needle) => text.includes(needle));
+        expect(namesRunA, `${label} body names run-A`).toBe(true);
+      }
       ac.abort();
     });
   }
@@ -129,6 +152,10 @@ describe('run-read paths reject a cross-tenant caller (HTTP)', () => {
       const session = mintAnonSession();
       const res = await fetch(`${BASE}${runPath(session.tenantId, tail)}`, { headers: { accept, cookie: `__session=${signSession(session)}`, 'OpenWOP-Version': '2' } });
       expect(res.status, `${label} should not leak tenant-A`).toBe(404);
+      // The READ GATE's refusal (`run_not_found`, rendered on the wire as
+      // `not_found` with the gate's own message), not an unrouted path's 404,
+      // and nothing else of run-A in the body.
+      expect(await res.json(), `${label} refusal body`).toEqual({ error: 'not_found', message: `run ${RUN_A_ID} not found` });
     });
   }
 });

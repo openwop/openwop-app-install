@@ -30,10 +30,11 @@ PREFIX="release-freeze"
 die() { echo "release-freeze: $*" >&2; exit 1; }
 
 cmd="${1:-status}"; [ $# -gt 0 ] && shift
-HOLDER="${OPENWOP_FREEZE_HOLDER:-}"; REASON=""; TTL_MIN=120; FORCE=0; PR=""
+HOLDER="${OPENWOP_FREEZE_HOLDER:-}"; REASON=""; TTL_MIN=120; FORCE=0; PR=""; MATCH_HEAD=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --holder) HOLDER="${2:-}"; shift 2 ;;
+    --match-head-commit) MATCH_HEAD="${2:-}"; [ -n "$MATCH_HEAD" ] || die "--match-head-commit needs a SHA"; shift 2 ;;
     --reason) REASON="${2:-}"; shift 2 ;;
     --ttl-min) TTL_MIN="${2:-}"; shift 2 ;;
     --force) FORCE=1; shift ;;
@@ -81,16 +82,18 @@ case "$cmd" in
   merge)
     [ -n "$PR" ] || { echo "release-freeze: merge needs a PR number" >&2; exit 2; }
     [ -n "$HOLDER" ] || { echo "release-freeze: --holder is required (or OPENWOP_FREEZE_HOLDER)" >&2; exit 2; }
+    MERGE_ARGS=(--merge)
+    [ -z "$MATCH_HEAD" ] || MERGE_ARGS+=(--match-head-commit "$MATCH_HEAD")
     cur=$(current)
     if [ -z "$cur" ]; then
-      gh pr merge "$PR" --merge >/dev/null 2>&1 || true
+      gh pr merge "$PR" "${MERGE_ARGS[@]}" >/dev/null 2>&1 || true
     else
       IFS=$'\t' read -r id _ holder _ _ <<< "$cur"
       [ "$holder" = "$HOLDER" ] || die "main is $(describe "$cur") — not yours to merge through"
       # Re-enable on ANY exit: a failed merge must never leave main open.
       trap 'gh api -X PUT "repos/$REPO/rulesets/$id" -f enforcement=active >/dev/null 2>&1 || echo "release-freeze: COULD NOT RE-ENABLE the freeze (ruleset $id) — main is OPEN; fix it now" >&2' EXIT
       gh api -X PUT "repos/$REPO/rulesets/$id" -f enforcement=disabled >/dev/null || die "could not lift the freeze for the merge"
-      gh pr merge "$PR" --merge >/dev/null 2>&1 || true   # exit code is not the result from a worktree
+      gh pr merge "$PR" "${MERGE_ARGS[@]}" >/dev/null 2>&1 || true   # exit code is not the result from a worktree
     fi
     state=$(gh pr view "$PR" --json state --jq .state 2>/dev/null)
     [ "$state" = "MERGED" ] || die "#$PR is ${state:-unreadable} after the merge"

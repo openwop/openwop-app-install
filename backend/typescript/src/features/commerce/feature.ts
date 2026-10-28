@@ -7,6 +7,8 @@
  *
  * @see docs/adr/0177-e-commerce.md
  */
+import { registerProductSourceVerifier } from '../media/mediaService.js';
+import { isProductSource } from './productMedia.js';
 import type { BackendFeature } from '../types.js';
 import { registerCommerceRoutes } from './routes.js';
 import { registerCommerceUcpRoutes } from './ucp/routes.js';
@@ -15,8 +17,7 @@ import { registerCommerceAgentTools } from './agentTools.js';
 import { registerCommerceBuyerAgentTools } from './ucpBuyer/agentTools.js';
 import { registerToggleDefault } from '../../host/featureToggles/registry.js';
 import { buildCommerceSurface, COMMERCE_SURFACE_POLICY } from './surface.js';
-import { setTransactionalEmailTransport } from './transactionalEmail.js';
-import { sendBrokeredTransactionalEmail } from '../email/brokeredProvider.js';
+import { registerCommerceTransactionalTemplates } from './transactionalTemplates.js';
 import { startCommerceReservationSweep } from './reservationSweep.js';
 import { backfillAffiliateLedger } from './affiliate.js';
 import { registerSubscriptionRecurrence, registerProductDeletionCleanup } from './subscriptions.js';
@@ -29,6 +30,7 @@ import { exportCommerceData } from './dataExport.js';
 export const commerceFeature: BackendFeature = {
   id: 'commerce',
   registerRoutes: (deps) => {
+    registerProductSourceVerifier(isProductSource); // ADR 0945 P2 — media's product-hint check asks the catalog
     registerFeatureDataExporter('commerce', exportCommerceData); // ADR 0820 §7 — read-only export, served after a plan lapse
     registerCommerceRoutes(deps);
     // ADR 0447 D3 — opening-balance backfill: frozen `balanceOwed` values become
@@ -74,22 +76,10 @@ export const commerceFeature: BackendFeature = {
       await deleteSavedPaymentMethodsForContact(tenantId, subjectKey);
       await deleteCartsForUser(tenantId, subjectKey);
     });
-    // B4 (gap plan §5B) — the DEFAULT transactional transport: order confirmations
-    // ride the email feature's ADR 0193 brokered spine (acting human's Connection +
-    // the per-org sender address + the ONE sent-ledger). No connection / no sender
-    // ⇒ `false` = the seam's documented honest no-op. Tests can still inject a mock
-    // via setTransactionalEmailTransport (last writer wins).
-    setTransactionalEmailTransport(async (email) => {
-      if (!email.context) return false;
-      return sendBrokeredTransactionalEmail({
-        storage: deps.storage,
-        tenantId: email.context.tenantId,
-        orgId: email.context.orgId,
-        actingUserId: email.context.actingUserId,
-        to: email.to, subject: email.subject, text: email.text,
-        ...(email.context.idempotencyKey ? { idempotencyKey: email.context.idempotencyKey } : {}),
-      });
-    });
+    // ADR 0905 D6 — the transactional transport (the brokered spine) is registered by
+    // the `email` feature now, which owns it; commerce only sends through the host seam,
+    // and registers its own kinds on the host registry.
+    registerCommerceTransactionalTemplates();
     // ADR 0178 — UCP server adapter (agentic commerce). A DISTINCT toggle (`commerce-ucp`,
     // OFF) gates the UCP surface; `commerce` itself is unchanged and runs without it. The
     // UCP routes PROJECT commerce (no new order/cart store) — see docs/adr/0178.

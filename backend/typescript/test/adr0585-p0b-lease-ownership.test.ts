@@ -13,6 +13,12 @@
  * against the pre-P0b code. Everything else here rests on it: if a renewal could
  * still steal, the lost-lease signal would never fire and every other assertion
  * would be vacuously green.
+ *
+ * Tracker TST-BG3-8. Red when: the sqlite renewal loses its `dispatch_owner = @owner`
+ * predicate, `assertEffectAllowed` skips the lost-lease gate or reports another
+ * effect kind, the lost-lease set answers for every run, the abandon path gains an
+ * `emitTerminalFailure`, the node catch records a LeaseLostError instead of
+ * re-throwing it, or the heartbeat renews with the unconditional `setRunDispatchLease`.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
@@ -33,8 +39,8 @@ function runRow(runId: string): RunRecord {
   const now = new Date().toISOString();
   return {
     runId, workflowId: 'wf', tenantId: 'default', status: 'running',
-    createdAt: now, updatedAt: now, inputs: {},
-  } as RunRecord;
+    createdAt: now, updatedAt: now, inputs: {}, metadata: {}, configurable: {},
+  };
 }
 
 describe('ADR 0585 P0b — CAS renewal', () => {
@@ -111,14 +117,9 @@ describe('ADR 0585 P0b — the effect gate', () => {
 
   it('the error names the run and the effect kind, so a log line is actionable', () => {
     markDispatchLeaseLost('r6');
-    try {
-      runWithEffectContext({ runId: 'r6', replaying: false }, () => assertEffectAllowed('email'));
-      throw new Error('expected LeaseLostError');
-    } catch (e) {
-      expect(e).toBeInstanceOf(LeaseLostError);
-      expect((e as LeaseLostError).runId).toBe('r6');
-      expect((e as LeaseLostError).effectKind).toBe('email');
-    }
+    const attempt = (): void => runWithEffectContext({ runId: 'r6', replaying: false }, () => assertEffectAllowed('email'));
+    expect(attempt).toThrow(LeaseLostError);
+    expect(attempt).toThrow(expect.objectContaining({ runId: 'r6', effectKind: 'email' }));
   });
 });
 

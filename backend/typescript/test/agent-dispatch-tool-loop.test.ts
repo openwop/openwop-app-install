@@ -8,9 +8,16 @@
  * `agent.toolCalled` / `agent.toolReturned` events, (d) validates args BEFORE
  * execution, and (e) refuses out-of-allowlist calls — while a deps-free call
  * still falls back to the single completion.
+ *
+ * Tracker TST-BKX-7. Red when invalid args reach the tool or lose `invalid_args`,
+ * an out-of-allowlist call executes, `maxToolRounds` is ignored, tools stop being
+ * offered, an unknown tool's result goes unfenced (WSRCH-1) or its inner END
+ * marker survives, the return contract is dropped / added for a schema-less
+ * agent, or the final text is not recovered as the structured result — each
+ * sabotage-witnessed (w65). The XCH-DISP-1 cases reset `seenSystem` per case.
  */
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { getAgentRegistry } from '../src/executor/agentRegistry.js';
 import {
   runAgentDispatchLive,
@@ -65,7 +72,7 @@ describe('runAgentDispatchLive — tool loop (A1)', () => {
       }
       return { content: 'Found it.', toolCalls: [], finishReason: 'stop' };
     };
-    const executed: { name: string; input: Record<string, unknown> }[] = [];
+    const executed: { name: string; input: Record<string, unknown>; callId?: string }[] = [];
     const executeTool: LiveDispatchDeps['executeTool'] = async (call) => {
       executed.push(call);
       return { content: 'result: 42' };
@@ -81,7 +88,7 @@ describe('runAgentDispatchLive — tool loop (A1)', () => {
     // The model was actually offered the §A14-filtered tool.
     expect(rounds[0]?.tools?.map((t) => t.name)).toEqual(['search']);
     // The tool was actually executed with the model's args.
-    expect(executed).toEqual([{ name: 'search', input: { query: 'openwop' } }]);
+    expect(executed).toEqual([{ name: 'search', input: { query: 'openwop' }, callId: 'c1' }]); // ADR 0984 D7 keys the as-executed record by it
     // RFC 0002/0064 events present and well-formed.
     const called = res.events.find((e) => e.type === 'agent.toolCalled');
     const ret = res.events.find((e) => e.type === 'agent.toolReturned');
@@ -153,7 +160,7 @@ describe('runAgentDispatchLive — tool loop (A1)', () => {
     // Always asks for a tool — would loop forever without the bound.
     const callAIWithTools = async (): Promise<AiToolCallResult> => {
       calls += 1;
-      return { toolCalls: [{ id: `c${calls}`, name: 'search', input: { query: 'x' } }], finishReason: 'tool-call' };
+      return { toolCalls: [{ id: `c${calls}`, name: 'search', input: { query: `x${calls}` } }], finishReason: 'tool-call' };
     };
     const executeTool: LiveDispatchDeps['executeTool'] = async () => ({ content: 'r' });
 
@@ -163,7 +170,10 @@ describe('runAgentDispatchLive — tool loop (A1)', () => {
     );
 
     expect(calls).toBe(3); // exactly the bound, then stop
-    expect(res.status).toBe('completed');
+    // ADR 0975 D6 — out of rounds with no answer is a TYPED failure, never an
+    // empty "completed" (it used to complete with no content at all).
+    expect(res.status).toBe('failed');
+    expect(res.error).toMatchObject({ code: 'tool_rounds_exhausted' });
   });
 
   it('falls back to single-shot when tool deps are absent (no regression)', async () => {
@@ -237,6 +247,7 @@ describe('runAgentDispatchLive — tool loop (A1)', () => {
       });
     }
     const seenSystem: string[] = [];
+    beforeEach(() => { seenSystem.length = 0; }); // per-case state: shuffle-safe
     const loop = (finalText: string) => {
       let round = 0;
       return async (req: AiToolCallRequest): Promise<AiToolCallResult> => {
@@ -274,7 +285,6 @@ describe('runAgentDispatchLive — tool loop (A1)', () => {
 
     it('an agent with NO return schema is unchanged: verbatim system prompt, text result even when the text is JSON', async () => {
       register(['search']);
-      seenSystem.length = 0;
       const res = await runAgentDispatchLive(
         { agentId: 'tool.agent', task: 't', availableTools: ['search'] },
         { callAI: callAINever, callAIWithTools: loop('{"commands":[]}'), executeTool, resolveTool: resolveSearch },

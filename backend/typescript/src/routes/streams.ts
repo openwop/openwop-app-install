@@ -83,7 +83,15 @@ export function registerStreamRoutes(app: Express, deps: Deps): void {
       // tenant exactly as the wrapper does.
       // Found from a peer host's live witness (myndhyve-1 `efcf`, 2026-09-05);
       // no `v2-*` conformance scenario covers SSE, so 55/56 green hid it.
-      const wireTenant = (req as { tenantId?: string }).tenantId ?? 'default';
+      //
+      // ADR 0975 D9 — bound to the RUN's tenant, not the request's. The read is
+      // already authorized above, and the run's tenant is the truth for every id
+      // in its events. They differ on one lane only: the cross-origin SSE with a
+      // `streamToken` (ADR 0975 D5), which carries no cookie, so `req.tenantId`
+      // is the bearer's PERSONAL tenant. MEASURED on kicktodo.com (2026-10-27):
+      // the stream bound a `host-kicktodo` conversation as `u-<personal>/<id>`,
+      // the SPA re-sent that id, and the poll fallback got `id_tenant_mismatch`.
+      const wireTenant = run.tenantId;
       // #4543 — a member who neither started the run nor administers the
       // workspace watches it move without its payload. Applied at the same
       // choke, so replay, live, gap, batch and the JSON sibling all inherit it.

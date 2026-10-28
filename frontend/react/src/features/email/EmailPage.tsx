@@ -19,6 +19,7 @@ import { Notice } from '../../ui/Notice.js';
 import { StateCard } from '../../ui/StateCard.js';
 import { InlineState } from '../../ui/InlineState.js';
 import { SuppressionsPanel } from './SuppressionsPanel.js';
+import { EmailSendingHealthCard } from './EmailSendingHealthCard.js';
 import { useOrgSelection } from '../../ui/useOrgSelection.js';
 import { OrgSelectionState } from '../../ui/OrgSelectionState.js';
 import { Skeleton } from '../../ui/Skeleton.js';
@@ -29,14 +30,15 @@ import { useFeatureAccess } from '../../featureToggles/FeatureAccessContext.js';
 import { GlobeIcon, LockIcon, PlusIcon, SaveIcon, SendIcon, TrashIcon, SparklesIcon } from '../../ui/icons/index.js';
 import {
   createCampaign, createTemplate, deleteCampaign, listCampaigns, listOrgs, listSegments,
-  listSends, listTemplates, sendCampaign, sendTestEmail, TestSendRateLimitedError, getEmailSettings, putEmailSettings, getSegmentEstimate, getEngagement, CONTACT_STAGES, type EmailBodyFormat,
+  listSends, listTemplates, sendCampaign, sendTestEmail, TestSendRateLimitedError, getEmailSettings, putEmailSettings, getSegmentEstimate, getEngagement, CONTACT_STAGES, CAMPAIGN_STATUSES, submitCampaignReview, withdrawCampaignReview, listTopics, type EmailTopic, type EmailBodyFormat, smsSegments,
   type Campaign, type ContactStage, type EmailSegment, type EmailTemplate, type Org, type SendLog,
 } from './emailClient.js';
 import { TemplateCard, TemplateRow } from './EmailTemplateViews.js';
+import { EmailTopicsCard } from './EmailTopicsCard.js';
 
 type AudienceMode = 'all' | 'stage' | 'segment';
 
-const campChip = (s: Campaign['status']): string => (s === 'sent' ? 'chip chip--success' : s === 'sending' ? 'chip chip--warning' : 'chip chip--muted');
+const campChip = (s: Campaign['status']): string => (s === 'sent' || s === 'approved' ? 'chip chip--success' : s === 'sending' || s === 'in_review' ? 'chip chip--warning' : 'chip chip--muted');
 const SKIP_REASONS = new Set(['no_email', 'consent', 'suppressed', 'frequency']);
 
 const sendChip = (s: SendLog['status']): string => (s === 'sent' ? 'chip chip--success' : s === 'failed' ? 'chip chip--danger' : 'chip chip--muted');
@@ -55,6 +57,8 @@ export function EmailPage(): JSX.Element {
   // selection/lookups keep working; the RENDER branches below read the
   // sentinel, never these.
   const templateList = useMemo(() => (Array.isArray(templates) ? templates : []), [templates]);
+  // ADR 0955 D8 — an email campaign can only send an email template.
+  const emailTemplateList = useMemo(() => templateList.filter((tpl) => tpl.format !== 'sms'), [templateList]);
   const campaignList = useMemo(() => (Array.isArray(campaigns) ? campaigns : []), [campaigns]);
   // Per-action busy flags (UX audit finding #7) — a single shared `busy` made
   // every button on the page freeze while ANY one action ran (e.g. saving the
@@ -98,6 +102,10 @@ export function EmailPage(): JSX.Element {
   const [audienceMode, setAudienceMode] = useState<AudienceMode>('all');
   const [campStage, setCampStage] = useState<'' | ContactStage>('');
   const [campSegment, setCampSegment] = useState('');
+  // ADR 0905 D7 — subscription topics (a failed read just hides the topic UI).
+  const [topics, setTopics] = useState<{ topics: EmailTopic[]; max: number }>({ topics: [], max: 20 });
+  const [campTopic, setCampTopic] = useState('');
+  const loadTopics = useCallback((org: string) => { void listTopics(org).then(setTopics).catch(() => setTopics({ topics: [], max: 20 })); }, []);
   const [segments, setSegments] = useState<EmailSegment[] | null>(null);
   /** DESIGN.md §4.5 rule 9 — the send log is a QUICK-LOOK: reviewing a campaign
    *  should not leave the list, and a campaign has no editor to navigate to. But
@@ -140,6 +148,9 @@ export function EmailPage(): JSX.Element {
   const [senderFailed, setSenderFailed] = useState(false);
   // ADR 0848 D4 — the sender is an admin setting; an editor sees it read-only.
   const [senderCanEdit, setSenderCanEdit] = useState(true);
+  // ADR 0905 D4 — this workspace requires an approval before a campaign is sent.
+  const [approvalGate, setApprovalGate] = useState(false);
+  const [reviewBusy, setReviewBusy] = useState('');
   // Which campaign is mid-dispatch — a batched send is up to ~50 sequential
   // HTTP sends; the active button must show progress, not read as frozen.
   const [sendingId, setSendingId] = useState('');
@@ -186,7 +197,7 @@ export function EmailPage(): JSX.Element {
     // below owns the clear. (Caught by `campaignLogDeepLink.test.tsx`.)
     setError(null); setSends(null);
     void listTemplates(org)
-      .then((tpls) => { if (!fresh()) return; setTemplates(tpls); setCampTpl((c) => c || (tpls[0]?.templateId ?? '')); })
+      .then((tpls) => { if (!fresh()) return; setTemplates(tpls); setCampTpl((c) => c || (tpls.find((x) => x.format !== 'sms')?.templateId ?? '')); })
       .catch((e) => {
         if (!fresh()) return;
         // Terminal state on failure (never `null`, which stranded the skeleton
@@ -207,7 +218,7 @@ export function EmailPage(): JSX.Element {
     setSenderFailed(false);
     setSender(''); // review F5 — never show the previous org's address in a form that can't save
     void getEmailSettings(org)
-      .then((s) => { if (!fresh()) return; setSender(s.senderAddress); setSenderConfigured(s.configured); setSenderCanEdit(s.canEdit !== false); setSenderLoaded(true); })
+      .then((s) => { if (!fresh()) return; setSender(s.senderAddress); setSenderConfigured(s.configured); setSenderCanEdit(s.canEdit !== false); setApprovalGate(s.approvalGate === true); setSenderLoaded(true); })
       .catch(() => { if (fresh()) { setSenderConfigured(null); setSenderFailed(true); } });
     setProviderStatus(null);
     void getProviderStatus(org).then((p) => { if (fresh()) setProviderStatus(p); }).catch(() => { if (fresh()) setProviderStatus('error'); });
@@ -218,15 +229,16 @@ export function EmailPage(): JSX.Element {
   // must not) reach into another page's URL.
   useEffect(() => {
     if (!orgId) return;
-    setTemplates(null); setCampaigns(null); setCampTpl('');
+    setTemplates(null); setCampaigns(null); setCampTpl(''); setCampTopic(''); loadTopics(orgId);
     setTplQuery(''); setCampQuery(''); setCampStatus('');
     load(orgId);
-  }, [orgId, load]);
+  }, [orgId, load, loadTopics]);
 
   const addTemplate = useCallback(async () => {
-    if (!orgId || !nt.name.trim() || !nt.subject.trim() || !nt.body.trim()) return;
+    // ADR 0955 D8 — an SMS template has no subject line.
+    if (!orgId || !nt.name.trim() || (nt.format !== 'sms' && !nt.subject.trim()) || !nt.body.trim()) return;
     setTemplateBusy(true);
-    try { await createTemplate(orgId, { name: nt.name.trim(), subject: nt.subject.trim(), body: nt.body.trim(), format: nt.format }); setNt({ name: '', subject: '', body: '', format: 'text' }); load(orgId); toast.success(t('templateCreated')); }
+    try { await createTemplate(orgId, { name: nt.name.trim(), subject: nt.format === 'sms' ? '' : nt.subject.trim(), body: nt.body.trim(), format: nt.format }); setNt({ name: '', subject: '', body: '', format: 'text' }); load(orgId); toast.success(t('templateCreated')); }
     catch (e) { toast.error(e instanceof Error ? e.message : t('createFailed')); }
     finally { setTemplateBusy(false); }
   }, [orgId, nt, load, t]);
@@ -239,11 +251,12 @@ export function EmailPage(): JSX.Element {
         templateId: campTpl,
         ...(audienceMode === 'stage' && campStage ? { stage: campStage } : {}),
         ...(audienceMode === 'segment' && campSegment ? { segmentId: campSegment } : {}),
+        ...(campTopic ? { topicId: campTopic } : {}),
       });
       load(orgId); toast.success(t('campaignCreated'));
     } catch (e) { toast.error(e instanceof Error ? e.message : t('createFailed')); }
     finally { setCampaignBusy(false); }
-  }, [orgId, campTpl, audienceMode, campStage, campSegment, load, t]);
+  }, [orgId, campTpl, audienceMode, campStage, campSegment, campTopic, load, t]);
 
   const saveSender = useCallback(async () => {
     setSenderBusy(true);
@@ -317,6 +330,21 @@ export function EmailPage(): JSX.Element {
     } catch (e) { toast.error(e instanceof Error ? e.message : t('sendFailed')); }
     finally { setSendingId(''); }
   }, [orgId, load, t, tplName, audienceLabel]);
+
+  // ADR 0905 D3 — the send review. Submitting always works (the queue is always
+  // available); the gate only decides whether a campaign may be SENT without one.
+  const submitReview = useCallback(async (c: Campaign) => {
+    setReviewBusy(c.campaignId);
+    try { await submitCampaignReview(orgId, c.campaignId); toast.success(t('reviewSubmitted')); load(orgId); }
+    catch (e) { toast.error(e instanceof Error ? e.message : t('reviewFailed')); }
+    finally { setReviewBusy(''); }
+  }, [orgId, load, t]);
+  const withdrawReview = useCallback(async (c: Campaign) => {
+    setReviewBusy(c.campaignId);
+    try { await withdrawCampaignReview(orgId, c.campaignId); toast.success(t('reviewWithdrawn')); load(orgId); }
+    catch (e) { toast.error(e instanceof Error ? e.message : t('reviewFailed')); }
+    finally { setReviewBusy(''); }
+  }, [orgId, load, t]);
 
   const removeCampaign = useCallback(async (id: string) => {
     // EM-UX-29 — the body says what the delete actually does. VERIFIED against
@@ -475,14 +503,17 @@ export function EmailPage(): JSX.Element {
 
           <div className="surface-card u-p-4 surface-form">
             <label className="u-grid u-gap-1"><span className="u-label-sm">{t('templateNameLabel')}</span><input value={nt.name} onChange={(e) => setNt({ ...nt, name: e.target.value })} placeholder={t('templateNamePlaceholder')} /></label>
-            <label className="u-grid u-gap-1"><span className="u-label-sm">{t('subjectLabel')}</span><input value={nt.subject} onChange={(e) => setNt({ ...nt, subject: e.target.value })} placeholder={t('subjectPlaceholder')} /></label>
-            <label className="u-grid u-gap-1"><span className="u-label-sm">{t('bodyLabel')}</span><input value={nt.body} onChange={(e) => setNt({ ...nt, body: e.target.value })} placeholder={t('bodyPlaceholder')} /></label>
+            {/* ADR 0955 D8 — the format comes first: SMS has no subject line. */}
             <label className="u-grid u-gap-1"><span className="u-label-sm">{t('editorFormatLabel')}</span>
               <select value={nt.format} onChange={(e) => setNt({ ...nt, format: e.target.value as EmailBodyFormat })}>
                 <option value="text">{t('formatPlain')}</option>
                 <option value="markdown">{t('formatMarkdown')}</option>
+                <option value="sms">{t('formatSms')}</option>
               </select>
             </label>
+            {nt.format === 'sms' ? null : <label className="u-grid u-gap-1"><span className="u-label-sm">{t('subjectLabel')}</span><input value={nt.subject} onChange={(e) => setNt({ ...nt, subject: e.target.value })} placeholder={t('subjectPlaceholder')} /></label>}
+            <label className="u-grid u-gap-1"><span className="u-label-sm">{t('bodyLabel')}</span><input value={nt.body} onChange={(e) => setNt({ ...nt, body: e.target.value })} placeholder={t('bodyPlaceholder')} aria-describedby={nt.format === 'sms' ? 'email-new-sms-hint' : undefined} /></label>
+            {nt.format === 'sms' ? <p id="email-new-sms-hint" className="muted u-fs-12 u-m-0">{t('smsHint', { count: smsSegments(nt.body) })}</p> : null}
             <Button variant="primary" disabled={templateBusy || !nt.name.trim()} onClick={() => void addTemplate()}><PlusIcon /> {t('newTemplate')}</Button>
           </div>
 
@@ -543,7 +574,7 @@ export function EmailPage(): JSX.Element {
 
           <div className="surface-card u-p-4 surface-form">
             <label className="u-grid u-gap-1"><span className="u-label-sm">{t('campaignTemplateLabel')}</span>
-              <select value={campTpl} onChange={(e) => setCampTpl(e.target.value)}>{templateList.map((tpl) => <option key={tpl.templateId} value={tpl.templateId}>{tpl.name}</option>)}</select>
+              <select value={campTpl} onChange={(e) => setCampTpl(e.target.value)}>{emailTemplateList.map((tpl) => <option key={tpl.templateId} value={tpl.templateId}>{tpl.name}</option>)}</select>
             </label>
             <label className="u-grid u-gap-1 is-narrow"><span className="u-label-sm">{t('audienceModeLabel')}</span>
               <select value={audienceMode} onChange={(e) => setAudienceMode(e.target.value as AudienceMode)}>
@@ -591,8 +622,19 @@ export function EmailPage(): JSX.Element {
                 )}
               </label>
             ) : null}
+            {topics.topics.length > 0 ? (
+              <label className="u-grid u-gap-1 is-narrow"><span className="u-label-sm">{t('campaignTopicLabel')}</span>
+                <select value={campTopic} onChange={(e) => setCampTopic(e.target.value)}>
+                  <option value="">{t('campaignTopicGeneral')}</option>
+                  {topics.topics.map((tp) => <option key={tp.topicId} value={tp.topicId}>{tp.name}</option>)}
+                </select>
+              </label>
+            ) : null}
             <Button variant="primary" disabled={campaignBusy || !campTpl || (audienceMode === 'segment' && !campSegment)} onClick={() => void addCampaign()}><PlusIcon /> {t('newCampaign')}</Button>
           </div>
+
+          {orgId ? <EmailSendingHealthCard orgId={orgId} /> : null}
+          {orgId ? <EmailTopicsCard orgId={orgId} topics={topics.topics} max={topics.max} onChanged={() => loadTopics(orgId)} /> : null}
 
           <div className="surface-card u-gap-2">
             <div className="u-flex u-items-center u-gap-2 u-flex-wrap">
@@ -611,7 +653,7 @@ export function EmailPage(): JSX.Element {
                       eyebrow label would break the one-row filterbar baseline. */}
                   <select className="ui-input filterbar-select" value={campStatus} onChange={(e) => setCampStatus(e.target.value)} aria-label={t('campFilterStatus')}>
                     <option value="">{t('campFilterAllStatuses')}</option>
-                    {(['draft', 'sending', 'sent'] as const).map((s) => <option key={s} value={s}>{t(`campaignStatus_${s}`)}</option>)}
+                    {CAMPAIGN_STATUSES.map((s) => <option key={s} value={s}>{t(`campaignStatus_${s}`)}</option>)}
                   </select>
                 </div>
               ) : null}
@@ -644,6 +686,7 @@ export function EmailPage(): JSX.Element {
                     {c.audience.stage ? ` · ${t(`stage_${c.audience.stage}`)}` : c.audience.segmentId ? ` · ${t('audienceSegmentPrefix', { name: segName(c.audience.segmentId) })}` : ''}
                   </strong>
                   <span className={campChip(c.status)}>{t(`campaignStatus_${c.status}`)}</span>
+                  {c.topicId ? <span className="chip chip--muted">{topics.topics.find((tp) => tp.topicId === c.topicId)?.name ?? t('campaignTopicUnknown')}</span> : null}
                   {/* R2 EM-SP-9 — Email Copywriter drafts mint `cmp:agent:*`
                       ids; without the badge an agent draft was
                       indistinguishable from a human one. */}
@@ -651,7 +694,14 @@ export function EmailPage(): JSX.Element {
                   <span className="muted u-fs-12">{formatRelativeTime(c.createdAt)}</span>
                   {c.stats ? <span className="u-label-sm">{t('campaignStats', { sent: formatNumber(c.stats.sent), skipped: formatNumber(c.stats.skipped), failed: formatNumber(c.stats.failed) })}</span> : null}
                   <div className="action-bar">
-                    <Button variant="quiet" disabled={sendingId !== ''} aria-label={c.status === 'sent' ? t('resend') : c.status === 'sending' ? t('continueSending') : t('campaignSend')} onClick={() => void send(c)}><SendIcon /> {sendingId === c.campaignId ? t('common:loading') : c.status === 'sent' ? t('resend') : c.status === 'sending' ? t('continueSending') : t('campaignSend')}</Button>
+                    {c.status === 'draft' || c.status === 'sent' ? (
+                      <Button variant="quiet" disabled={reviewBusy !== ''} onClick={() => void submitReview(c)}>{t('submitForReview')}</Button>
+                    ) : c.status === 'in_review' || c.status === 'approved' ? (
+                      <Button variant="quiet" disabled={reviewBusy !== ''} onClick={() => void withdrawReview(c)}>{t('withdrawReview')}</Button>
+                    ) : null}
+                    <Button variant="quiet" disabled={sendingId !== '' || (approvalGate && c.status !== 'approved' && c.status !== 'sending')}
+                      {...(approvalGate && c.status !== 'approved' && c.status !== 'sending' ? { 'aria-describedby': `campaign-gate-${c.campaignId}` } : {})}
+                      aria-label={c.status === 'sent' ? t('resend') : c.status === 'sending' ? t('continueSending') : t('campaignSend')} onClick={() => void send(c)}><SendIcon /> {sendingId === c.campaignId ? t('common:loading') : c.status === 'sent' ? t('resend') : c.status === 'sending' ? t('continueSending') : t('campaignSend')}</Button>
                     <Button variant="quiet" onClick={() => setTestSendFor(c)} aria-label={t('testSendLabel', { name: tplName(c.templateId) })}>{t('testSend')}</Button>
                     {/* A DISCLOSURE, so it must say so: without `aria-expanded` a
                         screen-reader user hears "Log, button" and gets no signal
@@ -677,6 +727,16 @@ export function EmailPage(): JSX.Element {
                     <Button variant="quiet" disabled={sendingId !== ''} title={t('deleteCampaign')} aria-label={t('deleteCampaign')} onClick={() => void removeCampaign(c.campaignId)}><TrashIcon /></Button>
                   </div>
                 </div>
+                {/* ADR 0905 D3 — where the send review stands, and what it covers. */}
+                {c.review && (c.status === 'in_review' || c.status === 'approved') ? (
+                  <p className="muted u-fs-12 u-m-0">{t(c.status === 'approved' ? 'reviewApprovedLine' : 'reviewPendingLine', { version: formatNumber(c.review.pin.templateVersion) })}</p>
+                ) : null}
+                {c.status === 'draft' && c.review?.outcome === 'changes_requested' ? (
+                  <p className="u-fs-12 u-m-0"><span className="chip chip--danger">{t('reviewChangesRequested')}</span>{c.review.note ? ` ${c.review.note}` : ''}</p>
+                ) : null}
+                {approvalGate && c.status !== 'approved' && c.status !== 'sending' ? (
+                  <p id={`campaign-gate-${c.campaignId}`} className="muted u-fs-12 u-m-0">{t('sendNeedsApproval')}</p>
+                ) : null}
                 {engagementFor === c.campaignId ? (
                   <div id={`campaign-engagement-${c.campaignId}`} className="u-grid u-gap-1">
                     {engagementFailed ? (

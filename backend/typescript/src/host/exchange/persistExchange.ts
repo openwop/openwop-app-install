@@ -17,6 +17,7 @@ import type { Storage } from '../../storage/storage.js';
 import { stripSecretsFromPersisted } from '../../byok/ephemeralRunSecrets.js';
 import { extractConversationMemory } from '../../features/memory-auto-extract/extractionBinding.js';
 import { llmExtractFacts } from '../../features/memory-auto-extract/memoryExtractor.js';
+import type { ExtractionOutcome } from '../../features/memory-auto-extract/extractionOp.js';
 import { maybeAutotitleOnFirstExchange } from '../../features/chat-autotitle/binding.js';
 import { asText } from './contentParts.js';
 
@@ -132,46 +133,54 @@ export function memoryExtractionBudgetMs(): number {
  *  reproduced in the instrument instead of the subject. Here the bound is reachable
  *  precisely BECAUSE we are still in-request.
  *
- *  COST: an un-opted-in close pays one point-get — `extractionOp.ts:37` returns
- *  `skipped:'no-consent'` before any LLM call — so the wait is paid by exactly the
- *  users who asked for the feature. This lane has already been silently inert in
- *  production once (ADR 0666 D1: a doubled `user:` prefix, "an inert feature and a
- *  consent control that did nothing"); it should not also write where CPU is not
- *  guaranteed and say nothing when it does not finish. */
+ *  COST (ADR 0982 A8): a close outside a personal `user:` tenant pays nothing (the tenant check is
+ *  pure and runs first). An un-opted-in close in a personal tenant pays three point-gets (the
+ *  conversation record, the canonical person and the grant) before `skipped:'no-consent'`, so the
+ *  LLM wait is paid only by people who asked for the feature. */
 export async function maybeExtractMemoryOnClose(run: RunRecord, turns: readonly ConversationTurn[]): Promise<void> {
-  const userId = run.metadata?.['actingUserId'];
-  if (typeof userId !== 'string' || userId.length === 0) return;
-  const transcript = turns
-    .filter((t) => t.role === 'user' || t.role === 'agent')
-    .map((t) => `${t.from}: ${asText(t.content)}`)
-    .join('\n')
-    .slice(0, 8000);
-  if (!transcript.trim()) return;
+  // ADR 0982 D3 — only the person's OWN turns are extraction input. Agent turns echo tool results,
+  // MCP content, fetched pages and mock output; before this they were sent too, unfenced.
+  const userTurns = turns.filter((t) => t.role === 'user').map((t) => asText(t.content));
+  const actingSubject = typeof run.metadata?.['actingUserId'] === 'string' ? run.metadata['actingUserId'] as string : undefined;
 
+  // ADR 0982 D4 (architect A2) — ONE deadline governs the whole lane. The old shape raced a timer
+  // and cancelled nothing, so (with CPU always allocated since ADR 0741) an "abandoned" extraction
+  // still finished and wrote after the warning. The signal aborts the provider call, stops a
+  // repair from starting and is checked before every write.
   const budgetMs = memoryExtractionBudgetMs();
-  let timer: NodeJS.Timeout | undefined;
-  const budget = new Promise<'timeout'>((resolve) => {
-    timer = setTimeout(() => resolve('timeout'), budgetMs);
-    // Never hold the process open for this: the bound protects close latency, it is
-    // not work in its own right.
-    timer.unref?.();
-  });
+  const deadline = new AbortController();
+  const timer = setTimeout(() => deadline.abort(), budgetMs);
+  // Never hold the process open for this: the bound protects close latency, it is not work.
+  timer.unref?.();
   try {
-    const outcome = await Promise.race([
-      extractConversationMemory(run.tenantId, userId, transcript, (text) => llmExtractFacts(run.tenantId, text, userId))
-        .then(() => 'done' as const)
-        .catch((e) => {
-          // WARN, not debug: a consent-gated write that failed is the user's memory
-          // silently not being written.
-          logger.warn('memory_extraction_failed', { error: e instanceof Error ? e.message : String(e) });
-          return 'failed' as const;
-        }),
-      budget,
-    ]);
-    if (outcome === 'timeout') {
+    const work = extractConversationMemory(
+      run, userTurns,
+      (sent) => llmExtractFacts(run.tenantId, sent, { ...(actingSubject ? { actingSubject } : {}), signal: deadline.signal }),
+      deadline.signal,
+    ).catch((e): ExtractionOutcome => {
+      // WARN, not debug: a consent-gated write that failed is the person's memory silently not
+      // being written.
+      logger.warn('memory_extraction_failed', { error: e instanceof Error ? e.message : String(e) });
+      // A throw here is a lane read (grant, conversation, person) or an unexpected error, not a
+      // write: per-fact write failures are counted inside the op (code-review #1).
+      return { status: 'failed', reason: 'lane-error' };
+    });
+    // The race still bounds close latency if some step ignores the signal (a hung store read);
+    // the signal is what guarantees no write STARTS after the deadline. A write already under way
+    // (the note and its recall index) finishes (MAE2CD-7).
+    const expired = new Promise<ExtractionOutcome>((resolve) => {
+      deadline.signal.addEventListener('abort', () => resolve({ status: 'abandoned' }), { once: true });
+    });
+    const outcome = await Promise.race([work, expired]);
+    if (outcome.status === 'abandoned') {
       logger.warn('memory_extraction_abandoned', { budgetMs });
+    } else if (outcome.status === 'failed') {
+      logger.warn('memory_extraction_outcome', { ...outcome });
+    } else if (outcome.status !== 'skipped' || outcome.reason !== 'not-personal') {
+      // One line per close that reached the lane: status, counts and reason, never content.
+      logger.info('memory_extraction_outcome', { ...outcome });
     }
   } finally {
-    if (timer) clearTimeout(timer);
+    clearTimeout(timer);
   }
 }

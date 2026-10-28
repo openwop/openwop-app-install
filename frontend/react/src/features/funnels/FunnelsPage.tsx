@@ -13,6 +13,7 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { PageHeader } from '../../ui/PageHeader.js';
 import { Notice } from '../../ui/Notice.js';
 import { StateCard } from '../../ui/StateCard.js';
+import { FunnelArchitectPocket } from './FunnelArchitectPanel.js';
 import { useOrgSelection } from '../../ui/useOrgSelection.js';
 import { OrgSelectionState } from '../../ui/OrgSelectionState.js';
 import { SkeletonRows } from '../../ui/Skeleton.js';
@@ -250,6 +251,12 @@ export function FunnelsPage(): JSX.Element {
           )}
         </div>
       )}
+      {/* ADR 0948 P3a — the Funnel Architect: a pocket over the page (bounded, keyed by
+          org, open by default only when there is no funnel yet; refreshes the list). */}
+      {orgId && rows !== null && !rowsFailed ? (
+        <FunnelArchitectPocket key={orgId} orgId={orgId} orgName={orgs?.find((o) => o.orgId === orgId)?.name}
+          defaultOpen={rows.length === 0} onTurnSettled={() => void refresh()} />
+      ) : null}
       </OrgSelectionState>
 
     </section>

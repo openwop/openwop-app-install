@@ -12,6 +12,32 @@
  *   and the executor wires all of it onto a real run.
  * The broker is REAL (loopback provider, `OPENWOP_WEBHOOK_ALLOW_PRIVATE`, as in
  * `connector-invoker.test.ts`); only the provider's server is a stub.
+ * Tracker: TST-BDI-6..14.
+ *
+ * Red when (sabotage-witnessed, wave 60): the base rule stops refusing
+ * credentials, dot segments or off-pin hosts; a placeholder value is not encoded
+ * or may be a dot segment; the first `rel` no longer wins; the base is not
+ * re-validated at call time; the page, byte or wall-clock cap, the array check or
+ * the per-hop confinement goes; pages are aggregated by argument spreading; a GET
+ * may carry a body; the ledger stops refusing a duplicate, releasing a failed
+ * write, keeping bodies out, or requiring a key; a read-only provider takes a
+ * write or a mutation; a subscription is sent; a mutation skips the ledger; a
+ * type-system definition rides beside an operation; `200 + errors` loses its
+ * errors; the data-source route skips `workspace:write` or the base rule; a
+ * re-consent drops the data source; the pack's idempotency key stops being
+ * stable; the executor withholds the connector broker.
+ *
+ * Double guards (each named so a single-guard probe is read correctly):
+ *   - terminal-page deadline: `assertDeadline()` after the call AND after
+ *     `nextLink` (dataIntegrationAdapter.ts); either alone refuses `/final`;
+ *   - D2 non-active row: the adapter's `c.status !== 'active'` AND the broker's
+ *     pinned lane (`selectPinnedConnection`, connectionsService.ts:
+ *     `refuse(status_…)`, witnessed by `crm-gmail-sync-pin.test.ts`). A REVOKED
+ *     row is deleted, so it is refused as missing (`!c`), not by status;
+ *   - a base whose host left the pins: call-time re-validation AND the broker's
+ *     `apiHosts` pin;
+ *   - `buildSourceUrl`'s final `isWithinBase` sits behind the `://`, dot-segment
+ *     and `?#\\` checks: no literal path reaches it (defence in depth, a ceiling).
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import http from 'node:http';
@@ -24,6 +50,7 @@ import { createApp } from '../src/index.js';
 import type { Storage } from '../src/storage/storage.js';
 import { registerProvider, getProvider } from '../src/features/connections/providerRegistry.js';
 import {
+  __setConnectionStatusForTests,
   createSecretConnection,
   getConnection,
   revokeConnection,
@@ -37,6 +64,9 @@ import { createWorkspace, createMember } from '../src/host/accessControlService.
 import { egressLedgerKey, priorSend } from '../src/host/egressSentLedger.js';
 import { userIdFor } from '../src/features/users/usersService.js';
 import { configureKmsClient, createLocalAesKmsClient, _resetKmsForTesting } from '../src/byok/kmsEncryption.js';
+import type { RunRecord } from '../src/types.js';
+import type { NodeModule, WorkflowDefinition } from '../src/executor/types.js';
+import type { ProviderPolicyResolver } from '../src/host/index.js';
 
 async function codeOf(p: Promise<unknown>): Promise<string | undefined> {
   try { await p; return undefined; } catch (e) { return (e as { code?: string }).code; }
@@ -115,7 +145,9 @@ beforeAll(async () => {
     id: 'dstest-ro', label: 'Read-only data source test', kind: 'api_key', authFlow: 'manual', reach: 'openapi', readOnly: true,
     scopes: { read: [], write: [] }, refreshable: false, defaultScopes: [], consumerNodes: [], apiHosts: ['127.0.0.1'],
   });
-  await storage.insertRun({ runId: RUN, workflowId: 'w', tenantId: TENANT, status: 'pending', inputs: null, metadata: {}, configurable: {}, createdAt: 'x', updatedAt: 'x' } as never);
+  const seededAt = new Date().toISOString();
+  const seeded: RunRecord = { runId: RUN, workflowId: 'w', tenantId: TENANT, status: 'pending', inputs: null, metadata: {}, configurable: {}, createdAt: seededAt, updatedAt: seededAt };
+  await storage.insertRun(seeded);
 });
 
 afterAll(async () => {
@@ -191,9 +223,10 @@ describe('fetchRest over the real broker', () => {
   it('GET: fills the path, sends the query, returns the source status and body', async () => {
     const id = await source();
     hits.length = 0;
-    const r = await di().fetchRest({ sourceId: id, path: '/items/{{id}}', params: { id: 'a b', limit: 2 } });
+    // `/` must be encoded INTO the segment: the URL parser alone would keep it a separator.
+    const r = await di().fetchRest({ sourceId: id, path: '/items/{{id}}', params: { id: 'a b/c', limit: 2 } });
     expect(r.status).toBe(200);
-    expect(r.data).toEqual({ path: '/api/items/a%20b', query: { limit: '2' } });
+    expect(r.data).toEqual({ path: '/api/items/a%20b%2Fc', query: { limit: '2' } });
     expect(typeof r.fetchedAt).toBe('string');
     expect(hits).toHaveLength(1);
   });
@@ -310,13 +343,19 @@ describe('D2 — one non-probing refusal', () => {
   it('unknown, foreign-tenant, unconfigured, revoked and another user\'s connection all answer source_unavailable', async () => {
     const foreign = await source('/api', 'ten-ds-other');
     const plain = await createSecretConnection({ tenantId: TENANT, provider: 'dstest', kind: 'api_key', secret: 'ds-secret-key-2', scope: 'workspace' });
+    // A revoke DELETES the row, so this leg is the missing-row refusal (`!c`).
     const revoked = await source();
     await revokeConnection(TENANT, revoked);
+    // A row that still exists but is not `active` (double guard: the adapter's
+    // status check AND the broker's pinned lane; see the header).
+    const stale = await source();
+    await __setConnectionStatusForTests(stale, 'needs-reconsent');
+    expect((await getConnection(TENANT, stale))?.status, 'the stale row still exists').toBe('needs-reconsent');
     // A USER-scoped row of someone else: the broker's pin refuses it (not_owner).
     const theirs = await createSecretConnection({ tenantId: TENANT, provider: 'dstest', kind: 'api_key', secret: 'ds-secret-key-3', scope: 'user', userId: 'user:someone-else' });
     await setConnectionDataSource(TENANT, theirs.connectionId, `http://127.0.0.1:${PORT}/api`);
     hits.length = 0;
-    for (const id of ['conn:does-not-exist', foreign, plain.connectionId, revoked, theirs.connectionId]) {
+    for (const id of ['conn:does-not-exist', foreign, plain.connectionId, revoked, stale, theirs.connectionId]) {
       expect(await codeOf(di().fetchRest({ sourceId: id, path: '/items/1' })), id).toBe('source_unavailable');
     }
     expect(hits, 'none of them reached the source').toHaveLength(0);
@@ -409,7 +448,9 @@ describe('D8 — canonical AST read-only enforcement at the HTTP boundary', () =
     expect(JSON.parse(hits[0]!.body!).query).toBe(operation);
   });
 
-  it.each(['query Read {', 'fragment F on T { a }', 'type Query { a: String }'])('refuses non-executable/malformed documents before dialing: %s', async (operation) => {
+  // The last document carries a real operation, so only the executable-definitions
+  // check (not the empty-operation check) can refuse it.
+  it.each(['query Read {', 'fragment F on T { a }', 'type Query { a: String }', 'type Query { a: String } query Q { a }'])('refuses non-executable/malformed documents before dialing: %s', async (operation) => {
     const id = await source('/api/graphql');
     hits.length = 0;
     await expect(di().fetchGraphql({ sourceId: id, operation })).rejects.toMatchObject({ code: 'validation_error' });
@@ -515,9 +556,11 @@ describe('D1 — the data-source route', () => {
     });
     return (res.headers.get('set-cookie') ?? '').split(';')[0] ?? '';
   }
-  async function call(path: string, cookie: string, method = 'GET', body?: unknown): Promise<{ status: number; body: any }> {
+  /** The data-source route's answer, or this host's flat error envelope. */
+  interface DataSourceBody { dataSource?: { baseUrl: string; updatedAt: string } | null; error?: string; message?: string }
+  async function call(path: string, cookie: string, method = 'GET', body?: unknown): Promise<{ status: number; body: DataSourceBody | undefined }> {
     const res = await fetch(`${BASE}${path}`, { method, headers: { cookie, ...(body !== undefined ? { 'content-type': 'application/json' } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    return { status: res.status, body: res.status === 204 ? undefined : ((await res.json().catch(() => undefined)) as DataSourceBody | undefined) };
   }
   beforeAll(async () => {
     const ws = await createWorkspace({ name: 'ADR 0783 p2a', ownerSubject: 'oidc:d0783-owner' });
@@ -534,10 +577,10 @@ describe('D1 — the data-source route', () => {
     expect(bad.status, JSON.stringify(bad.body)).toBe(400);
     const ok = await production(() => call(path, editor, 'PUT', { baseUrl: 'https://acme.service-now.com/api/now/' }));
     expect(ok.status, JSON.stringify(ok.body)).toBe(200);
-    expect(ok.body.dataSource.baseUrl).toBe('https://acme.service-now.com/api/now');
-    expect((await call(path, editor)).body.dataSource.baseUrl).toBe('https://acme.service-now.com/api/now');
+    expect(ok.body?.dataSource?.baseUrl).toBe('https://acme.service-now.com/api/now');
+    expect((await call(path, editor)).body?.dataSource?.baseUrl).toBe('https://acme.service-now.com/api/now');
     expect((await call(path, editor, 'DELETE')).status).toBe(204);
-    expect((await call(path, editor)).body.dataSource).toBeNull();
+    expect((await call(path, editor)).body?.dataSource).toBeNull();
   });
 
   it('a Viewer who owns a connection cannot make it a data source (a workspace write)', async () => {
@@ -545,6 +588,8 @@ describe('D1 — the data-source route', () => {
     const viewer = await login(VIEWER);
     const res = await production(() => call(`${C}/${encodeURIComponent(row.connectionId)}/data-source`, viewer, 'PUT', { baseUrl: 'https://acme.service-now.com/api' }));
     expect(res.status, JSON.stringify(res.body)).toBe(403);
+    // The WRITE gate's refusal, not the owner check's (the Viewer owns the row).
+    expect(res.body).toMatchObject({ error: 'forbidden_scope', message: 'Missing required scope: workspace:write' });
     expect((await getConnection(WS, row.connectionId))?.dataSource).toBeUndefined();
   });
 
@@ -599,24 +644,26 @@ describe('the executor wires data sources onto a real run', () => {
     const { getNodeRegistry } = await import('../src/executor/nodeRegistry.js');
     const id = await source();
     const typeId = 'test.adr0783.p2a-probe';
-    getNodeRegistry().register({
+    const probeNode: NodeModule = {
       typeId, version: '1.0.0',
-      async execute(ctx: { dataIntegration?: { fetchRest?: (a: unknown) => Promise<{ status: number; data: unknown }> } }) {
-        const fetchRest = ctx.dataIntegration?.fetchRest;
-        if (!fetchRest) return { status: 'failure', error: { code: 'no_surface', message: 'ctx.dataIntegration.fetchRest absent' } };
+      async execute(ctx) {
+        const di = ctx.dataIntegration;
+        if (!di) return { status: 'failure', error: { code: 'no_surface', message: 'ctx.dataIntegration absent' } };
         try {
-          const r = await fetchRest({ sourceId: id, path: '/items/{{id}}', params: { id: 'run' } });
+          const r = await di.fetchRest({ sourceId: id, path: '/items/{{id}}', params: { id: 'run' } });
           return r.status === 200 ? { status: 'success', outputs: { data: r.data } } : { status: 'failure', error: { code: 'status', message: String(r.status) } };
         } catch (e) {
           return { status: 'failure', error: { code: (e as { code?: string }).code ?? 'x', message: String(e) } };
         }
       },
-    } as never);
+    };
+    getNodeRegistry().register(probeNode);
     const now = new Date().toISOString();
-    const run = { runId: `run-0783p2a-${Math.random().toString(36).slice(2, 10)}`, workflowId: 'wf.test.0783.p2a', tenantId: TENANT, status: 'pending', inputs: {}, metadata: {}, configurable: {}, createdAt: now, updatedAt: now };
-    await storage.insertRun(run as never);
-    const result = await executeRun(storage, run as never, { workflowId: 'wf.test.0783.p2a', nodes: [{ nodeId: 'p', typeId }] } as never,
-      { policyResolver: { async resolveForRun() { return []; } } } as never);
+    const run: RunRecord = { runId: 'run-0783p2a-exec', workflowId: 'wf.test.0783.p2a', tenantId: TENANT, status: 'pending', inputs: {}, metadata: {}, configurable: {}, createdAt: now, updatedAt: now };
+    await storage.insertRun(run);
+    const definition: WorkflowDefinition = { workflowId: 'wf.test.0783.p2a', nodes: [{ nodeId: 'p', typeId }] };
+    const policyResolver: ProviderPolicyResolver = { async resolveForRun() { return []; } };
+    const result = await executeRun(storage, run, definition, { policyResolver });
     expect(result.status, JSON.stringify(result)).toBe('completed');
   });
 });

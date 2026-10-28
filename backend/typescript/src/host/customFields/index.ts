@@ -12,7 +12,7 @@
 // (near-)behavior-preserving follow-on (kept off this PR to protect core CRM).
 
 import { OpenwopError } from '../../types.js';
-import { cleanString } from '../boundedStrings.js';
+import { cleanContent, cleanString } from '../boundedStrings.js';
 
 export type FieldType = 'string' | 'number' | 'boolean' | 'date' | 'enum' | 'reference' | 'media';
 export const FIELD_TYPES: FieldType[] = ['string', 'number', 'boolean', 'date', 'enum', 'reference', 'media'];
@@ -89,9 +89,8 @@ export function __unregisterFieldKindValidator(kind: string): void {
   fieldKindRegistry.delete(kind);
 }
 
-// `cleanString` (host/boundedStrings) trims, caps, AND scrubs secret-shaped blobs — the last
-// matters because product string values are served on the PUBLIC storefront (parity with the
-// CRM field-def validator; the seam must not weaken that scrub).
+// `cleanString` (host/boundedStrings) trims, caps, AND scrubs secret-shaped blobs: used for
+// the field DEFINITION's labels and options. String VALUES use the content lane (below).
 const cleanStr = cleanString;
 /** Strict YYYY-MM-DD (a real calendar date). */
 export function isStrictDate(v: string): boolean {
@@ -202,7 +201,9 @@ export async function validateFieldValues(
       if (!ok) throw new OpenwopError('validation_error', `Custom field \`${key}\` references a ${def.refEntityType} that does not exist.`, 400, { key, refEntityType: def.refEntityType });
       out[key] = value;
     } else {
-      out[key] = cleanStr(value, MAX_STRING_VALUE);
+      // Content lane: product values are served on the PUBLIC storefront, so they
+      // are never rewritten; a credential-shaped value is a typed refusal instead.
+      out[key] = cleanContent(value, MAX_STRING_VALUE, `customFields.${key}`);
     }
   }
   if (opts.requireAll) {

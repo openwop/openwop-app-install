@@ -11,7 +11,9 @@ import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { resolveEffectiveAccess, type Scope } from '../../host/accessControlService.js';
 import { requireFeatureEnabled, requireString, authorizeOrgScope } from '../featureRoute.js';
-import { resolveToggle } from '../../host/featureToggles/service.js';
+import { resolveToggle, resolveOne } from '../../host/featureToggles/service.js';
+import { buildProductFeed, renderFeedXml, getFeedSettings, saveFeedSettings, signedFeedUrl, verifyFeedSignature, pushCatalog, commerceServesStore } from './catalogFeed.js';
+import { publicBaseUrl } from '../featureRoute.js';
 import { ownerPublicRuntimeLapsed } from '../../host/publicLapse.js';
 import { getOrg } from '../../host/accessControlService.js';
 import { upsertPixel, listPixels, removePixel, publicPixelsForOrg, relayConversion, listConversions, marketingAllowedOrUnreadable } from './pixelService.js';
@@ -209,6 +211,76 @@ export function registerCampaignConnectorsRoutes(deps: RouteDeps): void {
       // ADR 0907 D6 — the IP and user agent exist only for delivery; a workspace
       // reader sees the queue, not the visitors' network addresses.
       res.json({ conversions: (await listConversions(tenantId, orgId)).map(({ ip: _ip, userAgent: _ua, ...row }) => row) });
+    } catch (err) { next(err); }
+  });
+
+  // ── ADR 0952 D6 (P7) — the product feed from the one commerce catalog ──
+  // Settings + the signed URL (workspace:read/write). Rotating bumps the version,
+  // so every earlier URL stops working.
+  const feedView = async (req: Request, tenantId: string, orgId: string) => {
+    const s = await getFeedSettings(tenantId, orgId);
+    const feed = await buildProductFeed(tenantId, orgId, publicBaseUrl(req));
+    return {
+      enabled: s.enabled, version: s.version, contentLanguage: s.contentLanguage, feedLabel: s.feedLabel,
+      ...(s.metaCatalogId ? { metaCatalogId: s.metaCatalogId } : {}),
+      ...(s.merchantAccountId ? { merchantAccountId: s.merchantAccountId } : {}),
+      ...(s.merchantDataSource ? { merchantDataSource: s.merchantDataSource } : {}),
+      ...(s.enabled ? { feedUrl: signedFeedUrl(publicBaseUrl(req), s) } : {}),
+      items: feed.items.length, excluded: feed.excluded,
+    };
+  };
+  app.get(`${BASE}/orgs/:orgId/catalog-feed`, async (req, res, next) => {
+    try {
+      const { orgId, tenantId } = await authorizeOrgScope(req, { toggleId: TOGGLE_ID, label: LABEL }, 'workspace:read');
+      res.json(await feedView(req, tenantId, orgId));
+    } catch (err) { next(err); }
+  });
+  app.put(`${BASE}/orgs/:orgId/catalog-feed`, async (req, res, next) => {
+    try {
+      const { orgId, tenantId } = await authorizeOrgScope(req, { toggleId: TOGGLE_ID, label: LABEL }, 'workspace:write');
+      await saveFeedSettings(tenantId, orgId, (req.body ?? {}) as Record<string, unknown>);
+      res.json(await feedView(req, tenantId, orgId));
+    } catch (err) { next(err); }
+  });
+  app.post(`${BASE}/orgs/:orgId/catalog-feed/rotate`, async (req, res, next) => {
+    try {
+      const { orgId, tenantId } = await authorizeOrgScope(req, { toggleId: TOGGLE_ID, label: LABEL }, 'workspace:write');
+      await saveFeedSettings(tenantId, orgId, {}, { rotate: true });
+      res.json(await feedView(req, tenantId, orgId));
+    } catch (err) { next(err); }
+  });
+  // Push now: the caller's own ad / merchant connections (fixture-only until verified).
+  app.post(`${BASE}/orgs/:orgId/catalog-feed/push`, async (req, res, next) => {
+    try {
+      const { user, orgId, tenantId } = await authorizeOrgScope(req, { toggleId: TOGGLE_ID, label: LABEL }, 'workspace:write');
+      const platform = (req.body ?? {}).platform;
+      if (platform !== 'meta' && platform !== 'google') throw new OpenwopError('validation_error', '`platform` must be meta or google.', 400, { field: 'platform' });
+      const deps = { storage: hostExtStorage(), tenantId, runId: `hostext:catalog-push:${randomUUID()}`, actingUserId: user.userId, orgId };
+      res.json(await pushCatalog(deps, tenantId, orgId, platform, publicBaseUrl(req)));
+    } catch (err) { next(err); }
+  });
+
+  // PUBLIC: the signed feed Merchant Center / Meta Catalog fetch on a schedule.
+  // Only what the public store already shows. Disabled, unknown org, toggle off
+  // or a bad / rotated signature all answer the same 404.
+  app.get('/host/openwop-app/public/:orgId/catalog/feed.xml', async (req, res, next) => {
+    try {
+      const notFound = (): never => { throw new OpenwopError('not_found', 'Feed not found.', 404, {}); };
+      const org = (await getOrg(req.params.orgId)) ?? notFound();
+      const { tenantId } = org;
+      // The operator's own marketing feature, so toggle + plan (ADR 0819 resolveOne),
+      // and a lapsed owner (ADR 0820 §7) answers like the toggle being off.
+      if (!(await resolveOne(TOGGLE_ID, { tenantId }))?.enabled || (await ownerPublicRuntimeLapsed(TOGGLE_ID, tenantId))) notFound();
+      // Every item links to the store: while the store does not serve, neither does its feed.
+      if (!(await commerceServesStore(tenantId))) notFound();
+      const s = await getFeedSettings(tenantId, req.params.orgId);
+      if (!s.enabled || !verifyFeedSignature(s, req.query.v, req.query.sig)) notFound();
+      const base = publicBaseUrl(req);
+      const feed = await buildProductFeed(tenantId, req.params.orgId, base);
+      res.setHeader('content-type', 'application/xml; charset=utf-8');
+      // Never a shared (CDN) cache: a rotate or a disable must take effect at once.
+      res.setHeader('cache-control', 'private, max-age=300');
+      res.send(renderFeedXml(feed, { title: org.name, brand: org.name, link: `${base}/store/${encodeURIComponent(req.params.orgId)}` }));
     } catch (err) { next(err); }
   });
 

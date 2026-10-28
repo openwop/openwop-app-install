@@ -6,10 +6,14 @@
  * Anthropic step was sent to Anthropic (the call failed upstream, but a third party had
  * already received a key it should never see). ADR 0712 Phase 2 routed the SPA around
  * this; this closes it at the resolver, for every caller.
+ *
+ * Tracker TST-BGF-16. Red when `explicitRefNamesOtherProvider` stops exempting
+ * compat/mock or stops returning null for the step's own provider, or when the
+ * adapter's `otherProvider` refusal is skipped (the key then reaches fetch).
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { explicitRefNamesOtherProvider } from '../src/aiProviders/credentialRefLadder.js';
-import { createAiProvidersAdapter } from '../src/aiProviders/aiProvidersHost.js';
+import { AiProviderError, createAiProvidersAdapter } from '../src/aiProviders/aiProvidersHost.js';
 import { openStorage } from '../src/storage/index.js';
 import { setInvocationBackend } from '../src/executor/invocationLog.js';
 
@@ -56,10 +60,12 @@ describe('ADR 0712 OQ4 — the adapter never sends a mis-paired key', () => {
     const sent: string[] = [];
     const adapter = await adapterWith({ 'anthropic:prod': 'sk-ant-SECRET', 'byok:google': 'AIza-own' }, sent);
     const err = await adapter.callAI({ provider: 'google', model: 'gemini-2.5-flash', credentialRef: 'anthropic:prod', messages: [{ role: 'user', content: 'hi' }] })
-      .then(() => null, (e: unknown) => e as { code?: string; details?: Record<string, unknown>; message?: string });
-    expect(err?.code).toBe('byok_required_but_unresolved');
-    expect(err?.details).toMatchObject({ reason: 'explicit_ref_wrong_provider', provider: 'google', refProvider: 'anthropic' });
-    expect(err?.message ?? '').not.toContain('sk-ant-SECRET');
+      .then(() => null, (e: unknown) => e);
+    expect(err).toBeInstanceOf(AiProviderError);
+    if (!(err instanceof AiProviderError)) return;
+    expect(err.code).toBe('byok_required_but_unresolved');
+    expect(err.details).toMatchObject({ reason: 'explicit_ref_wrong_provider', provider: 'google', refProvider: 'anthropic' });
+    expect(err.message).not.toContain('sk-ant-SECRET');
     expect(sent, 'the mis-paired key must never leave the process').toEqual([]);
   });
 

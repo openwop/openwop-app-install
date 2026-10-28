@@ -24,7 +24,9 @@ import { SCHEDULE_RECURRING_TOOL_ID, MAX_ACTIVE_RECURRING_PER_USER } from '../sr
 import { SCHEDULED_CHAT_TURN_WORKFLOW_ID } from '../src/features/scheduled-agent-chats/scheduledChatTurnWorkflow.js';
 import { getJob, listJobsForSubject } from '../src/host/schedulingService.js';
 
-const TENANT = 'default';
+// ADR 0985 D6 — arming a schedule from chat needs `workspace:write` where it runs;
+// a personal workspace grants it to its owner (the implicit-owner shortcut).
+const TENANT = 'user:sched-tool-tests';
 
 let server: http.Server;
 beforeAll(async () => {
@@ -36,7 +38,7 @@ beforeAll(async () => {
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 function runTool(input: Record<string, unknown>, scope: { actingUserId?: string; agentProfileId?: string; conversationId?: string; runId?: string }): Promise<{ content: string; isError?: boolean }> {
-  const provider = createAgentToolProvider({ tenantId: TENANT, runId: 'run-a3', ...scope });
+  const provider = createAgentToolProvider({ tenantId: TENANT, personalTenant: TENANT, runId: 'run-a3', ...scope });
   return provider.executeTool({ name: SCHEDULE_RECURRING_TOOL_ID, input });
 }
 const FULL_SCOPE = { actingUserId: 'u-rec', agentProfileId: 'host:iris', conversationId: 'conv-rec' };

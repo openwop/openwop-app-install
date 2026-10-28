@@ -7,10 +7,10 @@ import { describe, it, expect } from 'vitest';
 import { multiTabChatFeature } from '../src/features/multi-tab-chat/feature.js';
 
 describe('multi-tab-chat feature (ADR 0140)', () => {
-  it('declares the toggle the FE gate depends on (OFF, per-USER)', () => {
+  it('declares the toggle the FE gate depends on (ON since 2026-10-25, per-USER)', () => {
     expect(multiTabChatFeature.id).toBe('multi-tab-chat');
     expect(multiTabChatFeature.toggleDefault?.id).toBe('multi-tab-chat');
-    expect(multiTabChatFeature.toggleDefault?.status).toBe('off');
+    expect(multiTabChatFeature.toggleDefault?.status).toBe('on');
     // A per-user UI preference — NOT tenant-bucketed (a future change must not silently flip this).
     expect(multiTabChatFeature.toggleDefault?.bucketUnit).toBe('user');
   });

@@ -6,6 +6,16 @@
  * refused for reveal/rotate/delete (the connections lifecycle owns them);
  * delete fail-closes on live references and honors ?force=true; every
  * mutation lands a `security.*` row on the EXISTING tamper-evident chain.
+ *
+ * TST-BQA-3. Each case seeds its OWN ref (shuffle-safe). Red when: the GET
+ * drops `requireSuperadmin`; the add/reveal `connection:*` refusal or the
+ * ADR 0779 owned-ref refusal is removed; the step-up check is skipped or the
+ * wildcard exemption is lost; the reveal/rotate/delete audit append is
+ * skipped; rotate's 404 guard is removed; the live-reference or the
+ * unknown-consumers 409 is removed; `?force` is ignored; the compensating
+ * `security.secret-set-failed` row is not appended. "Audit BEFORE the value
+ * is returned" is an ordering claim HTTP cannot observe — an honest ceiling,
+ * not asserted here.
  */
 
 import http from 'node:http';
@@ -20,6 +30,8 @@ let server: http.Server;
 let BASE: string;
 const ADMIN = { authorization: 'Bearer dev-token', 'content-type': 'application/json' };
 const VAULT = '/host/openwop-app/vault';
+interface ErrorBody { error: string; message: string; details?: Record<string, unknown> }
+const refOf = (e: { payload: unknown }): string | undefined => (e.payload as { credentialRef?: string }).credentialRef;
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -42,6 +54,7 @@ describe('ADR 0389 P2 — secrets vault', () => {
   it('fails closed: an authenticated non-superadmin (anon session) gets 403', async () => {
     const res = await fetch(`${BASE}${VAULT}`); // no bearer ⇒ anon cookie session
     expect(res.status).toBe(403);
+    expect(((await res.json()) as ErrorBody).message).toBe('The secrets vault requires a superadmin principal.');
   });
 
   it('inventory is masked — refs/metadata only, never a value field', async () => {
@@ -60,30 +73,37 @@ describe('ADR 0389 P2 — secrets vault', () => {
       body: JSON.stringify({ credentialRef: 'vault-added', value: 'v1-value', scope: 'host' }),
     });
     expect(ok.status).toBe(201);
+    // Read back: the value landed in the host bucket.
+    const back = await fetch(`${BASE}${VAULT}/secrets/vault-added/reveal`, {
+      method: 'POST', headers: ADMIN, body: JSON.stringify({ scope: 'host' }),
+    });
+    expect(((await back.json()) as { value: string }).value).toBe('v1-value');
     const refused = await fetch(`${BASE}${VAULT}/secrets`, {
       method: 'POST', headers: ADMIN,
       body: JSON.stringify({ credentialRef: 'connection:abc', value: 'x', scope: 'host' }),
     });
     expect(refused.status).toBe(400);
+    expect(((await refused.json()) as ErrorBody).message).toBe('`connection:*` refs are owned by the connections lifecycle — create a connection instead.');
   });
 
-  it('reveal: wildcard admin bearer is step-up-exempt, audits BEFORE returning; connection:* refused', async () => {
-    const res = await fetch(`${BASE}${VAULT}/secrets/vault-added/reveal`, {
+  it('reveal: wildcard admin bearer is step-up-exempt and audits the reveal; connection:* refused', async () => {
+    await setSecret('vault-reveal-ref', 'reveal-value');
+    const res = await fetch(`${BASE}${VAULT}/secrets/vault-reveal-ref/reveal`, {
       method: 'POST', headers: ADMIN, body: JSON.stringify({ scope: 'host' }),
     });
     expect(res.status).toBe(200);
-    expect(((await res.json()) as { value: string }).value).toBe('v1-value');
+    expect(((await res.json()) as { value: string }).value).toBe('reveal-value');
     // The reveal chained a tamper-evident security.* row (host-admin chain for
     // the wildcard bearer).
     const chain = await listChain('host-admin');
-    const reveal = chain.find((e) => e.kind === 'security.secret-reveal');
+    const reveal = chain.find((e) => e.kind === 'security.secret-reveal' && refOf(e) === 'vault-reveal-ref');
     expect(reveal).toBeTruthy();
-    expect((reveal!.payload as { credentialRef?: string }).credentialRef).toBe('vault-added');
 
     const conn = await fetch(`${BASE}${VAULT}/secrets/connection:abc/reveal`, {
       method: 'POST', headers: ADMIN, body: JSON.stringify({ scope: 'host' }),
     });
     expect(conn.status).toBe(403); // delegated tokens never reveal
+    expect(((await conn.json()) as ErrorBody).message).toBe('Delegated OAuth credentials are never revealed (ADR 0024). Re-consent to rotate them.');
   });
 
   it('ADR 0779 D2: refs another lifecycle owns are never set, revealed or rotated raw here (not only connection:*)', async () => {
@@ -115,8 +135,9 @@ describe('ADR 0389 P2 — secrets vault', () => {
     expect(who.status).toBe(200);
     const personal = ((await who.json()) as { personal: string }).personal;
     process.env.OPENWOP_SUPERADMIN_TENANTS = personal;
+    await setSecret('vault-stepup-ref', 'stepup-value');
     try {
-      const res = await fetch(`${BASE}${VAULT}/secrets/vault-added/reveal`, {
+      const res = await fetch(`${BASE}${VAULT}/secrets/vault-stepup-ref/reveal`, {
         method: 'POST', headers: { cookie: m![1]!, 'content-type': 'application/json' }, body: JSON.stringify({ scope: 'host' }),
       });
       expect(res.status).toBe(403);
@@ -132,16 +153,17 @@ describe('ADR 0389 P2 — secrets vault', () => {
       method: 'POST', headers: ADMIN, body: JSON.stringify({ value: 'x', scope: 'host' }),
     });
     expect(missing.status).toBe(404);
-    const res = await fetch(`${BASE}${VAULT}/secrets/vault-added/rotate`, {
+    await setSecret('vault-rotate-ref', 'v1-value');
+    const res = await fetch(`${BASE}${VAULT}/secrets/vault-rotate-ref/rotate`, {
       method: 'POST', headers: ADMIN, body: JSON.stringify({ value: 'v2-value', scope: 'host' }),
     });
     expect(res.status).toBe(200);
-    const reveal = await fetch(`${BASE}${VAULT}/secrets/vault-added/reveal`, {
+    const reveal = await fetch(`${BASE}${VAULT}/secrets/vault-rotate-ref/reveal`, {
       method: 'POST', headers: ADMIN, body: JSON.stringify({ scope: 'host' }),
     });
     expect(((await reveal.json()) as { value: string }).value).toBe('v2-value');
     const chain = await listChain('host-admin');
-    expect(chain.some((e) => e.kind === 'security.secret-rotate')).toBe(true);
+    expect(chain.some((e) => e.kind === 'security.secret-rotate' && refOf(e) === 'vault-rotate-ref')).toBe(true);
   });
 
   it('delete fail-closes on a live reference, honors ?force=true, audits', async () => {
@@ -170,7 +192,7 @@ describe('ADR 0389 P2 — secrets vault', () => {
       });
       expect(forced.status).toBe(200);
       const chain = await listChain(personal);
-      expect(chain.some((e) => e.kind === 'security.secret-delete')).toBe(true);
+      expect(chain.some((e) => e.kind === 'security.secret-delete' && refOf(e) === 'dep-checked')).toBe(true);
     } finally {
       delete process.env.OPENWOP_SUPERADMIN_TENANTS;
     }
@@ -239,7 +261,7 @@ describe('ADR 0389 P2 — secrets vault', () => {
         method: 'DELETE', headers: ADMIN,
       });
       const chain = await listChain('host-admin');
-      const row = chain.find((e) => e.kind === 'security.secret-delete');
+      const row = chain.find((e) => e.kind === 'security.secret-delete' && refOf(e) === 'audit-unknown-probe');
       expect(row).toBeTruthy();
       const detail = JSON.stringify(row);
       expect(detail).toContain('"referencesKnown":false');

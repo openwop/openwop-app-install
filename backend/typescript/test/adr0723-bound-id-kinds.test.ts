@@ -7,6 +7,11 @@
  * has no v2 scenario naming `interruptId`, so a green suite proved nothing here —
  * these are the host's own witnesses, one leg per kind at the HTTP boundary,
  * cloned from `v2-bound-id-path-projection.test.ts` (RFC 0184, runs only).
+ *
+ * Tracker TST-BAA-4. Red when (sabotage-witnessed, wave 60): `interruptId` is
+ * dropped from the bound-kind derivation; `projectV2RunIds` stops recursing into
+ * arrays; `v2Identity` stops refusing a foreign tenant segment; the `~` segment
+ * is no longer unprojected.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';
@@ -28,9 +33,21 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
 
-async function req(method: string, path: string, headers: Record<string, string> = {}, body?: unknown) {
+/** Every body shape this file reads, as the narrow local view of each response. */
+interface Body {
+  subscriptionId?: string;
+  error?: string;
+  subscription?: { subscriptionId: string };
+  outcome?: string;
+  runId?: string;
+  deliveries?: Array<{ deliveryId: string; subscriptionId?: string }>;
+  events?: Array<{ type: string; payload: { interruptId?: string } }>;
+}
+async function req(method: string, path: string, headers: Record<string, string> = {}, body?: unknown): Promise<{ status: number; json: Body; text: string }> {
   const res = await fetch(`${base}${path}`, { method, headers: { Authorization: 'Bearer dev-token', 'Content-Type': 'application/json', ...headers }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-  const text = await res.text(); let json: any; try { json = JSON.parse(text); } catch { json = undefined; }
+  const text = await res.text();
+  let json: Body = {};
+  try { json = JSON.parse(text) as Body; } catch { json = {}; }
   return { status: res.status, json, text };
 }
 const V2 = { 'OpenWOP-Version': '2' };
@@ -50,10 +67,12 @@ describe('ADR 0723 — the derived key set covers all five kinds', () => {
   });
 
   it('effectId: a compensation/effect-ledger doc projects the effect id (no HTTP producer exists in-repo to drive it)', () => {
-    const out = projectV2RunIds({ effectId: 'a'.repeat(32), effects: [{ effectId: 'b'.repeat(32), inverseActionId: 'x' }] }, 'default') as any;
-    expect(out.effectId).toBe(`default/${'a'.repeat(32)}`);
-    expect(out.effects[0].effectId).toBe(`default/${'b'.repeat(32)}`);
-    expect(out.effects[0].inverseActionId, 'a non-bound sibling key is untouched').toBe('x');
+    const out = projectV2RunIds({ effectId: 'a'.repeat(32), effects: [{ effectId: 'b'.repeat(32), inverseActionId: 'x' }] }, 'default');
+    expect(out).toEqual({
+      effectId: `default/${'a'.repeat(32)}`,
+      // a non-bound sibling key (`inverseActionId`) is untouched
+      effects: [{ effectId: `default/${'b'.repeat(32)}`, inverseActionId: 'x' }],
+    });
   });
 });
 
@@ -62,7 +81,7 @@ describe('ADR 0723 — subscriptionId (webhooks)', () => {
     const r = await req('POST', '/webhooks', V2, { url: 'https://hooks.example.test/adr0723', events: ['run.completed'] });
     expect(r.status, r.text.slice(0, 160)).toBe(201);
     expect(String(r.json.subscriptionId)).toMatch(BOUND);
-    return r.json.subscriptionId as string;
+    return String(r.json.subscriptionId);
   }
   // ADR 0812 P3c-0: the "under major 1 a bare one" half was deleted with major 1.
   it('POST /webhooks under major 2 returns a TENANT-BOUND subscriptionId', async () => {
@@ -115,12 +134,12 @@ describe('ADR 0723 — subscriptionId + deliveryId (trigger subscriptions)', () 
   it('register → read back by projected segment → ingest: subscription and delivery ids are bound on every read', async () => {
     const reg = await req('POST', '/trigger-subscriptions', V2, { source: 'form', workflowId: 'openwop-app.uppercase', verification: { mode: 'none' } });
     expect(reg.status, reg.text.slice(0, 200)).toBe(201);
-    const id = String(reg.json.subscription.subscriptionId);
+    const id = String(reg.json.subscription?.subscriptionId);
     expect(id).toMatch(BOUND);
 
     const got = await req('GET', `/trigger-subscriptions/${projectBoundId(id)}`, V2);
     expect(got.status, got.text.slice(0, 160)).toBe(200);
-    expect(got.json.subscription.subscriptionId, 'resolved to the SAME row').toBe(id);
+    expect(got.json.subscription?.subscriptionId, 'resolved to the SAME row').toBe(id);
 
     const ingest = await req('POST', `/trigger-subscriptions/${projectBoundId(id)}/ingest`, V2, { fields: { q: 'hi' }, submissionId: 'adr0723-1' });
     expect(ingest.status, ingest.text.slice(0, 200)).toBe(200);
@@ -129,11 +148,11 @@ describe('ADR 0723 — subscriptionId + deliveryId (trigger subscriptions)', () 
 
     const after = await req('GET', `/trigger-subscriptions/${encodeURIComponent(id)}`, V2);
     expect(after.status).toBe(200);
-    const deliveries = after.json.deliveries as Array<{ deliveryId: string; subscriptionId?: string }>;
+    const deliveries = after.json.deliveries ?? [];
     expect(deliveries.length).toBeGreaterThan(0);
     for (const d of deliveries) {
       expect(String(d.deliveryId), 'deliveryId is a tenant-bound kind (identity.md §5)').toMatch(BOUND);
-      if (d.subscriptionId !== undefined) expect(d.subscriptionId).toBe(id);
+      expect(d.subscriptionId, 'each delivery names its (bound) subscription').toBe(id);
     }
     // ADR 0812 P3c-0: the "major 1 on the same row reads every id bare" control
     // was deleted with major 1.
@@ -147,14 +166,14 @@ describe('ADR 0723 — interruptId (events read under major 2)', () => {
     // completes at once; `conformance-cancellable` holds until cancelled.
     const created = await req('POST', '/runs', V2, { workflowId: 'conformance-cancellable', inputs: {} });
     expect(created.status, created.text.slice(0, 160)).toBe(201);
-    const bound = created.json.runId as string;
+    const bound = String(created.json.runId);
     const bare = bound.split('/')[1]!;
     const interruptId = 'f'.repeat(32);
     await storage.appendEvent({ eventId: randomUUID(), runId: bare, type: 'node.suspended', nodeId: 'n1', payload: { interruptId, kind: 'approval', nodeId: 'n1' }, timestamp: new Date().toISOString() });
 
     const v2 = await req('GET', `/runs/${projectBoundId(bound)}/events/poll`, V2);
     expect(v2.status, v2.text.slice(0, 200)).toBe(200);
-    const ev2 = (v2.json.events as Array<{ type: string; payload: any }>).find((e) => e.type === 'node.suspended');
+    const ev2 = (v2.json.events ?? []).find((e) => e.type === 'node.suspended');
     expect(ev2, 'the seeded event is on the read').toBeDefined();
     expect(ev2!.payload.interruptId).toBe(`default/${interruptId}`);
     // ADR 0812 P3c-0: the "bare on /v1" control was deleted with major 1.

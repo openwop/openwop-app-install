@@ -12,6 +12,10 @@
  *   2. opted in: the text call goes to the tenant's own provider;
  *   3. opted in but the key no longer resolves: falls through to managed;
  *   4. the flag is validated (boolean only) and never set implicitly.
+ *
+ * Tracker TST-BUL-6. Sabotage-witnessed (w62): red when the opt-in check is
+ * dropped or always-off, a stale key is dispatched anyway, a non-boolean flag is
+ * accepted, or `preferForText: false` is persisted.
  */
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -38,7 +42,11 @@ beforeEach(async () => {
   await setSecret('gem', 'KEY', { tenantId: T });
 });
 afterEach(() => { vi.restoreAllMocks(); });
-afterAll(async () => { await clearAllSecrets(); process.env.OPENWOP_BYOK_EPHEMERAL = ''; });
+const prevEphemeral = process.env.OPENWOP_BYOK_EPHEMERAL;
+afterAll(async () => {
+  await clearAllSecrets();
+  if (prevEphemeral === undefined) delete process.env.OPENWOP_BYOK_EPHEMERAL; else process.env.OPENWOP_BYOK_EPHEMERAL = prevEphemeral;
+});
 
 describe('ADR 0821 D5 — headless text BYOK preference is an opt-in', () => {
   it('default OFF: a tenant WITH a BYOK default still runs headless text on managed', async () => {
@@ -55,7 +63,7 @@ describe('ADR 0821 D5 — headless text BYOK preference is an opt-in', () => {
     await setHeadlessAiDefault({ tenantId: T }, { provider: 'google', model: 'gemini-2.0-flash', credentialRef: 'gem', preferForText: true }, NOW);
     const dispatch = (await resolveHeadlessAi(T, 'text', { featureId: 'cms' }))!;
     await dispatch(MSG, { maxTokens: 50 }).catch(() => undefined); // the response shape is the dispatcher's concern; WHO was called is ours
-    expect(urls.some((u) => u.includes('generativelanguage.googleapis.com'))).toBe(true);
+    expect(urls.map((u) => new URL(u).host)).toContain('generativelanguage.googleapis.com');
   });
 
   it('opted in but the key no longer resolves: falls through to managed (never fails closed on a stale pointer)', async () => {
@@ -68,7 +76,7 @@ describe('ADR 0821 D5 — headless text BYOK preference is an opt-in', () => {
 
   it('the flag is boolean-only and is not set unless asked for', async () => {
     await expect(setHeadlessAiDefault({ tenantId: T }, { provider: 'google', model: 'gemini-2.0-flash', credentialRef: 'gem', preferForText: 'yes' }, NOW))
-      .rejects.toMatchObject({ httpStatus: 400 });
+      .rejects.toMatchObject({ httpStatus: 400, code: 'validation_error', details: { field: 'preferForText' } });
     const saved = await setHeadlessAiDefault({ tenantId: T }, { provider: 'google', model: 'gemini-2.0-flash', credentialRef: 'gem', preferForText: false }, NOW);
     expect('preferForText' in saved).toBe(false);
   });

@@ -48,6 +48,7 @@ import { exposureFor, findToolForCaller, listToolsForCaller, type ExposedHandler
 import type { McpCaller } from './mcpCaller.js';
 import type { LaunchResolvedWorkflow } from './resolveLaunchDefinition.js';
 import { awaitRunResumeChain, needsNamedApprover, resolveAndResume } from '../routes/interrupts.js';
+import { isApprovalGate, isCampaignRun } from './campaignRunGuard.js';
 import { OpenwopError } from '../types.js';
 import { compileToolSchema } from './toolSchemaValidation.js';
 import { createLogger } from '../observability/logger.js';
@@ -323,6 +324,18 @@ export async function resumeInterrupt(
   // (or an ineligible voter 403'd) with the interrupt already spent and the run
   // never resumed.
   if (needsNamedApprover(interrupt.data)) {
+    return { kind: 'failed', runId: interrupt.runId, text: 'this approval needs a named approver — decide it in the inbox' };
+  }
+  // ADR 0942 P4b — a review (veto) window ends only when its timer fires.
+  if (interrupt.kind === 'timer' && (interrupt.data as { autonomy?: { vetoWindow?: unknown } } | undefined)?.autonomy?.vetoWindow === true) {
+    return { kind: 'failed', runId: interrupt.runId, text: 'this step is waiting out a review window and cannot be resumed early' };
+}
+
+  // ADR 0962 D4.1 (as corrected) — an external agent can never satisfy a gate on
+  // a campaign run, ACL or not (the brief/channel/journey content gates carry no
+  // ACL yet: role refs there would resolve to nobody outside a campaign run). Same
+  // refusal text, before anything is consumed, so the gate stays open for the inbox.
+  if ((await isApprovalGate(deps.storage, deps.hostSuite, interrupt)) && (await isCampaignRun(deps.storage, deps.hostSuite, interrupt.runId))) {
     return { kind: 'failed', runId: interrupt.runId, text: 'this approval needs a named approver — decide it in the inbox' };
   }
   // Single use (ADR 0778 C7). This used to be enforced by claiming here, before

@@ -5,6 +5,13 @@
  * node in the background and the reel render lands in the brief's renders list.
  * The mock video seam (provider:'mock' + OPENWOP_TEST_SEAM_ENABLED) drives it
  * end-to-end without a live provider.
+ *
+ * TST-BQR-14. Red when the launch stops returning 202 + runId, a missing brief
+ * stops answering the route's own 'Creative brief not found.' 404, or the run
+ * fails to land a reel render carrying the brief's scene in its prompt (e.g.
+ * the prompt derivation drops `sceneDescription`). Honest ceiling: the run is
+ * dispatched in the background with no completion hook, so the case polls the
+ * run read (100 ms × 50).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -70,6 +77,7 @@ describe('ADR 0411 P3b — Generate reel launch route', () => {
 
     const missing = await c.post(CB(orgId, `/briefs/cbrief:does-not-exist/reel`), { provider: 'mock' });
     expect(missing.status).toBe(404);
+    expect(missing.body.message).toBe('Creative brief not found.');
   });
 
   it('the launched run generates a reel render end-to-end (mock video seam)', async () => {
@@ -91,7 +99,8 @@ describe('ADR 0411 P3b — Generate reel launch route', () => {
 
     const renders = await c.get(CB(orgId, `/briefs/${briefId}/renders`));
     expect(renders.status).toBe(200);
-    const list = (renders.body.renders ?? renders.body) as Array<{ reel?: { prompt: string }; mediaAssetId: string }>;
+    const list = renders.body.renders as Array<{ reel?: { prompt: string }; mediaAssetId: string }>;
+    expect(list).toHaveLength(1);
     const reel = list.find((r) => r.reel);
     expect(reel, 'a reel render should exist').toBeTruthy();
     expect(reel!.reel!.prompt).toContain('fox running');

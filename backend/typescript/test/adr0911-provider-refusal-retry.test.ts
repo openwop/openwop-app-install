@@ -5,6 +5,10 @@
  * Drives the real adapter → `dispatchStructured` → `providers/dispatch.ts`
  * path with `fetch` stubbed, so the HTTP status is mapped by the production
  * `mapDispatchErrors` ladder, not by a test double.
+ *
+ * Tracker TST-BJQ. Red when (probe-witnessed, w65): a 429 is classified retryable;
+ * the vendor excerpt keeps a Google key; the backoff stops doubling; the end-to-end
+ * or the legacy loop reports an all-5xx run as anything but provider_unavailable.
  */
 
 import { describe, expect, it, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
@@ -55,7 +59,10 @@ const call = (emitted: Array<{ type: string; payload: Record<string, unknown> }>
   });
 
 async function failure(p: Promise<unknown>): Promise<AiProviderError> {
-  try { await p; } catch (err) { return err as AiProviderError; }
+  try { await p; } catch (err) {
+    if (err instanceof AiProviderError) return err;
+    throw err;
+  }
   throw new Error('expected the call to fail');
 }
 

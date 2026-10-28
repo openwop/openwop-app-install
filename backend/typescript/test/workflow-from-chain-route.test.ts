@@ -39,8 +39,9 @@ describe('workflow-chain templates (ADR 0163 Phase 2)', () => {
     const body = (await r.json()) as { chains: { chainId: string; label: string; parameters: unknown }[] };
     const mi = body.chains.find((c) => c.chainId === 'market-intel.digest');
     expect(mi, 'market-intel.digest should be installed').toBeTruthy();
-    expect(mi!.label.length).toBeGreaterThan(0);
-    expect(mi!.parameters).toBeTruthy(); // the param schema (topic required)
+    expect(mi!.label).toMatch(/\S/);
+    // the param schema, read through: `topic` is declared and required (pack.json).
+    expect(mi!.parameters).toMatchObject({ type: 'object', required: ['topic'], properties: { topic: { type: 'string' } } });
   });
 
   it('POST /workflows/from-chain instantiates a fresh owned workflow that appears in the scoped list', async () => {
@@ -59,7 +60,8 @@ describe('workflow-chain templates (ADR 0163 Phase 2)', () => {
     // R6 — instantiate SUCCEEDS regardless of node availability (invitation, not
     // breakage); `warnings` is omitted when every typeId resolves (as here, the
     // market-intel node packs are present) or a string[] of unresolved typeIds.
-    expect(body.warnings === undefined || Array.isArray(body.warnings)).toBe(true);
+    // (Round 1 asserted `undefined || Array.isArray`, which no response can fail.)
+    expect(body.warnings).toBeUndefined();
   });
 
   it('"Use template = just copy": copies without a form; RFC 0013 Path A freezes params (no residual tokens); unknown chainId → 404', async () => {
@@ -82,6 +84,7 @@ describe('workflow-chain templates (ADR 0163 Phase 2)', () => {
       body: JSON.stringify({ chainId: 'nope.missing', params: {} }),
     });
     expect(unknown.status).toBe(404);
+    expect(await unknown.json()).toEqual({ error: 'not_found', message: 'workflow chain not found', details: { chainId: 'nope.missing' } });
   });
 
   it('each instantiation mints a distinct workflowId (non-idempotent "use template")', async () => {
@@ -143,7 +146,10 @@ describe('internal chains (RFC 0135) — omitted from the gallery, everything el
     });
     expect(r.status).toBe(201);
     const body = (await r.json()) as { workflowId: string };
-    expect(body.workflowId.length).toBeGreaterThan(0);
+    expect(body.workflowId).toMatch(/^wf\.copy\.openwop-app-kicktodo-lesson-batch\.[0-9a-f]{16}$/);
+    // "succeeds" = a real OWNED copy: it is in the caller's tenant-scoped list.
+    const list = (await (await fetch(url('/workflows'), { headers: { cookie: c } })).json()) as { workflows: { workflowId: string }[] };
+    expect(list.workflows.map((w) => w.workflowId)).toContain(body.workflowId);
   });
 });
 
@@ -168,6 +174,11 @@ describe('from-chain: a blank copy still mints a RUNNABLE workflow', () => {
     expect(r.status, 'copying a template must not require a form').toBe(201);
   });
 
+  // Scope note (wave 64): this case reads the MINTED definition over HTTP and
+  // applies the run-default fill (`withRunAiDefault`) to it; it does not start
+  // a run. It witnesses "the copy pins no vendor + the fill yields a concrete
+  // provider" (probe 8fw5g2-wfc-ai-default, witnessed). An end-to-end dispatch
+  // would be new coverage, so it is not added here.
   it('THE INCIDENT ASSERTION: a call from the minted AI node dispatches with a concrete provider', async () => {
     const c = await cookie();
     const created = await fetch(url('/workflows/from-chain'), {

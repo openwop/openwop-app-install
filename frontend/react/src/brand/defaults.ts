@@ -85,6 +85,18 @@ export const STOCK_OPENWOP_IDENTITY = {
   homeUrl: 'https://openwop.dev/',
 } as const;
 
+/**
+ * Is this the stock OpenWOP identity (the reference app), rather than a
+ * white-label build? Product copy and artwork that describe OpenWOP itself —
+ * the built-in front-page story, the protocol hero schematic — are shown only
+ * when it is (#5226: a white-label domain served the OpenWOP home and hero art
+ * until its operator published its own pages). Compares against the STOCK
+ * identity, never `BRAND_DEFAULTS`, for the reason given above.
+ */
+export function isStockOpenwopBrand(b: Pick<BrandConfig, 'productName'>): boolean {
+  return b.productName === STOCK_OPENWOP_IDENTITY.productName;
+}
+
 export const BRAND_DEFAULTS: BrandConfig = {
   productName: 'OpenWOP',
   brandMark: { pre: 'Open', emphasis: 'WOP', sub: 'agent platform' },
@@ -214,7 +226,49 @@ export const BRAND_ENV_KEYS = {
   defaultTheme: 'VITE_BRAND_DEFAULT_THEME',
   appGateMode: 'VITE_BRAND_APP_GATE_MODE',
   appGatePassword: 'VITE_BRAND_APP_GATE_PASSWORD',
+  /** Read by `privacyHref.ts`, not by the resolver below; listed so this map is
+   *  the complete set of brand build variables (BRAND-01). */
+  privacyUrl: 'VITE_BRAND_PRIVACY_URL',
 } as const;
+
+/** Every `VITE_BRAND_*` build variable this app reads. The Vite config refuses any
+ *  other `VITE_BRAND_*` name, and the compose pack forwards exactly this set
+ *  (`deploy/compose`), so a typo or an unforwarded variable fails loudly instead
+ *  of shipping the default identity (gap-closure plan S01-R3 / BRAND-01). */
+export const KNOWN_BRAND_ENV_VARS: readonly string[] = Object.values(BRAND_ENV_KEYS);
+
+function editDistance(a: string, b: string): number {
+  const row = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    let prev = row[0]!;
+    row[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const cur = row[j]!;
+      row[j] = Math.min(row[j]! + 1, row[j - 1]! + 1, prev + (a[i - 1] === b[j - 1] ? 0 : 1));
+      prev = cur;
+    }
+  }
+  return row[b.length]!;
+}
+
+/** `VITE_BRAND_*` names set in `env` that this app does not read, each with the
+ *  closest known name when one is near (a likely typo). */
+export function unknownBrandEnvVars(
+  env: Record<string, string | undefined>,
+): { name: string; didYouMean?: string }[] {
+  return Object.keys(env)
+    .filter((name) => name.startsWith('VITE_BRAND_') && !KNOWN_BRAND_ENV_VARS.includes(name))
+    .sort()
+    .map((name) => {
+      let best: string | undefined;
+      let bestD = Infinity;
+      for (const known of KNOWN_BRAND_ENV_VARS) {
+        const d = editDistance(name, known);
+        if (d < bestD) { bestD = d; best = known; }
+      }
+      return best !== undefined && bestD <= 3 ? { name, didYouMean: best } : { name };
+    });
+}
 
 /** A non-empty string, or the fallback when unset/blank. */
 export function coalesce(value: string | undefined, fallback: string): string {

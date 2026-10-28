@@ -11,6 +11,11 @@
  * Driven over HTTP. Each run is seeded with the owner stamp the REAL run-create
  * path writes for that session (copied from a `POST /runs`), so ownership is
  * decided against the production shape, not a hand-rolled one.
+ *
+ * TST-BNW-1. Red when: the owner filter on the suggestion list is dropped (a
+ * Viewer/Admin reads another member's pattern), a decision looks a suggestion up
+ * without its owner (another member's dismiss/accept lands), or a Scan mines any
+ * owned run instead of the caller's own (w65 probes).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -47,13 +52,38 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+/** The response fields these cases read (a narrow local view of the work-graph,
+ *  login, workspace and run routes). */
+interface Suggestion {
+  suggestionId: string;
+  status: string;
+  toolSequence: string[];
+  count: number;
+  sampleGoal?: string;
+  exampleRunIds: string[];
+}
+interface AwgBody {
+  suggestions: Suggestion[];
+  suggestion: { status: string };
+  draftSeed: { sampleGoal?: string };
+  user: { userId: string; tenantId: string };
+  workspaceId: string;
+  runId: string;
+  orgId: string;
+  orgs?: Array<{ orgId: string }>;
+  scanned: number;
+  truncated: boolean;
+}
+interface Res { status: number; body: AwgBody }
 function client() {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown, headers: Record<string, string> = {}): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}), ...headers }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    const parsed: unknown = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    // The ONE narrowing in this file: every case asserts the status before it
+    // reads a field, so a refusal body is never read as a success shape.
+    return { status: res.status, body: parsed as AwgBody };
   };
   return { get: (p: string, h?: Record<string, string>) => call('GET', p, undefined, h), post: (p: string, b?: unknown) => call('POST', p, b), put: (p: string, b?: unknown) => call('PUT', p, b) };
 }
@@ -71,7 +101,7 @@ async function signup(c: Client, tag: string): Promise<{ userId: string; tenantI
 async function sharedWorkspace(roles: string[]): Promise<{ ws: string; owner: Client; members: Client[]; ownerUserId: string; memberUserIds: string[] }> {
   const owner = client();
   const ownerUserId = (await signup(owner, 'owner')).userId;
-  const ws = (await owner.post('/host/openwop-app/workspaces', { name: `AWG-${n++}` })).body.workspaceId as string;
+  const ws = (await owner.post('/host/openwop-app/workspaces', { name: `AWG-${n++}` })).body.workspaceId;
   expect((await owner.post(`/host/openwop-app/workspaces/${encodeURIComponent(ws)}/switch`)).status).toBe(200);
   const members: Client[] = [];
   const memberUserIds: string[] = [];
@@ -91,7 +121,7 @@ async function sharedWorkspace(roles: string[]): Promise<{ ws: string; owner: Cl
 async function realStamp(c: Client): Promise<Record<string, unknown>> {
   const r = await c.post('/runs', { workflowId: 'conformance-noop', inputs: {} });
   expect(r.status, JSON.stringify(r.body)).toBeLessThan(300);
-  const run = await storage.getRun(raw(r.body.runId as string));
+  const run = await storage.getRun(raw(r.body.runId));
   expect(run?.metadata?.owner, 'the real create path stamps an owner').toBeTruthy();
   return { owner: run!.metadata!.owner };
 }
@@ -187,7 +217,7 @@ describe('row 52 S2 — dismiss and accept are the pattern owner\'s decisions', 
     await seedPattern(ws, { ...(await realStamp(owner)), goal: OWNER_GOAL }, OWNER_TOOLS);
     const r = await owner.post(sug(ws, '/refresh'));
     expect(r.body.suggestions, JSON.stringify(r.body)).toHaveLength(1);
-    return { ws, owner, other, id: r.body.suggestions[0].suggestionId as string };
+    return { ws, owner, other, id: r.body.suggestions[0]!.suggestionId };
   }
 
   it('another member cannot dismiss it (404), and the owner still sees it', async () => {
@@ -198,10 +228,16 @@ describe('row 52 S2 — dismiss and accept are the pattern owner\'s decisions', 
   });
 
   it('another member cannot accept it (404, no draft seed, no proposal)', async () => {
-    const { ws, other, id } = await ownerPattern();
+    const { ws, owner, other, id } = await ownerPattern();
     const r = await other.post(sug(ws, `/${id}/accept`));
     expect(r.status).toBe(404);
     expect(JSON.stringify(r.body ?? {})).not.toContain('owner-secret');
+    // No proposal was minted for the pattern, and it is still the owner's to decide.
+    const listed = await owner.get('/host/openwop-app/proposals?kind=workflow-chain-pack');
+    expect(listed.status).toBe(200);
+    expect(JSON.stringify(listed.body)).not.toContain(`wg:${id}`);
+    const mine = await owner.get(sug(ws));
+    expect(mine.body.suggestions.map((s) => [s.suggestionId, s.status])).toEqual([[id, 'suggested']]);
   });
 
   it('CONTROL: the owner dismisses it, and a re-scan does not bring it back', async () => {
@@ -253,11 +289,11 @@ describe('row 52 S3 — a fork is not a recurrence', () => {
 /** The org a personal-workspace caller reaches the page through (the SPA takes the first). */
 async function personalOrg(c: Client): Promise<string> {
   const listed = await c.get('/host/openwop-app/orgs');
-  const first = (listed.body?.orgs as Array<{ orgId: string }> | undefined)?.[0]?.orgId;
+  const first = listed.body?.orgs?.[0]?.orgId;
   if (first) return first;
   const made = await c.post('/host/openwop-app/orgs', { name: 'Solo' });
   expect(made.status, JSON.stringify(made.body)).toBeLessThan(300);
-  return made.body.orgId as string;
+  return made.body.orgId;
 }
 const settings = (ws: string): string => `/host/openwop-app/work-graph/orgs/${encodeURIComponent(ws)}/settings`;
 type Sug = { suggestionId: string; status: string; toolSequence: string[]; ownerPrincipal?: string };
@@ -293,7 +329,7 @@ describe('row 52 S6 (ADR 0930 D7/A8) — a personal pause stops processing', () 
     await seedPattern(ws, stamp, ['c.tool', 'd.tool']);
     const first = await owner.post(sug(ws, '/refresh'));
     expect(first.body.suggestions).toHaveLength(2);
-    const dismissed = first.body.suggestions.find((x: Sug) => x.toolSequence[0] === 'a.tool').suggestionId;
+    const dismissed = first.body.suggestions.find((x: Sug) => x.toolSequence[0] === 'a.tool')!.suggestionId;
     expect((await owner.post(sug(ws, `/${dismissed}/dismiss`))).status).toBe(200);
 
     expect((await owner.put(settings(ws), { paused: true })).status).toBe(200);
@@ -553,9 +589,13 @@ describe('row 52 S10 (ADR 0930 D4/D6/A2/A7) — races, collisions and legacy row
 
   it('legacy tenant-wide rows are never served and the next Scan deletes them', async () => {
     const { ws, owner } = await sharedWorkspace([]);
-    const legacy = { ...row(ws, 'x', 'legacy.sig'), suggestionId: `ws-legacy${n++}` } as Record<string, unknown>;
-    delete legacy.ownerPrincipal;
-    await upsertSuggestion(legacy as unknown as Parameters<typeof upsertSuggestion>[0]);
+    // A pre-ADR 0930 row has NO ownerPrincipal. It reaches the store as JSON (the
+    // shape a legacy row is read back in), so it is built through JSON, not a cast.
+    const { ownerPrincipal: _owner, ...legacyFields } = { ...row(ws, 'x', 'legacy.sig'), suggestionId: `ws-legacy${n++}` };
+    void _owner;
+    const legacy: Parameters<typeof upsertSuggestion>[0] = JSON.parse(JSON.stringify(legacyFields));
+    expect('ownerPrincipal' in legacy).toBe(false);
+    await upsertSuggestion(legacy);
     expect((await owner.get(sug(ws))).body.suggestions).toEqual([]);
     await owner.post(sug(ws, '/refresh'));
     expect((await listSuggestions(ws)).filter((s) => s.ownerPrincipal === undefined)).toEqual([]);
@@ -567,7 +607,7 @@ describe('row 52 S11 — closing-grade races (AWG2CD-3/4/6)', () => {
   it('AWG2CD-3: a pause that lands during an accept mints no proposal', async () => {
     const { ws, owner, ownerUserId, members: [viewer] } = await sharedWorkspace(['viewer']);
     await seedPattern(ws, await realStamp(owner), ['race.tool']);
-    const id = (await owner.post(sug(ws, '/refresh'))).body.suggestions[0].suggestionId as string;
+    const id = (await owner.post(sug(ws, '/refresh'))).body.suggestions[0].suggestionId;
     const orig = DurableCollection.prototype.compareAndSwap;
     const spy = vi.spyOn(DurableCollection.prototype, 'compareAndSwap').mockImplementation(async function (this: DurableCollection<unknown>, expected: unknown, next: unknown) {
       const ok = await orig.call(this, expected, next);

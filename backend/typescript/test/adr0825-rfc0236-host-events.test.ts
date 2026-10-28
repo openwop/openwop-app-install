@@ -17,6 +17,18 @@
  *
  * Every negative has a positive control in the same test, so an empty result
  * cannot pass by the path simply being dead.
+ *
+ * Floors are the MEASURED values at w62 (catalog 179 entries; 31 emitter files,
+ * 48 literal names, 12 computed families); shrinking any of them is deliberate.
+ * Tenant isolation on the webhook lane is a DOUBLE guard in routes/webhooks.ts:
+ * `deliverHostEventV2`'s `listWebhooks({ tenantId })` and `fanOutHostEvent`'s
+ * in-loop `sub.tenantId !== tenantId`; only breaking both reds it.
+ *
+ * Tracker TST-BHE-5. Sabotage-witnessed (w62): red when `*` matches a host
+ * type, a major-1 subscription gets the v2 body, both webhook tenant guards are
+ * removed, an ephemeral event is enqueued, a pre-flag id is not projected, an
+ * unadvertised type reaches the stream, the stream or resume tenant filter is
+ * removed, an ephemeral frame carries `id:`, or either flag gate is removed.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';
@@ -24,7 +36,7 @@ import type { AddressInfo } from 'node:net';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import Ajv2020 from 'ajv/dist/2020.js';
+import { Ajv2020 } from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import type { Express } from 'express';
 import { createApp, type AppConfig } from '../src/index.js';
@@ -56,7 +68,7 @@ const V2 = join(here, '..', '..', '..', 'schemas', 'v2');
 
 function ajv(): Ajv2020 {
   const a = new Ajv2020({ strict: false, allErrors: true });
-  (addFormats as unknown as (x: unknown) => void)(a);
+  addFormats(a);
   for (const f of readdirSync(V2)) {
     if (!f.endsWith('.json')) continue;
     try { a.addSchema(JSON.parse(readFileSync(join(V2, f), 'utf8')) as Record<string, unknown>, f); } catch { /* sibling's own problem */ }
@@ -88,7 +100,7 @@ describe('RFC 0236 host-event types — the SSOT', () => {
     expect(twoSegmentHostEventType('openwop-app.whatsapp.health-degraded')).toBe('openwop-app.whatsapp-health-degraded');
     expect(twoSegmentHostEventType('run.completed')).toBeNull();
     const entries = hostEventTypeEntries();
-    expect(entries.length).toBeGreaterThan(150);
+    expect(entries.length).toBeGreaterThanOrEqual(179);
     for (const e of entries) {
       expect(HOST_EVENT_TYPE_PATTERN.test(e.type), e.type).toBe(true);
       expect(e.type.split('.')).toHaveLength(2);
@@ -123,9 +135,9 @@ describe('RFC 0236 host-event types — the SSOT', () => {
       for (const m of code.matchAll(/`(host\.[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)*\.)\$\{/g)) computed.add(m[1]!);
     }
     // Anti-vacuity: the scan found the emitter population.
-    expect(emitterFiles).toBeGreaterThanOrEqual(25);
-    expect(literals.size).toBeGreaterThanOrEqual(40);
-    expect(computed.size).toBeGreaterThanOrEqual(10);
+    expect(emitterFiles).toBeGreaterThanOrEqual(31);
+    expect(literals.size).toBeGreaterThanOrEqual(48);
+    expect(computed.size).toBeGreaterThanOrEqual(12);
     // `openwop-app.<feature>.<x>` literals in an emitter file that are NOT host
     // events (workflow ids, run-event types) — recorded so the exclusion is visible.
     const NOT_HOST_EVENTS = /^openwop-app\.(agents|workflow|kicktodo|insights|authored|evals|conversation|ai|chat|channel|scheduled-chat|node|web|production|host|cdp|kanban)\./;
@@ -345,7 +357,7 @@ describe('RFC 0236 §E — durable host events on major-2 webhooks (flag ON)', (
 // ── 3. discovery ─────────────────────────────────────────────────────────────
 
 describe('RFC 0236 §B — the hostEvents advertisement', () => {
-  const CONFIG = { serviceName: 'test', serviceVersion: '0.0.1' } as unknown as AppConfig;
+  const CONFIG: AppConfig = { port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false };
   it('validates against the vendored capabilities schema and lists the SSOT', () => {
     const doc = buildV2Advertisement(CONFIG);
     const rec = doc.hostEvents as { status: string; witness: string; types: Array<{ type: string; delivery: string }> };
@@ -455,10 +467,12 @@ describe('RFC 0236 §B–§D — /host/events', () => {
     const ids = frames(s.text()).filter((f) => !f.comment).map((f) => f.id);
     expect(ids).toEqual([id('e3'), id('e4')]); // after e1, A only (e2 is B's)
     s.close();
-    // Control: an unknown id resumes from live — nothing replayed.
+    // Control: an unknown id resumes from live — nothing replayed. A fresh live
+    // event is awaited first, so "nothing else" is read after the stream is proven live.
     const s2 = await openStream(ca, 'hev-not-a-retained-id-000000');
-    await new Promise((r) => setTimeout(r, 50));
-    expect(frames(s2.text()).filter((f) => !f.comment)).toEqual([]);
+    await deliverHostExtEvent({ type: 'host.cms.page.published', tenantId: A, payload: {}, eventId: id('f9') });
+    await until(() => s2.text().includes(id('f9')));
+    expect(frames(s2.text()).filter((f) => !f.comment).map((f) => f.id)).toEqual([id('f9')]);
     s2.close();
   });
 

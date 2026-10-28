@@ -5,6 +5,9 @@
  * so it is only honest while that field matches the chain's real entry node.
  * The first cut told people to "set it up in the builder" for a chain that runs
  * only once its event is bound. This pins the two together.
+ *
+ * Tracker TST-BHD-3. Red when (sabotage-witnessed, wave 62): the card's `trigger` for a
+ * play disagrees with its chain's entry node.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';

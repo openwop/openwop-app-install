@@ -26,6 +26,10 @@ import { SharedQuoteView } from './SharedQuoteView.js';
 // chunk stays lean for the common markdown-shaped resources.
 const AppBuilderInteractiveViewer = lazy(() =>
   import('../../chat/artifacts/AppBuilderInteractiveViewer.js').then((m) => ({ default: m.AppBuilderInteractiveViewer })));
+// ADR 0924 D5 — the client approver's page (campaign ops). Lazy and its own
+// chunk: it is a decision page, not a read-only view, so it takes no ShareFrame.
+const PublicApprovalView = lazy(() =>
+  import('../campaign-ops/PublicApprovalView.js').then((m) => ({ default: m.PublicApprovalView })));
 // ADR 0328 P7 — the notes-free shared deck pager, same lazy posture.
 const SharedDeckViewer = lazy(() => import('../slides/SharedDeckViewer.js').then((m) => ({ default: m.SharedDeckViewer })));
 
@@ -40,6 +44,8 @@ const asString = (v: unknown): string => (typeof v === 'string' ? v : '');
 const DEDICATED_ROUTE: Partial<Record<string, (token: string) => string>> = {
   booking_manage: (tok) => `/book/manage/${encodeURIComponent(tok)}`,
   sign_request: (tok) => `/sign/${encodeURIComponent(tok)}`,
+  // ADR 0958 — an external collaborator's invite is accepted while signed in.
+  collab_invite: (tok) => `/collab/accept/${encodeURIComponent(tok)}`,
 };
 
 /** The markdown body for each resource type the public surface resolves. */
@@ -218,6 +224,14 @@ export function SharedSharePage({ token }: { token: string }): JSX.Element {
           body={t('publicGoneBody')}
         />
       </div>
+    );
+  }
+
+  if (shared.resourceType === 'campaign_approval') {
+    return (
+      <Suspense fallback={<div className="u-p-4"><Skeleton /></div>}>
+        <PublicApprovalView token={token} resource={shared.resource} />
+      </Suspense>
     );
   }
 

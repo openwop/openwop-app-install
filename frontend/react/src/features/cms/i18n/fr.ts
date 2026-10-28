@@ -788,4 +788,9 @@ export const messages = {
   pricingContactUrlAria: 'Lien de contact pour les offres sans prix',
   pricingContactUrlPlaceholder: 'Lien de contact pour les offres sans prix (ex. /p/contact)',
   pricingCompareSwipeHint: 'Faites défiler le tableau sur le côté pour voir toutes les offres →',
+  // ADR 0949 P0 — legacy result honesty (SRM, fixed-horizon).
+  expSrmNotice: "La répartition du trafic ne correspond pas aux poids que vous avez définis : aucun verdict n'est affiché. Quelque chose envoie plus de visiteurs vers une version que vers l'autre (une redirection, un cache ou un filtre anti-robots). Corrigez-le, puis lancez un nouveau test.",
+  expStopEarlyNote: "Ce verdict suppose que vous le lisez une seule fois, à la fin. Le consulter sans cesse et s'arrêter la première fois qu'il indique « significatif » rend les faux gagnants beaucoup plus probables. Fixez la durée du test avant de commencer et tenez-la.",
+  expGatesUnavailable: "Les contrôles de promotion n'ont pas pu être lus pour le moment.",
+  expGatesWarn: "Certains contrôles de promotion ne passent pas. Vous pouvez encore promouvoir à la main ; une promotion automatique refuserait.",
 } as const;

@@ -14,6 +14,14 @@
  *      + positive control with the env unset).
  *   E. `OPENWOP_BILLING_EXEMPT_TENANTS` is exempt from the free cap and from every
  *      draw, and the global ceiling still binds it.
+ *
+ * The free-cap refusal and the global refusal share `daily_limit_reached`, so
+ * each refusal below asserts its own MESSAGE.
+ *
+ * Tracker TST-BUL-4. Sabotage-witnessed (w62): red when the payable check is
+ * skipped, the exemption is ignored, the overflow is the whole call, the tenant
+ * ceiling never binds, the global ceiling is skipped, the plan allowance is not
+ * drawn first, or attribution stops recording the charged tokens.
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -102,7 +110,7 @@ describe('A. defaults reproduce today\'s behaviour (no new env set)', () => {
     fakeBalance(10_000);
     process.env.OPENWOP_MANAGED_GLOBAL_DAILY_TOKEN_CAP = '500';
     await storage.incrementManagedUsage(GLOBAL_USAGE_TENANT, 'openwop-free', today(), 500, 0);
-    await expect(chat('user:a4')).rejects.toMatchObject({ code: 'daily_limit_reached' });
+    await expect(chat('user:a4')).rejects.toMatchObject({ code: 'daily_limit_reached', message: 'The free tier is at capacity for today. Resets at 00:00 UTC — or bring your own key.' });
   });
 });
 
@@ -153,14 +161,14 @@ describe('C. the plan\'s monthly allowance pays before the balance', () => {
 
     // Both spent ⇒ refused with the existing managed-cap error.
     setManagedBalanceProvider(null);
-    await expect(chat('user:c1')).rejects.toMatchObject({ code: 'daily_limit_reached' });
+    await expect(chat('user:c1')).rejects.toMatchObject({ code: 'daily_limit_reached', message: `Daily limit reached (${CAP} tokens). Resets at 00:00 UTC.` });
   });
 
   it('no aiCreditsMonthly configured ⇒ no plan allowance (absence is zero, never unlimited)', async () => {
     registerPlanLimitsResolver(async () => ({ workflowRuns: 5 }));
     expect(await planAllowanceRemaining('user:c2')).toBe(0);
     await storage.incrementManagedUsage('user:c2', 'openwop-free', today(), CAP, 0);
-    await expect(chat('user:c2')).rejects.toMatchObject({ code: 'daily_limit_reached' });
+    await expect(chat('user:c2')).rejects.toMatchObject({ code: 'daily_limit_reached', message: `Daily limit reached (${CAP} tokens). Resets at 00:00 UTC.` });
   });
 });
 
@@ -206,13 +214,13 @@ describe('E. OPENWOP_BILLING_EXEMPT_TENANTS (architect #1)', () => {
   it('positive control — the same tenant, not listed, is refused', async () => {
     process.env.OPENWOP_BILLING_EXEMPT_TENANTS = 'conformance-verify';
     await storage.incrementManagedUsage('conformance-prod', 'openwop-free', today(), CAP * 10, 0);
-    await expect(chat('conformance-prod')).rejects.toMatchObject({ code: 'daily_limit_reached' });
+    await expect(chat('conformance-prod')).rejects.toMatchObject({ code: 'daily_limit_reached', message: `Daily limit reached (${CAP} tokens). Resets at 00:00 UTC.` });
   });
 
   it('the global ceiling still binds an exempt tenant (operator backstop)', async () => {
     process.env.OPENWOP_BILLING_EXEMPT_TENANTS = 'conformance-prod';
     process.env.OPENWOP_MANAGED_GLOBAL_DAILY_TOKEN_CAP = '500';
     await storage.incrementManagedUsage(GLOBAL_USAGE_TENANT, 'openwop-free', today(), 500, 0);
-    await expect(chat('conformance-prod')).rejects.toMatchObject({ code: 'daily_limit_reached' });
+    await expect(chat('conformance-prod')).rejects.toMatchObject({ code: 'daily_limit_reached', message: 'The free tier is at capacity for today. Resets at 00:00 UTC — or bring your own key.' });
   });
 });

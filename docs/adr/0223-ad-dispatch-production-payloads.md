@@ -85,6 +85,30 @@ its manifest description now documents the per-platform requirements (the fail-c
 
 ## Known limitations (honest-incomplete, by name)
 
+> **Correction (2026-10-20, ADR 0952 defect P9 — money): every budget unit here assumed a 2-decimal
+> currency.** Google sent `minor × 10⁴` micros, TikTok and LinkedIn `minor / 100` (LinkedIn also with
+> `currencyCode: 'USD'` hard-coded), and Meta passed ISO minor units straight through as `daily_budget`.
+> That set a JPY budget 100× too small and a KWD one 10× too large on Google and TikTok. On Meta, whose
+> currency offsets are its own table (1 for HUF/TWD/IDR/COP/CRC, 100 for BHD/JOD), it set HUF/TWD 100× and
+> BHD/JOD 10× too large. Fixed: `dailyBudgetMinor` is ISO minor units of the AD ACCOUNT's currency. Every
+> live budget write first reads that currency from the platform (Meta `act_<id>?fields=currency`, Google
+> `customer.currency_code`, TikTok `advertiser/info`, LinkedIn `adAccounts/<id>`), after the strategy's own
+> argument checks and before its first write. It then converts through `adsWire.ts` (Google micros =
+> minor × 10^(6 − exponent); Meta = minor × offset / 10^exponent; TikTok/LinkedIn major units with the
+> currency's decimals). An unreported or unsupported currency is a typed failure, never a default. The
+> exponent comes from the one ISO helper (`host/currencyUnits.ts`); Meta's offset table is Meta's, kept
+> separate as billing keeps Stripe's. Test: `ads-budget-currency-units.test.ts` (per exponent and offset
+> class, plus the fail-closed legs), sabotage-witnessed. Limitation 2's LinkedIn `USD` assumption is
+> retired by the same change.
+>
+> **Residuals found by the same audit, not fixed here:** (a) the spend gate compares `dailyBudgetMinor`
+> (account-currency minor units) with `adSpend.approvalThresholdMinor`, which names no currency, so a
+> JPY account's ¥5,000 reads as 5,000 "cents" against a USD-cents threshold. (b) Meta dispatch puts the
+> daily budget on the AD SET (ad-set budgets), while `updateBudget` writes the CAMPAIGN's `daily_budget`
+> (campaign budget optimization): on a campaign this app dispatched, Meta rejects the campaign write. Both
+> are filed against ADR 0952. (b) is FIXED in ADR 0952 P3 (#5078): the budget read and write find the
+> budget where it lives (the campaign, or its one budgeted ad set).
+
 1. **No live-sandbox witness** — see the honesty statement; the operator runbook item stands.
 2. **Targeting is not authored** — Meta ad sets and LinkedIn campaigns are created without a
    targeting spec; the platforms will require one at activation (which is already a human,
@@ -117,3 +141,28 @@ bytes, placeholder chaining, zero calls.
 Plus `campaign-channels-publish-docs.test.ts` (pass-through + linkedin allow-set),
 `campaign-sync` / `campaign-audience-suppression` / `campaign-channels-publish` /
 `ads-metrics-budget` regressions. Backend `tsc --noEmit` clean.
+
+
+### Recovery correction — exact amounts and target ownership (2026-10-21)
+
+The P9 conversion above must reject rounding, unknown ISO-shaped codes and unsafe
+integers. Money writers now use a strict recognized runtime currency catalogue;
+display callers keep their existing fallback. Google/Meta conversions require exact
+integer scaling; LinkedIn decimal strings use quotient/remainder; TikTok numeric
+serialization must preserve the requested decimal amount. Negative, fractional,
+nonfinite and unsafe inputs refuse before provider I/O; zero is explicitly converted
+and included rather than being treated as absent (a vendor may still refuse it).
+Conversion is prepared before any upload/create, including Meta image and LinkedIn
+group creation. HTTP, malformed and business-error currency replies fail closed.
+
+Meta's globally addressed campaign must report the same account used for currency,
+approvals and caps. Both budget changes and activation/pause status reads verify that
+binding; missing/foreign/unreadable ownership refuses before mutation. Campaign-level
+budget writes still address CBO, and currencyless governance thresholds remain the
+separate limitation recorded above. The existing at-most-one launch claim and fresh
+spend-cap coverage checks remain in force; no exactly-once vendor claim is made.
+
+New pure, brokered-fixture, ownership and preview witnesses are authored in the
+existing ads suites. Fixture request accounting records currency reads before early
+returns. These new checks have NOT run: the serialized canonical29 recovery gate
+still owns the heavy slot. No live vendor account was contacted for this correction.

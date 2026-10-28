@@ -20,17 +20,31 @@ import {
   nativeSearchSatisfies,
   engineIsDurable,
 } from '../src/host/webSearchCapability.js';
+import { getProviderConfig } from '../src/providers/catalog.js';
+
+/** Every model id the catalog lists for a provider — read from the SSoT, never typed
+ *  here, so a refresh that renames models cannot leave this file asserting on ids
+ *  that no longer exist (it did: `claude-opus-4-5-20260514` had left the catalog,
+ *  so the "OFF" leg passed for an unknown model — probe 8fw4g4-wsc-model-flag). */
+const modelsOf = (provider: string): string[] => (getProviderConfig(provider)?.models ?? []).map((m) => m.id);
 
 describe('capability — read from the per-MODEL providers.json flag', () => {
   it('google models advertise native search', () => {
+    expect(modelsOf('google'), 'the pinned model is still in the catalog').toContain('gemini-3.8-flash');
     expect(modelSupportsNativeSearch('google', 'gemini-3.8-flash')).toBe(true);
   });
 
   it('anthropic/openai are OFF pending their live check (capability honesty)', () => {
     // Implemented in the dispatchers but deliberately unflagged — see
     // dispatchProviderTools.ts. If this flips, it must flip in providers.json.
-    expect(modelSupportsNativeSearch('anthropic', 'claude-opus-4-5-20260514')).toBe(false);
-    expect(nativeSearchSuitability('anthropic', 'claude-opus-4-5-20260514')).toBe('none');
+    for (const provider of ['anthropic', 'openai']) {
+      const models = modelsOf(provider);
+      expect(models.length, `${provider} has catalog models to check`).toBeGreaterThan(0);
+      for (const model of models) {
+        expect(modelSupportsNativeSearch(provider, model), `${provider}/${model}`).toBe(false);
+        expect(nativeSearchSuitability(provider, model), `${provider}/${model}`).toBe('none');
+      }
+    }
   });
 
   it('an unknown provider or model is `none`, never a default-yes', () => {
@@ -49,9 +63,10 @@ describe('suitability — the licensing gate', () => {
     expect(nativeSearchSatisfies('google', 'gemini-3.8-flash', 'durable')).toBe(false);
   });
 
-  it('a durable provider satisfies BOTH asks (once its capability flag is on)', () => {
-    // Asserted through engineIsDurable so the test states the licensing tier
-    // without depending on a capability flag that is intentionally off today.
+  it('native anthropic/openai are classified DURABLE at the persistence gate', () => {
+    // Retitled in grade-tests wave 63 (it said "satisfies BOTH asks", which it does
+    // not assert): this states the licensing tier through engineIsDurable, without
+    // depending on a capability flag that is intentionally off today.
     expect(engineIsDurable('native:anthropic')).toBe(true);
     expect(engineIsDurable('native:openai')).toBe(true);
   });
@@ -138,7 +153,8 @@ describe('ADR 0101 Phase 4 tracked-gap closures', () => {
     const doc = JSON.parse(readFileSync(join(import.meta.dirname, '../../../providers.json'), 'utf8')) as {
       providers: Array<{ id: string; searchSuitability?: string; _searchSuitabilityNote?: string }>;
     };
-    expect(doc.providers.length).toBeGreaterThan(3); // non-vacuity
+    // MEASURED 2026-10-23: providers.json lists 5 providers.
+    expect(doc.providers.length).toBeGreaterThanOrEqual(5); // non-vacuity
     for (const p of doc.providers) {
       expect(p.searchSuitability, `provider "${p.id}" is missing searchSuitability — a new provider must state whether its native search results may be STORED (see host/webSearchCapability.ts)`).toBeDefined();
       expect(['durable', 'answer-only', 'none']).toContain(p.searchSuitability);
@@ -171,8 +187,7 @@ describe('ADR 0101 Phase 4 tracked-gap closures', () => {
     // None may be ambiguous to `engineIsDurable`, or the dossier gate would be
     // deciding on a value it does not understand.
     const emitted = ['demo', 'brave', 'searx', 'native:google', 'native:anthropic', 'native:openai'];
-    for (const e of emitted) expect(typeof engineIsDurable(e)).toBe('boolean');
-    // …and the classification is the intended one on both sides of the line.
+    // The classification is the intended one on both sides of the line.
     expect(emitted.filter((e) => engineIsDurable(e))).toEqual(['brave', 'searx', 'native:anthropic', 'native:openai']);
   });
 });

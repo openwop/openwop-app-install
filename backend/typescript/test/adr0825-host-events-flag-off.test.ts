@@ -12,6 +12,9 @@
  * It deliberately pins the NON-conformant major-2 body (`runId: "hostext:…"`):
  * that is what live receivers get today, and the flag exists so they keep
  * getting it until an operator turns RFC 0236 on.
+ *
+ * Tracker TST-BHE-4. Sabotage-witnessed (w62): red when the flag-off path takes
+ * the v2 lane, or the legacy `hostext:` runId spelling changes.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';

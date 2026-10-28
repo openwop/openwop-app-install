@@ -54,8 +54,13 @@ import { resolveContactIdByIdentifier, normalizeIdentifierValue, type ContactIde
 import { resolveContactSurvivor, type Contact, type ContactKeyClaim } from './contactsService.js';
 import type { Booking } from './entities/bookings.js';
 import type { SignRequest, SignatureRecord } from './entities/signRequests.js';
-import type { SuppressionEntry } from './suppressionService.js';
+import { listScopedSuppressions, type SuppressionEntry } from './suppressionService.js';
 import { listGmailSyncs, deleteGmailSync } from './gmailSyncService.js';
+import { eraseModelAttribution } from './leadIntel/modelStore.js';
+import { closeLeadBinding, eraseLeadAttribution, hasLeadBinding } from './leadIntel/leadStore.js';
+import { eraseSlaSettingsSubjects } from './leadIntel/speedToLead.js';
+import { eraseRoutingPolicySubjects } from './leadIntel/routingPolicy.js';
+import { onCrmRecordDeleted } from '../../host/crmRecordLifecycle.js';
 
 const log = createLogger('features.crm.erasure');
 
@@ -180,6 +185,11 @@ export async function eraseCrmSubject(tenantId: string, subjectKey: string): Pro
   // `values` and every address-keyed leg below sees them too.
   const tombstones = isOurs ? await tombstonesMergedInto(tenantId, contactId) : [];
   const chainIds = new Set<string>([contactId, ...tombstones.map((t) => t.contactId)]);
+  // Close production authority and fence pending/absent companions BEFORE the
+  // contact cleanup can report success. A late grade/profile CAS must fail.
+  for (const id of chainIds) {
+    if (isOurs || await hasLeadBinding(tenantId, id)) await closeLeadBinding(tenantId, id);
+  }
 
   // ── THE ADDRESS KEY-SET, AND WHY THE LEG ORDER BELOW IS LOAD-BEARING ────────
   //
@@ -284,6 +294,17 @@ export async function eraseCrmSubject(tenantId: string, subjectKey: string): Pro
   for (const value of values) {
     const row = await suppressions.get(`${tenantId}::${value}`);
     if (!row || row.tenantId !== tenantId) continue;
+    if (row.actor === ERASED_VALUE && row.note === undefined) continue;
+    const next: SuppressionEntry = { ...row, actor: ERASED_VALUE };
+    delete next.note;
+    await suppressions.put(next);
+    touched += 1;
+  }
+  //    ADR 0955 D2 — the scoped rows (SMS, and any client-sender row) live under the `#`
+  //    keyspace, keyed by an org this leg does not know, so they are read by that prefix
+  //    (tenant-bounded, the DSAR path only) and matched on their own normalized address.
+  for (const row of await listScopedSuppressions(tenantId)) {
+    if (!values.has(row.address ?? row.email)) continue;
     if (row.actor === ERASED_VALUE && row.note === undefined) continue;
     const next: SuppressionEntry = { ...row, actor: ERASED_VALUE };
     delete next.note;
@@ -397,9 +418,16 @@ export async function eraseCrmTaskAssignees(tenantId: string, subjectKey: string
   if (!tenantId || !subjectKey) return; // fail-closed — never a tenant-wide sweep
   const { forms } = subjectKeyForms(subjectKey);
   await clearTaskAssignee(tenantId, (a) => forms.has(a), false);
+  await eraseModelAttribution(tenantId, subjectKey);
+  await eraseLeadAttribution(tenantId, subjectKey);
+  await eraseRoutingPolicySubjects(tenantId, subjectKey);
+  await eraseSlaSettingsSubjects(tenantId, subjectKey);
 }
 
 export function registerCrmErasure(): void {
+  onCrmRecordDeleted('crm-lead-intelligence', async (event) => {
+    if (event.entity === 'contact') await closeLeadBinding(event.tenantId, event.recordId);
+  });
   registerSubjectEraser(eraseCrmSubject);
   registerSubjectKeyResolver(resolveCrmSubjectKeys);
   registerSubjectEraser(eraseCrmTaskAssignees);
@@ -422,6 +450,9 @@ export function registerCrmErasure(): void {
   declarePiiFields('crm:suppression', ['email', 'note']);
   declarePiiFields('crm:merge-event', ['filledFields', 'absorbedIdentifiers']);
   declarePiiFields('cdp:contact-ident', ['value']);
+  declarePiiFields('crm:lead-model', ['createdBy']);
+  declarePiiFields('crm:lead-model-active', ['activatedBy']);
+  declarePiiFields('crm:lead-sla-settings', ['agencyLead', 'updatedBy']);
   // ADR 0627 D6 — the claim's `claimId` KEY embeds the normalized address.
   // `maskGloballyByFieldName:false` — `claimId` is a generic name (`crm:companykeyclaim`
   // and `crm:dealkeyclaim` carry non-PII claimIds); only THIS entity's is masked.

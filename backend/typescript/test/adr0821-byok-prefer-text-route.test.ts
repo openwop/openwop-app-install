@@ -16,6 +16,10 @@
  *   - an EDITOR (a real member: the ungated GET answers 200) is refused the write
  *     with a 403 naming `host:byok:manage`, and the stored opt-in is unchanged;
  *   - a non-boolean value is a 400, never a coerced opt-in.
+ * Tracker: TST-BNC-4.
+ *
+ * Red when (wave 60 probes w60g4-prefer-*): any value other than `true` (or an
+ * omitted one) stores the opt-in; a non-boolean is accepted; an editor may write.
  */
 import { randomBytes } from 'node:crypto';
 import type { Server } from 'node:http';
@@ -55,7 +59,10 @@ async function stored(cookie: string): Promise<{ preferForText?: boolean } | nul
 }
 const binding = { provider: 'google', model: 'gemini-3.1-flash-lite', credentialRef: REF };
 
+const ENV_KEYS = ['OPENWOP_STORAGE_DSN', 'OPENWOP_SESSION_SECRET', 'OPENWOP_TEST_AUTH_ENABLED', 'OPENWOP_AUTH_DISABLE_COOKIES'] as const;
+const savedEnv: Record<string, string | undefined> = {};
 beforeAll(async () => {
+  for (const k of ENV_KEYS) savedEnv[k] = process.env[k];
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
   process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
@@ -72,7 +79,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   _resetKmsForTesting();
-  delete process.env.OPENWOP_TEST_AUTH_ENABLED;
+  for (const k of ENV_KEYS) { const v = savedEnv[k]; if (v === undefined) delete process.env[k]; else process.env[k] = v; }
   await new Promise<void>((r) => server.close(() => r()));
 });
 
@@ -86,6 +93,13 @@ describe('ADR 0821 D5 — the background-AI opt-in over HTTP', () => {
 
     const off = await call(admin, 'PUT', { ...binding, preferForText: false });
     expect(off.status).toBe(200);
+    expect((await stored(admin))?.preferForText).toBeUndefined();
+
+    // Saving WITHOUT the field (the header's claim) also turns it off.
+    expect((await call(admin, 'PUT', { ...binding, preferForText: true })).status).toBe(200);
+    expect((await stored(admin))?.preferForText).toBe(true);
+    const omitted = await call(admin, 'PUT', binding);
+    expect(omitted.status).toBe(200);
     expect((await stored(admin))?.preferForText).toBeUndefined();
   });
 
@@ -103,6 +117,10 @@ describe('ADR 0821 D5 — the background-AI opt-in over HTTP', () => {
 
   it('a non-boolean opt-in is a 400, never a coerced ON', async () => {
     const admin = await login(ADMIN, WS);
-    expect((await call(admin, 'PUT', { ...binding, preferForText: 'yes' })).status).toBe(400);
+    expect((await call(admin, 'PUT', { ...binding, preferForText: false })).status).toBe(200);
+    const res = await call(admin, 'PUT', { ...binding, preferForText: 'yes' });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: 'validation_error', details: { field: 'preferForText' } });
+    expect((await stored(admin))?.preferForText, 'the refused write stored nothing').toBeUndefined();
   });
 });

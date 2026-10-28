@@ -54,6 +54,7 @@ export const messages = {
   lookupFailedBody: 'A leitura de \u201c{{subjectKey}}\u201d falhou, ent\u00e3o ainda n\u00e3o se sabe nada sobre esta pessoa. Isso n\u00e3o \u00e9 o mesmo que n\u00e3o haver registro de consentimento \u2014 tente novamente antes de concluir qualquer coisa.',
   // Category chips
   categoryAnalytics: 'análise',
+  categorySessionReplay: 'gravação de sessão',
   categoryMarketing: 'marketing',
   categoryNecessaryOnly: 'somente necessários',
 

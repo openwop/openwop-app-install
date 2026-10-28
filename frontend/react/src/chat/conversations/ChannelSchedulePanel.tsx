@@ -16,7 +16,8 @@ import {
   listChannelScheduledPosts, createChannelScheduledPost, setChannelScheduledPostEnabled, deleteChannelScheduledPost,
   type ChannelScheduledPost,
 } from '../../client/channelsClient.js';
-import { formatDateTime, formatTime, formatWeekday } from '../../i18n/format.js';
+import { formatDateTime, formatWeekday } from '../../i18n/format.js';
+import { describeCadence } from '../../schedules/describeCadence.js';
 
 /** A channel-member agent, from the resolved roster. */
 export interface ScheduleAgent { agentId: string; displayName: string }
@@ -75,22 +76,13 @@ export function ChannelSchedulePanel({ channelId, agents }: Props): JSX.Element 
 
   useEffect(() => { void reload(); }, [reload]);
 
-  // Humanize a stored cron for the list. Handles every shape the picker composes
-  // (and the legacy fixed presets); an unrecognized cron shows verbatim.
-  const cadenceLabel = useCallback((cron: string): string => {
-    const parts = cron.trim().split(/\s+/);
-    if (parts.length !== 5) return cron;
-    const [m, h, dom, mon, dw] = parts as [string, string, string, string, string];
-    if (dom !== '*' || mon !== '*') return cron;
-    if (h === '*') return m === '0' ? t('schedLabelHourly') : cron; // only the on-the-hour shape the picker emits
-    const mi = Number(m), hi = Number(h);
-    if (!Number.isInteger(mi) || mi < 0 || mi > 59 || !Number.isInteger(hi) || hi < 0 || hi > 23) return cron;
-    const clock = formatTime(new Date(2000, 0, 1, hi, mi));
-    if (dw === '*') return t('schedLabelDaily', { time: clock });
-    if (dw === '1-5') return t('schedLabelWeekdays', { time: clock });
-    if (/^[0-7]$/.test(dw)) return t('schedLabelWeekly', { day: formatWeekday(Number(dw) % 7), time: clock });
-    return cron;
-  }, [t]);
+  // Humanize a stored cron for the list (ADR 0985 D7 — the one shared parser).
+  const cadenceLabel = useCallback((cron: string): string => describeCadence(cron, {
+    hourly: () => t('schedLabelHourly'),
+    daily: (time) => t('schedLabelDaily', { time }),
+    weekdays: (time) => t('schedLabelWeekdays', { time }),
+    weekly: (day, time) => t('schedLabelWeekly', { day, time }),
+  }), [t]);
 
   const run = useCallback(async (op: () => Promise<unknown>): Promise<void> => {
     setBusy(true);

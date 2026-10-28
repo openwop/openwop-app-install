@@ -21,6 +21,7 @@ import { environmentsFeature } from './environments/routes.js';
 import { recommendationsFeature } from './recommendations/routes.js';
 import { promotionsFeature } from './promotions/routes.js';
 import { funnelsFeature } from './funnels/routes.js';
+import { experimentsFeature } from './experiments/routes.js';
 import { tutorialsFeature } from './tutorials/routes.js';
 import { customDomainsFeature } from './custom-domains/routes.js';
 import { discoveryFeature } from './product-discovery/routes.js';
@@ -63,6 +64,8 @@ import { campaignBriefFeature } from './campaign-brief/routes.js';
 import { creativeBriefsFeature } from './creative-briefs/routes.js';
 import { campaignOrchestrationFeature } from './campaign-orchestration/routes.js';
 import { campaignOpsFeature } from './campaign-ops/routes.js';
+import { campaignPlaybooksFeature } from './campaign-playbooks/routes.js';
+import { collabFeature } from './collab/routes.js';
 import { campaignsFeature } from './campaigns/routes.js';
 import { campaignConnectorsFeature } from './campaign-connectors/routes.js';
 import { webinarsFeature } from './webinars/routes.js';
@@ -152,7 +155,7 @@ export interface AgentWorkspaceTab {
 }
 
 /** Every frontend feature the app composes. Append a new feature here. */
-export const FRONTEND_FEATURES: FrontendFeature[] = [crmFeature, cdpFeature, csmFeature, usersFeature, profilesFeature, mediaFeature, cmsFeature, notificationsFeature, kbFeature, publishingFeature, sharingFeature, formsFeature, consentFeature, analyticsFeature, connectionsFeature, emailFeature, commentsFeature, marketplaceFeature, agentKnowledgeFeature, advisoryBoardFeature, projectsFeature, documentsFeature, priorityMatrixFeature, strategyFeature, brandFeature, campaignBriefFeature, creativeBriefsFeature, campaignOrchestrationFeature, campaignOpsFeature, campaignConnectorsFeature, webinarsFeature, creativeVideoFeature, campaignIntelFeature, campaignsFeature, usageAnalyticsFeature, evalsFeature, scheduledAgentChatsFeature, channelsFeature, chatWidgetFeature, capabilityFirewallFeature, modelRouterFeature, ambientWorkGraphFeature, navigationSettingsFeature, accessHubFeature, chatDeploymentFeature, appBuilderFeature, slidesFeature, drawingsFeature, cadFeature, documentEditorFeature, campaignStudioFeature, canvasPacksFeature, productionFeature, billingFeature, commerceConnectFeature, commerceFeature, commerceUcpFeature, commerceUcpBuyerFeature, recommendationsFeature, promotionsFeature, funnelsFeature, tutorialsFeature, customDomainsFeature, discoveryFeature, manualTestsFeature, designSystemGalleryFeature, territoriesFeature, jobSearchFeature, salesCommissionsFeature, dealersFeature, salesMapsFeature, uiPluginsFeature, dashboardFeature, entitiesFeature, environmentsFeature, kicktodoFeature, kicktodoCirclesFeature,
+export const FRONTEND_FEATURES: FrontendFeature[] = [crmFeature, cdpFeature, csmFeature, usersFeature, profilesFeature, mediaFeature, cmsFeature, notificationsFeature, kbFeature, publishingFeature, sharingFeature, formsFeature, consentFeature, analyticsFeature, connectionsFeature, emailFeature, commentsFeature, marketplaceFeature, agentKnowledgeFeature, advisoryBoardFeature, projectsFeature, documentsFeature, priorityMatrixFeature, strategyFeature, brandFeature, campaignBriefFeature, creativeBriefsFeature, campaignOrchestrationFeature, campaignOpsFeature, collabFeature, campaignPlaybooksFeature, campaignConnectorsFeature, webinarsFeature, creativeVideoFeature, campaignIntelFeature, campaignsFeature, usageAnalyticsFeature, evalsFeature, scheduledAgentChatsFeature, channelsFeature, chatWidgetFeature, capabilityFirewallFeature, modelRouterFeature, ambientWorkGraphFeature, navigationSettingsFeature, accessHubFeature, chatDeploymentFeature, appBuilderFeature, slidesFeature, drawingsFeature, cadFeature, documentEditorFeature, campaignStudioFeature, canvasPacksFeature, productionFeature, billingFeature, commerceConnectFeature, commerceFeature, commerceUcpFeature, commerceUcpBuyerFeature, recommendationsFeature, promotionsFeature, funnelsFeature, experimentsFeature, tutorialsFeature, customDomainsFeature, discoveryFeature, manualTestsFeature, designSystemGalleryFeature, territoriesFeature, jobSearchFeature, salesCommissionsFeature, dealersFeature, salesMapsFeature, uiPluginsFeature, dashboardFeature, entitiesFeature, environmentsFeature, kicktodoFeature, kicktodoCirclesFeature,
   kicktodoEngagementFeature,
   kicktodoCommunityFeature, kicktodoOrgProgramsFeature,
   kicktodoStudioFeature,

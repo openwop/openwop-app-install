@@ -30,6 +30,12 @@
  * `evidence.recoveryBounds`, which the host supplies through the durability seam
  * (`routes/durabilitySeam.ts`, pinned by `rfc0158-durability-seam.test.ts`).
  * The discovery half below is unchanged and still binding.
+ *
+ * Tracker TST-BG3-9. Red when discovery.ts mentions the recovery bound in ANY
+ * casing — `recoveryBound`, or the module's own exports `declaredRecoveryBoundMs` /
+ * `RecoveryBoundTerms` (the first form of this check was case-sensitive and missed
+ * the second spelling; /grade-tests w58 probe `0585r2-case`). Ceiling: a field
+ * spelled without "recoverybound" is invisible to a name scan.
  */
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -44,7 +50,7 @@ describe('ADR 0585 P2 — the bound must NOT become a discovery field', () => {
   it('discovery.ts does not import the recovery-bound module', () => {
     const src = readFileSync(DISCOVERY, 'utf8');
     expect(
-      src.includes('recoveryBound'),
+      /recoverybound/i.test(src),
       'RFC 0158 §E.10 mints NO capability field for the recovery bound — it is bundle-published. ' +
         'Advertising it in discovery would be wire surface the governing RFC declined to mint.',
     ).toBe(false);

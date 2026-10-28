@@ -8,6 +8,10 @@
  *  - architect H4: `OPENWOP_SHARE_PUBLISHER_RECHECK=report` serves and logs.
  *  - D1 step 1: a `system:` (visitor-lane) mint is never re-checked, so a
  *    receipt survives without any member behind it.
+ *
+ * Tracker TST-BHF-3. Red when (sabotage-witnessed, wave 62): a session-authority outage
+ * is read as a refusal, any thrown error darkens a link, report mode stops serving,
+ * or a `system:` mint is re-checked.
  */
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync } from 'node:fs';

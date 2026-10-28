@@ -179,3 +179,42 @@ export async function countRetained(
 
 /** Test-only: clear registered purgers (mirrors `__resetSubjectErasers`). */
 export function __resetRetentionPurgers(): void { purgers.length = 0; }
+
+/**
+ * ADR 0951 D3/D4 — a store whose retention window is a property of the DATA, not
+ * of tenant governance policy. The governance fan-out above runs only for governed
+ * tenants with a configured window, behind `OPENWOP_RETENTION_SWEEP_ENABLED`; a
+ * session recording must still age out at its own default (30 days) on a host
+ * that never configured either. The retention daemon runs these on its DEFAULT-ON
+ * half (beside the ADR 0380 size TTLs), so the window holds on every posture.
+ *
+ * Contract: idempotent; strictly per-row; MUST skip a tenant under legal hold
+ * (the daemon passes no tenant — the sweep resolves each row's); returns what it
+ * deleted and what matched but failed. Never run under a retention dry run.
+ */
+export interface DefaultWindowSweep {
+  feature: string;
+  sweep(nowMs: number): Promise<PurgeOutcome>;
+}
+const defaultWindowSweeps = new Map<string, DefaultWindowSweep>();
+/** Register by feature (a repeated boot overwrites its own slot). */
+export function registerDefaultWindowSweep(s: DefaultWindowSweep): void {
+  defaultWindowSweeps.set(s.feature, s);
+}
+/** Run every registered default-window sweep once. Best-effort per feature: one
+ *  failure is logged and never blocks the rest. */
+export async function runDefaultWindowSweeps(nowMs: number = Date.now()): Promise<PurgeResult[]> {
+  const out: PurgeResult[] = [];
+  for (const s of defaultWindowSweeps.values()) {
+    try {
+      const r = await s.sweep(nowMs);
+      out.push({ feature: s.feature, deleted: r.deleted, failed: r.failed ?? 0, ok: true });
+      if (r.deleted > 0 || (r.failed ?? 0) > 0) log.info('default_window_swept', { feature: s.feature, deleted: r.deleted, failed: r.failed ?? 0 });
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err);
+      log.error('default_window_sweep_failed', { feature: s.feature, error });
+      out.push({ feature: s.feature, deleted: 0, failed: 0, ok: false, error });
+    }
+  }
+  return out;
+}

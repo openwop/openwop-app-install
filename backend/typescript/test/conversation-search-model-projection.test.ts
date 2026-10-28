@@ -28,6 +28,8 @@ import { registerConversationSearchAgentTools, CONVERSATIONS_SEARCH_TOOL_ID } fr
 
 const T = 't-search-projection';
 
+/** The top-level keys of the tool result. `truncated` was added by ADR 0997 D4. */
+const RESULT_KEYS = ['hits', 'truncated'];
 /** The keys a model may see. Adding one here is the deliberate edit the ADR asks for. */
 const MODEL_FACING_KEYS = ['conversationId', 'title', 'type', 'messageId', 'snippet', 'score', 'role'];
 
@@ -52,7 +54,9 @@ describe('ADR 0685 D1 — the tool projects an allowlist, not the engine shape',
     const tool = builtinAgentTool(CONVERSATIONS_SEARCH_TOOL_ID);
     expect(tool, 'the feature registers the tool').toBeDefined();
     const res = await tool!.run({ query: 'wombat' }, { tenantId: T, runId: 'run-proj', actingUserId: 'u-proj' });
-    const out = JSON.parse(res.content) as { hits: Array<Record<string, unknown>> };
+    const out = JSON.parse(res.content) as { hits: Array<Record<string, unknown>>; truncated?: unknown };
+    expect(Object.keys(out).sort(), 'the result envelope is an allowlist too').toEqual([...RESULT_KEYS].sort());
+    expect(out.truncated, 'one candidate is far below the cap').toBe(false);
 
     expect(out.hits, 'non-vacuous: the seeded message is found').toHaveLength(1);
     const hit = out.hits[0]!;

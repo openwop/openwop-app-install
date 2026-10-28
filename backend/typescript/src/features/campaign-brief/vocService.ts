@@ -17,7 +17,7 @@
 import { createHash } from 'node:crypto';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { OpenwopError } from '../../types.js';
-import { cleanString, optionalCleanString } from '../../host/boundedStrings.js';
+import { cleanContent, cleanString, optionalCleanString } from '../../host/boundedStrings.js';
 import { declarePiiFields } from '../../host/dataClassification.js';
 
 export const VOC_SENTIMENTS = ['pain', 'desire', 'objection', 'praise'] as const;
@@ -103,7 +103,7 @@ export interface VocValidationFinding {
 export function validateVocCandidate(raw: VocEvidenceInput, index: number):
   | { ok: true; item: Pick<VocEvidence, 'quote' | 'sourceRef' | 'theme' | 'sentiment'> & { personaHint?: string } }
   | { ok: false; finding: VocValidationFinding } {
-  const quote = cleanString(raw.quote, QUOTE_MAX);
+  const quote = cleanContent(raw.quote, QUOTE_MAX, 'quote');
   if (!quote) return { ok: false, finding: { index, field: 'quote', message: 'Evidence must carry a non-empty verbatim quote.' } };
   const ref = raw.sourceRef;
   if (!ref || typeof ref !== 'object' || Array.isArray(ref)) {

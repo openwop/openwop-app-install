@@ -5,7 +5,8 @@
  *     plus `details.service` (and `details.reason` for a sandbox escape). The
  *     host code is untouched, because the major-1 suite still asserts it.
  *  2. The three ads-publish packs branch on BOTH spellings of a secrets
- *     rejection, so they run on either major.
+ *     rejection, so they run on either major. The packs' `mapSecretError` is lifted
+ *     from the SHIPPED source and executed, so the tested text is what ships.
  */
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -29,14 +30,17 @@ describe('storage rejections on the major-2 wire (RFC 0228 §Decisions)', () => 
   });
 
   it('details the failure already carries win over the defaults', () => {
-    const out = projectV2ErrorObject({ code: 'path_outside_sandbox', message: 'm', details: { reason: 'symlink-escape', path: 'x' } }) as { details: Record<string, unknown> };
-    expect(out.details).toEqual({ service: 'fs', reason: 'symlink-escape', path: 'x', hostCode: 'path_outside_sandbox' });
+    expect(projectV2ErrorObject({ code: 'path_outside_sandbox', message: 'm', details: { reason: 'symlink-escape', path: 'x' } })).toEqual({
+      code: 'forbidden', message: 'm',
+      details: { service: 'fs', reason: 'symlink-escape', path: 'x', hostCode: 'path_outside_sandbox' },
+    });
   });
 
   it('is stable when projected twice, and leaves other aliases without service details', () => {
     const once = projectV2ErrorObject({ code: 'path_outside_sandbox', message: 'm' });
-    expect(projectV2ErrorObject(once)).toBe(once);
-    expect((projectV2ErrorObject({ code: 'invalid_args', message: 'm' }) as { details: Record<string, unknown> }).details).toEqual({ hostCode: 'invalid_args' });
+    // Idempotence (the claim), not object identity (an implementation choice).
+    expect(projectV2ErrorObject(once)).toEqual(once);
+    expect(projectV2ErrorObject({ code: 'invalid_args', message: 'm' })).toEqual({ code: 'validation_error', message: 'm', details: { hostCode: 'invalid_args' } });
   });
 });
 
@@ -46,6 +50,7 @@ function loadMapSecretError(pack: string): (err: unknown) => Mapped {
   const src = readFileSync(fileURLToPath(new URL(`../../../packs/vendor.myndhyve.ads-publish-${pack}/index.mjs`, import.meta.url)), 'utf8');
   const m = /function mapSecretError\(err\) \{\n[\s\S]*?\n\}\n/.exec(src);
   if (!m) throw new Error(`ads-publish-${pack}: mapSecretError not found`);
+  // `new Function` returns `any`: the one boundary cast, onto the shape the cases assert.
   // eslint-disable-next-line @typescript-eslint/no-implied-eval
   return new Function(`${m[0]}; return mapSecretError;`)() as (err: unknown) => Mapped;
 }

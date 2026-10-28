@@ -21,6 +21,7 @@ import { listHostSurfaces } from '../bootstrap/hostSurfaceRegistry.js';
 import type { WorkflowDefinition } from '../executor/types.js';
 import { isTombstoned } from './packTombstones.js';
 import { isParkedPackDirName } from '../bootstrap/mountLocalPacks.js';
+import { matchedLocalizationTag, resolveLocalizedValues } from './i18n/resolveSection.js';
 
 const MAX_SCHEMA_INLINE_BYTES = 8 * 1024;
 
@@ -60,6 +61,11 @@ export interface CatalogNode {
    *  compose the feature, or (on the per-tenant catalog route) the tenant has
    *  it off. */
   requiresFeatureSurfaces?: string[];
+  /** ADR 0937 (Book AI SRV-2) — per-locale `label`/`description` overlays from
+   *  the manifest entry's `x-localizations` (RFC 0138 hatch), keyed by BCP-47
+   *  tag. The catalog route resolves them for the request's `Accept-Language`
+   *  ({@link localizeCatalogNode}); the base fields stay the pack's own text. */
+  localizations?: Record<string, { label?: string; description?: string }>;
   /** RFC 0031 §B — model-capability identifiers this NodeModule depends on. */
   requiredModelCapabilities?: string[];
   /** RFC 0031 §B — host-substitution coordinates when the active model can't
@@ -82,6 +88,8 @@ interface PackManifestNode {
   'x-ports'?: string;
   /** ADR 0917 — feature surfaces the node reads (RFC 0138 `x-` hatch). */
   'x-requiresFeatureSurfaces'?: unknown;
+  /** ADR 0937 — per-locale label/description (RFC 0138 `x-` hatch). */
+  'x-localizations'?: unknown;
   role?: string;
   capabilities?: string[];
   requiredModelCapabilities?: string[];
@@ -173,6 +181,10 @@ export function buildNodeCatalog(): CatalogNode[] {
           inputSchema: readSchemaInline(packDir, entry, n.inputSchemaRef),
           outputSchema: readSchemaInline(packDir, entry, n.outputSchemaRef),
           ...(n['x-ports'] === 'single' ? { ports: 'single' as const } : {}),
+          ...((): { localizations?: CatalogNode['localizations'] } => {
+            const localizations = readNodeLocalizations(n['x-localizations']);
+            return localizations ? { localizations } : {};
+          })(),
           requiresHostSurfaces: required,
           missingHostSurfaces: missing,
           ...(featureSurfaces.length > 0 ? { requiresFeatureSurfaces: featureSurfaces } : {}),
@@ -355,4 +367,47 @@ function readSchemaInline(packDir: string, packEntry: string, ref: string | unde
   } catch {
     return undefined;
   }
+}
+
+
+// ADR 0937 — the localized-content tag grammar's shape (`ll`, `ll-RR`, `ll-Ssss`,
+// `ll-Ssss-RR`); a key outside it is dropped, never served.
+const LOCALE_TAG_RE = /^[a-z]{2,3}(?:-[A-Z][a-z]{3})?(?:-(?:[A-Z]{2}|[0-9]{3}))?$/;
+const MAX_LABEL = 120;
+const MAX_DESCRIPTION = 2000;
+
+/** ADR 0937 — read a manifest entry's `x-localizations`, keeping only
+ *  well-formed tags and non-empty, bounded `label`/`description` strings. */
+export function readNodeLocalizations(raw: unknown): CatalogNode['localizations'] | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const out: NonNullable<CatalogNode['localizations']> = {};
+  for (const [tag, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (!LOCALE_TAG_RE.test(tag) || !v || typeof v !== 'object' || Array.isArray(v)) continue;
+    const { label, description } = v as { label?: unknown; description?: unknown };
+    const entry: { label?: string; description?: string } = {};
+    if (typeof label === 'string' && label.trim() && label.length <= MAX_LABEL) entry.label = label;
+    if (typeof description === 'string' && description.trim() && description.length <= MAX_DESCRIPTION) entry.description = description;
+    if (entry.label !== undefined || entry.description !== undefined) out[tag] = entry;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
+ * ADR 0937 — a node's palette text for the reader's most-preferred locale,
+ * through the ONE normative chain every localized surface here shares
+ * (`resolveLocalizedValues`: exact → script family → language → base). The
+ * pack's own text is the base. The overlay map is not served, and `servedTag`
+ * names the overlay used (`null` = the base), for `Content-Language`.
+ */
+export function localizeCatalogNode(node: CatalogNode, locale: string, baseLocale: string): { node: CatalogNode; servedTag: string | null } {
+  const { localizations, ...rest } = node;
+  const servedTag = matchedLocalizationTag(localizations, locale, baseLocale);
+  if (!localizations || servedTag === null) return { node: rest, servedTag: null };
+  const values = resolveLocalizedValues(
+    { label: node.label, description: node.description },
+    localizations,
+    locale,
+    baseLocale,
+  );
+  return { node: { ...rest, label: values.label, description: values.description }, servedTag };
 }

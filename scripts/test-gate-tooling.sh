@@ -9,6 +9,22 @@
 #
 # Fast by construction: no build, no browser, no tsc. Seconds, not minutes.
 set -uo pipefail
+# ADR 0991 — the scripts under test publish to the real cross-machine release
+# bus by default; a test must never write to it.
+export OPENWOP_RELEASE_BUS=off
+# Isolation (2026-10-26): the merge-train runs below must not register with the
+# machine's real broker (a fake 'train 4242' reached its log) nor publish a
+# machine-wide train marker other repos' gates would wait on (scripts/lib/ci-claims.sh).
+export OPENWOP_BROKER_OBSERVE=off
+export OPENWOP_CI_CLAIMS_DIR=/dev/null/owp-ci-claims   # cannot be created: no marker is written or read
+
+# A git hook runs with GIT_DIR (and in a linked worktree GIT_INDEX_FILE etc.)
+# exported. Every fixture in this file that does `git init`/`git config` in a temp dir
+# would then act on THIS repository instead: MEASURED 2026-10-26 from the
+# pre-push hook of a linked worktree, it set core.bare=true and a fixture
+# user.email on the real .git/config and failed 7 gate-tooling tests that pass
+# when run by hand. The gate resolves the repo from its own path, so drop them.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=lib/gate-ports.sh
@@ -29,6 +45,13 @@ bad()  { FAIL=$((FAIL + 1)); echo "  ✗ $1" >&2; }
 check() { if [ "$1" = "$2" ]; then ok "$3"; else bad "$3 (got '$1', want '$2')"; fi; }
 
 echo "== gate tooling tests =="
+
+# The progress banner must not execute the package-manager commands it names.
+if bash "$ROOT/scripts/test-ci-banner.sh"; then
+  ok "CI build-config banner prints literally without running npm"
+else
+  bad "CI build-config banner runs npm or changes its displayed commands"
+fi
 
 # ---------------------------------------------------------------- GATE-4
 # `lsof` unusable must be REFUSED, never read as "every port is free".
@@ -626,6 +649,23 @@ if grep -q 'steward_lane "\$ROOT"' "$ROOT/scripts/ci.sh" && grep -q 'steward-lan
   ok "ci.sh consults steward_lane and exits on a refusal"
 else
   bad "ci.sh does not consult steward_lane (or does not exit when it refuses)"
+fi
+# The skill-mirror gate skips only in a bundle with BOTH skill dirs stripped.
+mkdir -p "$SLT/claude-only/.claude/skills/x" "$SLT/agents-only/.agents/skills"
+check "$(skill_mirror_lane "$SLT/bundle" skip)" skip "skill mirror: bundle with both skill dirs stripped SKIPS"
+check "$(skill_mirror_lane "$SLT/full" take)" take "skill mirror: full repo always TAKES, even with both skill dirs absent"
+check "$(skill_mirror_lane "$SLT/claude-only" skip)" take "skill mirror: bundle that re-adds .claude/skills TAKES"
+check "$(skill_mirror_lane "$SLT/agents-only" skip)" take "skill mirror: bundle with only .agents/skills TAKES"
+# ...and TAKE really fails when .claude/skills exists without its mirror.
+mkdir -p "$SLT/claude-only/scripts"
+cp "$ROOT/scripts/check-agent-skill-mirror.mjs" "$SLT/claude-only/scripts/"
+echo x > "$SLT/claude-only/.claude/skills/x/SKILL.md"
+node "$SLT/claude-only/scripts/check-agent-skill-mirror.mjs" >/dev/null 2>&1
+check "$?" 1 "skill mirror: .claude/skills with .agents/skills missing FAILS"
+if grep -q 'skill_mirror_lane "\$ROOT" "\$STEWARD_LANE_MODE"' "$ROOT/scripts/ci.sh"; then
+  ok "ci.sh gates the skill-mirror step on skill_mirror_lane"
+else
+  bad "ci.sh runs the skill-mirror step without consulting skill_mirror_lane"
 fi
 rm -rf "$SLT"
 

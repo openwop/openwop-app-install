@@ -3,10 +3,11 @@
  * surface (ADR 0014 Phase 2). The first node pack to call a FEATURE surface
  * (`ctx.features.<id>`), as opposed to a core host surface (`ctx.knowledge`).
  *
- * The three READ nodes are `role: "action"` (they read the tenant KB store — a
- * side-effect), so the engine records their outputs in the event log and
- * replay/fork read the recorded result rather than re-querying. `reindex-drain`
- * (v1.2.0, ADR 0643 D2) is `role: "side-effect"` — see its own docblock.
+ * ADR 0904 correction: search and RAG remain action reads and declare side-effectful,
+ * because reads can hydrate indexes and dispatch paid providers. Replay serves
+ * their recorded outcome; action alone never provided that protection.
+ * listCollections remains a current-state read. reindex-drain keeps its
+ * scheduler-only side-effect declaration (ADR 0643 D2).
  * Pure-JS, Node-20 stdlib only.
  */
 
@@ -65,7 +66,7 @@ export async function listCollections(ctx) {
 /**
  * ADR 0643 D1b/D2 — drive ONE bounded slice of an in-progress reindex.
  *
- * `role: "side-effect"`, unlike the three reads above, and not as a formality:
+ * `role: "side-effect"`, like search/RAG, and not as a formality:
  * the terminal branch of `drainReindex` flips the collection's `activeSignature`
  * and DELETES the old namespace's vectors. A `mode:'replay'` fork that
  * re-executed this would delete the namespace the collection is currently

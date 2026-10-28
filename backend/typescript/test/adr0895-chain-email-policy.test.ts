@@ -5,8 +5,16 @@
  * Born-red on the pre-ADR adapter: it passed `from` through verbatim, honoured an
  * author's `purpose: "transactional"` from anyone, and counted nothing. The
  * non-chain lane (no `lane`) is pinned unchanged in the last case.
+ *
+ * Tracker TST-BJA. Red when (probe-witnessed, w65): the sender match drops its
+ * lower-casing, the root-org fallback or the unreadable-store refusal; a non-admin
+ * or actorless `transactional` is honoured; the meter counts a refused send, checks
+ * `used > limit`, or ignores `0`; the non-chain lane takes the chain policy.
+ * The actorless leg is held twice (`!actingUserId` and `assertRunOrgScope` throwing
+ * for an undefined actor, chainEmailPolicy.ts): each alone keeps it marketing.
+ * The meter's hour window reads `Date.now()`, so the D3 cases fake Date mid-hour.
  */
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from '../src/index.js';
@@ -43,7 +51,7 @@ describe('ADR 0895 — chain-lane email policy', () => {
     process.env.OPENWOP_SENDGRID_API_BASE = `http://127.0.0.1:${(sg.address() as AddressInfo).port}`;
     for (const [tenantId, userId] of [[ADMIN_T, 'chainadmin'], [SHARED_T, 'u2'], [NO_SENDER_T, 'nosender']] as const) {
       await createSecretConnection({ tenantId, provider: 'sendgrid', kind: 'api_key', secret: 'SG.testkey', scope: 'user', userId });
-      await storage.insertRun({ runId: `run-${tenantId}`, workflowId: 'w', tenantId, status: 'pending', inputs: null, metadata: {}, configurable: {}, createdAt: 'x', updatedAt: 'x' });
+      await storage.insertRun({ runId: `run-${tenantId}`, workflowId: 'w', tenantId, status: 'pending', inputs: null, metadata: {}, configurable: {}, createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString() });
     }
     await ensureWorkspaceRootOrg({ orgId: ADMIN_T, tenantId: ADMIN_T, name: 'A', createdBy: 'chainadmin' });
     await createMember({ orgId: ADMIN_T, tenantId: ADMIN_T, displayName: 'Admin', subject: 'chainadmin', roles: ['owner'] });
@@ -119,6 +127,9 @@ describe('ADR 0895 — chain-lane email policy', () => {
   });
 
   describe('D3 — recipient meter', () => {
+    // The window is a clock hour: pin Date mid-hour so the sends never straddle one.
+    beforeEach(() => { vi.useFakeTimers({ toFake: ['Date'], now: Date.UTC(2026, 9, 17, 12, 30) }); });
+    afterEach(() => { vi.useRealTimers(); });
     it('refuses the send that would overrun the hourly budget, and a refusal spends nothing', async () => {
       process.env.OPENWOP_EMAIL_CHAIN_RECIPIENTS_PER_HOUR = '3';
       const a = chain(NO_SENDER_T, 'nosender');

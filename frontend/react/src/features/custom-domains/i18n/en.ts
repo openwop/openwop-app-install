@@ -6,7 +6,7 @@ export const messages = {
   eyebrow: 'Marketing',
   title: 'Custom domains',
   lede: 'Serve your published pages, funnels, and storefront on your own hostname.',
-  howItWorks: 'Add a hostname, publish the TXT record shown below at _openwop-verify.<hostname>, then Verify. TLS and routing for the hostname are configured by your operator (see the deploy guide) — a live domain here is the ownership half.',
+  howItWorks: 'Add a hostname, publish the TXT record shown under DNS records at _openwop-verify.<hostname>, then Verify. Once ownership is verified, the platform team issues the HTTPS certificate for the hostname and points it at your site; the DNS records list shows anything else to add.',
   notEnabledTitle: 'Custom domains are not enabled',
   notEnabledBody: 'Ask an administrator to turn on the Custom domains feature in Admin → Feature toggles.',
   emptyTitle: 'No domains yet',

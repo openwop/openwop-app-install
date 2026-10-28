@@ -45,8 +45,14 @@ describe('ADR 0003 Phase 4d — rekeyLegacyMemberSubjects', () => {
     await ensurePersonalWorkspace({ tenantId: TENANT, ownerSubject: legacyOidc, ownerDisplayName: 'Alice' });
 
     // (b) A member already keyed by the canonical `user:<id>` subject — must be
-    // left untouched.
+    // left untouched. A durable user whose principalId IS that string exists
+    // too, so the user lookup WOULD resolve it (to a different `user:<hash>`):
+    // the canonical-prefix check is then the ONLY thing that keeps it. Without
+    // this user the `!user` skip covered it as well, and deleting the prefix
+    // check changed nothing (8fw3g2-rk-canonical was vacuous in round 1).
     const canonicalSubject = 'user:already-canonical';
+    const canonUser = await createUser({ tenantId: TENANT, principalId: canonicalSubject, source: 'manual' });
+    expect(canonUser.userId).not.toBe(canonicalSubject);
     await createMember({
       orgId: TENANT,
       tenantId: TENANT,

@@ -33,3 +33,21 @@ function isWordSlug(run: string): boolean {
   if (/(?:^|-)(sk-|xox[baprs]-)/.test(run)) return false;
   return run.split('-').every((seg) => seg.length <= 20);
 }
+
+/**
+ * The CONTENT lane (published or sent text): only these high-precision credential
+ * shapes are refused there. The generic `[A-Za-z0-9_-]{40,}` rule above is a log
+ * and model-context heuristic; on content it destroys signed URLs, hashes and
+ * slugs, so content keeps such runs byte for byte. Kept as its own constant so the
+ * log scrub's regex stays exactly as it is.
+ */
+const CREDENTIAL_SHAPES = /\b(sk-[A-Za-z0-9_-]{8,}|AKIA[0-9A-Z]{12,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{8,}|AIza[0-9A-Za-z_-]{35})/;
+
+/** Does `text` contain a credential-shaped token? Returns its kind only, never
+ *  the token, so a refusal cannot echo the secret. */
+export function findCredentialShape(text: string): string | null {
+  const m = CREDENTIAL_SHAPES.exec(text);
+  if (!m) return null;
+  const t = m[1]!;
+  return t.startsWith('sk-') ? 'api-key' : t.startsWith('AKIA') ? 'aws-access-key' : t.startsWith('gh') || t.startsWith('github_pat_') ? 'github-token' : t.startsWith('xox') ? 'slack-token' : 'google-api-key';
+}

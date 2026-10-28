@@ -16,7 +16,8 @@ import { randomUUID } from 'node:crypto';
 import { DurableCollection } from '../../../host/hostExtPersistence.js';
 import { OpenwopError } from '../../../types.js';
 import { slugify } from '../../../host/slug.js';
-import { MAX, MAX_PER_ORG_ENTITIES, assertUnderCap, cleanStr, nowIso, optStr } from './shared.js';
+import { cleanContent, optionalCleanContent } from '../../../host/boundedStrings.js';
+import { MAX, MAX_PER_ORG_ENTITIES, assertUnderCap, nowIso } from './shared.js';
 import { isValidTimeZone, parseHhmm, type WeeklyHours } from '../bookingTime.js';
 import { crmMutated, emitOptsOf, type CrmEmitOptions } from '../emit.js';
 
@@ -196,7 +197,11 @@ export async function createBookingLink(input: BookingLinkInput & CrmEmitOptions
   assertConfig({ timezone: input.timezone, weeklyHours, durations });
 
   const bookingLinkId = input.bookingLinkId ?? `booking-link:${randomUUID()}`;
-  const title = cleanStr(input.title, MAX.name, 'Meeting');
+  const title = cleanContent(input.title, MAX.name, 'title', 'Meeting');
+  // Complete fallible content validation before reserving a public slug.
+  const description = optionalCleanContent(input.description, MAX.body, 'description');
+  const videoLink = optionalCleanContent(input.videoLink, MAX.short, 'videoLink');
+  const location = optionalCleanContent(input.location, MAX.short, 'location');
   const slug = await claimSlug(input.slug || title, bookingLinkId, input.tenantId);
   const ts = nowIso();
   const link: BookingLink = {
@@ -206,7 +211,7 @@ export async function createBookingLink(input: BookingLinkInput & CrmEmitOptions
     slug,
     ownerUserId: input.ownerUserId,
     title,
-    ...(optStr(input.description, MAX.body) ? { description: optStr(input.description, MAX.body) } : {}),
+    ...(description ? { description } : {}),
     status: input.status && BOOKING_LINK_STATUSES.includes(input.status) ? input.status : 'draft',
     timezone: input.timezone,
     weeklyHours,
@@ -215,8 +220,8 @@ export async function createBookingLink(input: BookingLinkInput & CrmEmitOptions
     bufferAfterMin: boundedInt(input.bufferAfterMin, 0, LIMITS.maxNoticeMin, 0),
     minNoticeMin: boundedInt(input.minNoticeMin, 0, LIMITS.maxNoticeMin, 0),
     maxAdvanceDays: boundedInt(input.maxAdvanceDays, 1, LIMITS.maxAdvanceDays, 60),
-    ...(optStr(input.videoLink, MAX.short) ? { videoLink: optStr(input.videoLink, MAX.short) } : {}),
-    ...(optStr(input.location, MAX.short) ? { location: optStr(input.location, MAX.short) } : {}),
+    ...(videoLink ? { videoLink } : {}),
+    ...(location ? { location } : {}),
     createdBy: input.createdBy,
     createdAt: ts,
     updatedAt: ts,
@@ -236,9 +241,9 @@ export async function updateBookingLink(
   const cur = await getBookingLink(tenantId, orgId, bookingLinkId);
   if (!cur) return null;
   const next: BookingLink = { ...cur, updatedAt: nowIso() };
-  if (patch.title !== undefined) next.title = cleanStr(patch.title, MAX.name, cur.title);
+  if (patch.title !== undefined) next.title = cleanContent(patch.title, MAX.name, 'title', cur.title);
   if (patch.description !== undefined) {
-    const d = optStr(patch.description, MAX.body);
+    const d = optionalCleanContent(patch.description, MAX.body, 'description');
     if (d) next.description = d; else delete next.description;
   }
   if (patch.status !== undefined && BOOKING_LINK_STATUSES.includes(patch.status)) next.status = patch.status;
@@ -250,11 +255,11 @@ export async function updateBookingLink(
   if (patch.minNoticeMin !== undefined) next.minNoticeMin = boundedInt(patch.minNoticeMin, 0, LIMITS.maxNoticeMin, cur.minNoticeMin);
   if (patch.maxAdvanceDays !== undefined) next.maxAdvanceDays = boundedInt(patch.maxAdvanceDays, 1, LIMITS.maxAdvanceDays, cur.maxAdvanceDays);
   if (patch.videoLink !== undefined) {
-    const v = optStr(patch.videoLink, MAX.short);
+    const v = optionalCleanContent(patch.videoLink, MAX.short, 'videoLink');
     if (v) next.videoLink = v; else delete next.videoLink;
   }
   if (patch.location !== undefined) {
-    const l = optStr(patch.location, MAX.short);
+    const l = optionalCleanContent(patch.location, MAX.short, 'location');
     if (l) next.location = l; else delete next.location;
   }
   // Re-validate the (possibly changed) availability config before persisting.

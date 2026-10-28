@@ -4,9 +4,16 @@
  * route / format / session is fetched (incl. an unencoded session id), the
  * download is not triggered, named or cleaned up, the import body loses `data`,
  * or a non-OK response resolves silently instead of throwing.
+ *
+ * ADR 0992 D9: the file is named by the server's Content-Disposition (a UUID or a
+ * hostile header never becomes the name); an import failure is TYPED so the chat can
+ * say why; a ChatGPT archive is recognised and listed; the idempotency key rides the body.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { exportConversation, importConversation, detectImportFormat } from '../../client/chatExportClient.js';
+import {
+  exportConversation, importConversation, detectImportFormat, isChatGptArchive, listArchiveConversations,
+  fileNameFromDisposition, fileDigest, ChatImportError,
+} from '../../client/chatExportClient.js';
 import { config } from '../../client/config.js';
 
 const realCreate = URL.createObjectURL;
@@ -36,13 +43,20 @@ describe('exportConversation', () => {
 
     expect(String(fetchMock.mock.calls[0]![0])).toBe(`${config.baseUrl}/host/openwop-app/chat-export/sess%201%2Fx?format=md`);
     // Download triggered once, from an attached anchor, with the blob url and the named file.
-    expect(clicked).toEqual([{ href: 'blob:x', download: 'conversation-sess 1/x.md', attached: true }]);
+    // ADR 0992 D9 — no Content-Disposition → a neutral name, never the session id.
+    expect(clicked).toEqual([{ href: 'blob:x', download: 'conversation.md', attached: true }]);
     const blob = createObjectURL.mock.calls[0]![0];
     if (!(blob instanceof Blob)) throw new Error('createObjectURL was not given a Blob');
     expect(blob.type).toBe('text/markdown');
     // Cleaned up: the object url is revoked and the anchor removed.
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:x');
     expect(document.body.querySelector('a[download]')).toBeNull();
+  });
+
+  it('names the download from the server (Content-Disposition); refuses an unsafe name', () => {
+    expect(fileNameFromDisposition('attachment; filename="launch-plan.md"')).toBe('launch-plan.md');
+    expect(fileNameFromDisposition('attachment; filename="../../etc/passwd"')).toBeNull();
+    expect(fileNameFromDisposition(null)).toBeNull();
   });
 
   it('throws on a non-OK response (so the caller can surface it)', async () => {
@@ -72,8 +86,55 @@ describe('importConversation', () => {
     expect(init?.method).toBe('POST');
     expect(JSON.parse(String(init?.body))).toEqual({ format: 'openwop', data: { version: 'openwop-v1' } });
   });
-  it('throws on a non-OK response', async () => {
-    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async () => new Response(null, { status: 400 })));
-    await expect(importConversation('openwop', {})).rejects.toThrow(/import_failed_400/);
+  it('ADR 0992 D4 — sends the idempotency key when given', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response('{}', { status: 201 }));
+    vi.stubGlobal('fetch', fetchMock);
+    await importConversation('chatgpt', { mapping: {} }, 'abc:3');
+    expect(JSON.parse(String(fetchMock.mock.calls[0]![1]?.body))).toMatchObject({ idempotencyKey: 'abc:3' });
+  });
+  it.each([
+    [413, null, 'too_large'],
+    [409, { error: 'conflict', details: { reason: 'import_conflict' } }, 'conflict'],
+    [400, { error: 'validation_error', details: { reason: 'empty' } }, 'empty'],
+    [400, { error: 'validation_error', details: { reason: 'not_openwop' } }, 'unsupported'],
+    [500, null, 'failed'],
+  ] as const)('ADR 0992 D9 — a %i (%j) is a typed %s failure', async (status, body, failure) => {
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async () => new Response(body ? JSON.stringify(body) : null, { status })));
+    const err = await importConversation('openwop', {}).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ChatImportError);
+    expect((err as ChatImportError).failure).toBe(failure);
+  });
+});
+
+describe('ADR 0992 D9 — ChatGPT archives', () => {
+  const archive = [
+    { title: 'Older', create_time: 1_600_000_000, mapping: { a: { message: { author: { role: 'user' }, content: { parts: ['hi'] } } }, b: { message: null } } },
+    { title: '', create_time: 1_700_000_000, mapping: { a: { message: { author: { role: 'user' }, content: { parts: ['x'] } } }, b: { message: { author: { role: 'assistant' }, content: { parts: ['', 'y'] } } } } },
+  ];
+  it('recognises an archive (an array of conversation trees), not a single export', () => {
+    expect(isChatGptArchive(archive)).toBe(true);
+    expect(isChatGptArchive(archive[0])).toBe(false);
+    expect(isChatGptArchive([])).toBe(false);
+    expect(isChatGptArchive([{ version: 'openwop-v1' }])).toBe(false);
+  });
+  it('counts only the user/assistant turns the server will store (grade-ux CX2UX-4)', () => {
+    const [entry] = listArchiveConversations([{ mapping: {
+      a: { message: { author: { role: 'system' }, content: { parts: ['sys'] } } },
+      b: { message: { author: { role: 'tool' }, content: { parts: ['tool out'] } } },
+      c: { message: { author: { role: 'user' }, content: { parts: ['q'] } } },
+    } }]);
+    expect(entry!.messageCount).toBe(1);
+  });
+  it('lists conversations newest first, keeping each one\'s index into the file', () => {
+    const entries = listArchiveConversations(archive);
+    expect(entries.map((e) => e.index)).toEqual([1, 0]);
+    expect(entries[0]).toMatchObject({ title: '', messageCount: 2 });
+    expect(entries[1]).toMatchObject({ title: 'Older', messageCount: 1, createdAt: new Date(1_600_000_000_000).toISOString() });
+  });
+  it('digests the file deterministically for the idempotency key', async () => {
+    const a = await fileDigest('same');
+    expect(a).toMatch(/^[0-9a-f]{64}$/);
+    expect(await fileDigest('same')).toBe(a);
+    expect(await fileDigest('other')).not.toBe(a);
   });
 });

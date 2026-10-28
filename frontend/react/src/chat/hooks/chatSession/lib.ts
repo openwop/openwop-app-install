@@ -72,6 +72,9 @@ export function parsePersistedMessages(rows: readonly ChatMessagePersisted[]): C
         // Grade-ux fix — the system-notice discriminator (e.g. 'voice-degraded')
         // must survive reload so the warning treatment isn't live-only.
         ...(typeof rowMeta.kind === 'string' ? { kind: rowMeta.kind } : {}),
+        // ADR 0992 D9 — the import provenance the importer writes into the ROW meta.
+        // It only ever ADDS a caution label, so a row that claims it costs nothing.
+        ...(rowMeta.source === 'import' ? { imported: true as const } : {}),
       };
       const withLifecycle = (m: ChatMessage): ChatMessage =>
         Object.keys(lifecycle).length ? { ...m, meta: { ...m.meta, ...lifecycle } } : m;

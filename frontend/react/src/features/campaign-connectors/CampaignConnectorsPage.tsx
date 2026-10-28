@@ -26,6 +26,7 @@ import {
   type KpiSummary, type AdPlatform, type ImportResult, type OrgRef, type SyncResult,
 } from './campaignConnectorsClient.js';
 import { SyncSettingsCard } from './SyncSettingsCard.js';
+import { CatalogFeedCard } from './CatalogFeedCard.js';
 
 type TFn = ReturnType<typeof useTranslation>['t'];
 const fmt = (n: number): string => formatNumber(Math.round(n));
@@ -248,6 +249,8 @@ export function CampaignConnectorsPage(): JSX.Element {
           {/* ADR 0907 D3 — outside the KPI branch: an org with no rows yet is
               exactly the one that needs to point the sync at its ad account. */}
           {kpi !== null || kpiFailed ? <SyncSettingsCard orgId={orgId} platforms={livePlatforms} onSynced={() => void refresh(orgId)} /> : null}
+          {/* ADR 0952 D6 — the product feed from the commerce catalog. */}
+          {kpi !== null || kpiFailed ? <CatalogFeedCard orgId={orgId} /> : null}
         </>
       )}
 

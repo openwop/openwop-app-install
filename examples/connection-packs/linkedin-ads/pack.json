@@ -1,11 +1,11 @@
 {
   "name": "core.openwop.connections.linkedin-ads",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "kind": "connection",
-  "description": "LinkedIn Ads connection pack (RFC 0095) \u2014 OAuth2 provider for the LinkedIn Marketing API. Reach is `openapi`: the manifest declares the global LinkedIn OAuth hosts and points at the Marketing API reference, consumed by the core.openwop.http nodes. Carries NO secret; the operator supplies the client id/secret host-side (ADR 0024 \u00a77). One of the ad platforms Campaign Studio syncs (ADR 0159) \u2014 and, since ADR 0223, a real dispatch target: `publish-ad-variants` creates a DRAFT/PAUSED campaignGroup\u2192campaign\u2192creative pipeline through the broker.",
+  "description": "LinkedIn Ads connection pack — OAuth2 provider for the LinkedIn Marketing API. Reach is `openapi`: the manifest declares the global LinkedIn OAuth hosts and points at the Marketing API reference, consumed by the core.openwop.http nodes. Carries NO secret; the operator supplies the client id/secret host-side. One of the three ad platforms Campaign Studio syncs (Google / Meta / LinkedIn Ads).",
   "license": "Apache-2.0",
   "engines": {
-    "openwop": ">=1.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "provider": {
     "id": "linkedin-ads",

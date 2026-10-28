@@ -20,15 +20,61 @@ upgrade" lives in [`CHANGELOG.md`](./CHANGELOG.md). Both are maintained by the
 - **Forward-only** (§D3). No down-migrations. Rollback = redeploy the prior image
   and restore a pre-upgrade database backup. Always back up before upgrading.
 
-## Required-stop policy
+## Required-stop and rolling-safety policy
 
-A release SHOULD be marked a required stop only when at least one holds:
-- a destructive or long-running data migration that must complete before the next,
-- a breaking config/env change requiring manual operator action pre-upgrade,
-- a migration not backward-compatible with the prior running binary (no
-  expand/contract path for a rolling deploy).
+Two separate constraints (ADR 0052 §D2 / §D2a), each recorded in `releases.json`
+and read by `node scripts/upgrade-plan.mjs <from> [<to>]`:
+
+- **`requiredStop: true`** — an upgrade must LAND on this version before going
+  past it. Mark it only when a migration must complete before a later one can run
+  (a destructive or long-running data migration), or when a manual operator action
+  must happen between the two versions.
+- **`rollingSafe: false`** (+ `rollingUnsafeReason`) — the previous release's
+  binary cannot run against this release's migrated schema (no expand/contract
+  path), so every old instance stops before the first new one starts. This holds
+  for anyone crossing the release, including an upgrade that skips past it.
+
+A breaking config change that the operator can make at the same time as the
+upgrade is neither: list it in `breakingConfig`.
+
+> **Corrected 2026-10-24 (ADR 0052 §D2a).** Until today this section listed
+> "a migration not backward-compatible with the prior running binary" as a reason
+> to mark a required stop. v0.2.0 was exactly that, and it was recorded
+> `requiredStop: false` because "land on 0.2.0 first" was never what it needed:
+> its notes said "stop the 0.1.0 binary first". The manifest had no field for that,
+> so a tool reading it would have offered a rolling upgrade. `rollingSafe` is that
+> field; v0.2.0 now carries `rollingSafe: false`. The released v0.2.0 artifact
+> itself is unchanged.
 
 ## Version log
+
+### v0.8.0 — 2026-10-28
+- **Required stop:** no. **Rolling-safe:** yes.
+- **Schema:** sqlite 51 / postgres 49 · **App migrations:** 24 (unchanged).
+- Durable run admission adds a nullable scope key and index without a backfill.
+  Plan PostgreSQL's index-build write pause; see the operator upgrade notes.
+- Breaking `auth`-posture startup decisions require membership authorization
+  and superadmin MFA, or their explicit operator overrides. Set them before
+  deploying; see the upgrade instructions.
+- Durable event replay, proposal operations and eval evidence, multi-tab and
+  scheduled chats, campaign collaboration, funnels and managed-tier selection.
+  Workspace admins can check their BYOK creative-fidelity judge against synthetic
+  product edits before relying on it.
+  Prompt-template tenant isolation, operator and run-stream fixes, plus CI and
+  white-label adoption improvements. Chat import/export, private team prompts,
+  collaborator management and purpose-based email routing are included.
+- Existing Postmark campaign operators must verify their Broadcast stream.
+  Production WASI execution now requires explicit opt-in; read the upgrade notes.
+- Conversation search uses the durable messages and current visibility rules;
+  the legacy tenant-wide search index is removed (ADR 0997).
+- Workflow vector/search/NoSQL/blob storage is separated from host-feature data
+  (ADR 0998). Existing workflow data needs a reviewed transition; affected
+  workflows must be quiesced while old and new storage namespaces differ.
+- Existing OpenSearch deployments need a reviewed rebuild from authoritative
+  tenant-scoped data into the new physical index names (#5355). Old indexes may
+  contain colliding tenants; do not copy them wholesale. Back up, quiesce affected
+  writers and verify the rebuild before resuming. No automatic migration runs.
+- [CHANGELOG §0.8.0](./CHANGELOG.md#080--2026-10-28)
 
 ### v0.7.0 — 2026-10-23
 - **Required stop:** no.
@@ -100,7 +146,8 @@ A release SHOULD be marked a required stop only when at least one holds:
 - [CHANGELOG §0.3.0](./CHANGELOG.md#030--2026-10-09)
 
 ### v0.2.0 — 2026-09-27
-- **Required stop:** no.
+- **Required stop:** no. **Rolling-safe:** no (`rollingSafe: false`, recorded
+  2026-10-24; see the correction above).
 - **Schema:** sqlite 48 / postgres 46 · **App migrations:** 21.
 - Three months since v0.1.0 (3,364 commits, ADRs 0172–0757): this host now speaks
   OpenWOP **v1 and v2**, with signed certification evidence per deploy. **Not

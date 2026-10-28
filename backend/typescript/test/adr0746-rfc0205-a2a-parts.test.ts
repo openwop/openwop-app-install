@@ -8,6 +8,17 @@
  * the VENDORED v2 schemas, the same files the corpus scenarios load, so a pass
  * here is a pass against the shape `v2-artifact-a2a-shape` and
  * `v2-conversation-turn-parts` check rather than against a restatement of it.
+ *
+ * Tracker TST-BAB-8. Red when (sabotage-witnessed, wave 60): media content gets
+ * text-only parts; an out-of-grammar type id reaches `metadata.openwop`; a row
+ * owned by another run, or a document version another run produced, is served;
+ * an absent subject reads a document as the tenant owner; `Vary: Accept` is
+ * dropped; the 405 loses `Allow`, or HEAD is refused; the read gates on
+ * `runs:read` instead of `artifacts:read`.
+ * DOUBLE GUARD (stream-token leg): another tenant presenting A's bound id is
+ * refused by the v2Identity tenant-segment rule BEFORE the route, and a token
+ * with no Bearer is refused by the auth layer — so the route's own
+ * `streamToken: false` cannot be witnessed from here (ceiling).
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import Ajv2020 from 'ajv/dist/2020.js';
@@ -26,6 +37,7 @@ import { resolveRunArtifact } from '../src/host/runArtifactRead.js';
 import { createMember } from '../src/host/accessControlService.js';
 import { createDocument, addVersion } from '../src/features/documents/documentsService.js';
 import type { EventRecord, RunRecord } from '../src/types.js';
+import type { Storage } from '../src/storage/storage.js';
 import { issueApiKey } from '../src/features/developer-keys/apiKeyService.js';
 import { mintRunStreamToken } from '../src/host/runStreamToken.js';
 import { getRunArtifact } from '../src/host/runArtifactStore.js';
@@ -36,7 +48,7 @@ let ajv: Ajv2020 | undefined;
 function v2(name: string): (doc: unknown) => { ok: boolean; errors: string } {
   if (!ajv) {
     ajv = new Ajv2020({ strict: false, allErrors: true });
-    (addFormats as unknown as (a: unknown) => void)(ajv);
+    addFormats(ajv);
     for (const f of readdirSync(V2_DIR)) {
       if (!f.endsWith('.schema.json')) continue;
       try { ajv.addSchema(JSON.parse(readFileSync(join(V2_DIR, f), 'utf8')) as Record<string, unknown>); } catch { /* duplicate $id */ }
@@ -163,7 +175,9 @@ describe('RFC 0205 §A — getArtifact over HTTP', () => {
     const res = await fetch(artifactUrl(runId, artifactId), { headers: v2Headers(KEY_A, { Accept: `${A2A}, application/json;q=0.5` }) });
     expect(res.status).toBe(200);
     expect((res.headers.get('content-type') ?? '').split(';')[0]).toBe(A2A);
-    expect(res.headers.get('vary') ?? '').toMatch(/accept/i);
+    // Exact token: `Accept-Encoding` would satisfy a substring match.
+    const vary = (res.headers.get('vary') ?? '').split(',').map((t) => t.trim().toLowerCase());
+    expect(vary).toContain('accept');
     const body = (await res.json()) as Json;
     const r = v2('artifact')(body);
     expect(r.ok, r.errors).toBe(true);
@@ -225,6 +239,7 @@ describe('RFC 0205 §A — getArtifact over HTTP', () => {
     // …and the token alone, with no Bearer at all, is not a credential here either.
     const tokenOnly = await fetch(url, { headers: { 'OpenWOP-Version': '2' } });
     expect(tokenOnly.status).toBe(401);
+    expect(((await tokenOnly.json()) as Json)['error']).toBe('unauthenticated');
   });
 
   it('ADR 0755 (WIT-ART-1) — an announced row carries announcedType only, never a host artifactTypeId', async () => {
@@ -317,7 +332,7 @@ describe('RFC 0205 §A — a Documents-backed announcement reads through the ONE
 });
 
 /** An in-memory `findFirstEventByPayload` + `getRun` — the two reads `resolveRunArtifact` makes (ADR 0754). */
-function logReader(events: EventRecord[], run: RunRecord) {
+function logReader(events: EventRecord[], run: RunRecord): Pick<Storage, 'findFirstEventByPayload' | 'getRun'> {
   return {
     findFirstEventByPayload: async (_runId: string, type: string, key: string, value: string) =>
       events.find((e) => e.type === type && (e.payload as Record<string, unknown> | null)?.[key] === value) ?? null,

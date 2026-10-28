@@ -1,8 +1,9 @@
 /**
  * feature.campaign-orchestration.nodes — the orchestration post-generation pipeline
  * (ADR 0158). consistency-check scores generated drafts against the brief's
- * kernel; finalize creates the MarketingCampaign from the brief. role:"action" —
- * outputs recorded, replay-safe. Pure-JS, Node-20 stdlib only.
+ * kernel; finalize creates the MarketingCampaign from the brief (role
+ * "side-effect" since ADR 0941 P5 — a fork serves its recorded outcome);
+ * campaign-context reads the run's own campaign. Pure-JS, Node-20 stdlib only.
  */
 
 /** ADR 0903 — no hard-coded vendor. A call passes the provider/model the node
@@ -161,10 +162,129 @@ function campaignToCanvas(campaign) {
   return { artifactTypeId: 'canvas.campaign', payload, title: name };
 }
 
+/**
+ * ADR 0941 P5 — the campaign this run belongs to. The host resolves it from the
+ * run's own tag; this node passes no campaign id, so a chain cannot ask about a
+ * campaign it was not started for. A run that is not a campaign run fails typed,
+ * never "success with an empty campaign".
+ */
+export async function campaignContext(ctx) {
+  const cs = ctx.features && ctx.features['campaign-orchestration'];
+  if (!cs || typeof cs.campaignContext !== 'function') {
+    return { status: 'failed', error: { code: 'host_capability_missing', message: "ctx.features['campaign-orchestration'].campaignContext is unavailable" } };
+  }
+  const out = await cs.campaignContext({});
+  if (!out || !out.found) {
+    const e = (out && out.error) || { code: 'campaign_not_found', message: 'No campaign for this run.' };
+    return { status: 'failed', error: { code: str(e.code) || 'campaign_not_found', message: str(e.message) } };
+  }
+  return { status: 'success', outputs: { campaign: out.campaign, goal: out.goal ?? null, goalVersion: out.goalVersion ?? 0, role: out.role ?? null } };
+}
+
+/**
+ * ADR 0942 D5 — the autonomy gate. The campaign's frozen autonomy policy decides
+ * this step, host-side, from the RUN (`autonomyResolve` reads the stamp); the
+ * node passes only the action class, the review stage and the risk facts, never
+ * approvers. Outcomes:
+ *  - legacy (unbound run, or toggle OFF with no stamp) → suspends exactly like
+ *    core.approvalGate today (an open approval gate);
+ *  - proceed (auto / notify-after) → success, the decision recorded in the output;
+ *  - approve → suspends as an approval interrupt with role-based approvers and the
+ *    host-written `autonomy` block (the inbox, quorum ledger, MCP refusal and the
+ *    no-self-approval check all key on that interrupt);
+ *  - blocked → typed failure `autonomy_blocked`.
+ * Rejection fails the node (`autonomy_rejected`). The suspend key is constant, so
+ * the resolution re-seeds the re-invoke.
+ */
+const APPROVER_CONFIG_KEYS = ['approverRefs', 'approverRoleRefs', 'approverGroupRefs', 'approversList', 'requiredApprovals', 'rejectionPolicy', 'overrideScopes'];
+
+function isRejection(res) {
+  return !!res && typeof res === 'object' && (res.action === 'reject' || res.decision === 'reject' || res.decision === 'rejected');
+}
+
+export async function autonomyGate(ctx) {
+  const cfg = ctx.config ?? {};
+  const forged = APPROVER_CONFIG_KEYS.filter((k) => cfg[k] !== undefined);
+  if (forged.length > 0) {
+    return { status: 'failure', retryable: false, error: { code: 'autonomy_config_approvers_refused', message: `Approvers come from the campaign's autonomy policy, never from node config (refused: ${forged.join(', ')}).` } };
+  }
+  const cs = ctx.features && ctx.features['campaign-orchestration'];
+  if (!cs || typeof cs.autonomyResolve !== 'function') {
+    throw Object.assign(new Error("host does not expose ctx.features['campaign-orchestration'].autonomyResolve (ADR 0942)"), { code: 'host_capability_missing', capability: 'host.sample.campaign-studio' });
+  }
+  const inputs = ctx.inputs ?? {};
+  const factsKey = str(cfg.factsFrom) || 'facts';
+  const facts = inputs[factsKey] && typeof inputs[factsKey] === 'object' ? inputs[factsKey] : {};
+  // The content this approval binds to (a covering grant must match it, ADR 0942 P3).
+  const contentHash = typeof inputs.contentHash === 'string' ? inputs.contentHash : undefined;
+  const verdict = await cs.autonomyResolve({ actionClass: cfg.actionClass, ...(cfg.stage ? { stage: cfg.stage } : {}), facts, ...(contentHash ? { contentHash } : {}), vetoKey: ctx.nodeId });
+  const prompt = str(cfg.prompt) || str(cfg.title) || 'Please approve to continue.';
+  if (verdict.mode === 'blocked') {
+    return { status: 'failure', retryable: false, error: { code: 'autonomy_blocked', message: `The campaign's autonomy policy blocks this step (${verdict.reason}; rule ${verdict.ruleId}).` } };
+  }
+  if (verdict.mode === 'lane_unavailable') {
+    return { status: 'failure', retryable: false, error: { code: 'autonomy_lane_unavailable', message: `${verdict.actionClass} is decided by its own approval queue, which an in-run gate cannot open yet.` } };
+  }
+  if (verdict.mode === 'proceed') {
+    return { status: 'success', outputs: { decision: verdict.outcome, ruleId: verdict.ruleId, layer: verdict.layer, policyHash: verdict.policyHash } };
+  }
+  // ADR 0942 P4b — a veto window is a TIMER, never an approval silence grants.
+  // The step runs when the timer fires unless a notified person vetoed it. Only
+  // the timer sweep may end the wait (the host refuses any other resolution of
+  // an interrupt flagged `autonomy.vetoWindow`).
+  if (verdict.mode === 'veto-window') {
+    await ctx.suspend({
+      reason: 'duration', seconds: verdict.seconds, key: 'autonomy-veto-window', prompt,
+      autonomy: { vetoWindow: true, vetoId: verdict.vetoId, ...(verdict.campaignId ? { campaignId: verdict.campaignId } : {}), ruleId: verdict.ruleId, actionClass: cfg.actionClass },
+    });
+    if (typeof cs.autonomyVetoOutcome !== 'function') {
+      throw Object.assign(new Error("host does not expose ctx.features['campaign-orchestration'].autonomyVetoOutcome (ADR 0942 P4b)"), { code: 'host_capability_missing', capability: 'host.sample.campaign-studio' });
+    }
+    const out = await cs.autonomyVetoOutcome({ vetoId: verdict.vetoId, ...(verdict.campaignId ? { campaignId: verdict.campaignId } : {}) });
+    if (out && out.outcome === 'vetoed') {
+      return { status: 'failure', retryable: false, error: { code: 'autonomy_vetoed', message: `Someone vetoed this step during its review window${out.reason ? ` (${out.reason})` : ''}.` } };
+    }
+    return { status: 'success', outputs: { decision: 'notify-after', vetoWindow: 'elapsed', ruleId: verdict.ruleId, layer: verdict.layer, policyHash: verdict.policyHash } };
+  }
+  const data = verdict.mode === 'approve' ? verdict.interruptData : {};
+  const resolution = await ctx.suspend({
+    kind: 'approval',
+    key: 'autonomy-gate',
+    prompt,
+    actions: ['approve', 'reject'],
+    ...data,
+  });
+  if (isRejection(resolution)) {
+    return { status: 'failure', retryable: false, error: { code: 'autonomy_rejected', message: 'The approver rejected this step.' } };
+  }
+  return {
+    status: 'success',
+    outputs: {
+      decision: 'approved',
+      ...(verdict.mode === 'approve' ? { ruleId: verdict.interruptData.autonomy.ruleId, policyHash: verdict.interruptData.autonomy.policyHash } : { legacy: true }),
+      resolution: resolution ?? null,
+    },
+  };
+}
+
+
+/** ADR 0942 D7 — the daily digest of notify-after steps (one notice per person per day). */
+export async function autonomyDigest(ctx) {
+  const cs = ctx.features && ctx.features['campaign-orchestration'];
+  if (!cs || typeof cs.autonomyDigest !== 'function') {
+    throw Object.assign(new Error("host does not expose ctx.features['campaign-orchestration'].autonomyDigest (ADR 0942)"), { code: 'host_capability_missing', capability: 'host.sample.campaign-studio' });
+  }
+  const out = await cs.autonomyDigest({});
+  return { status: 'success', outputs: { recipients: out.recipients ?? 0, items: out.items ?? 0 } };
+}
+
 export const nodes = {
+  'feature.campaign-orchestration.nodes.autonomy-digest': autonomyDigest,
+  'feature.campaign-orchestration.nodes.autonomy-gate': autonomyGate,
   'feature.campaign-orchestration.nodes.consistency-check': consistencyCheck,
   'feature.campaign-orchestration.nodes.setup-check': setupCheck,
   'feature.campaign-orchestration.nodes.finalize': finalize,
+  'feature.campaign-orchestration.nodes.campaign-context': campaignContext,
 };
 
 export default nodes;

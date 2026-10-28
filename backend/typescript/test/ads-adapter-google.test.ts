@@ -12,11 +12,14 @@
  * case-variant in extraHeaders.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { answerCurrencyRead, platformRequests, currencyReads, fixtureCurrency } from './adsCurrencyFixture.js';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from '../src/index.js';
 import type { Storage } from '../src/storage/storage.js';
 import { makeAdsAdapter } from '../src/host/adsAdapter.js';
+import { nodes as channelNodes } from '../../../packs/feature.campaign-channels.nodes/index.mjs';
+import { buildTrackedUrl } from '../src/host/trackedUrl.js';
 import { brokeredPost } from '../src/host/brokeredEgress.js';
 import { __resetConnectionsStore, createSecretConnection } from '../src/features/connections/connectionsService.js';
 import { resolveApproval } from '../src/host/approvalService.js';
@@ -43,6 +46,7 @@ describe('Google Ads dispatch adapter (ADR 0167 Phase 2)', () => {
       req.on('data', (c) => (raw += c));
       req.on('end', () => {
         const path = req.url ?? '';
+        if (answerCurrencyRead(path, raw, res)) return;
         hits.push({ method: req.method ?? '', path, auth: req.headers.authorization, dev: req.headers['developer-token'] as string, extra: req.headers['x-custom'] as string, body: raw ? JSON.parse(raw) : {} });
         const resource = (path.match(/\/customers\/\d+\/([a-zA-Z]+):mutate/) ?? [])[1] ?? 'obj';
         if (failOn && resource === failOn) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: { message: 'rejected' } })); return; }
@@ -69,7 +73,7 @@ describe('Google Ads dispatch adapter (ADR 0167 Phase 2)', () => {
     await new Promise<void>((r) => g.close(() => r()));
   });
 
-  beforeEach(() => { hits = []; failOn = null; });
+  beforeEach(() => { hits = []; platformRequests.length = 0; currencyReads.length = 0; failOn = null; });
 
   const adapter = (runId: string, actingUserId = 'u1') =>
     makeAdsAdapter({ storage, tenantId: 'tg', runId, ...(actingUserId ? { actingUserId } : {}), orgId: 'tg' });
@@ -114,7 +118,7 @@ describe('Google Ads dispatch adapter (ADR 0167 Phase 2)', () => {
     const first = await adapter('gr-1').publishAd(args('gbrief-FORK'));
     expect(first.outcome).toBe('published');
     if (first.outcome !== 'published') return;
-    hits = [];
+    hits = []; platformRequests.length = 0; currencyReads.length = 0;
     const forked = await adapter('gr-2-fork').publishAd(args('gbrief-FORK'));
     expect(forked.outcome).toBe('published');
     if (forked.outcome !== 'published') return;
@@ -128,20 +132,37 @@ describe('Google Ads dispatch adapter (ADR 0167 Phase 2)', () => {
     const { landingUrl: _omit, ...noUrl } = args('gbrief-NOURL');
     const out = await adapter('gr-1').publishAd(noUrl);
     expect(out).toEqual({ outcome: 'failed', error: 'missing_landing_url' });
-    expect(hits).toHaveLength(0);
+    expect(hits).toHaveLength(0); expect(platformRequests).toHaveLength(0);
   });
 
   it('fails closed missing_eu_political_declaration without the declaration — before any approval or call (ADR 0907 P0)', async () => {
     const { euPoliticalAdvertising: _omit, ...undeclared } = args('gbrief-NOEU');
     const out = await adapter('gr-1').publishAd(undeclared);
     expect(out).toEqual({ outcome: 'failed', error: 'missing_eu_political_declaration' });
-    expect(hits).toHaveLength(0);
+    expect(hits).toHaveLength(0); expect(platformRequests).toHaveLength(0);
     // A dry-run still previews, and shows the gap instead of inventing an attestation.
     const preview = await adapter('gr-1').publishAd({ ...undeclared, dryRun: true });
     expect(preview.outcome).toBe('preview');
     if (preview.outcome !== 'preview') return;
     const campaignStep = preview.plan.find((p) => /campaigns/.test(p.step))!;
     expect(JSON.stringify(campaignStep.body)).toContain('operator declaration required');
+    expect(hits).toHaveLength(0); expect(platformRequests).toHaveLength(0);
+  });
+
+  it('ADR 0907 P0: publish-ad-variants → the REAL adapter carries the declaration into the Google campaign create; absent ⇒ typed failure, zero calls', async () => {
+    const node = channelNodes['feature.campaign-channels.nodes.publish-ad-variants'];
+    const draft = { channel: 'ad_variants', briefId: 'gbrief-NODE', platformSets: [{ platform: 'Google', variants: [{ headline: 'Pick faster', description: '40% faster checkout' }] }] };
+    const features = { documents: { createDraftDocument: async () => ({}) },
+      'campaign-brief': { trackedUrl: async (input: { url: string; briefId: string }) => ({ url: buildTrackedUrl(input.url, undefined, { fallbackCampaign: input.briefId }), linted: false, violations: [] }) } };
+    const ok = await node({ ads: adapter('gr-1'), features, inputs: { draft, adAccountId: '123-456-7890', platform: 'google', landingUrl: 'https://example.com/lp', euPoliticalAdvertising: 'does_not_contain' }, runId: 'gr-1', nodeId: 'n1' });
+    expect(ok.status, JSON.stringify(ok)).toBe('success');
+    const campaignCreate = hits.find((h) => /campaigns:mutate/.test(h.path))!;
+    expect(create(campaignCreate).containsEuPoliticalAdvertising).toBe('DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING');
+
+    hits = [];
+    const missing = await node({ ads: adapter('gr-1'), features, inputs: { draft: { ...draft, briefId: 'gbrief-NODE2' }, adAccountId: '123-456-7890', platform: 'google', landingUrl: 'https://example.com/lp' }, runId: 'gr-1', nodeId: 'n1' });
+    expect(missing.status).toBe('failed');
+    expect(missing.error?.code).toBe('eu_political_declaration_required');
     expect(hits).toHaveLength(0);
   });
 
@@ -153,7 +174,7 @@ describe('Google Ads dispatch adapter (ADR 0167 Phase 2)', () => {
     // PII-adjacent default gate: first call requires approval (nothing dispatched)…
     const gated = await a.syncAudience(syncArgs);
     expect(gated.outcome).toBe('requires_approval');
-    expect(hits).toHaveLength(0);
+    expect(hits).toHaveLength(0); expect(platformRequests).toHaveLength(0);
     await resolveApproval((gated as { approvalId: string }).approvalId, { status: 'approved' });
 
     // …approved → the FULL member-upload pipeline runs.
@@ -191,7 +212,7 @@ describe('Google Ads dispatch adapter (ADR 0167 Phase 2)', () => {
       const out = await adapter('gr-1').publishAd(args('gbrief-NOTOK'));
       expect(out.outcome).toBe('failed');
       if (out.outcome === 'failed') expect(out.error).toBe('no_developer_token');
-      expect(hits).toHaveLength(0); // never dispatched a blank-header call
+      expect(hits).toHaveLength(0); expect(platformRequests).toHaveLength(0); // never dispatched a blank-header call
     } finally { process.env.OPENWOP_GOOGLE_ADS_DEVELOPER_TOKEN = saved; }
   });
 
@@ -211,4 +232,18 @@ describe('Google Ads dispatch adapter (ADR 0167 Phase 2)', () => {
     expect(hit?.auth).toBe('Bearer GOOG_OAUTH'); // the broker token wins; no EVIL variant survived
     expect(hit?.extra).toBe('ok');                // a genuine custom header DOES pass through
   });
+  it('publishes JPY in exact micros and refuses overflow before the first create', async () => {
+    fixtureCurrency.value = 'JPY';
+    try {
+      expect((await adapter('gr-1').publishAd({ ...args('brief-currency-jpy'), dailyBudgetMinor: 5000 })).outcome).toBe('published');
+      const budget = hits.find((hit) => hit.path.endsWith('/campaignBudgets:mutate'));
+      expect(budget && create(budget).amountMicros).toBe('5000000000');
+      hits = []; platformRequests.length = 0; currencyReads.length = 0;
+      expect(await adapter('gr-1').publishAd({ ...args('brief-currency-overflow'), dailyBudgetMinor: 9007199255 })).toEqual({ outcome: 'failed', error: 'budget_not_representable' });
+      expect(hits).toHaveLength(0);
+      expect(platformRequests).toHaveLength(1);
+      expect(currencyReads).toHaveLength(1);
+    } finally { fixtureCurrency.value = 'USD'; }
+  });
+
 });

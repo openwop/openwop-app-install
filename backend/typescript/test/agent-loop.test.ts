@@ -1,10 +1,17 @@
 /**
- * RFC 0061 — stateful agent-loop lifecycle + RFC 0058 maxLoopIterations.
+ * RFC 0061 — stateful agent-loop lifecycle + RFC 0058 maxLoopIterations
+ * (TST-BLA-1). Subject: `runAgentLoop`, the deterministic seam behind
+ * `POST /v1/host/openwop-app/agentloop/run` (routes/testSeam.ts).
  *
  *   - §B: one runOrchestrator.decided per turn, monotonic 1-based iteration
  *   - final turn carries decision 'terminate'
  *   - §E / RFC 0058: the (max+1)th turn breaches loop-iterations + stops
  *   - §D: a suspend at turn K resumes at iteration K (counter intact)
+ *
+ * Red when: the counter starts at 0, the final turn stops terminating, the
+ * bound fires one turn late, or resume reports iteration K+1 (w65 probes).
+ * §C is a hard-coded seam answer (grade-code AGENTLOOP-WS-CONST-1): its case
+ * reds only if that constant changes.
  *
  * @see RFCS/0061-agent-loop-lifecycle.md §B/§D/§E
  * @see RFCS/0058-run-execution-bounds.md §A
@@ -31,11 +38,7 @@ describe('RFC 0058 §E — maxLoopIterations bound', () => {
     const r = runAgentLoop({ turns: 5, maxLoopIterations: 3 });
     // Fired turns 1..3, refused turn 4.
     expect(r.decisions.map((d) => d.iteration)).toEqual([1, 2, 3]);
-    expect(r.bound).toBeDefined();
-    expect(r.bound!.kind).toBe('loop-iterations');
-    expect(r.bound!.limit).toBe(3);
-    expect(r.bound!.observed).toBe(4);
-    expect(r.bound!.errorCode).toBe('loop_limit_exceeded');
+    expect(r.bound).toEqual({ kind: 'loop-iterations', limit: 3, observed: 4, errorCode: 'loop_limit_exceeded' });
   });
 
   it('does not breach when turns are within the bound', () => {

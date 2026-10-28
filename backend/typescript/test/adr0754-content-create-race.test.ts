@@ -5,22 +5,23 @@
  * READS before the write: two concurrent creates both passed them, then the second
  * write overwrote the first (kernel `put` updates an existing row) or `createPage`
  * silently renamed the slug to `slug-2`. These legs race two creates for real.
+ *
+ * Tracker TST-BAB-12. Red when (sabotage-witnessed, wave 60): the kernel write
+ * is not create-only (the loser overwrites the winner); the post-write slug
+ * re-check is skipped (two pages on one slug, or a silent rename). Both probes
+ * went red, so the two creates DO interleave past the read checks.
+ * The boot is for the CMS kernel (entities system types + host-ext stores);
+ * no HTTP server is needed, so none is started.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import http from 'node:http';
-import type { AddressInfo } from 'node:net';
+import { beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { createProtocolPage, listPages } from '../src/features/cms/cmsService.js';
 
 const TENANT = 'tenant-0754-race';
-let server: http.Server;
-
 beforeAll(async () => {
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
-  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { void (server.address() as AddressInfo); res(); }); });
+  await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
 });
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 const create = (pageId: string, slug: string, name: string) =>
   createProtocolPage({ tenantId: TENANT, orgId: TENANT, pageId, slug, name, sectionOrder: ['hero'], createdBy: 'test', baseLocale: 'en' });
@@ -33,7 +34,9 @@ describe('ADR 0754 — concurrent protocol creates', () => {
   it('two creates of ONE pageId: exactly one wins, the other is 409, and the stored page is the winner\'s', async () => {
     const results = await Promise.allSettled([create('race-id', 'race-a', 'First'), create('race-id', 'race-b', 'Second')]);
     expect(results.map(status).sort()).toEqual([409, 'ok'].sort());
-    const winner = (results.find((r) => r.status === 'fulfilled') as PromiseFulfilledResult<{ title: string; slug: string }>).value;
+    const won = results.find((r): r is PromiseFulfilledResult<Awaited<ReturnType<typeof create>>> => r.status === 'fulfilled');
+    expect(won, 'one create won').toBeDefined();
+    const winner = won!.value;
     const stored = (await listPages(TENANT, TENANT)).filter((p) => p.pageId === 'race-id');
     expect(stored).toHaveLength(1);
     expect(stored[0]!.title, 'the loser must not have overwritten the winner').toBe(winner.title);

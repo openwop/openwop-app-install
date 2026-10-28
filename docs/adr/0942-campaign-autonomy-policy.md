@@ -1,6 +1,6 @@
 # ADR 0942 — Campaign autonomy policy: per-campaign HITL, frozen at run start
 
-Status: Proposed
+Status: Accepted (P0–P3a, P4a, P4b, P5, P6 implemented 2026-10-20; P3b open)
 Date: 2026-10-19
 
 Program: **Campaign Studio** (ADRs 0941–0962), Tier 0, the governance keystone.
@@ -115,6 +115,25 @@ decision under the policy in force at the time.
 | `playbook.rollout` | start or advance a playbook rollout across clients | ADR 0959 `rolloutService` start and per-client apply | PendingApproval `playbook-rollout` (ADR 0959 D7) |
 | `campaign.change-set.apply` | campaign-ops write (ADR 0925) | ADR 0924/0925 | PendingApproval `campaign-change-set` |
 
+> **CORRECTED 2026-10-20 (ruling for ADR 0948 P1b): `content.publish` has TWO
+> chokepoints.** Pages → PendingApproval `content-publish`; a funnel →
+> PendingApproval `funnel-publish` (owned by funnels, pinned to a digest of slug,
+> steps, offers and `campaignId`). Publishing a funnel is its own external effect:
+> it is what makes its order bumps and one-click offers chargeable, so the
+> per-page rows do not cover it. Same action class, so the vocabulary and every
+> preset are unchanged.
+> - **The policy decides through `enforceCampaignAction`, not the decide handler
+>   alone.** Inside a campaign run, `auto` / `notify-after` publish through the
+>   SAME publish function the decide handler calls (one publish path, then the
+>   notice after the effect); `approve` queues `funnel-publish` with the policy's
+>   approvers (`createFunnelPublishApprovalOnce(…, policy)`); `blocked` refuses.
+>   Outside a campaign run (no stamp) the funnels posture stands: always approve.
+> - The `step_pages_unpublished` precondition holds on every outcome, so "the
+>   owning kind wins" holds: a funnel never publishes its own pages.
+> - A waiting node resumes through `resumeRunsAwaitingApproval` (P3a), never a
+>   second resume path.
+
+
 **Twenty classes.** The last seven rows before `campaign.change-set.apply` were
 requested by ADRs 0954, 0955, 0957, 0958 and 0959 during program review. Those
 ADRs use these exact spellings. A PendingApproval-lane class whose kind does not
@@ -141,6 +160,9 @@ interface ApproverSpec {
   roleRefs?: string[]; groupRefs?: string[]; subjectRefs?: string[];  // ADR 0075, resolved on the CLIENT org
   clientApprover?: boolean;            // an ADR 0958 client-stakeholder `decide` grant (ADR 0924 D5's token store is replaced); v1 only on campaign.change-set.apply
   requiredApprovals: 1 | 2 | 3; rejectionPolicy?: 'any' | 'majority';
+  // Per-party quorum: when set, approval needs `min` votes from EACH listed party, and
+  // requiredApprovals is the total. A bare count never stands in for "one of each".
+  perParty?: Array<{ party: 'agency' | 'client'; refs: 'roleRefs' | 'clientApprover'; min: 1 | 2 }>;
   delegation: 'allowed' | 'none';      // ADR 0198
   sla?: { remindAfterMs?: number; escalateAfterMs?: number; expireAfterMs?: number }; // expire = reject
   escalateTo?: { roleRefs: string[] };
@@ -179,8 +201,10 @@ interface AutonomyBinding {            // which policy a client or campaign uses
   fact's type; and **an escalation may only be at least as severe as its
   rule's default** — thresholds tighten, never loosen. No expression language.
 - **Resolution order at run start:** campaign binding → client-org binding →
-  `review-everything@1`. New clients default to `review-everything@1`.
-- **Presets** are versioned code constants (proposed numbers are David's call, Q1):
+  `review-everything@1`. A new client's binding is created as `guarded@1`
+  (David, 2026-10-19); `review-everything@1` remains the fallback when no binding
+  resolves, so an unbound or unstamped run is never looser than Guarded.
+- **Presets** are versioned code constants (numbers approved by David 2026-10-19, Q1):
   - *Review everything*: `creative.generate` auto; every other class approve(client-org admins).
   - *Guarded*: generate auto; `plan.approve` and `creative.review` (every stage) approve; `content.publish` notify-after,
     escalate to approve when `findingsHigh>=1` or `firstForDestination`;
@@ -251,6 +275,13 @@ that already exist; never a second evaluator" and ADR 0036's most-restrictive la
   replay re-derives nothing from the live overlay.
 
 ### D5 — One gate primitive, two existing lanes, no third owner
+
+> **No resume path on `campaign-change-set` (a0, 2026-10-19).** That PendingApproval
+> kind gates no waiting run. Its decide handler starts the ADR 0925 execute chain
+> after its own CAS, so `resumeRunsAwaitingApproval` is a no-op for it today. If a 0942
+> `autonomy-gate` ever suspends on this kind, the gate must NOT also start execution
+> on resume: exactly one path starts the execute chain, the decide handler. Adding a
+> second one double-executes a change set.
 
 **The gate node** `feature.campaign-orchestration.nodes.autonomy-gate`
 (config `{actionClass, factsFrom?}`; role `gate`; added to
@@ -344,6 +375,17 @@ answered from the chain plus a replay of the run.
 
 ### D9 — Editing a policy
 
+**Recovery correction (2026-10-21):** removing an override now CAS-replaces the
+exact authorized binding with a retained inheritance marker. A stale editor
+cannot delete an admin's concurrent tightening. Logical reads inherit the client
+default with `etag: none` and no dangling-policy warning; a later save replaces
+the physical marker through the existing CAS. Actual campaign/client deletion
+still removes binding rows. Only the winning clear appends a policy-change audit;
+as with policy saves, an audit error after the state CAS is surfaced and is not
+claimed as a successful audit. This is not a transaction across the independent
+client-default row. HTTP/storage-boundary race and repeated-clear witnesses are
+added; execution and the canonical gate remain pending.
+
 - Tighten (any change whose every class is at least as severe): `workspace:write`
   on the client org.
 - Loosen: `host:members:manage` on the client org; audited; notifies the org's
@@ -353,8 +395,20 @@ answered from the chain plus a replay of the run.
 - **ADR 0924 D4 folds in:** `ClientAccount.approvalPolicy` becomes the
   `ApproverSpec` of the client's `campaign.change-set.apply` rule
   (`agency` → org `approvals:respond` roles; `client` → `clientApprover:true`;
-  `client_and_agency` → both, `requiredApprovals:2`). The field stays readable
-  until 0924's handler reads the rule; one migration writes the binding.
+  `client_and_agency` → both, with `perParty: [{party:'agency', refs:'roleRefs',
+  min:1}, {party:'client', refs:'clientApprover', min:1}]` and `requiredApprovals:2`).
+  The field stays readable until 0924's handler reads the rule; one migration writes
+  the binding.
+
+  > **Corrected 2026-10-19 (a0 review of #5033).** This line first said
+  > `client_and_agency` → `requiredApprovals:2` alone. That does NOT mean "one client
+  > and one agency": two agency members reach a quorum of 2 with no client vote. The
+  > quorum is now per party, as above. `compileApproverSpec` refuses a
+  > `client_and_agency` mapping (or any spec mixing `clientApprover` with role refs)
+  > that carries a bare count without `perParty`. The decide path counts votes per
+  > party from the quorum ledger. Required test: two agency votes on a
+  > `client_and_agency` change set leave it **pending**, and one agency vote plus one
+  > client vote approves it. ADR 0924 D4 takes the same correction (a0).
 
 ### D10 — Three approval-integrity rules and the fork posture
 
@@ -465,6 +519,7 @@ wants to honour campaign policies. The program's one recommended RFC is ADR
 1. **(David)** Preset thresholds ($500 / $2,000 daily spend, 50,000 audience,
    10% budget delta) and the default for new clients (`review-everything`).
    (The fidelity floor in D3 is decided, not open. David may overturn it.)
+   **Decided (2026-10-19, David): Guarded is the default for every new client, with the $500 / $2,000 daily-spend and 50,000-audience thresholds as proposed. Moving above Guarded needs passing evals (ADR 0961).**
 2. **(David)** Does loosening a policy need a second person (proposer ≠ approver)?
 3. **(David)** Should `:fork` offer "re-run under today's policy" as an explicit
    option, or is that always a new run? Proposed: always a new run.
@@ -475,7 +530,522 @@ wants to honour campaign policies. The program's one recommended RFC is ADR
 7. **(David)** Should an MCP-started run ever be allowed `auto` for an external
    effect, for example under a tenant-level "trusted MCP client" grant?
    Proposed: no in v1 (D10.3).
+   **Decided (2026-10-19, David): Never. An MCP-started run may never take `auto` or `notify-after` for an external effect; it is a D10 floor, not a policy setting.**
 8. No `/architect` review has been invoked on this ADR yet.
+
+> **Correction (2026-10-20, P2b — the org-scoped freeze).** As built through
+> P2, the stamp required a `campaignId` and the contributor keyed only on the
+> ADR 0941 campaign tag. So a run that acts for one CLIENT but no single
+> campaign was unbound, and every gate in it fell to `legacy`: no policy and no
+> approvers. That covers a client report across several campaigns
+> (`report.publish`), lead grading (0954) and journeys (0955). Found by
+> cs-0943 (ADR 0957 P1).
+> - **Bound** now means the campaign tag OR the ADR 0921 campaign-ops client
+>   stamp (`openwop-app.campaignOps.orgId`, host-written and in
+>   `CAMPAIGN_ATTRIBUTION_KEYS`, so a caller cannot supply it) OR an autonomy
+>   stamp.
+> - A **client-bound run** is stamped by a campaign-ops contributor with the
+>   client's default policy (`resolveEffectivePolicy(tenant, org)` with no
+>   campaign) and `approverOrgId` = the client, so role-routed approvers resolve
+>   on the client org. Its stamp has `orgId` and no `campaignId`.
+> - **Precedence is unchanged.** A campaign-tagged run is the campaign arm's:
+>   campaign override, then client default, then fallback. A tag and a
+>   campaign-ops stamp naming different clients is refused `wrong_client`.
+> - **No backfill write.** A client with no binding resolves to the stricter
+>   Review-everything fallback, as `clientService` documents for a failed
+>   creation-time bind. The contributor is a pure read; writing Guarded here
+>   (`bindClientPresetIfAbsent`) would silently loosen that fallback for a client
+>   nobody configured. This departs from the build request, deliberately.
+> - **Fail-closed.** An unstamped client-bound run whose toggle is ON resolves
+>   to the fallback at the gate, never `legacy`.
+> - campaign-ops' own change-request and execution runs carry the client stamp,
+>   so they are now stamped too. That is inert: their chains have no autonomy
+>   gate.
+
+## Implementation record
+
+Built to the design as amended by #5038 (per-party quorum, new clients on
+`guarded@1`, the MCP floor decided). `/architect` was run on each phase plan
+before building it; its findings are folded in below.
+
+| Phase | What shipped | Tests | Commit / PR |
+|---|---|---|---|
+| P0 | `host/autonomyPolicy/` (types, presets, closed-world validator, pure D3 resolver, strictness comparator, stores, policy-change service, subject eraser); sub-toggle `campaign-orchestration.autonomy` (OFF, tenant); `GET/PUT/DELETE …/campaign-orchestration/campaigns/:campaignId/autonomy`; `GET/PUT …/campaign-ops/clients/:orgId/autonomy-default`; `createClient` binds `guarded@1`; campaign and client delete cascade their bindings | `test/adr0942-p0-resolver.test.ts`, `test/adr0942-p0-routes.test.ts` (sabotage-witnessed; notes in each file header) | branch `feat/autonomy-0942-p0` |
+| P1 | Run-start contributor (`features/campaign-orchestration/autonomyStamp.ts`) over the ADR 0941 run tag; reserved `campaignAutonomy` + `campaignForkPosture`; `RunStartContext.parentRunId` / `forkMode`; children inherit through the ADR 0941 inherited-metadata seam; redrive re-takes inherited stamps from the source row; `runAutonomyOf` reader (hash-verified, fail-closed); MCP origin carried in the stamp | `test/adr0942-p1-run-stamp.test.ts` (sabotage-witnessed) | branch `feat/autonomy-0942-p1` (built on 0941 P0) |
+| P2 | `autonomy-gate` node (`feature.campaign-orchestration.nodes` 1.3.0, role `gate`, in `APPROVAL_GATE_TYPE_IDS`); `autonomyResolve` / `autonomyExplain` on the campaign-orchestration surface; host `decideGate`, `compileApproverSpec`, `factsDigest`; no-self-approval in `resolveAndResume` on every vote lane; D6 action-class table + real-loader ratchet; `kernel-approve` replaced (chain pack 1.2.0 + SSoT); campaign runs stamp `approverOrgId`; canvas-invoke children inherit | `test/adr0942-p2-autonomy-gate.test.ts`, `test/adr0942-p2-action-classes.test.ts` (sabotage-witnessed) | branch `feat/autonomy-0942-p2` (stacked on P1) |
+| P2b | Org-scoped freeze (cs-0943's gap): a CLIENT-bound run (ADR 0921 campaign-ops stamp, no campaign) freezes the client's default policy. `FrozenAutonomy.campaignId` optional; `clientBoundOrg` + `runAutonomyOf.bound` count the client stamp; campaign-ops contributor `features/campaign-ops/autonomyStamp.ts` (pure read; precedence: a campaign tag is the campaign arm's); one `autonomyToggleOn` helper for both arms | `test/adr0942-p2b-client-bound-freeze.test.ts` (6, two witnesses + a measured redundant guard) | branch `feat/autonomy-0942-p2b` (stacked on P2) |
+
+| P3a | `enforceCampaignAction` (the one chokepoint helper: run stamp + run floors + client floor and campaign status through seams + tenant ceiling; D8 audit of every bound external resolution); ads spend gate decided by the policy for campaign runs (governance threshold folded in as the ceiling; one approval row with policy approvers, requesters and the client org; attended forks namespaced); `campaign-spend` decide-time eligibility for policy rows; the waiter store + `resumeRunsAwaitingApproval`; `ad-budget-update` and `publish-ad-variants` wait on the row; `sms.send` chokepoint with the derived covering-grant check | `test/adr0942-p3-chokepoints.test.ts` (sabotage-witnessed) | branch `feat/autonomy-0942-p3` (stacked on P2, on #5035) |
+| P4a | Per-row SLA ladders on PendingApprovals (`ApprovalPolicy.sla` / `escalateTo`, swept through the `approval:sla-row` index even with no tenant ladder; expire rejects `sla_expired` and resumes the waiting run); remind/escalate for autonomy gate interrupts (a second source in the same sweep, `autonomy:interrupt-sla`), expiry as the gate's own `timeoutMs` (the existing RFC 0093 timeout sweep); `delegation:'none'` as `allowDelegation:false`, read only by `approverResolution` through one refs builder (`gateApproverRefs` / `policyApproverRefs`) every lane now uses; notify-after notices after a successful effect (ads, sms) or at the gate (no-chokepoint classes), immediate or queued for the daily digest chain `campaign-autonomy.daily-digest` (chain pack, chain-backed, host-owned per-tenant job) | `test/adr0942-p4-sla-notify.test.ts` (sabotage-witnessed) | branch `feat/autonomy-0942-p4` (stacked on P3a) |
+| P5 | The read model carries the class vocabulary and each class's effective rule (`actionClasses`, `effective` per class and review stage from the resolver's own `findRule`, `presets`); `AutonomyPolicyPanel` (lazy chunk) on the campaign detail and, as a modal, from the campaign-ops client bar: levels, a step-by-outcome grid with approvers and escalation thresholds, customize mode (outcomes, thresholds, approver roles), "use the client's default", the always-applies explainer; run-timeline badge `autonomyBadgeOf`; 4 locales | `test/adr0942-p0-routes.test.ts` (read model pinned to `findRule`), `frontend/react/src/features/campaign-orchestration/__tests__/autonomyPolicyPanel.test.tsx`, `frontend/react/src/runs/__tests__/runTimelineAutonomyBadge.test.tsx` (sabotage-witnessed) | branch `feat/autonomy-0942-p5` (stacked on P4a) |
+| P6 | `openwop:campaign-orchestration.get-autonomy` (read, untrusted, fail-empty): the Strategist's projection of the SAME `describePolicy` read model (`host/autonomyPolicy/explain.ts` `projectPolicyForModel` + `ALWAYS_APPLIES`, keyed by the resolver's layer rule ids), through ONE access predicate shared with `GET …/campaigns/:id/autonomy` (`features/campaign-orchestration/autonomyAccess.ts`, a `{subject} \| {tenantPrincipal}` union); Strategist pack 1.3.0 (allowlist, prompt rewritten, `evalSuiteRef`); ADR 0889 suite `evals/campaign-strategist.json` (who signs off / asked to skip / asked to loosen) | `test/adr0942-p6-strategist-tool.test.ts`, `test/adr0942-p6-strategist-eval.test.ts` (pass script passes every task, violating script fails every task, each on a different axis), `src/features/campaign-orchestration/__tests__/promptCatalogParity.test.ts` (sabotage-witnessed) | branch `feat/autonomy-0942-p6` (stacked on P5) |
+| P4b | The veto window: a notify-after decision with `vetoWindowMs` makes the gate wait on a TIMER (`reason:'duration'`), never an approval; one veto record per gate visit (`host/autonomyPolicy/veto.ts`, get-or-create, frozen recipients, CAS'd terminal states) and an immediate notice; the timer's resume reads it and fails `autonomy_vetoed` or proceeds `{vetoWindow:'elapsed'}`; only the timer sweep may end a window (session and MCP resolves refused); a chokepoint reached with a veto-window decision resolves to approve; `GET/POST …/campaigns/:id/vetoes[/:vetoId]` (recipients only, 404 to others, 409 when closed); a "Waiting out a review window" section on the campaign page (4 locales); eraser covers `vetoedBy` | `test/adr0942-p4b-veto-window.test.ts` (sabotage-witnessed), `frontend/react/src/features/campaign-orchestration/__tests__/vetoWindowsSection.test.tsx` | branch `feat/autonomy-0942-p4b` (stacked on P6) |
+
+### Corrections found while building P4a (2026-10-20)
+
+> **P4 is split at a conformance gate: the veto window moves to P4b, with ADR 0950.**
+> As D5 wrote it ("the sweep resolves it as approved at the deadline unless
+> vetoed"), the veto window is an auto-approve on timeout of an approval
+> interrupt, and RFC 0093 forbids that.
+> - **P4b's shape:** a **timer** wait plus a veto record. The step proceeds after
+>   the timer unless a notified role vetoed; a veto fails it with
+>   `autonomy_vetoed`. It is never an approval that silence approves.
+> - **Why P4b:** ADR 0950 is its only consumer. Until P4b ships, a `NotifySpec`
+>   with `vetoWindowMs` behaves as plain notify-after; the validator still accepts
+>   the field.
+
+> **D7, expiry as built:**
+> - **Interrupt lane.** The expire rung is the gate's own deadline: `compileApproverSpec`
+>   writes `timeoutMs`, and the existing gate-timeout sweep rejects it with
+>   `timeout`. That makes one expiry path per lane; `timeout` is the RFC 0223
+>   record-only reason.
+> - **PendingApproval lane.** Rows with a per-row ladder reject with `sla_expired`
+>   from the autonomy per-row pass. Before this, the tenant ladder never
+>   auto-rejected `campaign-spend` (its reject has side effects). The pass then
+>   resumes the waiting run, which fails its step.
+> - **Ladder state.** It lives in two collections of its own (`approval:sla-row`,
+>   `autonomy:interrupt-sla`), so the tenant ladder's prefix hygiene cannot delete
+>   it.
+
+> **D7, escalation as built:** the escalate rung goes, in order, to:
+> 1. the `escalateTo` roles on the client org;
+> 2. else the approvers' active delegates (never when delegation is off);
+> 3. else the operator notice.
+
+> **D7, delegation as built:** `delegation:'none'` compiles to
+> `allowDelegation:false` on the interrupt data and on `ApprovalPolicy`.
+> `resolveEligibleApprovers` is the only reader. Every place that built gate refs by
+> hand (both vote lanes, the notification fan-out, the review projection, the
+> decision core) now goes through one builder, `gateApproverRefs` or
+> `policyApproverRefs`, so the flag cannot be dropped on one lane. While building
+> it, `isEligibleApprover` rule 3 was found rebuilding refs without the flag; it is
+> fixed and witnessed.
+
+> **D7, notify-after as built:**
+> - **Recipients.** The `NotifySpec` roles and subjects on the client org, through
+>   the one resolver. Delegates of a named approver are included (ADR 0198
+>   fan-out). If nobody resolves, nothing is sent; it is never a broadcast.
+> - **Timing.** A notice is emitted only after the effect succeeds (ads `updated`
+>   or `published`, SMS `sent`), or by the gate for a class with no wired chokepoint.
+>   Never on a replay.
+> - **Channels.** The inbox (`campaign.autonomy.notice`) plus device push. The
+>   email and Teams deliveries carry approval types only, so those `NotifySpec`
+>   channels are **not delivered yet**. That is a recorded residue, not a claim.
+> - **The daily digest.**
+>   - It is a chain (`campaign-autonomy.daily-digest`, an `internal` chain pack,
+>     registered chain-backed same-id).
+>   - It runs on a **host-owned** per-tenant schedule (`autonomy-digest:<tenant>`,
+>     08:00 UTC, no acting person, gated on `campaign-orchestration` at fire time).
+>     The schedule is registered when a saved policy first contains a daily
+>     `NotifySpec`.
+>   - It sends one notice per person per day, with a deterministic id, and deletes
+>     the delivered items.
+>   - Queued items are erased with the subject.
+
+### Corrections found while building P3a (2026-10-20)
+
+> **P3 is split at a real gate.** P3a is the chokepoints. P3b is the ADR 0924 D4
+> fold-in: per-party counting on `decideChangeSet` needs the client vote identity
+> (`client-approver:<id>`) that ADR 0924 P1 (#5043) introduces, and until it
+> merges nothing records a client vote to count. P3b follows #5043, with the
+> required test: two agency votes on a `client_and_agency` change set leave it
+> pending, and one agency vote plus one client vote approves it.
+
+> **D1 / D5, the chokepoints a run can reach today:**
+> - **Ads:** `publishAd` (`ads.publish`, created PAUSED) and `updateBudget`
+>   (`ads.budget`).
+> - **SMS:** `sendSms` (`sms.send`).
+>
+> **What has no chokepoint yet, and why:**
+> - **Launch.** There is no launch operation; ADR 0952 adds `setDeliveryStatus`,
+>   and `ads.launch` is wired there.
+> - **Email bulk send (ADR 0905) and CMS publish.** Neither is reachable from a
+>   run: nodes may only draft or submit, and both are human routes.
+> - **`apply-ramp`.** ADR 0950 is not built.
+>
+> Each calls `enforceCampaignAction` as soon as a run lane reaches it (ADR 0948,
+> 0950, 0952, 0955). That keeps D7's sequencing rule ("nothing that creates an
+> external effect ships before 0942 P3") enforceable by one helper rather than
+> rebuilt per feature.
+
+> **D3, the client floor and the live overlay come through seams.**
+> `setAutonomyClientResolver` is registered by campaign-ops, the owner of
+> `ClientAccount`. `setAutonomyCampaignStatusResolver` and
+> `setAutonomyToggleResolver` are registered by campaign-orchestration.
+> - The client floor applies only to an **agency client**, an org with a
+>   `ClientAccount`. A campaign in an org that is not a client gets no client floor.
+>   Before this correction, "missing" would have blocked every non-agency tenant's
+>   campaign effects.
+> - Neither seam is read on a replay.
+
+> **D5, ads as built:**
+> - **One decision for a campaign run.** The governance threshold is folded in as
+>   the tenant ceiling, so a campaign run's spend gets one approval row.
+> - **The row's contents.** It carries the policy's compiled approvers, the client
+>   `orgId`, and the run's requester (`submitters`).
+> - **Approvers narrow.** For campaign runs, a governance-threshold approval now
+>   names the policy's approvers (default: the client org's owners and admins)
+>   rather than any `approvals:respond` holder. That narrows and never widens.
+> - **Non-campaign runs** keep exactly today's gate.
+> - **Every budget change asks.** The adapter cannot see the old budget, so
+>   `spendDeltaPct` is absent and every preset's spend-increase escalation fires. That
+>   is honest and noisy. ADR 0952's approved caps are the route to "moves inside an
+>   approved cap stay automatic". The delta is not derived from the dispatch
+>   ledger, which is keyed by publish id, not campaign.
+> - **Re-asking above the grant.** The spend key hashes the amount, so any
+>   different amount opens a new approval. That is witnessed.
+> - **Brand compliance stays separate.** The ADR 0354 compliance checker's findings
+>   are not fed in as facts yet. Its own approval row (`cmpl:`) stays separate. An
+>   absent `findingsHigh` already escalates, so nothing is loosened. Folding the
+>   checker into the facts belongs with ADR 0945's fidelity verdicts, which enter as
+>   a D3 floor.
+
+> **D10.4, as built for spend:** fork-stable spend keys would have let a branch
+> fork reuse its source's approved row, which is exactly what D10.4 forbids. Under
+> the attended posture the key is namespaced by the fork's own run (`att:<runId>:`),
+> so humans decide again. A replay fork never reaches the adapter, because it is
+> side-effect served.
+
+> **D5 / D10.2, the PendingApproval lane, as built:**
+> - **Roles were not enforced before this.** `evaluateQuorum` finalized a
+>   single-approver row without reading its approver refs. An eligibility check is
+>   now registered for `campaign-spend`. It applies **only** to rows that carry
+>   policy approver refs (rows the autonomy chokepoint writes):
+>   - the decider must be eligible on the row's client org;
+>   - the decider may not be the run's requester, **in either direction**. The
+>     eligibility seam cannot see the verb, so a requester who wants to stop the
+>     spend cancels the run.
+> - **Rows without policy approver refs** keep today's rules. That is witnessed.
+> - **Waiting runs.** A campaign run waits on its spend row: the core
+>   `ad-budget-update` node and the `publish-ad-variants` pack node suspend on
+>   `external-event` keyed `approval:<id>`.
+>   - **Where the waiting is recorded.** In the waiter store
+>     `autonomy:approval-waiter`, one row per waiting run, because a fork-stable row
+>     can have several waiting runs.
+>   - **What the decision does.** It calls `resumeRunsAwaitingApproval` after the
+>     CAS. The node re-runs, and the adapter finds the decided row.
+>   - **Non-campaign runs** keep their `requiresApproval` output.
+>   - **A pack-side trap, found and fixed.** `publish-ad-variants` suspends outside
+>     its catch-all, because the catch-all would have turned the suspend into a
+>     failure. That is witnessed.
+
+> **D5, forks inside a spend wait (found by grade-workflows):**
+> - **The bug.** ADR 0751 re-creates a fork's open interrupt without re-running the
+>   node, so the fork was never registered as a waiter. It stranded when the source's
+>   approval was decided.
+> - **The fix.** `executor/forkInterrupts.ts` registers the fork when the
+>   re-created row is an `approval:` wait. On resume:
+>   - a **branch** fork re-runs its chokepoint and asks for its own approval
+>     (D10.4);
+>   - a **replay** fork fails closed with `replay_source_missing`, because a replay
+>     never fires a new effect.
+> - **Residue.** A fork created after the approval was already decided is not
+>   resumed. The operator cancels or re-runs it. A resume-on-recreate must not race
+>   the executor's dispatch, so it is left to a follow-up.
+
+> **D5, the covering grant is derived and not stored:** the run's event log names
+> its resolved interrupts, and the interrupt row (the ADR 0068 owner) carries the
+> gate's `data.autonomy` block. The gate now also records the `facts` it was asked
+> on, plus an optional `contentHash` input.
+> - **Coverage:** amounts and audience no larger, no new risk flag, and the same
+>   content when the gate bound content.
+> - **Forks:** a fork's grants are its own events.
+
+### Corrections found while building P2 (2026-10-20)
+
+> **D5 / matrix row 3, the surface shape:** `FeatureSurface` is a flat map, so
+> the workflow surface is `autonomyResolve({actionClass, stage?, facts?})` and
+> `autonomyExplain({actionClass, stage?})`, not `.autonomy.resolve`. Both read the
+> run row server-side.
+
+> **D5, as built:**
+> - **Legacy posture.** An unbound run, or a bound run with no stamp while the
+>   toggle is OFF, gets **exactly** today's open approval gate: no approver refs and
+>   no `autonomy` block. A stamped run is never legacy.
+> - **Notify-after.** `notify-after` returns success with the decision recorded. The
+>   notice and the veto window are P4.
+> - **PendingApproval-lane classes.** `approve` on such a class is a typed failure,
+>   `autonomy_lane_unavailable`, until P3 builds that lane. The D6 ratchet forbids a
+>   campaign chain from gating such a class meanwhile.
+> - **The node's statuses.** It returns `failure` (the `NodeOutcome` spelling). A
+>   rejection fails it with `autonomy_rejected`.
+
+> **D2 / D5, the approver org:** gate eligibility resolves role refs against
+> `run.metadata.approverOrgId` (ADR 0075 §D3).
+> - The P1 contributor now also stamps it with the run tag's `orgId`, so approvers
+>   are resolved on the **client** org.
+> - A child derives it from its inherited stamp.
+> - `decideGate` refuses (`approver_org_mismatch`) when the two disagree.
+> - **A pre-existing gap, reported and not fixed here:** `POST /runs` lets a caller
+>   supply `approverOrgId` whenever the host computes none, for example in a
+>   multi-org tenant. That chooses the org whose roles approve the run's
+>   group/role gates. Campaign runs are unaffected, because their tag cannot come
+>   from a caller. ADR 0075 should reserve the key.
+
+> **D4, replay:** the live tighten-only overlay is read only when the run is not
+> replaying (`currentEffectContext().replaying`). The verdict is otherwise a pure
+> function of the stamp and the facts. A paused campaign blocks a live gate, while
+> a replay of the same gate reproduces its recorded decision. Both are witnessed.
+
+> **D10.2, as built:** the check sits in `resolveAndResume` right after vote
+> eligibility, so every lane passes through it: a bound user, a capability-token
+> voter's `countAs`, and a delegate's `actedBy`.
+> - **Requesters** are the run's `actingUserId` and its RFC 0165 owner. The agent
+>   dispatcher's principal comes with ADR 0943's frozen binding.
+> - **Rejecting is always allowed.**
+> - **There is no sole-approver escape.** With the toggle on, a one-admin client
+>   cannot approve its own campaign's kernel. That is D10.2 by design; P4's
+>   escalation and P5's explainer must say so.
+
+> **D6, as built:** the table covers 22 typeIds, including the three
+> `vendor.myndhyve.ads-publish-*` nodes (`ads.publish.{meta,google,tiktok}`),
+> mapped `refused`. "The chain loader refuses" is enforced as a real-loader ratchet
+> over the committed campaign chain packs. A tenant-authored chain is not
+> campaign-family by construction; its runtime cover is P3's chokepoints plus
+> ADR 0941 P4's `adapterOnly`.
+
+> **The P1 escape hatch is closed:** canvas-invoked children
+> (`host/canvasSurface.ts`) now inherit the registered stamps from the parent row,
+> like sub-workflow children.
+
+### Corrections found while building P1 (2026-10-20)
+
+> **D4, the stamp shape:** `run.metadata.campaignAutonomy = {v:1, policyId, version,
+> name, basePreset?, hash, rules, source, campaignId, orgId, resolvedAt, mcpOrigin?,
+> dangling?}`. The reader (`runAutonomyOf`) re-validates the rules and recomputes
+> the hash. A stamp that does not verify counts as absent, so a bound run falls back
+> to `review-everything@1`.
+
+> **D4, binding and children:**
+> - **Bound runs.** A run is campaign-bound when it carries the ADR 0941 run tag
+>   (`campaignOrchestration.{campaignId, orgId}`) or a stamp. An unbound run gets no
+>   campaign policy and keeps today's behaviour.
+> - **Children.** `RunStartContext.parentRunId` exists, but a child does not
+>   re-resolve. The ADR 0941 inherited-metadata seam (`host/inheritedRunMetadata.ts`)
+>   copies the parent row's stamp and posture verbatim, and absence is inherited too.
+>   The contributor contributes nothing when `parentRunId` is set.
+
+> **D4, dangling tags:** a tag naming a campaign that is not under its org gets a
+> fallback stamp (`source:'default'`, `dangling:true`), never "no stamp". That keeps
+> the run explainable.
+
+> **D10.4, as built:** the posture lives in its own reserved key,
+> `campaignForkPosture:'attended'`. It sits beside the stamp and is not part of it,
+> so the stamp stays byte-identical across a fork. It is set on a **branch** fork and
+> on a **redrive**: a redrive re-executes nodes as a new run, so its effects are new
+> too. The architect review found that redrive was not covered by the ADR.
+> - **Belt and braces.** The reader also honours a live `run.forkMode === 'branch'`,
+>   which catches a fork whose contributor failed.
+> - **Redrive inheritance.** `routes/workflowDebug.ts` re-takes every registered
+>   inherited stamp from the stored source row after `buildRunRecord` strips reserved
+>   keys. That also fixes the same hole for ADR 0941's `campaignGoal`.
+
+> **D10.3, verified:** `host/mcpSemantics.ts:404` is the only MCP run constructor,
+> and it writes `source:'mcp-server-mount'` and `trustBoundary:'untrusted'` as a
+> literal, with no caller merge. A source-pin test holds that. The stamp records
+> `mcpOrigin:true`, so the floor survives into children, which do not carry
+> `source`. A caller who forges the marker only makes its own run stricter. No new
+> reservation was needed.
+
+> **Open for P2, found by the P1 review:** only the sub-workflow dispatcher
+> inherits. Canvas invoke (`host/canvasSurface.ts`) and the other child constructors
+> build children with neither the tag nor the stamp, so such a child is unbound. P2's
+> action-class ratchet must refuse non-inheriting child constructors in campaign
+> chains, or the 0941 seam must be extended to them.
+
+### Corrections found while building P0 (2026-10-20)
+
+> **D2, presets: the ladder was not monotonic.** As written, *Guarded* was
+> provably looser than *Autopilot* on four classes: `content.publish`,
+> `ads.publish` and `lead.contact` escalate on fewer facts in Guarded, and
+> Guarded's `ads.budget` allowed a ≤10% raise that owner decision 4 forbids
+> Autopilot. Switching a campaign from Autopilot to Guarded would then have
+> counted as a loosen. **Fix:** Guarded is built on Autopilot. Where Guarded is
+> not plain `approve`, it keeps Autopilot's risk escalations as a prefix and
+> appends its own tighter thresholds. The preset test proves
+> review-everything ≥ guarded ≥ autopilot per class and stage with the D9
+> comparator.
+
+> **D2, presets: any spend increase needs approval in every preset.** This applies
+> owner decision 4 (ADR 0941) to all three presets, not only to Autopilot, because
+> a preset looser than Autopilot breaks the ladder. Pausing and cutting spend
+> stay automatic. The 10% `spendDeltaPct` allowance is superseded until ADR 0952's
+> approved caps provide "moves inside an approved cap". Guarded's $500 threshold
+> stays as an extra escalation.
+
+> **D2, presets are rowless.** A binding names a preset as `policyId:'preset:<name>'`,
+> `version:<n>` and stores no policy row. The hash is computed from the code
+> constant. Only custom rules get `autonomy:policy` rows. A binding that names a
+> missing row or an unknown preset version resolves to `review-everything@1`, and
+> the read model says `dangling:true`.
+
+> **D2, operators: `in` is refused.** No `RiskFact` is string-typed, so a
+> closed-world validator refuses `in` for every fact. Booleans take `==` only.
+
+> **D2, missing facts:** a condition on a fact the caller did not supply is
+> **true**. Escalations only tighten, so an unknown fails toward review. The
+> resolver records `fact_missing:<fact>`. P3 chokepoints must therefore supply
+> every fact they know, or Autopilot's risk escalations will ask every time.
+
+> **D3, layer 1 and layer 5 scope:** the client-not-live floor, the MCP and
+> attended-fork floors, and the live overlay (paused or archived campaign,
+> emergency halt) bind **external-effect classes only**. Generation, plan
+> approval and creative review still run for a preview client. Content-rules,
+> vendor and fidelity floors apply to every class, because the caller supplies
+> them only where they are relevant.
+
+> **D3, layer 2 has three states, not two.** The resolver's ceiling input is
+> `'none' | 'approve' | 'blocked'`. ADR 0028's `draft-only` is not an autonomy
+> outcome; it stays the chokepoint's own posture (P3).
+
+> **D3, ties:** on a severity tie the policy's own decision is kept, because it
+> carries the policy's approvers and notify list. A floor that only matches it
+> does not replace it with the default approver.
+
+> **D1/D2, `MarketingCampaign.autonomy` is not mirrored yet.** The field belongs to
+> ADR 0941 P1, which a peer is building. The binding row is authoritative and
+> the GET returns it, so nothing reads the mirror. 0941 P1 adds the field.
+
+> **D9, as built:**
+> - **What "loosen" means.** It is decided by a conservative comparator:
+>   anything not provably at least as strict, per class and stage after preset
+>   fallback, is a loosen. This includes changing who approves, the SLA, the
+>   quorum split, or dropping an escalation.
+> - **Campaign overrides.** A campaign override is compared against both the
+>   policy in force and the client default.
+> - **Removing an override** (`DELETE`) is judged the same way.
+> - **Client defaults.** Agency admins set them, in either direction.
+> - **Notification.** A loosen is audited (`campaign.autonomy.policy-set` or
+>   `…policy-cleared`) and notifies the client org's `owner`/`admin` holders by
+>   addressed notice only. When recipients cannot be resolved it does **not**
+>   broadcast to the workspace, because a client's policy is that client's
+>   business.
+> - **Concurrency.** A stale `ifMatch` (`<policyId>@<version>` or `none`) is a 409.
+> - **Concurrency, residual.** The binding compare-and-swap covers only the scope
+>   being saved. A campaign save compares against the client default read in the
+>   same request, so a client-default tighten that lands between that read and
+>   the campaign's CAS is not seen. This is bounded: only agency admins move the
+>   client default, and every save is audited. Accepted.
+> - **Gating.** The client-default routes AND-gate `campaign-ops`,
+>   `campaign-orchestration` and the sub-toggle (ADR 0941 D5).
+
+> **D10.1, as built:** an approver spec must name role or group refs, or set
+> `clientApprover` (on `campaign.change-set.apply` only, Q4). A client approver
+> is a grant-backed named stakeholder, not an open gate. Mixing `clientApprover`
+> with role refs requires `perParty` for both parties (#5038).
+
+> **Existing clients are not backfilled.** Only clients created after this ships
+> are bound to Guarded; older clients resolve to `review-everything@1` (stricter)
+> until an agency admin binds them.
+
+### Corrections found while building P5 (2026-10-20)
+
+> **The SPA derives nothing.** The first plan had the panel hold its own class
+> list and work out each class's rule from the preset. The review moved both to
+> the server. The GET routes return `actionClasses` and `effective`: per class,
+> and per review stage for `creative.review`, the rule the resolver would find,
+> and where it came from (`policy`, `preset` or `fallback`). The panel shows any
+> class the server lists, including ones it has no label for, under "Other steps".
+> It never predicts tighten or loosen. A refused save shows the server's
+> `loosened` list.
+
+> **A level is applied, not selected.** The plan saved a preset on radio change.
+> Arrow keys move through a radio group, so a keyboard user would have saved
+> every level they passed. A pick is now staged behind "Apply this level".
+
+> **A customization keeps each row's approvers unless the person changes them.**
+> The first build wrote the chosen approver roles onto every approval and notice
+> in the policy. That silently changed who approves rows nobody touched. The
+> roles are now rewritten only after the checkbox group is changed. Every rule
+> is still sent (one per class and stage), because a custom policy is a full rule
+> set.
+
+> **Threshold values are editable in P5** (the plan deferred them). Only an
+> escalation with one numeric condition gets an input. Compound or boolean
+> conditions stay read-only, in plain language.
+
+> **The badge is display-only.** It reads the gate's own outputs
+> (`{decision, ruleId}` with the resolver's rule grammar) and its two failure
+> codes, from the segment's terminal event. Any node that emitted the same
+> outputs would get the same badge. That is accepted, because the badge grants
+> nothing. A legacy-mode approval with no `ruleId` shows none.
+
+### Corrections found while building P6 (2026-10-20)
+
+> **The Strategist's prompt had been false since P2.** It said the first thing a
+> person sees is the kernel approval and that "nothing proceeds until they approve
+> it". P2 made `kernel-approve` the autonomy gate, so whether it waits is the
+> policy's call. The prompt now says every gate follows the campaign's review
+> policy, and tells the agent to read the policy before it says whether a step
+> will wait. `promptCatalogParity.test.ts` pins that the unconditional claim is
+> gone.
+
+> **"The campaign scenario pack" is the Strategist's own ADR 0889 suite for now.**
+> ADR 0927's scenario runner (`test/campaign-ops/scenarios/`) is its open P1, so
+> the P6 exit ("eval green in the campaign scenario pack") is met by
+> `evals/campaign-strategist.json`, run through the no-LLM lane as a pass/fail
+> pair. The tasks move into 0927's runner when it lands.
+
+> **One access predicate, typed so a missing user cannot mean owner.**
+> `resolveEffectiveAccess` grants OWNER when no subject is given, so the shared
+> helper takes `{subject} | {tenantPrincipal}` rather than an optional subject.
+> The tool can only build `{subject}` (after its acting-user guard); the route
+> maps a request with no user to `{tenantPrincipal}`, which is its existing
+> behaviour made explicit.
+
+> **The eval does not forbid starting a run when asked to skip approvals.**
+> Starting the orchestration is legitimate (its gates still hold). The suite
+> forbids reading nothing before answering, offering a way around the gate, and
+> starting a run in answer to a loosen request.
+
+### Corrections found while building P4b (2026-10-20)
+
+> **The timer sweep resumes THROUGH `resolveAndResume`.** The plan assumed the sweep
+> bypassed it. It CAS-claims the interrupt (`storage.resolveInterrupt`) and then
+> resumes with `{preclaimed: true}` and `{elapsed: true, reason: 'timer'}`. The
+> early-resolve refusal therefore exempts exactly that shape, which no session or MCP
+> caller can produce. The first build refused the sweep too, and the window could
+> never end.
+
+> **Who may veto is decided by the eligibility resolver, not the notification one.**
+> `resolveNotificationRecipients` answers `null` (broadcast) whenever it cannot map a
+> subject. Used as an authorization check, that would have read as "anyone". The veto
+> route uses `resolveEligibleApprovers` on the window's FROZEN notify spec, with
+> canonical user-id matching, and fails closed on an empty spec.
+
+> **A window this run cannot prove elapsed counts as vetoed.** On resume, a missing
+> record, or one naming another run, fails the step (`veto_record_unreadable`); it
+> never proceeds.
+
+> **The window is at least one hour.** That is P0's validator floor for
+> `vetoWindowMs`. A policy written below it fails the run's stamp check and falls
+> back to `review-everything`, which is fail closed.
+
+### Correction: `creative.review` gains an approvals-lane binding for the publish edge (ADR 0945, 2026-10-20)
+
+> ADR 0945 D5's publish gate refuses AI product creative whose brand-accuracy
+> verdict is `needs_review` unless a person approved publishing THAT asset at THAT
+> verdict. It asks through `registerCreativeReviewApproval`. `factsDigest` cannot
+> answer this, because it hashes risk numbers and cannot name an asset. So
+> `creative.review` gains a binding on the approvals lane:
+> - **Kind `creative-publish-review`**, bound to `sha256(tenant, org, asset,
+>   verdict)`. Verdict ids are content-unique, so a new verdict is a new hash and
+>   an old approval stops applying.
+> - **Approvers** are the client policy's `creative.review` rule at stage
+>   `compliance` when it says approve, else the default approver; a `needs_review`
+>   always needs a person. The requester is a submitter and is refused (D10.2).
+>   Eligibility is the P3a policy-row check, required for this kind (no named
+>   approvers fails closed).
+> - **Disposition `campaign-spend`.** The claim is the decision, and the gate
+>   re-checks.
+> - **The check is a point read** of a binding index (`autonomy:creative-review`),
+>   re-verifying every field on the approval row. Approvals are never scanned.
+> - **Request route:** `POST …/campaign-orchestration/creative-reviews`. The org is
+>   resolved from the asset; only an org writer may ask; every other refusal is
+>   one 404.
+> - **Code:** `features/campaign-orchestration/creativeReview.ts`. **Test:**
+>   `test/adr0945-creative-review-binding.test.ts`, end to end through the real gate.
+> - **Not yet:** the ADR 0947 review-stage node that asks automatically.
 
 ## Planning rows
 
@@ -498,3 +1068,145 @@ wants to honour campaign policies. The program's one recommended RFC is ADR
   everything, Guarded, Autopilot. Frozen into the run at start and replayable;
   never looser than tenant governance or the agent's own rules. Toggle
   `campaign-orchestration.autonomy` (OFF, tenant). No RFC.
+
+Recovery correction (2026-10-21): subject erasure re-reads each binding or immutable policy row after a lost CAS, preserves concurrent policy changes, and reports a retryable failure after bounded contention. A lost CAS is never reported as complete erasure. The content hash and policy/version identity remain unchanged.
+
+Recovery correction (2026-10-24): requester identity aliases are denial-only and checked before approver eligibility as well as after delegation resolution. A resolved legacy autonomy gate retains its original posture on re-entry after the feature toggle changes; fresh gates still use the current fail-closed resolver. Spend-cap enforcement is classified as internal safety tightening: its adapter may pause delivery, never launch or increase spend. Targeted executor, requester-key and action-class witnesses cover these composition seams.
+
+
+## Recovery integration checkpoint (2026-10-25, unvalidated)
+
+The original P3–P6/P4b ancestry is retained with current main. Current campaign
+client/causal membership guards, canonical campaign and link reads, binding
+erasure CAS and ad-launch one-attempt claims are preserved. The prototype's
+unbound launch fast path is not restored: starting paid delivery retains the
+host's single-use human approval ceiling, including when a frozen campaign
+policy is more permissive. No automatic vendor-launch grant is invented.
+
+The Strategist keeps both campaign and autonomy reads, for four tools rather
+than either branch's three. Its changed pack is versioned 1.4.0. New review/veto
+controls compose into the existing keyed CampaignDetailPage; the removed inline
+detail and stale ledger state owner are not resurrected. The shared host toggle
+predicate remains the only owner. These source resolutions are not validation.
+
+Before release: regenerate derived pack/floor/parity/census metadata, verify
+current causal self-approval exclusions and terminal approval/fork wakeups,
+review timer-only veto admission/publication, then run bounded focused and full
+canonical gates. Earlier phase tables and assessments are inherited source
+records, not claims that this recovery has passed those checks.
+
+
+### Recovery review corrections — 2026-10-25 (validation pending)
+
+These corrections preserve the original phase record above. The recovered
+P3/P4/P4b/P6 source is not release-qualified until its focused tests and the
+canonical app gate pass.
+
+- The current host ceiling still requires a person’s single-use approval before
+  `ads.launch`; campaign autonomy never bypasses the existing pre-write claim,
+  account/currency/cap checks, or uncertain-outcome refusal.
+- A campaign spend approval now references its originating run through the
+  host-only `autonomySourceRunId`, distinct from the claim-started `runId`.
+  Decide-time checks use the existing `isAutonomyRequester` identity authority
+  for the actor (else causing member), delegated aliases, and RFC 0165 owner.
+  Every run sharing a pending approval is checked through the existing waiter
+  rows. Causes only deny a vote and acquire no notification/credential authority;
+  the existing `submitterCauses` field is scrubbed by the campaign-spend eraser.
+- The spend-map content key is additionally scoped to the frozen policy,
+  client org and effective approver requirement. An older one-person approval
+  cannot discharge a later two-person requirement for the same provider payload.
+- A finalizer that arrives before the interrupt is persisted keeps its waiter.
+  A bounded rotating pass in the existing dispatch daemon checks durable open
+  interrupts against terminal owning approvals and uses `resolveAndResume`.
+  This also addresses the already-decided-fork residue recorded above, without
+  another daemon, queue, approval engine, or direct executor call.
+- Veto closure checks the owning run before any write and refuses an unelapsed
+  deadline. A contended veto attempt checks the clock again before retrying;
+  subject erasure retries and reports exhaustion rather than silently leaving
+  attribution behind. Erasure removes the vetoer’s free-text reason too.
+- The frozen veto notification spec retains role references; membership is
+  resolved at veto time so revoked roles provide no authority. The autonomy
+  gate retains its gate role and declares the existing `side-effectful`
+  capability so a completed replay serves its recorded outcome rather than
+  opening another veto window or sending another notice.
+- The canonical keyed CampaignDetailPage owns the editor and veto list. The
+  Strategist keeps its existing get-campaign tool alongside get-autonomy,
+  status and run; the prompt and allowlist describe all four.
+
+- A veto window cannot elapse until every addressed notice is durable. The
+  existing single-notice emitter receives deterministic per-recipient IDs;
+  retries fill missing notices, and the veto record records acknowledgement.
+  A swallowed best-effort batch failure or an unresolved recipient never
+  authorizes a timed step. An unacknowledged window past its deadline fails
+  closed and requires a new run rather than promising retroactive review time.
+- The policy editor also owns state by campaign/client identity. Changing
+  clients drops the previous draft and etag before a save is possible, and
+  responses from an unmounted client cannot overwrite the current editor.
+
+- The gate and paid-effect chokepoints share `autonomyOrgOf`: malformed or
+  conflicting host-owned scopes cannot resolve approvers tenant-wide. Client-only
+  stamps never call the campaign-status resolver with an absent campaign ID.
+  A deleted explicit client binding denies live effects, and a malformed frozen
+  stamp cannot become legacy just because the toggle is now off.
+
+- Real canonical `user:<hash>` members exposed an existing notification mapping
+  defect: the users-owned subject resolver only looked up auth principal IDs.
+  It now recognizes an existing canonical user ID directly, including a user
+  whose home tenant differs from the workspace. Org/role expansion still owns
+  membership, and unknown principals remain unaddressable. The veto route tests
+  cover real canonical users, a shared-workspace member and a foreign-org denial.
+- A replay fork taken at a previously suspended `ctx.suspend` node must use the
+  live continuation style. The existing derived-resolution path was incorrectly
+  completing it with `{output: approvalResponse}`, losing the node’s actual
+  outputs. It now preserves the recorded re-invoke key and reuses the existing
+  scheduler continuation; paid nodes still serve the source outcome before
+  execution. Native approval-gate accept/reject/conflict semantics are retained.
+  This implements the existing RFC 0223/replay contract; no new wire shape or
+  normative rule is introduced.
+- Recovered ad-provider fixtures now supply their account currency. The current
+  production currency/account fences remain in place; missing currency never
+  authorizes a write.
+
+
+Recovery validation before the canonical merge train:
+
+| Scope | Result |
+|---|---|
+| Backend types and focused runtime/identity/replay | GREEN, 20 files / 245 cases (`autonomy-recovery-focused-6`); includes the existing RFC 0223 native gate and derivation-race suites |
+| Frontend lint and canonical build | GREEN, zero lint warnings and all token/CSS/i18n/bundle checks (`autonomy-frontend-focused-2`) |
+| Frontend test types and focused UI | GREEN, 9 files / 71 cases (`autonomy-frontend-tests-1`), including route identity, policy editor, veto list and timeline |
+| Generated pack/served metadata | Reviewed: only the three changed campaign packs; three additional served nodes, undischarged 43 and unresolved 0 unchanged; parity adds the two new surface methods without new known drift |
+| Resource guard | One heavy job at a time, Node 22, serial lanes, niced, aggregate 8 GiB cap; no swap growth or resource stop |
+| Canonical app gate / merge / deploy | PENDING; no live flag, policy, credential or spend setting changed by these checks |
+
+
+Recovery canonical correction — 2026-10-25: the first full gate passed 2,778
+backend files and failed seven checks (zero Tracegate misses). The SLA interval
+now enters the existing worker contract explicitly; the orchestration chain
+pins autonomy-gate 1.1.0 under chain/pack 1.2.1. The requester-reader inventory
+records the enforcer's narrowing-only use. Both older Strategist parity suites
+now assert the actual four registered tools. The existing ADR0936 replay test
+now checks the node's actual `answers`/`comment` ports, matching its source output,
+while retaining both known-secret and credential-shape scrub assertions; it no
+longer expects the native-gate wrapper for a ctx.suspend continuation. Types,
+pack-version checks and all 13 focused files / 89 cases passed, including every
+failed check and the real budget/veto replay suites. Full canonical retry is
+still required before merge.
+
+
+Recovery grant correction — 2026-10-25: a new real-SMS-adapter regression first
+failed (`sms_not_connected` instead of `autonomy_approval_required`) when the
+resolved approval carried no content hash. The grant matcher now requires the
+same content identity, including absence: an unbound approval never covers a
+content-bound effect. Backend types and all 13 focused files / 90 cases passed
+including that regression, matching-content and changed-content grants,
+financial fences, recorded budget replay, veto/timer replay and RFC0223 gates.
+The second canonical attempt was stopped only at its task-owned wrapper before
+merge so this correction could join the qualified head. No agent was stopped.
+
+P4b scope remains conservative: timer/veto gate completion does not itself
+remove the synchronous external chokepoint's separate approval floor. A future
+elapsed-window effect grant must bind the run, policy, real facts and content;
+this recovery does not treat an arbitrary elapsed timer as effect authority.
+P3b client-party quorum, wider effect integration and the remaining ADR phases
+remain open; this is not a full autonomy-program completion claim.

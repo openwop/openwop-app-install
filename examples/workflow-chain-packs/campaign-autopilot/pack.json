@@ -1,0 +1,74 @@
+{
+  "name": "core.openwop.workflows.campaign-autopilot",
+  "version": "0.2.0",
+  "kind": "workflow-chain",
+  "description": "Campaign autopilot (ADR 0961). v0.2 is the launch spine for one campaign: a read-only preflight that waits on a checklist card while something is missing, then the drafting stage, which starts the existing campaign spine (`campaign-studio.campaign-orchestration`) as its own campaign run tagged with the same campaign. Drafts only, no external effect. A gated stage runs as its own run because a suspended sub-chain child is not resumed into its parent on this host (ADR 0961 D4 correction). Launched by the campaign-autopilot launch route, which tags the run with its campaign; every node reads that tag, never an input.",
+  "keywords": [
+    "campaign-studio",
+    "campaign-autopilot",
+    "marketing"
+  ],
+  "engines": {
+    "openwop": ">=1.0.0 <3.0.0"
+  },
+  "chains": [
+    {
+      "chainId": "campaign-studio.autopilot",
+      "version": "0.2.0",
+      "internal": true,
+      "label": "Campaign autopilot",
+      "description": "Runs one campaign from its brief: a preflight checks what is missing (and waits on a checklist card until it is fixed), then the drafting stage starts the campaign spine as its own run, which drafts the messaging kernel and every channel, each behind its review gate. Drafts only; nothing is published or spent.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "provider": {
+            "type": "string",
+            "description": "AI provider id for the drafting stage's model-calling nodes (for example anthropic, openai, google). Leave unset to keep the nodes' own default."
+          },
+          "model": {
+            "type": "string",
+            "description": "Model id for the drafting stage's model-calling nodes. Must be offered by `provider` in the host catalog. Set it together with `provider`."
+          }
+        }
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "preflight",
+            "typeId": "feature.campaign-autopilot.nodes.preflight@1.1.0",
+            "name": "Preflight",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {}
+          },
+          {
+            "id": "drafts",
+            "typeId": "feature.campaign-autopilot.nodes.start-stage@1.0.0",
+            "name": "Start drafting",
+            "position": {
+              "x": 240,
+              "y": 0
+            },
+            "config": {
+              "stage": "drafts"
+            },
+            "inputs": {
+              "provider": "{{params.provider}}",
+              "model": "{{params.model}}"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "preflight",
+            "to": "drafts"
+          }
+        ]
+      }
+    }
+  ]
+}

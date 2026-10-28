@@ -54,7 +54,8 @@ export function MemoryCreated({ entry: e }: { entry: MemoryEntry }): JSX.Element
   );
 }
 
-export function MemoryCard({ entry: e, onDelete }: { entry: MemoryEntry; onDelete: (e: MemoryEntry) => void }): JSX.Element {
+/** `onDelete` absent ⇒ no delete control (ADR 0979 D4: the host said it would refuse). */
+export function MemoryCard({ entry: e, onDelete }: { entry: MemoryEntry; onDelete?: (e: MemoryEntry) => void }): JSX.Element {
   const { t } = useTranslation('memory');
   return (
     <div className="surface-card u-grid u-gap-2">
@@ -62,14 +63,16 @@ export function MemoryCard({ entry: e, onDelete }: { entry: MemoryEntry; onDelet
       <div className="memory-tags u-flex u-gap-1 u-wrap"><MemoryTags entry={e} /></div>
       <div className="u-flex u-items-center u-gap-2 u-wrap memory-created">
         <MemoryCreated entry={e} />
-        <Button
-          variant="secondary" size="sm" className="u-ml-auto"
-          onClick={() => onDelete(e)}
-          title={t('deleteEntryTitle')}
-          aria-label={t('deleteEntryAria', { id: e.id })}
-        >
-          <TrashIcon size={13} />
-        </Button>
+        {onDelete && (
+          <Button
+            variant="secondary" size="sm" className="u-ml-auto"
+            onClick={() => onDelete(e)}
+            title={t('deleteEntryTitle')}
+            aria-label={t('deleteEntryAria', { id: e.id })}
+          >
+            <TrashIcon size={13} />
+          </Button>
+        )}
       </div>
     </div>
   );

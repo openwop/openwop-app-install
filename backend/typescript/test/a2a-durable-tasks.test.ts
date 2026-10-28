@@ -11,9 +11,16 @@
  *  - a push fires on the terminal/blocking transitions; an SSRF push URL is
  *    refused.
  *  - back-compat: with durableTasks off, tasks/get is still not-found.
+ *
+ * Tracker TST-BG1-5. Red when (probe-witnessed, wave 58): a push fires on a
+ * non-transition state (`working`); a re-send drops the registered push-config;
+ * `setA2aTaskPushConfig` skips the SSRF guard, or `assertPushUrlAllowed` stops
+ * delegating to the egress guard; the synchronous core persists a Task;
+ * `cancelling` projects terminal; `waiting-external` loses its row; resubscribe
+ * reports a terminal task as non-final; an escalation loses its interrupt kind.
  */
 
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getAgentRegistry } from '../src/executor/agentRegistry.js';
 import { handleA2aRequest, type A2aJsonRpcRequest } from '../src/host/a2aServer.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
@@ -142,7 +149,16 @@ describe('ADR 0035 / RFC 0100 — durable A2A Tasks', () => {
     await handleA2aRequest(send('message/send', { agentId: 'peer.agent', message: { parts: [{ text: 'go' }] } }), DURABLE);
     const before = await getA2aTask('a2a:peer.agent');
 
-    const res = await handleA2aRequest(send('tasks/resubscribe', { id: 'a2a:peer.agent' }), DURABLE);
+    // Move the clock past the stored `updatedAt`, so a write during resubscribe
+    // could not hide behind a same-millisecond timestamp.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    let res: Awaited<ReturnType<typeof handleA2aRequest>>;
+    try {
+      vi.setSystemTime(Date.parse(before!.updatedAt) + 60_000);
+      res = await handleA2aRequest(send('tasks/resubscribe', { id: 'a2a:peer.agent' }), DURABLE);
+    } finally {
+      vi.useRealTimers();
+    }
     const evt = res.result as { kind: string; taskId: string; status: { state: string }; final: boolean };
     expect(evt.kind).toBe('status-update');
     expect(evt.taskId).toBe('a2a:peer.agent');
@@ -178,7 +194,10 @@ describe('ADR 0035 / RFC 0100 — durable A2A Tasks', () => {
     expect(set.error).toBeUndefined();
     // Drive a transition (re-send → completed) so the registered push fires.
     await handleA2aRequest(send('message/send', { agentId: 'peer.agent', message: { parts: [{ text: 'again' }] }, id: 'a2a:peer.agent' }), DURABLE);
-    expect(pushed.some((p) => p.url === 'https://hooks.example.com/push' && p.state === 'completed')).toBe(true);
+    // EXACTLY one push: the re-send upserts `working` (not a transition state,
+    // so no push) and then `completed` (one push). A push on `working` would be
+    // the RFC 0100 §4 floor violated, which `.some(...)` could not see.
+    expect(pushed).toEqual([{ url: 'https://hooks.example.com/push', state: 'completed' }]);
   });
 
   it('refuses an SSRF push URL (RFC 0093 egress guard)', async () => {

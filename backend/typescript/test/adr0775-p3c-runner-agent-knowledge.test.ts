@@ -9,6 +9,10 @@
  * The resolver is stubbed (its own behaviour is covered by the agent-knowledge
  * tests); what this pins is that the runner asks for it with the RESOLVED profile
  * id and that what it returns reaches the model.
+ *
+ * Red when (wave 60 probes, tracker TST-BRC-3): the runner asks with the registry
+ * agent id instead of the resolved profile id; the retriever is not handed to the
+ * dispatch; or a resolver fault fails the turn.
  */
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -24,7 +28,7 @@ vi.mock('../src/host/agentMemoryAdapter.js', async (orig) => ({
 }));
 
 import agentRunnerNode from '../src/host/agentRunnerNode.js';
-import { getAgentRegistry, type ResolvedAgentManifest } from '../src/executor/agentRegistry.js';
+import { getAgentRegistry } from '../src/executor/agentRegistry.js';
 import { openStorage } from '../src/storage/index.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { createRosterEntry } from '../src/host/rosterService.js';
@@ -46,18 +50,20 @@ describe('agent-runner composes the agent\'s bound knowledge', () => {
     registry.register({
       agentId: 'test.p3c-agent', persona: 'P3c', modelClass: 'chat', systemPrompt: 'You review invoices.',
       packName: 'test', packVersion: '0', toolAllowlist: [],
-    } as ResolvedAgentManifest);
+    });
     const entry = await createRosterEntry({ tenantId: 'tenant-p3c', persona: `P3c ${Date.now()}`, agentRef: { agentId: 'test.p3c-agent', version: '0' } });
     let seen = '';
     const callAI = vi.fn<(req: AiCallRequest) => Promise<AiCallResult>>(async (req) => {
       seen = JSON.stringify(req);
       return { data: 'done' };
     });
-    const out = await agentRunnerNode.execute({
-      tenantId: 'tenant-p3c', runId: `run-p3c-${Date.now()}`, config: { offerTools: [] }, configurable: {},
+    const ctx: NodeContext = {
+      tenantId: 'tenant-p3c', runId: `run-p3c-${Date.now()}`, nodeId: 'agent', attempt: 1, secrets: {},
+      config: { offerTools: [] }, configurable: {},
       inputs: { agentId: entry.rosterId, task: 'review the overnight invoices', credentialRef: 'managed:openwop-free' },
-      emit: async () => {}, callAI, callAIWithTools: vi.fn(async () => { throw new Error('no tools offered'); }),
-    } as unknown as NodeContext);
+      emit: async () => ({ eventId: 'evt-p3c', sequence: 0 }), callAI, callAIWithTools: vi.fn(async () => { throw new Error('no tools offered'); }),
+    };
+    const out = await agentRunnerNode.execute(ctx);
     return { out, seen, rosterId: entry.rosterId };
   }
 

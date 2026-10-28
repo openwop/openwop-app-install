@@ -1,11 +1,11 @@
 {
   "name": "core.openwop.connections.meta-ads",
-  "version": "1.0.0",
+  "version": "1.2.1",
   "kind": "connection",
-  "description": "Meta (Facebook/Instagram) Ads connection pack (RFC 0095) \u2014 OAuth2 provider for the Meta Marketing API. Reach is `openapi`: the manifest declares the global Meta OAuth hosts and points at the Marketing API reference, consumed by the core.openwop.http nodes. Carries NO secret; the operator supplies the app id/secret host-side (ADR 0024 \u00a77). An available provider (the parallel ad platform to google-ads); one of the three ad platforms Campaign Studio syncs (ADR 0159).",
+  "description": "Meta (Facebook/Instagram) Ads connection pack — OAuth2 provider for the Meta Marketing API. Reach is `openapi`: the manifest declares the global Meta OAuth hosts and points at the Marketing API reference, consumed by the core.openwop.http nodes. Carries NO secret; the operator supplies the app id/secret host-side. An available provider (the parallel ad platform to google-ads); one of the three ad platforms Campaign Studio syncs.",
   "license": "Apache-2.0",
   "engines": {
-    "openwop": ">=1.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "provider": {
     "id": "meta-ads",
@@ -16,8 +16,8 @@
       "authFlow": "manual",
       "scopeModel": "groups",
       "endpoints": {
-        "authorize": "https://www.facebook.com/v19.0/dialog/oauth",
-        "token": "https://graph.facebook.com/v19.0/oauth/access_token"
+        "authorize": "https://www.facebook.com/v25.0/dialog/oauth",
+        "token": "https://graph.facebook.com/v25.0/oauth/access_token"
       },
       "scopes": {
         "read": [
@@ -32,9 +32,18 @@
         "write": [
           {
             "key": "ads.manage",
-            "label": "Manage ads & budgets",
+            "label": "Manage ads, budgets and Page ads",
             "scopes": [
-              "ads_management"
+              "ads_management",
+              "pages_manage_ads",
+              "pages_show_list"
+            ]
+          },
+          {
+            "key": "catalog.manage",
+            "label": "Manage product catalogs",
+            "scopes": [
+              "catalog_management"
             ]
           }
         ]

@@ -244,13 +244,17 @@ export async function patchCard(
     createdBy?: string;
     assignmentReason?: string;
     blockerNote?: string;
+    /** ADR 0963 — apply `blockerNote` only if the stored note is still this one (409 otherwise). */
+    ifBlockerNote?: string;
   },
 ): Promise<{ card: KanbanCard; triggeredRunId: string | null }> {
   const res = await fetch(
     `${base}/cards/${encodeURIComponent(cardId)}`,
     fetchOpts({ method: 'PATCH', headers: jsonHeaders(), body: JSON.stringify(patch) }),
   );
-  if (!res.ok) throw new Error(`patchCard returned ${res.status}`);
+  // `status` rides the error so a caller can tell a 409 (the card changed under a
+  // conditional write, ADR 0963) from a failure.
+  if (!res.ok) throw Object.assign(new Error(`patchCard returned ${res.status}`), { status: res.status });
   return (await res.json()) as { card: KanbanCard; triggeredRunId: string | null };
 }
 

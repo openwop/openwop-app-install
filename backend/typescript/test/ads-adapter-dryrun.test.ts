@@ -9,14 +9,21 @@
  * dispatch, a later preview for the same brief reports alreadyDispatched:true (so a UI
  * can warn the run would be a fork-stable no-op) without ever short-circuiting to
  * 'published' — a preview must stay side-effect-free.
+ *
+ * Tracker TST-BKU-1. Red when a dry-run makes a platform call, alreadyDispatched
+ * or connectionReady stops being honest, Google requires a developer-token to
+ * preview, media bytes leak into the plan, or a create stops being paused
+ * (TikTok DISABLE / LinkedIn DRAFT) — each sabotage-witnessed (w65).
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { answerCurrencyRead, platformRequests, currencyReads } from './adsCurrencyFixture.js';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from '../src/index.js';
 import type { Storage } from '../src/storage/storage.js';
 import { makeAdsAdapter } from '../src/host/adsAdapter.js';
 import { __resetConnectionsStore, createSecretConnection } from '../src/features/connections/connectionsService.js';
+import { registerProvider } from '../src/features/connections/providerRegistry.js';
 
 interface Hit { method: string; path: string }
 
@@ -31,6 +38,7 @@ describe('ads dry-run / preview (ADR 0167)', () => {
       let raw = '';
       req.on('data', (c) => (raw += c));
       req.on('end', () => {
+        if (answerCurrencyRead(req.url ?? '', raw, res)) return;
         hits.push({ method: req.method ?? '', path: req.url ?? '' });
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ id: `obj-${++idSeq}`, code: 0, data: { campaign_id: `c-${idSeq}`, adgroup_id: `g-${idSeq}`, ad_id: `a-${idSeq}` }, results: [{ resourceName: `rn/${idSeq}` }] }));
@@ -56,6 +64,10 @@ describe('ads dry-run / preview (ADR 0167)', () => {
     // Meta + TikTok connections present; Google deliberately WITHOUT a developer-token
     // configured, to prove a preview builds even when real dispatch would fail closed.
     delete process.env.OPENWOP_GOOGLE_ADS_DEVELOPER_TOKEN;
+    // ADR 0952 defect P9 — the account-currency read is a GET through brokeredFetch,
+    // which pins the provider's apiHosts (the production packs list the platform host).
+    registerProvider({ id: 'meta-ads', label: 'Meta Ads', kind: 'oauth2', authFlow: 'manual', reach: 'openapi', scopes: { read: [] }, refreshable: true, defaultScopes: [], consumerNodes: [], apiHosts: ['127.0.0.1'] });
+    registerProvider({ id: 'tiktok-ads', label: 'TikTok Ads', kind: 'oauth2', authFlow: 'manual', reach: 'openapi', scopes: { read: [] }, refreshable: true, defaultScopes: [], consumerNodes: [], apiHosts: ['127.0.0.1'] });
     await createSecretConnection({ tenantId: 'tads', provider: 'meta-ads', kind: 'bearer', secret: 'META_TOKEN', scope: 'user', userId: 'u1' });
     await createSecretConnection({ tenantId: 'tads', provider: 'tiktok-ads', kind: 'bearer', secret: 'TT_TOKEN', scope: 'user', userId: 'u1' });
     await storage.insertRun({ runId: 'run-1', workflowId: 'w', tenantId: 'tads', status: 'pending', inputs: null, metadata: {}, configurable: {}, createdAt: 'x', updatedAt: 'x' });
@@ -69,7 +81,7 @@ describe('ads dry-run / preview (ADR 0167)', () => {
     await Promise.all(servers.map((s) => new Promise<void>((r) => s.close(() => r()))));
   });
 
-  beforeEach(() => { hits = []; });
+  beforeEach(() => { hits = []; platformRequests.length = 0; currencyReads.length = 0; });
 
   const adapter = (runId = 'run-1', actingUserId = 'u1') =>
     makeAdsAdapter({ storage, tenantId: 'tads', runId, actingUserId, orgId: 'tads' });
@@ -96,7 +108,7 @@ describe('ads dry-run / preview (ADR 0167)', () => {
     expect((creative?.body.object_story_spec as { page_id: string }).page_id).toBe('page-77');
     const ad = out.plan.find((p) => p.step === 'ads');
     expect(ad?.body.creative).toEqual({ creative_id: '<adcreatives-id>' }); // placeholder-id chaining
-    expect(hits).toHaveLength(0); // the load-bearing assertion: a preview calls nothing
+    expect(hits).toHaveLength(0); expect(platformRequests).toHaveLength(0); // the load-bearing assertion: a preview calls nothing
     expect(JSON.stringify(out)).not.toContain('META_TOKEN');
   });
 
@@ -109,7 +121,7 @@ describe('ads dry-run / preview (ADR 0167)', () => {
     expect(String(upload?.body.bytes)).toContain('redacted'); // NEVER creative bytes in a plan
     const creative = out.plan.find((p) => p.step === 'adcreatives');
     expect((creative?.body.object_story_spec as { link_data: Record<string, unknown> }).link_data.image_hash).toBe('<image_hash>');
-    expect(hits).toHaveLength(0);
+    expect(hits).toHaveLength(0); expect(platformRequests).toHaveLength(0);
   });
 
   it('Google: builds a plan even with NO developer-token, and makes ZERO platform calls', async () => {
@@ -123,7 +135,7 @@ describe('ads dry-run / preview (ADR 0167)', () => {
     const campaign = out.plan.find((s) => s.step === 'campaigns');
     const create = (campaign?.body.operations as Array<{ create: Record<string, unknown> }>)[0].create;
     expect(create.status).toBe('PAUSED');
-    expect(hits).toHaveLength(0);
+    expect(hits).toHaveLength(0); expect(platformRequests).toHaveLength(0);
   });
 
   it('TikTok: builds a DISABLE plan carrying advertiser_id + identity, and makes ZERO platform calls', async () => {
@@ -141,7 +153,7 @@ describe('ads dry-run / preview (ADR 0167)', () => {
     const creative = (adStep?.body.creatives as Array<Record<string, unknown>>)[0]!;
     expect(creative.identity_id).toBe('ident-9');
     expect(creative.identity_type).toBe('CUSTOMIZED_USER');
-    expect(hits).toHaveLength(0);
+    expect(hits).toHaveLength(0); expect(platformRequests).toHaveLength(0);
     expect(JSON.stringify(out)).not.toContain('TT_TOKEN');
   });
 
@@ -154,7 +166,7 @@ describe('ads dry-run / preview (ADR 0167)', () => {
     const adStep = out.plan.find((p) => p.step === 'ad/create/');
     const creative = (adStep?.body.creatives as Array<Record<string, unknown>>)[0]!;
     expect(creative.image_ids).toEqual(['<image_id>']); // placeholder-id chaining
-    expect(hits).toHaveLength(0);
+    expect(hits).toHaveLength(0); expect(platformRequests).toHaveLength(0);
   });
 
   it('LinkedIn: builds a DRAFT/PAUSED plan (no connection needed) and makes ZERO platform calls', async () => {
@@ -168,20 +180,31 @@ describe('ads dry-run / preview (ADR 0167)', () => {
     expect(out.plan[1]?.body.status).toBe('PAUSED');
     expect(out.plan[1]?.body.campaignGroup).toBe('<adCampaignGroups-id>'); // placeholder chaining
     expect(out.plan[2]?.body.intendedStatus).toBe('PAUSED');
-    expect(hits).toHaveLength(0);
+    expect(hits).toHaveLength(0); expect(platformRequests).toHaveLength(0);
   });
 
   it('a preview after a REAL dispatch reports alreadyDispatched:true and STILL makes zero calls', async () => {
     const real = await adapter().publishAd(args('meta', 'brief-DRY-REUSE'));
     expect(real.outcome).toBe('published');
     if (real.outcome !== 'published') return;
-    hits = [];
+    hits = []; platformRequests.length = 0; currencyReads.length = 0;
 
     const preview = await adapter().publishAd(args('meta', 'brief-DRY-REUSE', { dryRun: true }));
     expect(preview.outcome).toBe('preview');
     if (preview.outcome !== 'preview') return;
     expect(preview.alreadyDispatched).toBe(true);
     expect(preview.platformCampaignId).toBe(real.platformCampaignId);
-    expect(hits).toHaveLength(0); // preview never short-circuits to 'published'; it calls nothing
+    expect(hits).toHaveLength(0); expect(platformRequests).toHaveLength(0); // preview never short-circuits to 'published'; it calls nothing
   });
+
+  it('an explicit non-USD preview converts the plan exactly without ownership or currency requests', async () => {
+    const output = await adapter().publishAd({ ...args('meta', 'brief-preview-huf'), dryRun: true, accountCurrency: 'HUF', dailyBudgetMinor: 500000 });
+    expect(output.outcome).toBe('preview');
+    if (output.outcome !== 'preview') throw new Error('expected a preview');
+    expect(output.plan.find((step) => step.step === 'adsets')?.body.daily_budget).toBe(5000);
+    expect(platformRequests).toHaveLength(0);
+    expect(currencyReads).toHaveLength(0);
+    expect(hits).toHaveLength(0);
+  });
+
 });

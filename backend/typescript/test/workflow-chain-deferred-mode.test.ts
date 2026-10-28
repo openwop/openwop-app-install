@@ -109,8 +109,10 @@ describe('RFC 0124 — deferred-parameter mode (increment 1)', () => {
     // position (→ source:secret PromptVariable). A whole-value node input would
     // materialize a plaintext source:variable value (no {type:"secret"} PortValue
     // exists), so it MUST fail closed rather than bag the secret.
+    // Each refusal pins ITS OWN site (`where`): the three refuse sites share the
+    // `sensitive_param_not_deferrable` prefix, so a prefix match passes on any.
     expect(() => expandChain(sensitiveInput, { deferred: true, params: { apiKey: 'secret-123' } })).toThrow(
-      /sensitive_param_not_deferrable/,
+      /sensitive_param_not_deferrable: parameter 'apiKey' .* node 'a' inputs\.key \(no source:secret node-input in v1\)/,
     );
   });
 
@@ -120,17 +122,17 @@ describe('RFC 0124 — deferred-parameter mode (increment 1)', () => {
       dag: { nodes: [{ id: 'a', typeId: 'core.noop', config: { auth: '{{params.apiKey}}' } }] },
     };
     expect(() => expandChain(inConfig, { deferred: true, params: { apiKey: 'x' } })).toThrow(
-      /sensitive_param_not_deferrable/,
+      /sensitive_param_not_deferrable: parameter 'apiKey' .* node 'a' config\.auth \(non-prompt \/ frozen\)/,
     );
   });
 
   it('SENSITIVE param in NON-deferred (Path A) mode → FAIL CLOSED (freeze would leak)', () => {
     expect(() => expandChain(sensitiveInput, { deferred: false, params: { apiKey: 'x' } })).toThrow(
-      /sensitive_param_not_deferrable/,
+      /sensitive_param_not_deferrable: parameter 'apiKey' .* expansion-time \(non-deferred\) node 'a'/,
     );
     // default (non-deferred) path also fails closed.
     expect(() => expandChain(sensitiveInput, { params: { apiKey: 'x' } })).toThrow(
-      /sensitive_param_not_deferrable/,
+      /sensitive_param_not_deferrable: parameter 'apiKey' .* expansion-time \(non-deferred\) node 'a'/,
     );
   });
 
@@ -154,7 +156,12 @@ describe('RFC 0124 — deferred-parameter mode (increment 1)', () => {
     expect(bag2[regionVar.name]).toBe('us');
   });
 
-  it('fork replays the same bound configurable value (RFC 0124 / R4 determinism)', () => {
+  // What this case proves: the alias overlay is a PURE function of
+  // (definition, configurable), so a fork that re-seeds from the inherited
+  // `configurable` binds the identical value. It does not drive `:fork`
+  // itself — no test does for a deferred-mode run (`routes/runs.ts:2167`,
+  // grade-code row DEFER-FORK-ROUTE-1).
+  it('fork replays the same bound configurable value (RFC 0124 / R4 determinism): the overlay is a pure function of (definition, configurable)', () => {
     const def = expandChain(nonSensitive, { deferred: true, params: { topic: 'AI ops' } });
     const topicVar = varBySuffix(def, '_topic')!;
     // original run overrides via configurable.

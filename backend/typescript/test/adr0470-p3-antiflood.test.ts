@@ -3,6 +3,11 @@
  * anon held writes/day (the operator inbox was unbounded-by-default) + a honeypot on the
  * public message endpoint. (A server-issued-challenge PoW was deferred as disproportionate
  * once the write target is default-bounded + per-IP rate-limited + HITL-gated.)
+ *
+ * Tracker TST-BG3-4. Red when: an unset `maxWritesPerDay` falls back to anything but
+ * the 25/day default (Infinity, 26), the per-day bound becomes `>` instead of `>=`,
+ * the honeypot check is skipped (a filled `hp` is no longer refused with the generic
+ * 'Invalid request.'), or an EMPTY `hp` is refused as a bot.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -19,7 +24,7 @@ describe('ADR 0470 P3 — secure default write ceiling (inbox bounded WITHOUT op
 
   it('an UNCONFIGURED anon widget (no maxWritesPerDay) is bounded by the default, not uncapped', async () => {
     // The default is OPENWOP_ANON_WRITE_DEFAULT_PER_DAY (25 when unset in the test env).
-    const w = { widgetId: 'p3-w', tenantId: 't', orgId: 'o', agentId: 'a', allowedDomains: ['x.com'], caps: {}, token: 'wgt_x', enabled: true, createdBy: 'op', createdAt: '2026-07-23', updatedAt: '2026-07-23' } as WidgetConfig;
+    const w: WidgetConfig = { widgetId: 'p3-w', tenantId: 't', orgId: 'o', agentId: 'a', allowedDomains: ['x.com'], caps: {}, token: 'wgt_x', enabled: true, createdBy: 'op', createdAt: '2026-07-23', updatedAt: '2026-07-23' };
     const DAY = '2026-07-23';
     let allowed = 0;
     for (let i = 0; i < 40; i++) { if ((await checkAnonWrite(w, DAY)).allowed) allowed++; else break; }
@@ -28,7 +33,7 @@ describe('ADR 0470 P3 — secure default write ceiling (inbox bounded WITHOUT op
   });
 
   it('an operator cap still wins (tighter bound honored)', async () => {
-    const w = { widgetId: 'p3-w2', tenantId: 't', orgId: 'o', agentId: 'a', allowedDomains: ['x.com'], caps: { maxWritesPerDay: 2 }, token: 'wgt_y', enabled: true, createdBy: 'op', createdAt: '2026-07-23', updatedAt: '2026-07-23' } as WidgetConfig;
+    const w: WidgetConfig = { widgetId: 'p3-w2', tenantId: 't', orgId: 'o', agentId: 'a', allowedDomains: ['x.com'], caps: { maxWritesPerDay: 2 }, token: 'wgt_y', enabled: true, createdBy: 'op', createdAt: '2026-07-23', updatedAt: '2026-07-23' };
     const DAY = '2026-07-24';
     expect((await checkAnonWrite(w, DAY)).allowed).toBe(true);
     expect((await checkAnonWrite(w, DAY)).allowed).toBe(true);
@@ -54,11 +59,15 @@ describe('ADR 0470 P3 — honeypot on /widget/message', () => {
   it('REJECTS (400) a message whose honeypot field is filled — a bot signal', async () => {
     const r = await postMsg({ token, message: 'hi', sessionId: 's1', hp: 'spam@bot.com' });
     expect(r.status).toBe(400);
+    // The honeypot's own GENERIC refusal (never revealing the decoy), not some other 400.
+    expect(await r.json()).toMatchObject({ error: 'validation_error', message: 'Invalid request.' });
   });
 
   it('does NOT reject for the honeypot when hp is empty (the real widget always sends it empty)', async () => {
     const r = await postMsg({ token, message: 'hi', sessionId: 's2', hp: '' });
     // May 5xx (free-tier unavailable in tests) or 200, but NOT the 400 honeypot rejection.
     expect(r.status).not.toBe(400);
+    const body = (await r.json().catch(() => ({}))) as { message?: unknown };
+    expect(body.message).not.toBe('Invalid request.');
   });
 });

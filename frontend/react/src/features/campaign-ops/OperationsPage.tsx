@@ -14,29 +14,41 @@
  *
  * @see docs/adr/0926-campaign-ops-operator-inbox-and-preview-onboarding.md
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '../../ui/Button.js';
 import { CheckboxField, SelectField, TextareaField, TextField } from '../../ui/Field.js';
 import { Notice } from '../../ui/Notice.js';
+import { toast } from '../../ui/toast.js';
 import { StateCard } from '../../ui/StateCard.js';
 import { ConfirmDialog } from '../../ui/ConfirmDialog.js';
+import { Modal } from '../../ui/Modal.js';
 import { useLiveRegion } from '../../ui/announce.js';
 import { PageHeader } from '../../ui/PageHeader.js';
+import { Tabs, TabPanel, useUrlTab } from '../../ui/Tabs.js';
 import { useHub } from '../../chrome/hubContext.js';
 import {
   listClients, updateClient, listAssets, listRequests, submitRequest, answerQuestions, reviseRequest,
   listChangeSets, getChangeSetDiff, requestApproval, listJobs, approveChangeSet, rejectChangeSet,
   CampaignOpsError,
-  type ClientAccount, type CampaignAsset, type ChangeRequest, type ChangeSet, type DiffEntry, type Job, type JobStep,
+  type ClientAccount, type CampaignAsset, type ChangeRequest, type ChangeSet, type DiffEntry, type Job, type JobStep, type ExternalAgentsAccess,
 } from './campaignOpsClient.js';
 import { ChangeDiff } from './ChangeDiff.js';
+import { ClientApproversPanel, SendToClient } from './ClientApproval.js';
+
+// ADR 0944 P4 — lazy: the memory panel is not needed to read the inbox.
+const ClientMemoryPanel = lazy(() => import('./ClientMemoryPanel.js').then((m) => ({ default: m.ClientMemoryPanel })));
 
 type TFn = ReturnType<typeof useTranslation>['t'];
 
+// ADR 0943 P4 — the Team tab is a separate chunk, loaded only when opened.
+const TeamPanel = lazy(() => import('./TeamPanel.js').then((m) => ({ default: m.TeamPanel })));
+type OpsTab = 'requests' | 'team';
+const OPS_TABS: readonly OpsTab[] = ['requests', 'team'];
+
 const POLL_MS = 15_000;
 const IN_PROGRESS: ReadonlySet<ChangeRequest['status']> = new Set(['interpreting', 'needs_facts', 'proposing']);
-const KNOWN_REASONS = new Set(['newer_human_edit', 'readback_mismatch', 'publish_blocked', 'not_authorized', 'preview_only', 'email_already_sent', 'unknown']);
+const KNOWN_REASONS = new Set(['newer_human_edit', 'readback_mismatch', 'publish_blocked', 'creative_blocked', 'not_authorized', 'preview_only', 'email_already_sent', 'unknown']);
 
 /** The server's message when it sent one (409/403 copy is already plain), else ours. */
 function errorText(e: unknown, t: TFn): string {
@@ -47,6 +59,15 @@ function errorText(e: unknown, t: TFn): string {
   }
   return t('actionFailed');
 }
+
+// ADR 0957 P0 — its own chunk: it renders nothing unless client reports are on.
+const ClientReportsSection = lazy(() => import('./ClientReportsSection.js').then((m) => ({ default: m.ClientReportsSection })));
+// ADR 0958 P3 — files collaborators sent for this client (own chunk; null when external collaborators are off).
+const ClientIntakeSection = lazy(() => import('./ClientIntakeSection.js').then((m) => ({ default: m.ClientIntakeSection })));
+// ADR 0958 P5 — the collaboration audit review (own chunk; agency admins; null when collaborators are off).
+const ClientCollabAuditSection = lazy(() => import('./ClientCollabAuditSection.js').then((m) => ({ default: m.ClientCollabAuditSection })));
+// ADR 0958 matrix row 10 — the agency's Collaborators panel (own chunk; agency admins; null when collaborators are off).
+const ClientCollaboratorsPanel = lazy(() => import('./ClientCollaboratorsPanel.js').then((m) => ({ default: m.ClientCollaboratorsPanel })));
 
 export function stepReasonKey(reason: string | undefined): string | null {
   if (!reason) return null;
@@ -87,8 +108,11 @@ function OperationsInbox(): JSX.Element {
   const [reloadClients, setReloadClients] = useState(0);
   const [data, setData] = useState<OrgData>(EMPTY_DATA);
   const [status, setStatus] = useLiveRegion();
+  // `?view=` (the hub already owns `?tab=`): reload and share keep the view.
+  const [tab, setTab] = useUrlTab<OpsTab>('view', OPS_TABS, 'requests');
   const orgRef = useRef(orgId);
   orgRef.current = orgId;
+  const clientStatus = useCallback((text: string) => { if (orgRef.current === orgId) setStatus(text); }, [orgId, setStatus]);
 
   useEffect(() => {
     let cancelled = false;
@@ -152,6 +176,7 @@ function OperationsInbox(): JSX.Element {
       <p role="status" aria-live="polite" aria-atomic="true" className="sr-only">{status}</p>
 
       <ClientBar
+        key={orgId}
         clients={clients}
         client={client}
         orgId={orgId}
@@ -163,6 +188,14 @@ function OperationsInbox(): JSX.Element {
         }}
       />
 
+      {client && agencyAdmin ? (
+        <ClientApproversPanel
+          key={`approvers-${client.orgId}`}
+          client={client}
+          onClientChanged={(updated) => setClients((cur) => cur?.map((c) => (c.orgId === updated.orgId ? updated : c)) ?? cur)}
+        />
+      ) : null}
+
       {client?.mode === 'preview' ? (
         <Notice variant="info">
           <strong>{t('previewBanner')}</strong> {t('previewBannerDetail')}
@@ -171,15 +204,44 @@ function OperationsInbox(): JSX.Element {
 
       {orgId ? (
         <>
-          <Composer key={orgId} orgId={orgId} assets={data.assets} assetsFailed={data.assetsFailed} onStatus={setStatus} onDone={refresh} />
-          {data.failed ? <Notice variant="warning" announce={t('listsFailed')}>{t('listsFailed')}</Notice> : null}
-          {!data.loaded && !data.failed ? <StateCard loading title={t('loading')} /> : null}
-          {data.loaded ? <Columns orgId={orgId} data={data} onStatus={setStatus} onDone={refresh} /> : null}
+          <Tabs
+            items={[{ id: 'requests', label: t('tabRequests') }, { id: 'team', label: t('tabTeam') }]}
+            value={tab}
+            onChange={setTab}
+            label={t('tablistLabel')}
+            idBase="campaign-ops"
+          />
+          <TabPanel idBase="campaign-ops" tabId={tab}>
+            {tab === 'requests' ? (
+              <div className="u-grid u-gap-4">
+                <Composer key={orgId} orgId={orgId} assets={data.assets} assetsFailed={data.assetsFailed} onStatus={setStatus} onDone={refresh} />
+                {data.failed ? <Notice variant="warning" announce={t('listsFailed')}>{t('listsFailed')}</Notice> : null}
+                {!data.loaded && !data.failed ? <StateCard loading title={t('loading')} /> : null}
+                {data.loaded ? <Columns orgId={orgId} clientApproves={client?.approvalPolicy === 'client'} data={data} onStatus={setStatus} onDone={refresh} /> : null}
+              </div>
+            ) : (
+              <Suspense fallback={<StateCard loading title={t('loading')} />}>
+                <TeamPanel key={orgId} orgId={orgId} clientName={client?.displayName ?? ''} onStatus={clientStatus} />
+              </Suspense>
+            )}
+          </TabPanel>
+          <Suspense fallback={null}><ClientReportsSection key={`reports-${orgId}`} orgId={orgId} /></Suspense>
+          <Suspense fallback={null}><ClientIntakeSection key={`intakes-${orgId}`} orgId={orgId} /></Suspense>
+          {agencyAdmin && client ? <Suspense fallback={null}><ClientCollaboratorsPanel key={`collaborators-${orgId}`} orgId={orgId} clientStatus={client.status} /></Suspense> : null}
+          {agencyAdmin ? <Suspense fallback={null}><ClientCollabAuditSection key={`collab-audit-${orgId}`} orgId={orgId} /></Suspense> : null}
+          {client ? (
+            <Suspense fallback={null}>
+              <ClientMemoryPanel key={orgId} orgId={orgId} clientName={client.displayName} agencyAdmin={agencyAdmin} onStatus={clientStatus} />
+            </Suspense>
+          ) : null}
         </>
       ) : null}
     </section>
   );
 }
+
+// ADR 0942 P5 — the client's default review policy; campaign-orchestration owns the editor, lazy-loaded.
+const AutonomyPolicyPanel = lazy(() => import('../campaign-orchestration/autonomy/AutonomyPolicyPanel.js'));
 
 function ClientBar({ clients, client, orgId, onSelect, agencyAdmin, onModeChanged }: {
   clients: ClientAccount[]; client: ClientAccount | null; orgId: string; onSelect: (id: string) => void;
@@ -187,8 +249,13 @@ function ClientBar({ clients, client, orgId, onSelect, agencyAdmin, onModeChange
 }): JSX.Element {
   const { t } = useTranslation('campaign-ops');
   const [confirming, setConfirming] = useState(false);
+  const [policyOpen, setPolicyOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [agentsBusy, setAgentsBusy] = useState(false);
+  /** A choice staged behind Apply: arrowing through a closed select must not save each level. */
+  const [agentsDraft, setAgentsDraft] = useState<ExternalAgentsAccess | null>(null);
+  const [agentsError, setAgentsError] = useState<string | null>(null);
   const next = client?.mode === 'preview' ? 'live' : 'preview';
   const nameOf = (c: ClientAccount): string =>
     c.status === 'paused' ? t('clientPaused', { name: c.displayName }) : c.status === 'archived' ? t('clientArchived', { name: c.displayName }) : c.displayName;
@@ -208,6 +275,54 @@ function ClientBar({ clients, client, orgId, onSelect, agencyAdmin, onModeChange
           {next === 'live' ? t('switchToLive') : t('switchToPreview')}
         </Button>
       ) : null}
+      {client ? (
+        <Button size="sm" variant="quiet" onClick={() => setPolicyOpen(true)}>{t('reviewPolicy')}</Button>
+      ) : null}
+      {client && policyOpen ? (
+        <Modal onClose={() => setPolicyOpen(false)} label={t('reviewPolicyTitle', { name: client.displayName })} showClose>
+          <Suspense fallback={null}>
+            <AutonomyPolicyPanel scope={{ kind: 'client', orgId: client.orgId }} bare />
+          </Suspense>
+        </Modal>
+      ) : null}
+      {client && agencyAdmin ? (
+        // ADR 0962 D7 — what outside agents (Claude, ChatGPT, Copilot over MCP) may do for this client.
+        <div className="u-flex u-flex-wrap u-items-end u-gap-2">
+          <SelectField
+            label={t('externalAgentsLabel')}
+            help={t('externalAgentsHelp')}
+            value={agentsDraft ?? client.externalAgents ?? 'off'}
+            disabled={agentsBusy}
+            className="u-minw-240"
+            onChange={(e) => {
+              const value = e.target.value as ExternalAgentsAccess;
+              setAgentsError(null);
+              setAgentsDraft(value === (client.externalAgents ?? 'off') ? null : value);
+            }}
+          >
+            <option value="off">{t('externalAgents_off')}</option>
+            <option value="read">{t('externalAgents_read')}</option>
+            <option value="request">{t('externalAgents_request')}</option>
+          </SelectField>
+          {agentsDraft ? (
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={agentsBusy}
+              onClick={() => {
+                setAgentsBusy(true); setAgentsError(null);
+                void updateClient(client.orgId, { externalAgents: agentsDraft })
+                  .then((updated) => { onModeChanged(updated); setAgentsDraft(null); toast.success(t('externalAgentsSaved')); })
+                  .catch((err: unknown) => setAgentsError(errorText(err, t)))
+                  .finally(() => setAgentsBusy(false));
+              }}
+            >
+              {t('externalAgentsApply')}
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
+      {agentsError ? <Notice variant="error" announce={agentsError}>{agentsError}</Notice> : null}
       {client && confirming ? (
         <ConfirmDialog
           title={next === 'live' ? t('switchToLiveTitle', { name: client.displayName }) : t('switchToPreviewTitle', { name: client.displayName })}
@@ -312,7 +427,7 @@ function Composer({ orgId, assets, assetsFailed, onStatus, onDone }: {
   );
 }
 
-function Columns({ orgId, data, onStatus, onDone }: { orgId: string; data: OrgData; onStatus: (s: string) => void; onDone: () => void }): JSX.Element {
+function Columns({ orgId, clientApproves, data, onStatus, onDone }: { orgId: string; clientApproves: boolean; data: OrgData; onStatus: (s: string) => void; onDone: () => void }): JSX.Element {
   const { t } = useTranslation('campaign-ops');
   // One row per request version; keep only the newest row per request.
   const latest = useMemo(() => {
@@ -342,13 +457,13 @@ function Columns({ orgId, data, onStatus, onDone }: { orgId: string; data: OrgDa
       <div className="u-grid-3 u-gap-4 u-items-start">
         <Column id="review" title={t('colReview')} count={review.length} empty={t('colReviewEmpty')}>
           {review.map((cs) => (
-            <li key={cs.changeSetId}><ChangeSetCard orgId={orgId} cs={cs} requestText={requestText.get(cs.requestId)} onStatus={onStatus} onDone={onDone} /></li>
+            <li key={cs.changeSetId}><ChangeSetCard orgId={orgId} clientApproves={clientApproves} cs={cs} requestText={requestText.get(cs.requestId)} onStatus={onStatus} onDone={onDone} /></li>
           ))}
         </Column>
         <Column id="progress" title={t('colProgress')} count={progressCount} empty={t('colProgressEmpty')}>
           {working.map((r) => <li key={r.requestId}><RequestCard orgId={orgId} req={r} onStatus={onStatus} onDone={onDone} /></li>)}
           {proposed.map((cs) => (
-            <li key={cs.changeSetId}><ChangeSetCard orgId={orgId} cs={cs} requestText={requestText.get(cs.requestId)} onStatus={onStatus} onDone={onDone} /></li>
+            <li key={cs.changeSetId}><ChangeSetCard orgId={orgId} clientApproves={clientApproves} cs={cs} requestText={requestText.get(cs.requestId)} onStatus={onStatus} onDone={onDone} /></li>
           ))}
           {runningJobs.map((j) => <li key={j.jobId}><JobCard job={j} /></li>)}
         </Column>
@@ -479,8 +594,8 @@ function RequestCard({ orgId, req, onStatus, onDone }: { orgId: string; req: Cha
   );
 }
 
-function ChangeSetCard({ orgId, cs, requestText, onStatus, onDone }: {
-  orgId: string; cs: ChangeSet; requestText: string | undefined; onStatus: (s: string) => void; onDone: () => void;
+function ChangeSetCard({ orgId, clientApproves, cs, requestText, onStatus, onDone }: {
+  orgId: string; clientApproves: boolean; cs: ChangeSet; requestText: string | undefined; onStatus: (s: string) => void; onDone: () => void;
 }): JSX.Element {
   const { t } = useTranslation('campaign-ops');
   const [diff, setDiff] = useState<DiffEntry[] | null>(null);
@@ -534,10 +649,13 @@ function ChangeSetCard({ orgId, cs, requestText, onStatus, onDone }: {
         ) : null}
         {cs.status === 'in_review' ? (
           <>
-            <Button size="sm" variant="primary" loading={busy === 'approve'} disabled={busy !== null || diff === null}
-              onClick={() => void act('approve', async () => approveChangeSet(await ensureApproval(), cs.hash), t('approved'))}>
-              {t('approve')}
-            </Button>
+            {/* ADR 0924 D4 — under client approval the agency sends the link; it cannot approve. */}
+            {clientApproves ? <SendToClient orgId={orgId} changeSetId={cs.changeSetId} disabled={busy !== null || diff === null} /> : (
+              <Button size="sm" variant="primary" loading={busy === 'approve'} disabled={busy !== null || diff === null}
+                onClick={() => void act('approve', async () => approveChangeSet(await ensureApproval(), cs.hash), t('approved'))}>
+                {t('approve')}
+              </Button>
+            )}
             <Button size="sm" variant="danger" disabled={busy !== null} onClick={() => { setError(null); setRejecting(true); }}>
               {t('reject')}
             </Button>

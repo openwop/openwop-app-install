@@ -1,9 +1,14 @@
 /**
  * ADR 0369 §6 / Phase 5 — the compose-and-run agent tool: schema-validate →
- * register transient → ordinary run. Pins: invalid stores NOTHING; the
- * capability refusal matches POST /v1/runs; no id takeover; the per-tenant
- * transient cap; the composed draft is catalog-hidden but owner-listed; the
- * run completes as an ordinary run.
+ * register transient → ordinary run. Pins: invalid stores NOTHING (and is
+ * refused BY VALIDATION, not by a later crash); dryRun neither registers nor
+ * runs; no id takeover; the per-tenant transient cap; the composed draft is
+ * catalog-hidden but owner-listed; the run completes as an ordinary run.
+ *
+ * NOT pinned here: the capability refusal. It is wired
+ * (`capabilityGatedTypeIdRefusal`, shared with POST /v1/runs) but is a
+ * documented no-op today — no typeId is capability-gated
+ * (`src/host/workflowComposeTool.ts:170`), so there is nothing to refuse.
  */
 import { describe, it, expect, beforeAll, afterEach } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -58,6 +63,9 @@ describe('workflows.compose-and-run (ADR 0369 §6)', () => {
     const before = listRegisteredWorkflows({ includeTransient: true, includeArchived: true }).length;
     const r = await runTool({ definition: { workflowId: 'agent-bad-1', nodes: 'not-an-array' } });
     expect(r.isError).toBe(true);
+    // The refusal must come from schema validation — any later TypeError would
+    // also set isError (probe 8fw5g3-cmp-validate was VACUOUS on isError alone).
+    expect(parse(r).message).toMatch(/^definition failed validation: /);
     expect(listRegisteredWorkflows({ includeTransient: true, includeArchived: true }).length).toBe(before);
     expect(getRegisteredWorkflow('agent-bad-1')).toBeUndefined();
   });
@@ -67,6 +75,8 @@ describe('workflows.compose-and-run (ADR 0369 §6)', () => {
     expect(r.isError).toBeUndefined();
     const body = parse(r);
     expect(body.valid).toBe(true);
+    expect(body.nodeCount).toBe(1);
+    expect(body.runId, 'dryRun must not start a run').toBeUndefined();
     expect(getRegisteredWorkflow(body.workflowId as string)).toBeUndefined();
   });
 

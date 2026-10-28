@@ -17,8 +17,12 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 vi.mock('../CampaignLedgerSection.js', () => ({ CampaignLedgerSection: () => null })); // own tests: campaignLedgerSection.test.tsx
+vi.mock('../autonomy/AutonomyPolicyPanel.js', () => ({ default: () => null })); // own tests: autonomyPolicyPanel.test.tsx
+vi.mock('../autonomy/VetoWindowsSection.js', () => ({ default: () => null })); // own tests: vetoWindowsSection.test.tsx
+vi.mock('../CommandSection.js', () => ({ CommandSection: () => null })); // own tests: commandSection.test.tsx
+vi.mock('../CampaignVariantsSection.js', () => ({ CampaignVariantsSection: () => null })); // own tests: campaignVariantsSection.test.tsx
 import { render, screen, cleanup, fireEvent, act, within } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import type { AdDispatch, MarketingCampaign } from '../campaignStudioClient.js';
 
 const listCampaigns = vi.fn();
@@ -33,12 +37,32 @@ vi.mock('../campaignStudioClient.js', async (orig) => {
     listOrgs: vi.fn(async () => [{ orgId: 'org-1', name: 'Acme' }]),
     listBriefs: vi.fn(async () => []),
     deleteCampaign: vi.fn(async () => {}),
+    // ADR 0941 D5 — the detail is its own route; it reads the campaign by id.
+    getCampaign: async (id: string) => ((await listCampaigns()) as MarketingCampaign[]).find((c) => c.id === id),
+    getCampaignLinks: vi.fn(async () => ({
+  products: { status: 'ok', items: [] }, project: { status: 'ok', items: [] },
+  assets: { status: 'ok', items: [] }, runs: { status: 'ok', items: [] }, emailSends: { status: 'ok', items: [] },
+  adDispatches: { status: 'ok', items: [] }, plans: { status: 'ok', items: [] }, opsAssets: { status: 'ok', items: [] }, assetTotal: 0,
+})),
     updateCampaign: vi.fn(async () => ({})),
   };
 });
 vi.mock('../../../ui/toast.js', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
 import { CampaignStudioPage } from '../CampaignStudioPage.js';
+import { CampaignDetailPage } from '../CampaignDetailPage.js';
+
+/** The list and the detail as the app routes them (ADR 0941 D5): a row opens the detail route. */
+function renderCampaigns(): void {
+  render(
+    <MemoryRouter initialEntries={['/campaigns']}>
+      <Routes>
+        <Route path="/campaigns" element={<CampaignStudioPage />} />
+        <Route path="/campaign-studio/campaigns/:campaignId" element={<CampaignDetailPage />} />
+      </Routes>
+    </MemoryRouter>,
+  );
+}
 
 const CAMPAIGN: MarketingCampaign = {
   id: 'camp-1', tenantId: 't1', orgId: 'org-1', briefId: 'brief-1', name: 'Spring push', status: 'active',
@@ -53,7 +77,7 @@ const DISPATCH: AdDispatch = {
 };
 
 async function openDetail(): Promise<void> {
-  render(<MemoryRouter><CampaignStudioPage /></MemoryRouter>);
+  renderCampaigns();
   await act(async () => {});
   fireEvent.click(await screen.findByRole('button', { name: /spring push/i }));
   await screen.findByText(/Launch|launch/i);
@@ -102,7 +126,7 @@ describe('ORCH-G2: the dispatch ledger shows the facts it already has', () => {
 
 describe('ORCH-G1: deleting discloses what survives on the ad platform', () => {
   it('the confirm says the dispatched platform campaigns stay put', async () => {
-    render(<MemoryRouter><CampaignStudioPage /></MemoryRouter>);
+    renderCampaigns();
     await act(async () => {});
     fireEvent.click(await screen.findByRole('button', { name: /delete/i }));
     const dialog = await screen.findByRole('dialog');

@@ -24,7 +24,7 @@ import { initInMemorySurfaces, buildHostSurfaceBundle } from '../src/host/inMemo
 import { initHostExtPersistence, __hostExtStorage } from '../src/host/hostExtPersistence.js';
 import { openStorage } from '../src/storage/index.js';
 import { __setHeadlessEmbedderForTest } from '../src/host/headlessAi.js';
-import { checkEmbedBudget } from '../src/features/kb/embedBudget.js';
+import { checkEmbedBudget, estimateTokens } from '../src/features/kb/embedBudget.js';
 import { collectionNamespace, createCollection, ingestDocument, deleteDocument, eraseSubjectKb, getDocument, search, setRetrievalConfig, startReindex, drainReindex, getReindexJob, cancelReindex, getCollection, listAllTenantCollections, _setCollectionCasInterferenceForTest } from '../src/features/kb/kbService.js';
 import { PREAUTHORIZED_CALLER } from '../src/host/subjectAccess.js';
 import { initHostEventDispatcher, __resetHostEventDispatcher, type HostEventEnvelope } from '../src/host/hostEventDispatcher.js';
@@ -313,11 +313,12 @@ describe('reindex machinery (ADR 0398 P3)', () => {
       expect(before!.embeddedChunks).toBeGreaterThan(0);
       expect(await stagingCount(cid, started.toSig)).toBeGreaterThan(0);
 
-      // Meter the tenant so the ABORT itself is observable: `recordEmbedUsage` runs BETWEEN
-      // the staging upsert and the job commit, so a drain that does not abort bills the
-      // tenant's DURABLE daily budget for a batch it is about to throw away.
+      // ADR 0904: a dispatched provider attempt retains its reservation even
+      // when the reindex loses its lease. Cancellation still forbids all vector
+      // and cursor publication, but cannot undo money already spent upstream.
       process.env.OPENWOP_EMBED_BUDGET_TOKENS_PER_DAY = '1000000';
       const usedBefore = (await checkEmbedBudget(tenantId, 0)).used;
+      let dispatchedTokens = 0;
 
       let entered!: () => void;
       let release!: () => void;
@@ -325,7 +326,7 @@ describe('reindex machinery (ADR 0398 P3)', () => {
       const embedGate = new Promise<void>((r) => { release = r; });
       __setHeadlessEmbedderForTest(async () => ({
         provider: 'openai', model: 'text-embedding-3-small',
-        embed: async (texts) => { entered(); await embedGate; return texts.map((t) => { const v = new Array(256).fill(0); v[Math.abs(hash(t)) % 256] = 1; return v; }); },
+        embed: async (texts) => { dispatchedTokens += texts.reduce((n, text) => n + estimateTokens(text), 0); entered(); await embedGate; return texts.map((t) => { const v = new Array(256).fill(0); v[Math.abs(hash(t)) % 256] = 1; return v; }); },
       }));
       try {
         const drain = drainReindex(tenantId, orgId, cid, 1);
@@ -348,7 +349,8 @@ describe('reindex machinery (ADR 0398 P3)', () => {
         expect(col.activeSignature, 'the drain MUST NOT cut over').toBeUndefined();
         expect(col.pendingSignature).toBeUndefined();
         expect(await stagingCount(cid, started.toSig), 'the drain MUST NOT resurrect vectors in the namespace it no longer owns').toBe(0);
-        expect((await checkEmbedBudget(tenantId, 0)).used, 'an aborted batch must not bill the tenant\'s daily embed budget').toBe(usedBefore);
+        expect(dispatchedTokens).toBeGreaterThan(0);
+        expect((await checkEmbedBudget(tenantId, 0)).used, 'a dispatched attempt retains its reservation after cancellation').toBe(usedBefore + dispatchedTokens);
       } finally {
         fakeEmbedder();
       }

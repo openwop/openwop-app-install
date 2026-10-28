@@ -13,6 +13,9 @@ import { createApp } from '../src/index.js';
  * is exactly what the conformance suite's fixture does. Asserting on the host's
  * internals instead would prove the host calls its own helper, not that the key
  * reaching the wire is stable — and the wire is the obligation.
+ *
+ * Witnessed (8f W4): er-key-per-attempt, er-ledger-key, er-one-attempt,
+ * er-effectid-drift, er-extra-allowed, er-cut-throws.
  */
 let server: Server;
 let base: string;
@@ -126,9 +129,20 @@ describe('forceEffectTransportRetry presents ONE identity across BOTH transport 
   });
 
   it('a malformed providerUrl is a typed 400, never a success with no effect', async () => {
-    for (const bad of [{}, { providerUrl: '' }, { providerUrl: 'not-a-url' }, { providerUrl: 'ftp://x/y' }, { providerUrl, extra: 1 }]) {
-      const { status } = await drive(bad);
+    // Each body is valid except for ONE property, and each refusal is asserted by
+    // its own message, so an earlier validator cannot stand in for a later one.
+    const cases: Array<[Record<string, unknown>, RegExp]> = [
+      [{}, /providerUrl is REQUIRED/],
+      [{ providerUrl: '' }, /providerUrl is REQUIRED/],
+      [{ providerUrl: 'not-a-url' }, /MUST be an absolute URI/],
+      [{ providerUrl: 'ftp://x/y' }, /MUST be http\(s\)/],
+      [{ providerUrl, extra: 1 }, /unknown property: extra/],
+    ];
+    for (const [bad, message] of cases) {
+      const { status, json } = await drive(bad);
       expect(status, `${JSON.stringify(bad)} should be refused`).toBe(400);
+      expect(json?.error, 'a TYPED refusal').toBe('validation_error');
+      expect(String(json?.message)).toMatch(message);
       expect(seenKeys.length, 'a refused request must not reach the provider').toBe(0);
     }
   });

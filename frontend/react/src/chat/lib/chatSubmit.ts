@@ -19,6 +19,7 @@
  */
 
 import { findCommand } from '../registry/CommandRegistry.js';
+import { insertIntoSubmittingComposer } from '../composerSeed.js';
 import { detectWorkflowSlashMention, type WorkflowMentionEntry } from './workflowMentions.js';
 import { detectAgentMention, type AgentMentionEntry } from './agentMentions.js';
 import { DEFAULT_ASSISTANT_ID } from '../activeAgents/constants.js';
@@ -73,6 +74,7 @@ export async function runCoreSubmit(
         cancel: ctx.cancel,
         config: ctx.config,
         emitSystem: ctx.emitSystem,
+        insert: insertIntoSubmittingComposer, // ADR 0993 D1 — the composer that sent this
       });
       if (consumed) return;
     }

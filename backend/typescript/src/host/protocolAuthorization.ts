@@ -41,6 +41,8 @@ import { callerSubject, tenantOf, isOwnPersonalWorkspace } from './requestSubjec
 import { createLogger } from '../observability/logger.js';
 import { keyDeclarationPermits } from './delegatedSubject.js';
 import { setBearerChallenge } from '../middleware/authChallenge.js';
+import { rfc0249WireAvailable } from './rfc0249Wire.js';
+import { recordMembershipShadow, shouldSampleMembership } from './profileCensus.js';
 
 const log = createLogger('host.authorization');
 
@@ -124,10 +126,28 @@ export type EnforcedProtocolScope = (typeof ENFORCED_PROTOCOL_SCOPES)[number];
  * five were advertised on before RFC 0049 enforcement is switched on.
  */
 export const KEY_LANE_EXTENSION_SCOPES = ['runs:annotate', 'prompts:read', 'prompts:write', 'content:read', 'content:write'] as const;
-export type KeyLaneExtensionScope = (typeof KEY_LANE_EXTENSION_SCOPES)[number];
 
-/** RFC 0200 §A.3 `scopes_supported` — every scope some route refuses a caller for. */
+/**
+ * RFC 0249 (ADR 0972 D2) — the three proposal scopes, key lane. Membership
+ * authority on those routes is `credentialScopesIn` (workspace:read /
+ * workspace:write / packs:publish), the route's own check, as for prompts.
+ * CONDITIONAL: a route refuses a caller for them only once the RFC 0249 wire is
+ * available (before that every `/proposals` route answers 404 first), so they
+ * join `scopes_supported` only then (`scopesSupported()`). They are always
+ * MINTABLE (`keyPolicy.ts`), so a key can be issued ahead of the switch.
+ */
+export const PROPOSAL_KEY_SCOPES = ['proposals:read', 'proposals:write', 'proposals:apply'] as const;
+export type KeyLaneExtensionScope = (typeof KEY_LANE_EXTENSION_SCOPES)[number] | (typeof PROPOSAL_KEY_SCOPES)[number];
+
+/** RFC 0200 §A.3 `scopes_supported` — every scope some route refuses a caller for,
+ *  less the conditional proposal scopes (see `scopesSupported()`). */
 export const SCOPES_SUPPORTED: readonly string[] = [...ENFORCED_PROTOCOL_SCOPES, ...KEY_LANE_EXTENSION_SCOPES];
+
+/** What discovery publishes: `SCOPES_SUPPORTED`, plus the proposal scopes once the
+ *  RFC 0249 wire is available (ADR 0972 D9). */
+export function scopesSupported(): readonly string[] {
+  return rfc0249WireAvailable() ? [...SCOPES_SUPPORTED, ...PROPOSAL_KEY_SCOPES] : SCOPES_SUPPORTED;
+}
 
 /**
  * ADR 0745 D2 / ADR 0755 D2 — does a key's DECLARED delegation permit `scope`?
@@ -229,6 +249,33 @@ function refuseScope(req: Request, scope: string, basis: string, subject: string
 }
 
 /**
+ * ADR 0975 D8 — "is this 403 a MISSING SCOPE?", the one test a run-scoped grant
+ * asks before standing in for a scope. `refuseScope` throws `forbidden` with
+ * `requiredScope`; other paths throw `forbidden_scope`. Matching only the second
+ * spelling is how D1's entry-gate fallback never ran with enforcement on.
+ * A resource-binding 403 (`forbidden_tenant`, `id_tenant_mismatch`) is never one.
+ */
+export function isScopeRefusal(err: unknown): err is OpenwopError {
+  return err instanceof OpenwopError && err.httpStatus === 403
+    && (err.code === 'forbidden_scope' || (err.code === 'forbidden' && typeof err.details?.requiredScope === 'string'));
+}
+
+/**
+ * ADR 0975 D8 — may a feature's run-scoped grant stand in for `scope` after this
+ * refusal? Only for a MEMBERSHIP miss. An `owk_` key whose own declaration leaves
+ * the scope out was narrowed on purpose by its owner, and no grant widens a key.
+ */
+export function grantMayStandIn(req: Request, err: unknown, scope: string): boolean {
+  return isScopeRefusal(err) && !keyNarrowingRefuses(req, scope);
+}
+
+/** ADR 0975 D8 — a grant that admits a request `refuseScope` already refused must
+ *  withdraw the RFC 0200 `insufficient_scope` challenge it set, or a 2xx carries it. */
+export function withdrawScopeChallenge(req: Request): void {
+  req.res?.removeHeader('WWW-Authenticate');
+}
+
+/**
  * ADR 0755 D1 — gate a route on a documented EXTENSION scope, key lane only.
  * Synchronous and membership-free by design (see `KEY_LANE_EXTENSION_SCOPES`).
  */
@@ -248,6 +295,21 @@ export async function holdsProtocolScope(req: Request, scope: EnforcedProtocolSc
   if (req.principal?.tenants?.includes('*')) return true;
   if (isOwnPersonalWorkspace(req)) return true;
   return (await decideProtocolAuthorization(tenantOf(req), callerSubject(req), scope)).allowed;
+}
+
+/**
+ * ADR 0981 P2 — while enforcement is OFF under the strict profile, ask the
+ * question enforcement WOULD ask, off the request path, and count the "no"s
+ * (`host/profileCensus.ts`). Skips exactly the callers enforcement itself lets
+ * through without a decision: the wildcard bearer and the caller's own personal
+ * workspace. Never refuses; never awaited.
+ */
+function noteMembershipCensus(req: Request, tenantId: string, scope: EnforcedProtocolScope): void {
+  if (req.principal?.tenants?.includes('*')) return;
+  if (tenantId === tenantOf(req) && isOwnPersonalWorkspace(req)) return;
+  const subject = callerSubject(req);
+  if (!shouldSampleMembership(tenantId, subject, scope)) return;
+  recordMembershipShadow(tenantId, subject, scope, decideProtocolAuthorization(tenantId, subject, scope));
 }
 
 /**
@@ -277,7 +339,10 @@ export async function requireProtocolScopeIn(req: Request, tenantId: string, sco
   // workspace escapes. A key narrowing its own delegation can only remove
   // authority, so there is no posture in which honouring it is unsafe.
   if (keyNarrowingRefuses(req, scope)) refuseScope(req, scope, 'key-scopes', req.principal?.principalId);
-  if (!isAuthorizationEnforced()) return;
+  if (!isAuthorizationEnforced()) {
+    noteMembershipCensus(req, tenantId, scope);
+    return;
+  }
   // Wildcard bearer (OPENWOP_API_KEYS / admin token / conformance harness) is the
   // trusted full-access operator principal — the SAME escape hatch the
   // feature-toggle superadmin uses (routes/featureToggles.ts). Without it,

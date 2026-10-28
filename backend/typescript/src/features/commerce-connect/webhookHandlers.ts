@@ -9,7 +9,7 @@ import { resolveOne } from '../../host/featureToggles/service.js';
 import { toStripeMinorUnits, fromStripeMinorUnits } from '../billing/stripeApi.js';
 import type { ConnectStripeEvent } from '../billing/connectEventHook.js';
 import {
-  sellers, accountIndex, seenEvents, payouts, orders, orderSellerIndex,
+  sellerRows, accountIndex, seenEvents, payouts, orders, orderSellerIndex,
   orderIntentIndex, disputes, nowIso,
   ACCOUNT_EVENT_TYPES, PAYOUT_EVENT_TYPES, PURCHASE_EVENT_TYPES,
   ENTITLED_ORDER_STATUSES,
@@ -57,7 +57,9 @@ export async function handleConnectEvent({ event }: { event: ConnectStripeEvent 
 
   // Payouts are money records — recorded regardless of toggle state (the same
   // money-truth rule as purchases); only pure STATE events are toggle-gated.
-  if (PAYOUT_EVENT_TYPES.has(event.type)) return handlePayoutEvent(idx.tenantId, event);
+  // ADR 0948 P0b — the binding names WHICH seller: the tenant's own, or a client
+  // org's (`idx.orgId`). Every event below acts on exactly that row.
+  if (PAYOUT_EVENT_TYPES.has(event.type)) return handlePayoutEvent(idx.tenantId, event, idx.orgId);
 
   const assignment = await resolveOne('commerce-connect', { tenantId: idx.tenantId });
   if (!assignment?.enabled) return { handled: false };
@@ -66,7 +68,7 @@ export async function handleConnectEvent({ event }: { event: ConnectStripeEvent 
     return { handled: true }; // duplicate delivery — already applied
   }
   try {
-    await applyAccountEvent(idx.tenantId, event);
+    await applyAccountEvent(idx.tenantId, event, idx.orgId);
     return { handled: true };
   } catch (err) {
     await seenEvents.delete(`evt:${event.id}`).catch(() => undefined); // release → Stripe retry reprocesses
@@ -77,7 +79,7 @@ export async function handleConnectEvent({ event }: { event: ConnectStripeEvent 
 
 /** Record a payout money-record idempotently (keyed on Stripe's payout id — a
  *  re-delivery under any event id overwrites with identical data). */
-async function handlePayoutEvent(tenantId: string, event: ConnectStripeEvent): Promise<{ handled: boolean }> {
+async function handlePayoutEvent(tenantId: string, event: ConnectStripeEvent, orgId?: string): Promise<{ handled: boolean }> {
   const obj = ((event.data as { object?: unknown })?.object ?? {}) as Record<string, unknown>;
   const payoutId = typeof obj.id === 'string' ? obj.id : '';
   if (!payoutId) return { handled: false };
@@ -85,7 +87,7 @@ async function handlePayoutEvent(tenantId: string, event: ConnectStripeEvent): P
   const currency = typeof obj.currency === 'string' ? obj.currency.toLowerCase() : 'usd';
   const existing = await payouts.get(payoutId);
   await payouts.put({
-    payoutId, tenantId,
+    payoutId, tenantId, ...(orgId ? { orgId } : {}),
     // Stripe payout amounts are minor units; store major (the app-side convention).
     amountMajorUnits: fromStripeMinorUnits(amountMinor, currency),
     currency,
@@ -97,8 +99,9 @@ async function handlePayoutEvent(tenantId: string, event: ConnectStripeEvent): P
 }
 
 
-async function applyAccountEvent(tenantId: string, event: ConnectStripeEvent): Promise<void> {
-  const seller = await sellers.get(tenantId);
+async function applyAccountEvent(tenantId: string, event: ConnectStripeEvent, orgId?: string): Promise<void> {
+  const rows = sellerRows({ tenantId, ...(orgId ? { orgId } : {}) });
+  const seller = await rows.get();
   if (!seller) return; // index row without a seller row — nothing to apply to
   // grade-code CC2CD-6 — bindings are immutable, so an account this tenant held
   // BEFORE re-onboarding still routes here. Its state must never overwrite the
@@ -111,7 +114,7 @@ async function applyAccountEvent(tenantId: string, event: ConnectStripeEvent): P
   const obj = ((event.data as { object?: unknown })?.object ?? {}) as Record<string, unknown>;
 
   if (event.type === 'account.application.deauthorized') {
-    await sellers.put({ ...seller, onboardingState: 'deauthorized', chargesEnabled: false, payoutsEnabled: false, updatedAt: nowIso() });
+    await rows.put({ ...seller, onboardingState: 'deauthorized', chargesEnabled: false, payoutsEnabled: false, updatedAt: nowIso() });
     log.warn('connect seller deauthorized', { tenantId, account: event.account });
     return;
   }
@@ -120,7 +123,7 @@ async function applyAccountEvent(tenantId: string, event: ConnectStripeEvent): P
     const chargesEnabled = obj.charges_enabled === true;
     const caps = (obj.capabilities && typeof obj.capabilities === 'object' ? obj.capabilities : {}) as Record<string, unknown>;
     const reqs = (obj.requirements && typeof obj.requirements === 'object' ? obj.requirements : {}) as Record<string, unknown>;
-    await sellers.put({
+    await rows.put({
       ...seller,
       chargesEnabled,
       payoutsEnabled: obj.payouts_enabled === true,
@@ -141,7 +144,7 @@ async function applyAccountEvent(tenantId: string, event: ConnectStripeEvent): P
   const capabilities = active
     ? Array.from(new Set([...seller.capabilities, capId]))
     : seller.capabilities.filter((c) => c !== capId);
-  await sellers.put({ ...seller, capabilities, updatedAt: nowIso() });
+  await rows.put({ ...seller, capabilities, updatedAt: nowIso() });
 }
 
 

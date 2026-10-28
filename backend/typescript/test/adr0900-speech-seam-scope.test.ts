@@ -10,6 +10,11 @@
  *
  * The flag is read per request (by the gate and by the handler's mock arm), so one boot
  * serves both postures: `OPENWOP_TEST_SEAM_ENABLED` is flipped per case.
+ *
+ * Tracker TST-BJH. Red when (probe-witnessed, w65): admission is granted to anyone
+ * (the 404 legs and the not-admitted log), the scope gate asks `runs:read` instead of
+ * `runs:create`, or the anonymous refusal stops logging its reasonCode. Each seam's
+ * cases nest under `describe(path)` so their titles stay short enough to key.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -58,9 +63,11 @@ afterAll(async () => {
 
 const seamOn = (): void => { process.env.OPENWOP_TEST_SEAM_ENABLED = 'true'; };
 
-async function post(path: string, body: unknown, headers: Record<string, string> = {}): Promise<{ status: number; json: { error?: unknown; message?: unknown; details?: { reason?: unknown } } }> {
+interface SeamReply { error?: unknown; message?: unknown; details?: { reason?: unknown } }
+async function post(path: string, body: unknown, headers: Record<string, string> = {}): Promise<{ status: number; json: SeamReply }> {
   const res = await fetch(`${BASE}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body) });
-  return { status: res.status, json: (await res.json().catch(() => ({}))) as never };
+  const json = (await res.json().catch(() => ({}))) as SeamReply; // JSON body, read as the declared reply shape
+  return { status: res.status, json };
 }
 
 /** A real signed-in member: a cookie session minted by the test-login seam. */
@@ -90,23 +97,23 @@ const expectNotEnabled = (r: { status: number; json: { error?: unknown; message?
 };
 
 describe('ADR 0900 D1 — test seam OFF: only a configured wildcard is admitted', () => {
-  for (const [path, body] of SEAMS) {
-    it(`${path}: a signed-in member (cookie) is refused 404, and served 200 once the test seam is on`, async () => {
+  for (const [path, body] of SEAMS) describe(path, () => {
+    it(`a signed-in member (cookie) is refused 404, and served 200 once the test seam is on`, async () => {
       const cookie = await signedInCookie();
       expectNotEnabled(await post(path, body, { cookie }));
       seamOn();
       expect((await post(path, body, { cookie })).status).toBeLessThan(300);
     });
-    it(`${path}: a member owk_ key WITH runs:create is refused 404, and served 200 once the test seam is on`, async () => {
+    it(`a member owk_ key WITH runs:create is refused 404, and served 200 once the test seam is on`, async () => {
       const auth = { authorization: `Bearer ${await memberKey(['runs:create', 'workspace:write'])}` };
       expectNotEnabled(await post(path, body, auth));
       seamOn();
       expect((await post(path, body, auth)).status).toBeLessThan(300);
     });
-    it(`${path}: a SCOPED env key is refused 404 (the prod cut's credential shape is not the wildcard)`, async () => {
+    it(`a SCOPED env key is refused 404 (the prod cut's credential shape is not the wildcard)`, async () => {
       expectNotEnabled(await post(path, body, { authorization: `Bearer ${SCOPED_ENV_KEY}` }));
     });
-    it(`${path}: the PUBLIC dev-token fallback wildcard is refused 404 (/architect M1, the ADR 0771 rule)`, async () => {
+    it(`the PUBLIC dev-token fallback wildcard is refused 404 (/architect M1, the ADR 0771 rule)`, async () => {
       // No keys configured + auth not enforced ⇒ `readKeyTenants` serves `dev-token:*`.
       const keys = process.env.OPENWOP_API_KEYS;
       delete process.env.OPENWOP_API_KEYS;
@@ -116,10 +123,10 @@ describe('ADR 0900 D1 — test seam OFF: only a configured wildcard is admitted'
         process.env.OPENWOP_API_KEYS = keys;
       }
     });
-    it(`${path}: an anonymous visitor gets the same 404 as everyone else outside the two cases`, async () => {
+    it(`an anonymous visitor gets the same 404 as everyone else outside the two cases`, async () => {
       expectNotEnabled(await post(path, body, { cookie: await anonCookie() }));
     });
-    it(`${path}: the configured wildcard is ADMITTED — the handler runs (400 on an empty body, not the gate's 404)`, async () => {
+    it(`the configured wildcard is ADMITTED — the handler runs (400 on an empty body, not the gate's 404)`, async () => {
       // With the flag off the handler routes to the real managed provider, which this
       // offline suite cannot reach, so admission is witnessed by the handler's own
       // validation answer. The <300 accept for the wildcard is the test-seam case below.
@@ -127,27 +134,28 @@ describe('ADR 0900 D1 — test seam OFF: only a configured wildcard is admitted'
       expect(r.status).toBe(400);
       expect(String(r.json.error)).toMatch(/(^|\.)invalid_request$/);
     });
-  }
+  });
 });
 
 describe('ADR 0900 D1 — test seam ON: the VOX2-F1/F1b gates still bite behind admission', () => {
-  for (const [path, body] of SEAMS) {
-    it(`${path}: the configured wildcard is served 200`, async () => {
+  for (const [path, body] of SEAMS) describe(path, () => {
+    it(`the configured wildcard is served 200`, async () => {
       seamOn();
       expect((await post(path, body, { authorization: `Bearer ${WILDCARD_KEY}` })).status).toBeLessThan(300);
     });
-    it(`${path}: an anonymous visitor is refused 401 anonymous_principal_refused (VOX2-F1b)`, async () => {
+    it(`an anonymous visitor is refused 401 anonymous_principal_refused (VOX2-F1b)`, async () => {
       seamOn();
       const r = await post(path, body, { cookie: await anonCookie() });
       expect(r.status).toBe(401);
       expect(r.json.details?.reason).toBe('anonymous_principal_refused');
     });
-    it(`${path}: a member key WITHOUT runs:create is refused 403 (VOX2-F1)`, async () => {
+    it(`a member key WITHOUT runs:create is refused 403 (VOX2-F1)`, async () => {
       seamOn();
       const r = await post(path, body, { authorization: `Bearer ${await memberKey(['runs:read', 'workspace:write'])}` });
       expect(r.status).toBe(403);
+      expect(String(r.json.error)).toMatch(/forbidden/);
     });
-  }
+  });
 });
 
 describe('ADR 0900 D2 — each seam refusal logs a countable reasonCode', () => {

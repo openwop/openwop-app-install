@@ -1,8 +1,9 @@
 /**
  * The parent campaign orchestration workflow (ADR 0158 Phase 2 + §P1.5) — the
- * declarative spine that ties Campaign Studio together. Registered via
- * `BackendFeature.builtinWorkflows` (restart-safe, cross-instance — the ADR 0072
- * precedent).
+ * declarative spine that ties Campaign Studio together. Registered chain-backed
+ * under its stable id from the `campaign-orchestration` chain pack
+ * (`registerLegacyDefsChainBacked`, `features/index.ts`; ADR 0472 P4). This array
+ * is the readable source of truth for that pack, not a builtin (ADR 0961 A-G6).
  *
  *   validate → kernel → kernel-approve → [channel fan-out] → consistency → finalize
  *
@@ -43,7 +44,9 @@ import { CHANNEL_WORKFLOW_IDS } from '../campaign-channels/channelWorkflows.js';
 
 const VALIDATE = 'feature.campaign-brief.nodes.validate';
 const KERNEL = 'feature.campaign-brief.nodes.generate-kernel';
-const APPROVE = 'core.approvalGate';
+// ADR 0942 P2 — the campaign's autonomy policy decides the kernel approval (toggle OFF
+// or an unbound run: an open approval gate, exactly as core.approvalGate was).
+const APPROVE = 'feature.campaign-orchestration.nodes.autonomy-gate';
 const SUBFLOW = 'core.subWorkflow';
 const SUPERVISOR = 'core.orchestrator.supervisor';
 const DISPATCH = 'core.dispatch';
@@ -64,7 +67,7 @@ function linearEdges(nodeIds: readonly string[]): Array<{ edgeId: string; source
 const prefixNodes: Node[] = [
   { nodeId: 'validate', typeId: VALIDATE, inputs: { ...briefIdInput } },
   { nodeId: 'kernel', typeId: KERNEL, inputs: { ...briefIdInput } },
-  { nodeId: 'kernel-approve', typeId: APPROVE, config: { prompt: 'Review the messaging kernel — the foundation every channel echoes.', title: 'Approve the messaging kernel?' } },
+  { nodeId: 'kernel-approve', typeId: APPROVE, config: { actionClass: 'plan.approve', prompt: 'Review the messaging kernel — the foundation every channel echoes.', title: 'Approve the messaging kernel?' } },
 ];
 const suffixNodes: Node[] = [
   // ADR 0356 P1 — the ADR 0172-designed post-merge slot: production planning

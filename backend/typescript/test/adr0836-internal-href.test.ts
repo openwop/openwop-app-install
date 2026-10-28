@@ -8,6 +8,10 @@
  *   it passed the old `/^\/(?![/\\])/` and a URL parser resolves it off-site.
  * - the `[TODO` publish blocker: the server rule and the browser checklist's ONE
  *   `block` rule are the same regex.
+ *
+ * TST-BWB-1 (grade-tests w62): red when either copy stops refusing control characters
+ * or `/\\` (the backend and frontend vector rows), when the headline vector is accepted by
+ * either copy, or when publishChecks.ts's TODO regex drifts in source or flags.
  */
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -43,9 +47,13 @@ describe('ADR 0836 D7 — isInternalHref', () => {
     expect(isInternalHref(href)).toBe(want);
   });
 
-  it('the headline vector is real: the old regex accepted it and a URL parser resolves it off-site', () => {
+  it('the headline vector is real: the old regex accepted it and a URL parser resolves it off-site', async () => {
     expect(/^\/(?![/\\])/.test('/\t/evil.com')).toBe(true);
     expect(new URL('/\t/evil.com', 'https://app.example').origin).toBe('https://evil.com');
+    // …and both copies refuse exactly that vector.
+    expect(isInternalHref('/\t/evil.com')).toBe(false);
+    const mod = (await import(join(FRONTEND, 'lib/internalHref.ts'))) as { isInternalHref: (h: string) => boolean };
+    expect(mod.isInternalHref('/\t/evil.com')).toBe(false);
   });
 
   it.each(VECTORS)('frontend mirror: %j → %s', async (href, want) => {

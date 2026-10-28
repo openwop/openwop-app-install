@@ -13,6 +13,13 @@
  * Every host is major-2-only since ADR 0812 P3c, so there is no version between
  * the floor and `preferredVersion`: no downgrade can happen, and the overlap-host
  * downgrade leg went with major 1.
+ *
+ * Tracker TST-BFA-4. Red when: the peer digest carries the origin in clear;
+ * a below-floor refusal records `unsupported`; an accepted a2a decision drops
+ * `version` or `requested`; the inbound served set keeps 0.3 under the switch;
+ * a header-less card under the switch is the 0.3 card; the MCP client lowers an
+ * unauthenticated exchange, records a below-floor refusal as `unsupported`, or
+ * records no accepted decision.
  */
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -64,7 +71,7 @@ const validatePayload = (() => {
   const def = doc.$defs['negotiationDecided'];
   if (!def) throw new Error('negotiationDecided payload schema missing — every validation below would be vacuous');
   const ajv = new Ajv2020({ strict: false, allErrors: true });
-  (addFormats as unknown as (a: unknown) => void)(ajv);
+  addFormats(ajv);
   const fn = ajv.compile(def as Record<string, unknown>);
   return (p: unknown): string[] => (fn(p) ? [] : (fn.errors ?? []).map((e) => `${e.instancePath} ${e.message}`));
 })();
@@ -189,14 +196,19 @@ describe('A2A — the client records every outcome (switch ON: the v2 floor bind
     } finally { await peer.stop(); }
   });
 
-  it('refused: an UNAUTHENTICATED exchange is not lowered either', async () => {
+  // Under the switch the 1.0 floor binds BEFORE authentication is consulted
+  // (`a2aSurface.ts` refuses a below-floor `peerOffersOnly` first), so an
+  // unauthenticated exchange is refused for the same reason, with no RPC sent.
+  it('refused: an UNAUTHENTICATED exchange is not lowered either (the 1.0 floor binds before authentication is consulted)', async () => {
     const peer = await a2aPeer(['0.3']);
     try {
       const r = await invoke('a2a', { peerUrl: peer.url, authenticated: false, peerOffersOnly: '0.3' });
       expect(r.status, JSON.stringify(r.json)).toBe(400);
+      expect(r.json['code'] ?? r.json['error']).toBe('interop_version_unsupported');
+      expect(peer.hits.filter((h) => h.method !== 'GET'), 'no RPC may reach a below-floor peer').toEqual([]);
       const events = await decided(runIdOf(r.json));
       assertContentFree(events, peer.url);
-      expect(events.at(-1)).toMatchObject({ outcome: 'refused' });
+      expect(events.at(-1)).toMatchObject({ protocol: 'a2a', outcome: 'refused', reason: 'below-floor', floor: '1.0' });
     } finally { await peer.stop(); }
   });
 
@@ -256,8 +268,10 @@ describe('A2A inbound, switch OFF (as shipped) — today\'s behaviour, exactly, 
   });
 
   it('an explicit or absent 0.3 JSON-RPC request is NOT refused as a version', async () => {
-    expect((await rpc('0.3')).error?.code).not.toBe(-32009);
-    expect((await rpc()).error?.code).not.toBe(-32009);
+    // A positive code, not just "not -32009": the request is answered by the
+    // method layer (empty params), which an auth or version refusal never is.
+    expect((await rpc('0.3')).error?.code).toBe(-32602);
+    expect((await rpc()).error?.code).toBe(-32602);
   });
 });
 

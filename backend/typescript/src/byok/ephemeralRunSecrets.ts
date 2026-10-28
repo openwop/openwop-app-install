@@ -196,6 +196,26 @@ export function stripKnownRunSecrets<T>(payload: T): T {
   return walk(payload) as T;
 }
 
+/**
+ * Book AI P18 (ADR 0936) — a node's declared DATA fields. Each top-level key of
+ * `record` named in `dataKeys` gets the Tier 1 scrub only (every secret a run
+ * resolved, as a substring); every other key keeps both tiers. Data fields are
+ * values a later node or feature reads back (model prose, an author's answer),
+ * where the credential-shape pass rewrote legitimate text. NFR-7 (no raw key
+ * material) still holds for them: that is Tier 1. A non-object, or no declared
+ * keys, is the full scrub.
+ */
+export function stripSecretsKeepingData<T>(record: T, dataKeys: readonly string[] | undefined): T {
+  if (!dataKeys || dataKeys.length === 0 || !record || typeof record !== 'object' || Array.isArray(record)) {
+    return stripSecretsFull(record);
+  }
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(record as Record<string, unknown>)) {
+    out[k] = dataKeys.includes(k) ? stripKnownRunSecrets(v) : stripSecretsFull(v);
+  }
+  return out as T;
+}
+
 function stripSecretsFull<T>(payload: T): T {
   const allSecrets = new Map<string, string>();
   for (const [_runId, perRun] of ephemeralByRun) {

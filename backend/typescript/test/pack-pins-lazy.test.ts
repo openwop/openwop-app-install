@@ -4,8 +4,12 @@
  * What would silently undo it, and the case that catches each:
  *  - a descriptor carrying a version again (`{ name, version }` in requiredPacks)
  *    → "descriptors declare names only";
- *  - registration resolving the pins eagerly → "the registry thunk is not called
- *    until a reader asks";
+ *  - the registry resolving the pins eagerly → "the registry thunk is not called
+ *    until a reader asks". This file proves the REGISTRY is lazy (its own thunk).
+ *    The registration SITE (`features/index.ts` passing a thunk, not a resolved
+ *    list) is witnessed by `pack-pins-boot.test.ts` › "a createApp() boot resolves
+ *    zero pins…" (wave 64 probe 8fw5g2-pp-index-eager-cover; the same sabotage
+ *    stays green here, 8fw5g2-pp-index-eager), so it is not re-booted here;
  *  - `PACK_PINS` stops being a pure literal (a spread, a call, a computed key),
  *    which makes it a module-load statement to Tracegate and re-runs every boot
  *    on a pin bump again → "PACK_PINS stays a pure object literal of strings";
@@ -25,7 +29,11 @@ const PINS_FILE = join(dirname(fileURLToPath(import.meta.url)), '../src/features
 describe('ADR 0919 — pack pins resolved lazily', () => {
   it('descriptors declare names only (no version in any requiredPacks entry)', () => {
     const withPacks = BACKEND_FEATURES.filter((f) => (f.requiredPacks ?? []).length > 0);
-    expect(withPacks.length).toBeGreaterThan(20);
+    // Floor = the measured count, wave 64 (2026-10-24, 19d13e682): 78 feature.ts
+    // files declare a non-empty `requiredPacks: [...]` (round 1 counted 79 by grep,
+    // but the 79th match is a doc comment in packPins.ts). A floor far below the
+    // truth (it was 20) lets a feature silently drop its packs.
+    expect(withPacks.length).toBeGreaterThanOrEqual(78);
     const notNames = withPacks.flatMap((f) => (f.requiredPacks ?? []).filter((r) => typeof r !== 'string').map(() => f.id));
     expect(notNames).toEqual([]);
   });
@@ -39,16 +47,19 @@ describe('ADR 0919 — pack pins resolved lazily', () => {
 
   it('the registry thunk is not called until a reader asks, and is re-read each time', () => {
     __resetFeaturePacks();
-    const thunk = vi.fn(() => [{ name: 'feature.x.nodes', version: '1.0.0' }]);
-    registerFeaturePacks('x', thunk);
-    expect(thunk).not.toHaveBeenCalled();
-    expect(getFeaturePacks('x')).toEqual([{ name: 'feature.x.nodes', version: '1.0.0' }]);
-    expect(getFeaturePacks('x')).toEqual([{ name: 'feature.x.nodes', version: '1.0.0' }]);
-    expect(thunk).toHaveBeenCalledTimes(2);
-    // Plain refs still work (the kicktodo readiness test registers them directly).
-    registerFeaturePacks('y', [{ name: 'feature.y.nodes', version: '2.0.0' }]);
-    expect(getFeaturePacks('y')).toEqual([{ name: 'feature.y.nodes', version: '2.0.0' }]);
-    __resetFeaturePacks();
+    try {
+      const thunk = vi.fn(() => [{ name: 'feature.x.nodes', version: '1.0.0' }]);
+      registerFeaturePacks('x', thunk);
+      expect(thunk).not.toHaveBeenCalled();
+      expect(getFeaturePacks('x')).toEqual([{ name: 'feature.x.nodes', version: '1.0.0' }]);
+      expect(getFeaturePacks('x')).toEqual([{ name: 'feature.x.nodes', version: '1.0.0' }]);
+      expect(thunk).toHaveBeenCalledTimes(2);
+      // Plain refs still work (the kicktodo readiness test registers them directly).
+      registerFeaturePacks('y', [{ name: 'feature.y.nodes', version: '2.0.0' }]);
+      expect(getFeaturePacks('y')).toEqual([{ name: 'feature.y.nodes', version: '2.0.0' }]);
+    } finally {
+      __resetFeaturePacks();
+    }
   });
 
   it('PACK_PINS stays a pure object literal of string literals (a Tracegate constant)', () => {

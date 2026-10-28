@@ -11,6 +11,14 @@
  * (read) and any `workspace:write` holder still get in — only a non-member of a
  * PRIVATE project is refused. Bounded to same-tenant (cross-tenant already 404s).
  *
+ * Tracker TST-BG3-12. Red when: ticket-mint, claim-seed or the WS upgrade skips
+ * `collabCanvasReadable` (the non-member then reaches the write gate and gets 403,
+ * not the uniform 404), ticket-mint skips `assertCollabWrite`, the cookie lane skips
+ * its `workspace:write` check, or the ticket is minted without the caller's
+ * principalId (the member's own ticket is then refused). DOUBLE GUARD on the cookie
+ * lane: `assertTenantScope(workspace:write)` and `canvasWriteAllowed` both deny the
+ * read-only member in case 2; case 3 (an org doc, no owner subject) isolates the first.
+ *
  * @see docs/adr/0610-owner-subject-access-and-egress-allowlist.md
  */
 import http from 'node:http';
@@ -48,18 +56,24 @@ beforeAll(async () => {
 });
 afterAll(async () => { __stopCollabLeaseHeartbeat(); __stopCollabUpdateSweep(); __resetCollabRooms(); __resetCollabConns(); delete process.env.OPENWOP_CORS_ORIGINS; await new Promise<void>((res) => server.close(() => res())); });
 
-interface Client { cookie: string; userId: string; get: (p: string) => Promise<any>; post: (p: string, b?: unknown) => Promise<any>; patch: (p: string, b?: unknown) => Promise<any> }
+interface Res { status: number; body: unknown }
+interface Client { cookie: string; userId: string; get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; patch: (p: string, b?: unknown) => Promise<Res> }
+/** Narrow a JSON body to the one field a call site reads. */
+function field<T>(r: Res, key: string): T {
+  const body = r.body as Record<string, unknown> | undefined;
+  return body?.[key] as T;
+}
 /** Log a user into a SPECIFIC tenant (so two users can share one tenant). */
 async function loginTo(tenantId: string, who: string): Promise<Client> {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<any> => {
+  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    return { status: res.status, body: res.status === 204 ? undefined : ((await res.json().catch(() => undefined)) as unknown) };
   };
   const r = await call('POST', '/host/openwop-app/test/login', { email: `${who}-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  return { cookie, userId: r.body.user.userId, get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b) };
+  return { cookie, userId: field<{ userId: string }>(r, 'user').userId, get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b) };
 }
 
 async function mintTicket(cookie: string, canvasId: string): Promise<{ status: number; ticket?: string }> {
@@ -88,9 +102,9 @@ const P = '/host/openwop-app/projects';
 async function privateProjectCanvas() {
   const tenantId = `org:slc1-${Date.now()}-${n++}`;
   const a = await loginTo(tenantId, 'owner');
-  const orgId = (await a.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
-  const projectId = (await a.post(P, { orgId, name: 'Secret' })).body.id;
-  expect((await a.patch(`${P}/${projectId}/visibility`, { visibility: 'private' })).body.visibility).toBe('private');
+  const orgId = field<string>(await a.post('/host/openwop-app/orgs', { name: 'Acme' }), 'orgId');
+  const projectId = field<string>(await a.post(P, { orgId, name: 'Secret' }), 'id');
+  expect(field<string>(await a.patch(`${P}/${projectId}/visibility`, { visibility: 'private' }), 'visibility')).toBe('private');
   const canvas = await createCanvasForTenant(tenantId, {
     canvasTypeId: 'canvas.document', name: 'Secret deck',
     ownerSubject: { kind: 'project', id: projectId },
@@ -110,6 +124,7 @@ describe("ADR 0610 collab-lane / SLC-1 — a private project's canvas collab roo
     // Positive controls FIRST (non-vacuity): the OWNER (a project member) gets in.
     expect((await mintTicket(a.cookie, canvasId)).status).toBe(200);
     expect(await connect(canvasId, { origin: ORIGIN, cookie: a.cookie })).toEqual({ open: true });
+    expect(await claimSeed(a.cookie, canvasId)).toBe(200); // claim-seed's own positive control
 
     // THE BYPASS: the non-member must be refused on every collab door.
     expect((await mintTicket(b.cookie, canvasId)).status).toBe(404);       // ticket-mint
@@ -155,7 +170,7 @@ describe('ADR 0886 D2 / SL2CD-2 — the COOKIE WS lane decides write at the upgr
   it('a workspace Viewer cannot open a read-write room over a same-origin cookie; an Editor can', async () => {
     const tenantId = `org:adr0886-ws-${Date.now()}-${n++}`;
     const a = await loginTo(tenantId, 'owner');
-    const orgId = (await a.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
+    const orgId = field<string>(await a.post('/host/openwop-app/orgs', { name: 'Acme' }), 'orgId');
     const canvas = await createCanvasForTenant(tenantId, {
       canvasTypeId: 'canvas.document', name: 'Org doc',
       initialState: { title: 'Org doc', content: { type: 'doc', content: [] } },

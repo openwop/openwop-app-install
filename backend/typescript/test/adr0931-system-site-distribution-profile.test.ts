@@ -7,6 +7,10 @@
  *  - an invalid profile yields NO profile, never the OpenWOP one;
  *  - `OPENWOP_SYSTEM_SITE_SEEDS_DISABLED` stops the blog/docs/seo/marketing
  *    seeds writing anything.
+ *
+ * Tracker TST-BJW. Red when (probe-witnessed, w65): the blog or marketing seed ignores
+ * the disable list; an invalid profile falls back to the OpenWOP one; home JSON-LD
+ * leaks onto other pages; a non-http(s) sameAs is accepted.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -65,8 +69,9 @@ function get(path: string, ua: string): Promise<{ status: number; body: string }
     req.end();
   });
 }
-const jsonLd = (html: string): any[] =>
-  [...html.matchAll(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/g)].map((m) => JSON.parse(m[1]!));
+type JsonLdBlock = Record<string, unknown>;
+const jsonLd = (html: string): JsonLdBlock[] =>
+  [...html.matchAll(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/g)].map((m): JsonLdBlock => JSON.parse(m[1]!));
 
 describe('ADR 0931 — OPENWOP_SYSTEM_SITE_PROFILE', () => {
   it('unset: the OpenWOP profile, demo-gated as before', () => {
@@ -147,12 +152,15 @@ describe('ADR 0931 — OPENWOP_SYSTEM_SITE_SEEDS_DISABLED', () => {
   it('parses a comma list, case- and space-insensitive', () => {
     for (const s of ['blog', 'docs', 'seo', 'marketing'] as const) expect(systemSiteSeedEnabled(s)).toBe(false);
     const prev = process.env.OPENWOP_SYSTEM_SITE_SEEDS_DISABLED;
-    process.env.OPENWOP_SYSTEM_SITE_SEEDS_DISABLED = 'docs,typo';
-    expect(systemSiteSeedEnabled('blog')).toBe(true);
-    expect(systemSiteSeedEnabled('docs')).toBe(false);
-    process.env.OPENWOP_SYSTEM_SITE_SEEDS_DISABLED = '';
-    expect(systemSiteSeedEnabled('docs')).toBe(true);
-    process.env.OPENWOP_SYSTEM_SITE_SEEDS_DISABLED = prev;
+    try {
+      process.env.OPENWOP_SYSTEM_SITE_SEEDS_DISABLED = 'docs,typo';
+      expect(systemSiteSeedEnabled('blog')).toBe(true);
+      expect(systemSiteSeedEnabled('docs')).toBe(false);
+      process.env.OPENWOP_SYSTEM_SITE_SEEDS_DISABLED = '';
+      expect(systemSiteSeedEnabled('docs')).toBe(true);
+    } finally {
+      process.env.OPENWOP_SYSTEM_SITE_SEEDS_DISABLED = prev;
+    }
   });
 
   it('a disabled seed writes nothing: no launch post, no docs, no marketing pages, no seeded SEO', async () => {

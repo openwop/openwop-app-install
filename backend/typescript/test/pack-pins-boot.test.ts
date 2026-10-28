@@ -7,8 +7,10 @@
  * resolved every pin, so 1,165 of 1,567 footprints executed `pinnedPackRef`.
  * The installer now takes names and resolves a pin only for a pack absent on
  * disk. This is the witness: a boot with its packs present resolves zero pins.
- * Sabotage (run by hand, recorded in ADR 0919): restoring
- * `featurePackRefs()` at the call site reds this case.
+ * Sabotage-witnessed (grade-tests wave 64): resolving every pin before the
+ * presence filter in `ensureRegistryPacksInstalled` (8fw5g5-ppb-eager), and
+ * restoring the eager pin list at the `createApp()` call site
+ * (8fw5g5-ppb-callsite), each red this case.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { existsSync } from 'node:fs';

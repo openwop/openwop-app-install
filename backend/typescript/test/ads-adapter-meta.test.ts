@@ -10,13 +10,23 @@
  * CREATIVE change mints a NEW key), rolls back a half-built campaign on a mid-pipeline
  * failure, and reports no_connection (→ the node's document fallback) when no Meta
  * connection exists.
+ *
+ * Tracker TST-BKU-2. Red when a create is not PAUSED, pageId stops being
+ * required, an unknown media asset is not refused, the page or the canonical
+ * targeting stops shaping the idempotency key, the ledger CAS becomes a blind
+ * put (ADS-2), the rollback DELETE is skipped, the cap deletes instead of
+ * tombstoning (CO-SP-6), or a fork re-creates — each sabotage-witnessed (w65).
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { answerCurrencyRead, platformRequests, currencyReads, fixtureCurrency } from './adsCurrencyFixture.js';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from '../src/index.js';
 import type { Storage } from '../src/storage/storage.js';
-import { makeAdsAdapter, listDispatchRecords } from '../src/host/adsAdapter.js';
+import { makeAdsAdapter, listDispatchRecords, listCampaignDispatchRecords } from '../src/host/adsAdapter.js';
+import { createBrief } from '../src/features/campaign-brief/briefService.js';
+import { ensureDraftCampaign } from '../src/features/campaign-orchestration/campaignService.js';
+import { stampCampaignRun } from '../src/features/campaign-orchestration/campaignRunTag.js';
 import { __resetConnectionsStore, createSecretConnection } from '../src/features/connections/connectionsService.js';
 import { registerProvider } from '../src/features/connections/providerRegistry.js';
 import { storeMediaAsset } from '../src/host/inMemorySurfaces.js';
@@ -42,6 +52,7 @@ describe('Meta ads-dispatch adapter (ADR 0167 Phase 1)', () => {
       req.on('data', (c) => (raw += c));
       req.on('end', () => {
         const path = req.url ?? '';
+        if (answerCurrencyRead(path, raw, res)) return;
         hits.push({ method: req.method ?? '', path, auth: req.headers.authorization, body: raw ? JSON.parse(raw) : {} });
         const edge = path.split('/').pop() ?? '';
         if (failOn && path.endsWith(`/${failOn}`)) {
@@ -77,7 +88,7 @@ describe('Meta ads-dispatch adapter (ADR 0167 Phase 1)', () => {
     await new Promise<void>((r) => meta.close(() => r()));
   });
 
-  beforeEach(() => { hits = []; failOn = null; });
+  beforeEach(() => { hits = []; platformRequests.length = 0; currencyReads.length = 0; failOn = null; });
 
   const adapter = (runId: string, actingUserId = 'u1') =>
     makeAdsAdapter({ storage, tenantId: 'tads', runId, ...(actingUserId ? { actingUserId } : {}), orgId: 'tads' });
@@ -123,6 +134,15 @@ describe('Meta ads-dispatch adapter (ADR 0167 Phase 1)', () => {
     expect((meta1?.connectionUse as Array<{ provider?: string }> | undefined)?.some((u) => u.provider === 'meta-ads')).toBe(true);
   });
 
+  it('ADR 0956 D6 — a new dispatch records its org, landing URL and ad reference on the ledger', async () => {
+    const brief = await createBrief('tads', 'tads', 'u1', { name: 'AdMap source', channels: [{ type: 'ad_variants', enabled: true, config: {} }] });
+    const { campaign } = await ensureDraftCampaign('tads', brief, 'u1');
+    const out = await adapter('run-1').publishAd({ ...args(brief.id), landingUrl: 'https://example.com/lp?utm_id=mem_1', adRef: 'mem_1' });
+    expect(out.outcome).toBe('published');
+    const [row] = await listDispatchRecords('tads', brief.id);
+    expect(row).toMatchObject({ orgId: campaign.orgId, campaignId: campaign.id, landingUrl: 'https://example.com/lp?utm_id=mem_1', adRef: 'mem_1' });
+  });
+
   it('uploads a media asset to adimages and threads the image_hash into the creative (ADR 0223 media leg)', async () => {
     const base64 = Buffer.from('png-bytes').toString('base64');
     const { token } = await storeMediaAsset('tads', { contentBase64: base64, contentType: 'image/png' });
@@ -145,19 +165,19 @@ describe('Meta ads-dispatch adapter (ADR 0167 Phase 1)', () => {
     const { pageId: _omit, ...noPage } = args('brief-NOPAGE');
     const out = await adapter('run-1').publishAd(noPage);
     expect(out).toEqual({ outcome: 'failed', error: 'missing_page_id' });
-    expect(hits).toHaveLength(0);
+    expect(hits).toHaveLength(0); expect(platformRequests).toHaveLength(0);
   });
 
   it('fails closed media_asset_not_found for an unknown/foreign media asset (zero platform calls)', async () => {
     const out = await adapter('run-1').publishAd({ ...args('brief-BADMEDIA'), mediaAssetId: 'masset:nope' });
     expect(out).toEqual({ outcome: 'failed', error: 'media_asset_not_found' });
-    expect(hits).toHaveLength(0);
+    expect(hits).toHaveLength(0); expect(platformRequests).toHaveLength(0);
   });
 
   it('a CREATIVE change (different pageId) mints a NEW idempotency key — no false reuse', async () => {
     const first = await adapter('run-1').publishAd(args('brief-KEY'));
     expect(first.outcome).toBe('published');
-    hits = [];
+    hits = []; platformRequests.length = 0; currencyReads.length = 0;
     const changed = await adapter('run-1').publishAd({ ...args('brief-KEY'), pageId: 'page-88' });
     expect(changed.outcome).toBe('published');
     if (changed.outcome !== 'published' || first.outcome !== 'published') return;
@@ -170,7 +190,7 @@ describe('Meta ads-dispatch adapter (ADR 0167 Phase 1)', () => {
     const first = await adapter('run-1').publishAd(args('brief-FORK'));
     expect(first.outcome).toBe('published');
     if (first.outcome !== 'published') return;
-    hits = []; // reset the recorder
+    hits = []; platformRequests.length = 0; currencyReads.length = 0; // reset the recorder
 
     // Simulate a :fork — different runId, identical business inputs.
     const forked = await adapter('run-2-fork').publishAd(args('brief-FORK'));
@@ -185,7 +205,7 @@ describe('Meta ads-dispatch adapter (ADR 0167 Phase 1)', () => {
   });
 
   it('ADR 0245: operator targeting is forwarded verbatim onto the adset; a targeting CHANGE mints a new dispatch but a REORDER does not', async () => {
-    hits = [];
+    hits = []; platformRequests.length = 0; currencyReads.length = 0;
     const targeting = { geo_locations: { countries: ['US'] }, age_min: 25, age_max: 45 };
     const out = await adapter('run-tgt').publishAd({ ...args('brief-TGT'), targeting });
     expect(out.outcome).toBe('published');
@@ -194,7 +214,7 @@ describe('Meta ads-dispatch adapter (ADR 0167 Phase 1)', () => {
     expect(adset?.body.targeting).toEqual(targeting);
 
     // A REORDER of the same targeting keys is idempotent (canonical key) — reuses the dispatch.
-    hits = [];
+    hits = []; platformRequests.length = 0; currencyReads.length = 0;
     const reordered = await adapter('run-tgt2').publishAd({ ...args('brief-TGT'), targeting: { age_max: 45, age_min: 25, geo_locations: { countries: ['US'] } } });
     expect(reordered.outcome).toBe('published');
     if (reordered.outcome !== 'published') return;
@@ -202,7 +222,7 @@ describe('Meta ads-dispatch adapter (ADR 0167 Phase 1)', () => {
     expect(hits.filter((h) => h.method === 'POST' && /\/campaigns$/.test(h.path))).toHaveLength(0);
 
     // A genuine targeting CHANGE (different audience) mints a NEW dispatch.
-    hits = [];
+    hits = []; platformRequests.length = 0; currencyReads.length = 0;
     const changed = await adapter('run-tgt3').publishAd({ ...args('brief-TGT'), targeting: { geo_locations: { countries: ['CA'] } } });
     expect(changed.outcome).toBe('published');
     if (changed.outcome !== 'published') return;
@@ -211,7 +231,7 @@ describe('Meta ads-dispatch adapter (ADR 0167 Phase 1)', () => {
   });
 
   it('ADS-2: a concurrent double-submit yields exactly ONE ledger row; the loser reuses the winner ids (consistent output)', async () => {
-    hits = [];
+    hits = []; platformRequests.length = 0; currencyReads.length = 0;
     // Two simultaneous publishes of the SAME (briefId → idemKey). The post-create
     // compareAndSwap(null,…) makes the ledger single-canonical: one row wins, the
     // loser returns the winner's ids with reused:true.
@@ -288,15 +308,53 @@ describe('Meta ads-dispatch adapter (ADR 0167 Phase 1)', () => {
       }
       // THE invariant: re-publishing EVERY brief — including tombstoned ones —
       // reuses the recorded ids and makes ZERO new platform campaign creates.
-      hits = [];
+      hits = []; platformRequests.length = 0; currencyReads.length = 0;
       for (const b of briefs) {
         const again = await adapter('run-2-fork').publishAd(args(b));
         expect(again.outcome).toBe('published');
-        if (again.outcome === 'published') expect(again.reused).toBe(true);
+        expect(again).toMatchObject({ outcome: 'published', reused: true });
       }
       expect(hits.filter((h) => h.method === 'POST' && /\/campaigns$/.test(h.path))).toHaveLength(0);
     } finally {
       delete process.env.OPENWOP_ADS_DISPATCH_LEDGER_CAP;
     }
   });
+  // ADR 0941 P2 — the dispatch row points up at its MarketingCampaign + client org,
+  // taken from the publishing RUN's tag (never from args), else from the brief.
+  it('back-links a dispatch to the campaign from the run tag, else the brief; legacy rows read back by brief', async () => {
+    const brief = await createBrief('tads', 'tads', 'u1', { name: 'Ads launch', channels: [{ type: 'ad_variants', enabled: true, config: {} }] });
+    const { campaign } = await ensureDraftCampaign('tads', brief, 'u1');
+    await storage.insertRun({ runId: 'run-tagged', workflowId: 'w', tenantId: 'tads', status: 'pending', inputs: null, metadata: { campaignOrchestration: stampCampaignRun(campaign, { role: 'stage' }) }, configurable: {}, createdAt: 'x', updatedAt: 'x' });
+    // Tagged run, but the node passes ANOTHER brief: the run wins.
+    const tagged = await adapter('run-tagged').publishAd({ ...args('brief-UNRELATED'), campaignName: 'Tagged' });
+    expect(tagged.outcome).toBe('published');
+    // Untagged run: the brief resolves the campaign.
+    const byBrief = await adapter('run-1').publishAd({ ...args(brief.id), campaignName: 'By brief' });
+    expect(byBrief.outcome).toBe('published');
+    const rows = await listCampaignDispatchRecords('tads', 'tads', campaign.id, brief.id);
+    expect(rows.map((r) => r.campaignId)).toEqual([campaign.id, campaign.id]);
+    expect(rows.every((r) => r.orgId === 'tads')).toBe(true);
+    // Another org never sees them.
+    expect(await listCampaignDispatchRecords('tads', 'org-other', campaign.id, brief.id)).toEqual([]);
+    // A pre-0941 row (no campaign) reads back by its brief.
+    const legacy = await listCampaignDispatchRecords('tads', 'tads', 'cmp_none', 'brief-RACE');
+    expect(legacy.length).toBeGreaterThan(0);
+    expect(legacy.every((r) => r.campaignId === undefined)).toBe(true);
+  });
+
+  it('publishes HUF in Meta offsets and refuses nonrepresentable BHD before media upload', async () => {
+    fixtureCurrency.value = 'HUF';
+    try {
+      expect((await adapter('run-1').publishAd({ ...args('brief-currency-huf'), dailyBudgetMinor: 500000 })).outcome).toBe('published');
+      expect(hits.find((hit) => hit.path.endsWith('/adsets'))?.body.daily_budget).toBe(5000);
+      hits = []; platformRequests.length = 0; currencyReads.length = 0;
+      fixtureCurrency.value = 'BHD';
+      const { token } = await storeMediaAsset('tads', { contentBase64: Buffer.from('png').toString('base64'), contentType: 'image/png' });
+      expect(await adapter('run-1').publishAd({ ...args('brief-currency-invalid'), mediaAssetId: token, dailyBudgetMinor: 5005 })).toEqual({ outcome: 'failed', error: 'budget_not_representable' });
+      expect(hits).toHaveLength(0);
+      expect(platformRequests).toHaveLength(1);
+      expect(currencyReads).toHaveLength(1);
+    } finally { fixtureCurrency.value = 'USD'; }
+  });
+
 });

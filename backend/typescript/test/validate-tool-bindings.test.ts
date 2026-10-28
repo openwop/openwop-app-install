@@ -5,6 +5,13 @@
  * native/builtin tool id) is DROPPED. This pins the structural guarantee that
  * makes the "ungated heartbeat path" a non-gap, so a future edit that lets native
  * tools into the heartbeat surface fails loudly here.
+ *
+ * Caller: `bootstrap/nodes.ts` (the chat node's `useTools` path) is the only one.
+ * DOUBLE GUARD (grade-tests w63): a non-object entry is dropped by the
+ * `typeof r !== 'object'` check AND by the `workflowId` string check after it,
+ * so weakening the first alone stays green (probe vt-nonobject: vacuous). The
+ * shared piece — the `workflowId` check — is witnessed (vt-workflowid reds the
+ * mixed-array case).
  */
 import { describe, expect, it } from 'vitest';
 import { validateToolBindings } from '../src/bootstrap/nodes.js';

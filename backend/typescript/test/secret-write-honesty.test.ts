@@ -18,11 +18,15 @@
  * were probing nothing. Its fixture guard is what caught that. These drive the real
  * failures instead: ephemeral mode for the total case, an injected `Storage` that
  * throws for one ref for the partial case.
+ *
+ * PROTECTED (BYOK / boot-secret handling). Sabotage witnesses (grade-tests 8f
+ * w2): sw-blame-json, sw-partial-count, sw-abort-loop, sw-log-value,
+ * sw-malformed.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Storage } from '../src/storage/storage.js';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -35,7 +39,16 @@ vi.mock('../src/observability/logger.js', async (importOriginal) => {
   return { ...orig, createLogger: () => ({ warn, error, info, debug: vi.fn() }) };
 });
 
-/** A Storage stub that fails `upsertEncryptedSecret` for the named refs only. */
+/**
+ * A Storage stub that fails `upsertEncryptedSecret` for the named refs only.
+ *
+ * Honest ceiling on fixture typing: `configureSecretResolver` takes a full
+ * `Storage` (`byok/secretResolver.ts`), and the boot-secret write path calls
+ * only `upsertEncryptedSecret`. A partial stub IS the point (it is how one ref
+ * fails while the others land), so this is the file's ONE documented cast. The
+ * fixture guards below (`toHaveBeenCalledTimes(3)`, the "could not store" log)
+ * prove the stub is the method actually reached.
+ */
 function storageFailingFor(failRefs: string[]): Storage {
   return {
     upsertEncryptedSecret: vi.fn(async (key: string) => {
@@ -43,6 +56,14 @@ function storageFailingFor(failRefs: string[]): Storage {
       if (failRefs.some((r) => key.includes(r))) throw new Error(`disk full writing ${key}`);
     }),
   } as unknown as Storage;
+}
+
+/** Each case's master-key dir, removed in afterEach. */
+const tmpDirs: string[] = [];
+function dataDir(): string {
+  const d = mkdtempSync(join(tmpdir(), 'byok-'));
+  tmpDirs.push(d);
+  return d;
 }
 
 const logText = () =>
@@ -56,6 +77,7 @@ beforeEach(() => {
   delete process.env.OPENWOP_BYOK_EPHEMERAL;
 });
 afterEach(() => {
+  for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true });
   delete process.env.OPENWOP_BOOT_SECRETS;
   delete process.env.OPENWOP_SAMPLE_SECRETS;
   delete process.env.OPENWOP_BYOK_EPHEMERAL;
@@ -68,7 +90,7 @@ describe('loadSecretsFromEnv — a WRITE failure is not a PARSE failure', () => 
     process.env.OPENWOP_BOOT_SECRETS = JSON.stringify({ 'web-search': 'k1' });
 
     const mod = await import('../src/byok/secretResolver.js');
-    mod.configureSecretResolver({ storage: storageFailingFor([]), dataDir: mkdtempSync(join(tmpdir(), 'byok-')) });
+    mod.configureSecretResolver({ storage: storageFailingFor([]), dataDir: dataDir() });
     const n = await mod.loadSecretsFromEnv();
 
     expect(n).toBe(0);
@@ -86,7 +108,7 @@ describe('loadSecretsFromEnv — a WRITE failure is not a PARSE failure', () => 
     process.env.OPENWOP_BOOT_SECRETS = '{not json';
     const mod = await import('../src/byok/secretResolver.js');
     const store = storageFailingFor([]);
-    mod.configureSecretResolver({ storage: store, dataDir: mkdtempSync(join(tmpdir(), 'byok-')) });
+    mod.configureSecretResolver({ storage: store, dataDir: dataDir() });
 
     expect(await mod.loadSecretsFromEnv()).toBe(0);
     expect(logText()).toMatch(/parse failed/i);
@@ -97,7 +119,7 @@ describe('loadSecretsFromEnv — a WRITE failure is not a PARSE failure', () => 
     process.env.OPENWOP_BOOT_SECRETS = JSON.stringify({ alpha: '1', bravo: '2', charlie: '3' });
     const mod = await import('../src/byok/secretResolver.js');
     const store = storageFailingFor(['bravo']);
-    mod.configureSecretResolver({ storage: store, dataDir: mkdtempSync(join(tmpdir(), 'byok-')) });
+    mod.configureSecretResolver({ storage: store, dataDir: dataDir() });
 
     const n = await mod.loadSecretsFromEnv();
 
@@ -110,7 +132,7 @@ describe('loadSecretsFromEnv — a WRITE failure is not a PARSE failure', () => 
   it('never logs a secret VALUE, only its ref', async () => {
     process.env.OPENWOP_BOOT_SECRETS = JSON.stringify({ 'web-search': 'sk-super-secret-probe' });
     const mod = await import('../src/byok/secretResolver.js');
-    mod.configureSecretResolver({ storage: storageFailingFor(['web-search']), dataDir: mkdtempSync(join(tmpdir(), 'byok-')) });
+    mod.configureSecretResolver({ storage: storageFailingFor(['web-search']), dataDir: dataDir() });
     await mod.loadSecretsFromEnv();
 
     const everything = JSON.stringify([warn.mock.calls, error.mock.calls, info.mock.calls]);

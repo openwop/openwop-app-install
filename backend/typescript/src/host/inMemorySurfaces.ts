@@ -58,6 +58,7 @@ import { registerVectorTenantPurger, registerVectorNamespacePurger } from './vec
 import { assetServeUrl } from './assetServePath.js';
 import { VENDOR_ROOT } from '../middleware/protocolVersion.js';
 import type { NegotiationRecorder } from './negotiationDecided.js';
+import { hostLaneSurfaces } from './runSurfaceNamespace.js';
 
 const log = createLogger('host.inMemorySurfaces');
 
@@ -1467,6 +1468,20 @@ export interface MemoryRow {
   createdAt: string;
   /** RFC 0004 TTL — entries past this MUST NOT surface in list/get. */
   expiresAt?: string;
+  /** ADR 0979 D1 — HOST-INTERNAL: the opaque RFC 0165 principal of the run that
+   *  wrote a tenant-memory row, so the read side decides visibility with the
+   *  run-payload rule and no run lookup. Never a tag (the `memory.written` payload
+   *  stays content- and owner-free) and never served: the route projects it out
+   *  (`toMemoryEntry`). Absent on legacy rows and on runs with no owner of record,
+   *  which are admins only, like an unowned run's payload. */
+  owner?: string;
+}
+
+/** The served shape of a row (schemas/memory-entry.schema.json): every host-internal
+ *  field removed. ADR 0979 D1 — the one projection every memory route answers with. */
+export function toMemoryEntry(row: MemoryRow): Omit<MemoryRow, 'owner'> {
+  const { owner: _owner, ...entry } = row;
+  return entry;
 }
 
 export interface MemoryListOpts {
@@ -1483,6 +1498,9 @@ export interface MemoryListOpts {
    *  RFC 0113 it offers recency-only and does NOT expose `'relevance'`. An
    *  unknown value falls back to recency (graceful, never errors). */
   rank?: 'recency';
+  /** ADR 0979 D1 — drop rows the caller may not see BEFORE `limit` and the
+   *  budget, so a restricted reader still gets a full page of their own rows. */
+  admit?: (row: MemoryRow) => boolean;
 }
 
 /** The demo's single per-tenant memoryRef. Real hosts derive memoryRefs
@@ -1601,6 +1619,12 @@ export interface MemoryWriteInput {
   expiresAt?: string;
   id?: string;
   createdAt?: string;
+  /** ADR 0944 D4 — rows carrying this tag are evicted only after every other
+   *  row when the scope is over its cap (curated notes are never pushed out by
+   *  turn summaries). */
+  evictionProtectedTag?: string;
+  /** ADR 0979 D1 — the writing run's opaque owner principal (see `MemoryRow.owner`). */
+  owner?: string;
 }
 
 function resolveExpiresAt(input: MemoryWriteInput, nowMs: number): { expiresAt: string } | Record<string, never> {
@@ -1640,6 +1664,7 @@ export async function writeMemoryEntry(
     tags: input.tags ?? [],
     createdAt: input.createdAt ?? new Date(now).toISOString(),
     ...resolveExpiresAt(input, now),
+    ...(input.owner ? { owner: input.owner } : {}),
   };
   await memoryStore(tenantId).mutateRows(memoryRef, (rows) => {
     // Upsert on explicit id (idempotency); append otherwise.
@@ -1648,7 +1673,17 @@ export async function writeMemoryEntry(
     // Bound unbounded per-scope growth (turn summaries accrue every run): retain the
     // most-recent MEMORY_SCOPE_HARD_CAP, evicting oldest (a heap backstop above the
     // read cap; user-curated notes are additionally count-capped at the feature layer).
-    return next.length > MEMORY_SCOPE_HARD_CAP ? next.slice(next.length - MEMORY_SCOPE_HARD_CAP) : next;
+    if (next.length <= MEMORY_SCOPE_HARD_CAP) return next;
+    // ADR 0944 D4 — evict the oldest UNPROTECTED rows first; protected rows go
+    // only if they alone exceed the cap.
+    const protectedTag = input.evictionProtectedTag;
+    if (!protectedTag) return next.slice(next.length - MEMORY_SCOPE_HARD_CAP);
+    let excess = next.length - MEMORY_SCOPE_HARD_CAP;
+    const kept = next.filter((r) => {
+      if (excess > 0 && !r.tags.includes(protectedTag)) { excess -= 1; return false; }
+      return true;
+    });
+    return kept.length > MEMORY_SCOPE_HARD_CAP ? kept.slice(kept.length - MEMORY_SCOPE_HARD_CAP) : kept;
   });
   return row;
 }
@@ -1710,7 +1745,7 @@ export async function listMemoryEntries(
   if (!isWellFormedMemoryRef(memoryRef)) return [];
   const now = Date.now();
   const all = (await memoryStore(tenantId).getRows(memoryRef)).filter((r) => notExpired(r, now));
-  const tagged = opts.tag ? all.filter((r) => r.tags.includes(opts.tag!)) : all;
+  const tagged = (opts.tag ? all.filter((r) => r.tags.includes(opts.tag!)) : all).filter((r) => !opts.admit || opts.admit(r));
   // Recency rank (newest first). `rank` only honors 'recency' (see MemoryListOpts).
   const sorted = [...tagged].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   const limit = Math.min(opts.limit ?? MEMORY_HARD_MAX, MEMORY_HARD_MAX);
@@ -1914,6 +1949,19 @@ interface MediaAssetEntry {
   /** Decoded asset size in bytes. */
   bytes: number;
   expiresAtMs: number;
+  /** ADR 0945 D4 — set ONLY by the AI providers adapter when it mints these
+   *  bytes: the host's own record that they are model output, so a node that
+   *  promotes the token to the library cannot drop or forge AI provenance. */
+  aiOrigin?: MediaAiOrigin;
+}
+
+/** ADR 0945 D4 — who generated a scratch asset (host-stamped). */
+export interface MediaAiOrigin {
+  provider: string; model?: string; op: string; runId?: string; nodeId?: string;
+  /** sha256 of the FULL prompt the adapter dispatched. */
+  promptHash?: string;
+  /** sha256 of the input image bytes (edit/upscale ops). */
+  inputSha256?: string;
 }
 
 /** token → entry, one durable row per asset (read-through, multi-instance
@@ -1979,7 +2027,7 @@ export async function listMediaAssetTokens(tenantId: string): Promise<Array<{ to
 
 export async function storeMediaAsset(
   tenantId: string,
-  input: { contentBase64: string; contentType: string; ttlSeconds?: number },
+  input: { contentBase64: string; contentType: string; ttlSeconds?: number; aiOrigin?: MediaAiOrigin },
 ): Promise<{ token: string; url: string; bytes: number; expiresAt: string }> {
   const token = randomBytes(32).toString('base64url');
   const bytes = Buffer.byteLength(input.contentBase64, 'base64');
@@ -1988,7 +2036,7 @@ export async function storeMediaAsset(
       ? input.ttlSeconds * 1000
       : MEDIA_ASSET_DEFAULT_TTL_MS;
   const expiresAtMs = Date.now() + ttlMs;
-  await _mediaAssets.put({ token, tenantId, contentBase64: input.contentBase64, contentType: input.contentType, bytes, expiresAtMs, storedAtMs: Date.now() });
+  await _mediaAssets.put({ token, tenantId, contentBase64: input.contentBase64, contentType: input.contentType, bytes, expiresAtMs, storedAtMs: Date.now(), ...(input.aiOrigin ? { aiOrigin: input.aiOrigin } : {}) });
   maybeSweepExpiredMediaAssets();
   return { token, url: assetServeUrl(token), bytes, expiresAt: new Date(expiresAtMs).toISOString() };
 }
@@ -2071,19 +2119,27 @@ export function buildHostSurfaceBundle(scope: BundleScope): HostSurfaceBundle {
   // uses the in-memory factory below; a selected real backend uses its
   // registered adapter, or throws (already caught at boot). The wire shape is
   // identical either way — see host/surfaceBackends.ts.
-  return {
+  // ADR 0998 — the four NAMED surfaces come back on the host lane (a run-keyspace
+  // name is refused); the executor re-derives the run lane from the raw ones.
+  const named = hostLaneSurfaces({
+    blob: guardBlobWrites(resolveSurface('blob', (s) => createBlob(_blobState, s), scope)),
+    vector: resolveSurface('vector', (s) => createVector(_vectorState, s), scope),
+    search: resolveSurface('search', (s) => createSearch(_searchState, s), scope),
+    nosql: resolveSurface('nosql', (s) => createNosql(_nosqlState, s), scope),
+  });
+  const bundle: HostSurfaceBundle = {
     storage: {
       kv: resolveSurface('kv', (s) => createKv(_kvState, s), scope),
       table: resolveSurface('table', (s) => createTable(_tableState, s), scope),
       cache: resolveSurface('cache', (s) => createCache(_cacheState, s), scope),
-      blob: guardBlobWrites(resolveSurface('blob', (s) => createBlob(_blobState, s), scope)),
+      blob: named.blob,
       queue: resolveSurface('queue', (s) => createQueue(_queueState, s), scope),
     },
     db: {
       sql: resolveSurface('sql', (s) => createSql(_sqlPool, s), scope),
-      vector: resolveSurface('vector', (s) => createVector(_vectorState, s), scope),
-      search: resolveSurface('search', (s) => createSearch(_searchState, s), scope),
-      nosql: resolveSurface('nosql', (s) => createNosql(_nosqlState, s), scope),
+      vector: named.vector,
+      search: named.search,
+      nosql: named.nosql,
     },
     fs: resolveSurface('fs', (s) => createFs(fsRoot, s), scope),
     queueBus: resolveSurface('queueBus', (s) => createQueueBus(_busState, s), scope),
@@ -2097,4 +2153,6 @@ export function buildHostSurfaceBundle(scope: BundleScope): HostSurfaceBundle {
     launchStudio: createLaunchStudioSurface(scope),
     features: buildFeatureSurfaces(scope),
   };
+  named.bind(bundle);
+  return bundle;
 }

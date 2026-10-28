@@ -13,6 +13,7 @@
  */
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { OpenwopError } from '../../types.js';
+import { subjectKeyForms } from '../../host/subjectErasureRedaction.js';
 
 export const TEST_STATUSES = ['untested', 'pass', 'fail', 'blocked', 'skip'] as const;
 export type TestStatus = (typeof TEST_STATUSES)[number];
@@ -83,3 +84,22 @@ export async function saveRun(tenantId: string, subjectRef: string, suiteKey: st
   return run;
 }
 
+
+/**
+ * DSAR eraser (ADR 0464 correction 2026-10-26, DSAR-DBL). A run is the tester's OWN data:
+ * their pass/fail verdicts plus free-text notes, keyed by their subjectRef. It had no
+ * eraser, and neither ADR 0464 gate sees a feature store whose only subject field is
+ * `subjectRef`. The route writes `user:${req.userId}` over an id that is already
+ * `user:`-shaped, so live rows hold `user:user:<hash>`; `subjectKeyForms` matches that.
+ */
+export async function eraseManualTestRunsSubject(tenantId: string, subjectKey: string): Promise<{ rowsTouched: number }> {
+  if (!tenantId || !subjectKey) return { rowsTouched: 0 };
+  const { forms } = subjectKeyForms(subjectKey);
+  let rowsTouched = 0;
+  for (const r of await runs.listForTenantIndexed(tenantId)) {
+    if (r.tenantId !== tenantId || !forms.has(r.subjectRef)) continue;
+    await runs.delete(r.runId);
+    rowsTouched += 1;
+  }
+  return { rowsTouched };
+}

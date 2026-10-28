@@ -10,6 +10,16 @@
  *      (a roster row, a deep link, the `inputs.agentId` a :fork re-resolves)
  *      reaches it; the reverse never happens (one-way); and every id-KEYED store
  *      addresses one row across both spellings.
+ *
+ * Red when (wave 60 probes, tracker TST-BRA-8): the registry's alias choke point
+ * (`lookup`) stops trying the canonical spelling, or falls back canonical → legacy;
+ * `agentStorageId` keys on the literal spelling; the DM key, memory scope, profile or
+ * allowlist key stops normalising; identity reports the literal id; the explicit
+ * `career-agent` map or the multi-segment rule is lost; node typeIds get mapped.
+ *
+ * Second guard, recorded: `resolveAgentForTenant(…, '*')` reaches its raw-id scan
+ * only when `reg.resolve` misses, and for a pack agent the alias choke point answers
+ * first, so the scan's canonical compare is unreachable here (w60g2-aid-wildcard-scan).
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
@@ -117,7 +127,7 @@ describe('resolution — inert before the rename, correct after', () => {
     expect((await getAgentRegistry().resolve(LEGACY))?.agentId).toBe(CANONICAL);
     expect(getAgentRegistry().has(LEGACY)).toBe(true);
     expect((await resolveAgentForTenant(LEGACY, 't-adr0763'))?.agentId, 'the tenant-visible path').toBe(CANONICAL);
-    expect((await resolveAgentForTenant(LEGACY, '*'))?.agentId, "the '*' admin branch scans raw ids and must not bypass the alias").toBe(CANONICAL);
+    expect((await resolveAgentForTenant(LEGACY, '*'))?.agentId, "the '*' admin branch resolves through the alias choke point").toBe(CANONICAL);
     const identity = await resolveAgentIdentity('t-adr0763', LEGACY);
     expect(identity.agentId, 'identity reports the canonical id').toBe(CANONICAL);
   });

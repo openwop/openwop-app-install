@@ -111,6 +111,7 @@ const ExampleDataPage = lazy(() => import('../settings/ExampleDataPage.js').then
 const EventBindingsPage = lazy(() => import('../settings/EventBindingsPage.js').then((m) => ({ default: m.EventBindingsPage })));
 const AuditLogPage = lazy(() => import('../settings/AuditLogPage.js').then((m) => ({ default: m.AuditLogPage })));
 const HeartbeatSettingsPage = lazy(() => import('../settings/HeartbeatSettingsPage.js').then((m) => ({ default: m.HeartbeatSettingsPage })));
+const FreeTierSettingsPage = lazy(() => import('../settings/FreeTierSettingsPage.js').then((m) => ({ default: m.FreeTierSettingsPage })));
 const RuntimePosturePage = lazy(() => import('../settings/RuntimePosturePage.js').then((m) => ({ default: m.RuntimePosturePage })));
 const AdminOverviewPage = lazy(() => import('../settings/AdminOverviewPage.js').then((m) => ({ default: m.AdminOverviewPage })));
 const OrgsPage = lazy(() => import('../orgs/OrgsPage.js').then((m) => ({ default: m.OrgsPage })));
@@ -260,7 +261,7 @@ const CORE_FEATURES: FeatureRoute[] = [
   },
   {
     path: '/memory', element: <MemoryInspectorPage />, tier: 'admin', archetype: 'admin',
-    nav: { group: 'AI & automation', label: 'Memory', labelKey: 'memoryLabel', icon: DatabaseIcon, hint: 'Tenant-attributed memory writes', hintKey: 'memoryHint' },
+    nav: { group: 'AI & automation', label: 'Memory', labelKey: 'memoryLabel', icon: DatabaseIcon, hint: 'Summaries of completed runs', hintKey: 'memoryHint' },
   },
   {
     path: '/capabilities', element: <CapabilitiesPanel />, tier: 'admin', archetype: 'admin',
@@ -336,6 +337,11 @@ const CORE_FEATURES: FeatureRoute[] = [
     // loop: master on/off, an auto-disabling run window, cadence, run budget.
     path: '/heartbeat-settings', element: <HeartbeatSettingsPage />, tier: 'admin', archetype: 'admin', chrome: 'narrow',
     nav: { group: 'AI & automation', label: 'Heartbeat', labelKey: 'heartbeatLabel', icon: ActivityIcon, hint: 'Autonomous work-loop cadence + on/off', hintKey: 'heartbeatHint', order: 95, superadminOnly: true },
+  },
+  {
+    // ADR 0990 — host-wide superadmin choice of the free tier's provider and model.
+    path: '/free-tier-settings', element: <FreeTierSettingsPage />, tier: 'admin', archetype: 'admin', chrome: 'narrow',
+    nav: { group: 'AI & automation', label: 'Free tier', labelKey: 'freeTierLabel', icon: SparklesIcon, hint: 'Which provider and model the free tier runs on', hintKey: 'freeTierHint', order: 96, superadminOnly: true },
   },
   // ADR 0742 — superadmin view of the Cloud Run posture (warm / cold), read
   // live from Cloud Run; change requests are audited and applied by an operator.

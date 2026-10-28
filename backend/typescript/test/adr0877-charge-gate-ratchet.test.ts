@@ -6,7 +6,10 @@
  * allowed to make it. The three storefront creators take a `StorefrontCharge`,
  * which only `resolveStorefrontSettlement` can mint (the single `as
  * StorefrontCharge` cast lives in that module). So a fifth charge lane cannot be
- * added with a bare key: it either fails to compile or fails this test.
+ * added with a bare key: it either fails to compile or fails this test. *
+ * Tracker TST-BFC-8. Red when: a StorefrontCharge is cast outside the
+ * resolver; a creator is called from an unsanctioned file; subscriptions.ts
+ * resolves a key for a new subscription.
  */
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';

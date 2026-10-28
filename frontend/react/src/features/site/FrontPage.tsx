@@ -26,6 +26,7 @@ import { useTranslation } from 'react-i18next';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import i18n from '../../i18n/index.js';
 import { brand } from '../../brand/brand.js';
+import { isStockOpenwopBrand } from '../../brand/defaults.js';
 import { Skeleton } from '../../ui/Skeleton.js';
 import { useDemoMode } from '../../client/useDemoMode.js';
 import { RenderSections } from '../cms/SectionRenderer.js';
@@ -64,6 +65,10 @@ const PRIMARY_CTA_URL = '/chat';
 
 function buildDefaultSections(demo: boolean): Section[] {
   const t = (k: string): string => i18n.t(`site:${k}`);
+  // #5226 — the story below is OpenWOP's own product copy. A white-label build
+  // whose operator has not published a home yet gets a neutral page in its own
+  // name instead (the demo is always the stock brand, so it never lands here).
+  if (!demo && !isStockOpenwopBrand(brand)) return buildNeutralSections();
   return [
     { sectionId: 'd-hero', type: 'hero', data: {
       // ADR 0762 — the intro film is demo-only (SectionRenderer gates it too);
@@ -89,6 +94,16 @@ function buildDefaultSections(demo: boolean): Section[] {
   ];
 }
 
+/** The white-label fallback: the product's own name and tagline, one way in. */
+function buildNeutralSections(): Section[] {
+  return [{ sectionId: 'd-hero', type: 'hero', data: {
+    visual: 'none',
+    heading: brand.productName,
+    ...(brand.tagline ? { subheading: brand.tagline } : {}),
+    ctaLabel: i18n.t('site:neutralCtaLabel'), ctaUrl: PRIMARY_CTA_URL,
+  } }];
+}
+
 /** Title + describe the document for the built-in default page (no CMS SEO to
  *  apply). SITE-R2-7: the localized hero subheading doubles as the meta
  *  description — a fresh install's '/' used to get an auto-generated search
@@ -98,7 +113,9 @@ function applyDefaultTitle(): () => void {
   const prev = document.title;
   document.title = brand.tagline ? `${brand.productName} — ${brand.tagline}` : brand.productName;
   const undos: Array<() => void> = [() => { document.title = prev; }];
-  const desc = i18n.t('site:heroSubheading');
+  // The story's subheading is OpenWOP copy, so a white-label build describes
+  // itself with its own tagline (#5226).
+  const desc = isStockOpenwopBrand(brand) ? i18n.t('site:heroSubheading') : brand.tagline;
   if (desc) {
     const existing = document.head.querySelector<HTMLMetaElement>('meta[name="description"]');
     if (existing) {
@@ -160,6 +177,7 @@ export function FrontPage({ orgId, slug, surface, embed }: { orgId: string; slug
     if (!orgId) { setState({ kind: 'default' }); return; }
     let live = true;
     let undoSeo: (() => void) | null = null;
+    let stopHeat: (() => void) | null = null;
     setState({ kind: 'loading' });
     // ADR 0236 (D1): send the anonymous visitor key so a RUNNING page
     // experiment can assign a variant (consent enforced server-side — no
@@ -199,8 +217,16 @@ export function FrontPage({ orgId, slug, surface, embed }: { orgId: string; slug
         // ADR 0018 CWV fold-in — report real-user Core Web Vitals for this public
         // page (consent enforced server-side at the beacon, like the pageview).
         // ADR 0860 D5 — or as soon as the posture/choice allows it.
-        if (vk) reportWebVitals(orgId, vk);
-        else void loadPosture(orgId).then(() => { const k = live ? getVisitorKey(orgId) : null; if (k) reportWebVitals(orgId, k); });
+        // ADR 0951 P1 — heat capture, loaded only once the decision allows analytics
+        // (the module then asks whether this site collects heat data at all).
+        const startHeat = (k: string): void => {
+          void import('./heatCapture.js')
+            .then((m) => m.startHeatCapture({ orgId, visitorKey: k, page: r.page.slug || '/', ...(r.page.experiment ? { experimentId: r.page.experiment.experimentId } : {}) }))
+            .then((stop) => { if (live) stopHeat = stop; else stop(); })
+            .catch(() => undefined);
+        };
+        if (vk) { reportWebVitals(orgId, vk); startHeat(vk); }
+        else void loadPosture(orgId).then(() => { const k = live ? getVisitorKey(orgId) : null; if (k) { reportWebVitals(orgId, k); startHeat(k); } });
         return;
       }
       if (surface === 'root') {
@@ -218,7 +244,7 @@ export function FrontPage({ orgId, slug, surface, embed }: { orgId: string; slug
         undoSeo = () => { document.title = prev; };
       }
     });
-    return () => { live = false; if (undoSeo) undoSeo(); };
+    return () => { live = false; if (undoSeo) undoSeo(); if (stopHeat) stopHeat(); };
   }, [orgId, slug, surface, navigate, attempt]);
 
   // The built-in page also sets a sensible title.

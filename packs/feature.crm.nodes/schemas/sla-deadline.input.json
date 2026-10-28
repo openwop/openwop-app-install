@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.crm.nodes/1.15.0/sla-deadline.input.json",
+  "title": "CrmSlaDeadlineInput",
+  "description": "The route node's recorded `sla` snapshot (over an edge).",
+  "type": "object",
+  "properties": {
+    "sla": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "route": {
+      "type": "object"
+    }
+  },
+  "additionalProperties": true
+}

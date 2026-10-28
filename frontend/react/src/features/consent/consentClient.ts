@@ -17,6 +17,8 @@ export interface ConsentRecord {
   categories: {
     necessary: boolean; analytics: boolean; marketing: boolean;
     'marketing.email'?: boolean; 'marketing.sms'?: boolean; 'marketing.push'?: boolean; 'marketing.whatsapp'?: boolean;
+    /** ADR 0951 D1 — session recording; strict explicit opt-in. */
+    'analytics.replay'?: boolean;
   };
   source?: string;
   legalBasis?: string;

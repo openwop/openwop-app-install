@@ -19,14 +19,15 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { DurableCollection } from '../../../host/hostExtPersistence.js';
 import { OpenwopError } from '../../../types.js';
-import { cleanString, optionalCleanString } from '../../../host/boundedStrings.js';
+import { cleanString, optionalCleanContent, optionalCleanString } from '../../../host/boundedStrings.js';
 import { createLogger } from '../../../observability/logger.js';
 import { resolveMediaAsset } from '../../../host/inMemorySurfaces.js';
-import { assertOrgCapacity, clearUsageForRef, createAsset, findAssetByContentHash, getAsset, mergeAssetMetadataOnDedup, syncUsageRefs } from '../../media/mediaService.js';
+import { assertOrgCapacity, clearUsageForRef, createAsset, findAssetByContentHash, getAsset, mergeAssetMetadataOnDedup, stampGroundingIfAbsent, syncUsageRefs, type MediaAsset } from '../../media/mediaService.js';
 import * as mediaStorage from '../../media/mediaStorage.js';
 import { listBrands, getBrand } from '../../brand/brandService.js';
 import { getBrandFont, BRAND_FONT_ROLES } from '../../brand/brandFonts.js';
-import type { Brand } from '../../brand/types.js';
+import type { Brand, BrandCreativeLocks } from '../../brand/types.js';
+import { applyBrandLocks, type RenderLockFacts } from './brandLocks.js';
 import { getBrief } from '../creativeBriefsService.js';
 import type { CreativeBrief } from '../types.js';
 import { getTemplate, type AdLayoutTemplate, type AdLayerId, type BrandColorToken } from './templates.js';
@@ -93,6 +94,9 @@ export interface CreativeRender {
   mediaAssetId: string;
   /** ADR 0399 OQ-2 — set when this render is an animated GIF. */
   animation?: { preset: 'reveal'; frames: number; fps: number };
+  /** ADR 0946 D4 — what the render used (colours, fonts, logo slot, nudges),
+   *  for the P2 `brand-lock` pre-flight re-check. Absent on older rows. */
+  lockFacts?: RenderLockFacts;
   /** ADR 0411 P3 — set when this render is a generated REEL (video via
    *  ctx.callVideoGenerator). Its presence discriminates a reel from a
    *  composed image render; `mediaAssetId` then points at the video, and the
@@ -133,6 +137,8 @@ function mapFontStack(stack: string | undefined, role: 'sans' | 'serif', warning
 
 interface ResolvedBrandTokens {
   tokens: BrandRenderTokens;
+  /** ADR 0946 D4 — the brand's creative locks, when it has any. */
+  locks?: BrandCreativeLocks;
   snapshot: CreativeRender['brand'];
   logo?: ResolvedLayerImage;
   /** ADR 0399 OQ-1 — attested brand fonts to embed (resvg buffers) + their
@@ -190,6 +196,7 @@ async function resolveBrandTokens(tenantId: string, orgId: string, brief: Creati
     tokens: { colors, fontFamilies },
     snapshot: { ...(brand ? { brandId: brand.id } : {}), colors, fontFamilies },
     ...(logo ? { logo } : {}),
+    ...(brand?.creativeLocks ? { locks: brand.creativeLocks } : {}),
     customFonts,
   };
 }
@@ -221,7 +228,7 @@ async function resolveBrandLogo(tenantId: string, src: string | undefined, warni
 
 /** Resolve one library asset to embeddable bytes — tenant+org IDOR-checked via
  *  the media service row, then bytes by its own serve token. */
-async function resolveLayerAsset(tenantId: string, orgId: string, layerId: AdLayerId, mediaAssetId: string, warnings: RenderWarning[]): Promise<{ image: ResolvedLayerImage; mediaAssetId: string } | undefined> {
+async function resolveLayerAsset(tenantId: string, orgId: string, layerId: AdLayerId, mediaAssetId: string, warnings: RenderWarning[]): Promise<{ image: ResolvedLayerImage; mediaAssetId: string; asset: MediaAsset } | undefined> {
   const asset = await getAsset(tenantId, orgId, mediaAssetId);
   if (!asset) {
     warnings.push({ code: 'layer-asset-missing', layerId, message: `Asset ${mediaAssetId} not found in this org — '${layerId}' layer left empty.` });
@@ -238,7 +245,7 @@ async function resolveLayerAsset(tenantId: string, orgId: string, layerId: AdLay
   }
   const bytes = Buffer.from(entry.contentBase64, 'base64');
   const sha256 = asset.contentHash ?? createHash('sha256').update(bytes).digest('hex');
-  return { image: { dataUri: `data:${entry.contentType};base64,${entry.contentBase64}`, sha256 }, mediaAssetId: asset.assetId };
+  return { image: { dataUri: `data:${entry.contentType};base64,${entry.contentBase64}`, sha256 }, mediaAssetId: asset.assetId, asset };
 }
 
 export interface RenderBriefArgs {
@@ -255,6 +262,10 @@ export interface RenderBriefArgs {
   brandId?: unknown;
   /** ADR 0399 OQ-2 — request an animated GIF instead of a static PNG. */
   animate?: unknown;
+  /** ADR 0945 P1 — set ONLY by `composeProductShot` after it verified the
+   *  product layer is a cut-out of this product's own photos. Never wired
+   *  from a request body or node args. */
+  verifiedProductId?: string;
 }
 
 /** Validate an `animate` request (v1: the `reveal` preset only). Clamped to
@@ -345,11 +356,11 @@ export async function renderForBrief(tenantId: string, orgId: string, actor: str
     }
     directionIndex = idx;
   }
-  const headline = optionalCleanString(args.copy?.headline, MAX.copy)
+  const headline = optionalCleanContent(args.copy?.headline, MAX.copy, 'headline')
     ?? (directionIndex !== undefined ? brief.directions[directionIndex]?.label : undefined)
     ?? brief.title;
-  const body = optionalCleanString(args.copy?.body, MAX.copy) ?? brief.messagingIntent;
-  const cta = optionalCleanString(args.copy?.cta, 60);
+  const body = optionalCleanContent(args.copy?.body, MAX.copy, 'body') ?? brief.messagingIntent;
+  const cta = optionalCleanContent(args.copy?.cta, 60, 'cta');
   const copy: CreativeRender['copy'] = { headline, ...(body ? { body } : {}), ...(cta ? { cta } : {}) };
 
   // Layer imagery: explicit args win; defaults walk the mood board in order.
@@ -358,26 +369,34 @@ export async function renderForBrief(tenantId: string, orgId: string, actor: str
 
   const images: ResolvedRenderContent['images'] = {};
   const layerAssets: CreativeRender['layerAssets'] = {};
+  /** ADR 0945 D4 — the layer rows, for the composite's provenance stamp. */
+  const layerRows: { background?: MediaAsset; product?: MediaAsset } = {};
   if (backgroundId) {
     const r = await resolveLayerAsset(tenantId, orgId, 'background', backgroundId, warnings);
-    if (r) { images.background = r.image; layerAssets.background = { mediaAssetId: r.mediaAssetId, sha256: r.image.sha256 }; }
+    if (r) { images.background = r.image; layerAssets.background = { mediaAssetId: r.mediaAssetId, sha256: r.image.sha256 }; layerRows.background = r.asset; }
   } else {
     warnings.push({ code: 'missing-layer-image', layerId: 'background', message: 'No background asset (empty mood board and no explicit layer) — rendered on the paper color.' });
   }
   if (productId && productId !== backgroundId) {
     const r = await resolveLayerAsset(tenantId, orgId, 'product', productId, warnings);
-    if (r) { images.product = r.image; layerAssets.product = { mediaAssetId: r.mediaAssetId, sha256: r.image.sha256 }; }
+    if (r) { images.product = r.image; layerAssets.product = { mediaAssetId: r.mediaAssetId, sha256: r.image.sha256 }; layerRows.product = r.asset; }
   }
 
-  const { tokens, snapshot, logo, customFonts } = await resolveBrandTokens(tenantId, orgId, brief, optionalCleanString(args.brandId, 200), warnings);
+  const { tokens, snapshot, logo, customFonts, locks } = await resolveBrandTokens(tenantId, orgId, brief, optionalCleanString(args.brandId, 200), warnings);
   if (logo) images.logo = logo;
-
-  const overrides = cleanOverrides(args.overrides, template);
 
   const content: ResolvedRenderContent = {
     images,
     texts: { headline: copy.headline, ...(copy.body ? { body: copy.body } : {}), ...(copy.cta ? { cta: copy.cta } : {}) },
   };
+  // ADR 0946 D4 — the brand's creative locks: nudges clamped to its bounds, an
+  // off-brand colour, font or logo slot refused before anything is drawn.
+  const locked = applyBrandLocks({
+    template, tokens, locks, overrides: cleanOverrides(args.overrides, template), logoPresent: Boolean(logo),
+    textLayerIds: new Set(Object.keys(content.texts) as AdLayerId[]),
+  });
+  warnings.push(...locked.warnings);
+  const overrides = locked.overrides;
   const renderInput = { template, content, brand: tokens, ...(overrides ? { overrides } : {}), ...(customFonts.buffers.length > 0 ? { extraFontBuffers: customFonts.buffers } : {}) };
 
   // ADR 0399 OQ-2 — an `animate` request renders a GIF (reveal preset); else a
@@ -418,10 +437,29 @@ export async function renderForBrief(tenantId: string, orgId: string, actor: str
   const b64 = bytes.toString('base64');
   const contentHash = createHash('sha256').update(bytes).digest('hex');
   const marketing = { product: brief.title, angle: directionIndex !== undefined ? brief.directions[directionIndex]?.label : undefined, background: `${template.platform} ${template.format}` };
+  // ADR 0945 D4 (closes G3) — the renderer's provenance used to be passed as
+  // `lineage:{source, briefId, templateId}`, which cleanLineage drops. The
+  // render id is minted HERE so the asset can name the render that made it.
+  const renderId = `crender:${randomUUID()}`;
+  const productLayer = layerRows.product;
+  const productIdOfLayer = productLayer ? (args.verifiedProductId ?? productLayer.marketing?.productId) : undefined;
+  // AI-ness propagates through composition: a composite with an AI layer is AI output.
+  const anyAiLayer = [layerRows.background, layerRows.product].some((a) => a?.lineage?.generatedBy === 'ai');
+  const grounding = {
+    // The product layer's pixels are copied and only scaled (ADR 0945 D2).
+    mode: productLayer ? 'composite' : 'none',
+    ...(productIdOfLayer ? { productId: productIdOfLayer } : {}),
+    sources: [layerAssets.background, layerAssets.product].flatMap((l) => (l ? [{ assetId: l.mediaAssetId, sha256: l.sha256 }] : [])),
+    provider: 'openwop',
+    model: `renderer@${RENDERER_VERSION}`,
+    op: 'render',
+    composedFrom: { renderId, templateId: template.templateId, briefId: brief.briefId },
+  };
   let mediaAssetId: string;
   const existing = await findAssetByContentHash(tenantId, orgId, contentHash);
   if (existing) {
-    const merged = await mergeAssetMetadataOnDedup(existing, { marketing });
+    const stamped = await stampGroundingIfAbsent(existing, grounding, { ai: anyAiLayer });
+    const merged = await mergeAssetMetadataOnDedup(stamped, { marketing });
     mediaAssetId = merged.assetId;
   } else {
     await assertOrgCapacity(tenantId, orgId, bytes.length);
@@ -435,7 +473,8 @@ export async function renderForBrief(tenantId: string, orgId: string, actor: str
       serveToken: stored.serveToken,
       tags: ['ad-render', template.platform, ...(animate ? ['animated'] : [])],
       uploadedBy: actor,
-      lineage: { source: 'creative-briefs:render', briefId: brief.briefId, templateId: template.templateId },
+      ...(anyAiLayer ? { lineage: { generatedBy: 'ai' } } : {}),
+      grounding,
       marketing,
       contentHash,
     });
@@ -443,7 +482,7 @@ export async function renderForBrief(tenantId: string, orgId: string, actor: str
   }
 
   const record: CreativeRender = {
-    renderId: `crender:${randomUUID()}`,
+    renderId,
     tenantId, orgId,
     briefId: brief.briefId,
     briefVersion: brief.version,
@@ -458,6 +497,7 @@ export async function renderForBrief(tenantId: string, orgId: string, actor: str
     compositeHash,
     mediaAssetId,
     ...(animate ? { animation: animate } : {}),
+    lockFacts: locked.lockFacts,
     createdBy: actor,
     createdAt: nowIso(),
   };
@@ -529,6 +569,14 @@ export async function listRenders(tenantId: string, orgId: string, briefId: stri
 
 export async function getRender(tenantId: string, orgId: string, briefId: string, renderId: string): Promise<CreativeRender | null> {
   return (await renders.get(`${tenantId}:${orgId}:${briefId}:${renderId}`)) ?? null;
+}
+
+/** Variant members name an asset and a render, without a brief id. Resolve
+ * through the owning store, scoped to this org; asset dedup can legitimately
+ * leave the media row's composedFrom pointing at an earlier render. */
+export async function listRendersForAssets(tenantId: string, orgId: string, assetIds: ReadonlySet<string>): Promise<CreativeRender[]> {
+  return (await renders.listByPrefix(`${tenantId}:${orgId}:`))
+    .filter((r) => r.tenantId === tenantId && r.orgId === orgId && assetIds.has(r.mediaAssetId));
 }
 
 export async function deleteRender(tenantId: string, orgId: string, briefId: string, renderId: string): Promise<boolean> {

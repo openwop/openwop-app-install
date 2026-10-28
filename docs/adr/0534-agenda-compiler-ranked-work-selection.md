@@ -126,6 +126,12 @@ the item's rank, and its reason. Use `host/runStartContext.ts`
 (`registerRunStartContributor`, ADR 0099) — the documented seam for "resolve a cross-cutting
 decision once per run and replay it verbatim."
 
+> **CORRECTED 2026-10-19 (ADR 0963 D6/D7).** As built, the stamp is
+> `{policy, rank, score, scores, candidates}`: no resolved variant, and it is written inline
+> by `runHeartbeatOnce`, not through `registerRunStartContributor`. It was also read from a
+> module-level map that any concurrent pass reassigned, so a Check now beside the daemon
+> could erase it (`WS2WF-5`); the decisions are now the pass's own (`rankWorkCandidates`).
+
 A fork must **not** re-run the compiler. Re-ranking on fork would let a replayed run pick a
 different card than the one it originally ran, which breaks replay determinism outright.
 
@@ -152,7 +158,11 @@ cross-tenant `DurableCollection` scan** filtered in memory, called per board, pe
 per 30-second tick. Ranking must not multiply that.
 
 The compiler receives an already-bounded candidate set (the member's To Do cards, capped),
-and the cap is applied at gather time, not after ranking. A future ADR that adds candidate
+and the cap is applied at gather time, not after ranking.
+
+> **CORRECTED 2026-10-19 (ADR 0963 D7).** No cap was ever applied. The candidate set is one
+> board's To Do lane, already in memory from the `listCards` the pass makes anyway; ranking
+> it adds no read. A future ADR that adds candidate
 *sources* must budget its reads explicitly. Recorded as a hard constraint, not a
 nice-to-have: this is the hot path of the whole autonomous loop.
 
@@ -188,7 +198,7 @@ signature is extensible so a later ADR can add kinds without reshaping the seam.
 | 7 | **Public surface** | **None.** Nothing public; no `PUBLIC_PATH_PREFIXES` entry. |
 | 8 | **RBAC + isolation (ADR 0006)** | Preview reads require `workspace:read` on the board's org; weight edits require org-admin (a selection policy is a workspace-governance decision). Board access derives from the card's board's `ownerSubject` via `host/subjectAccess.ts` — never from the request. Fail-closed on unknown board or absent org. |
 | 9 | **Replay / fork safety** | D3 — selection inputs + resolved variant frozen into `run.metadata` at creation via `registerRunStartContributor`; read verbatim on `:fork`; the compiler is never re-run for a fork. Packs stay decoupled from toggle state. |
-| 10 | **Frontend** | `workSelectionClient.ts` + a "why this card?" affordance on the board card. **No new weights editor and no new reason format** (architecture review 2026-08-08): weights are edited through Priority Matrix's existing criteria-set editor (1–10 sliders + named presets, org-admin gated), and the affordance renders the **ADR 0234 per-criterion breakdown** — the same shape as "why ranked here". Building either again would be the config-surface and presentation halves of the D1 duplication. Registered via `FRONTEND_FEATURES` / the menu registry; `ui/` cohesion, tokens, a11y per `DESIGN.md` and `/ux-review`. |
+| 10 | **Frontend** | **CORRECTED 2026-10-19 (ADR 0963 D7): no editor edits these weights — they are the code constant `WORK_SELECTION_CRITERIA`; nothing reads a tenant criteria set.** `workSelectionClient.ts` + a "why this card?" affordance on the board card. **No new weights editor and no new reason format** (architecture review 2026-08-08): weights are edited through Priority Matrix's existing criteria-set editor (1–10 sliders + named presets, org-admin gated), and the affordance renders the **ADR 0234 per-criterion breakdown** — the same shape as "why ranked here". Building either again would be the config-surface and presentation halves of the D1 duplication. Registered via `FRONTEND_FEATURES` / the menu registry; `ui/` cohesion, tokens, a11y per `DESIGN.md` and `/ux-review`. |
 
 ## Alternatives weighed
 
@@ -248,7 +258,11 @@ signature is extensible so a later ADR can add kinds without reshaping the seam.
   badges on cards would have implied the board *is* the queue; the separate "Up
   next" list keeps the human's arrangement and the agent's derived order visibly
   distinct.
-- **OQ-4 / ADR 0535 OQ-3 (crash-loop damping)** — resolved **for free**. `blocked`
+- **OQ-4 / ADR 0535 OQ-3 (crash-loop damping)** — ~~resolved **for free**~~ **FALSE —
+  CORRECTED 2026-10-19 (ADR 0963 D3/D7).** A cost only reorders: a board whose only To Do
+  card failed re-ran it every interval, and with ranking toggled off nothing was damped. The
+  real resolution is ADR 0963 D3: a card restored after a stopped or failed run is held until
+  a person clears its note. The original text follows. Resolved **for free**. `blocked`
   is a **cost** criterion and ADR 0535 writes a blocker note when it restores a
   card whose run failed, so a repeatedly-failing card sinks on its own with no
   bespoke retry damper; clearing the note restores its rank. The two ADRs compose.

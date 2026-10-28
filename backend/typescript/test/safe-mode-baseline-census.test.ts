@@ -12,6 +12,13 @@
  * a runtime mutation, so no static census can be a floor), NOT `effect` — `effect` is
  * display-only by its own contract and declares `http.fetch` a read. A newly registered
  * tool fails here until it is placed in exactly one table below.
+ *
+ * Sabotage witnessed red (8f grade-tests wave 2): destination-sync's
+ * safe-mode declaration dropped (`8fw2g3-cen-destsync-decl`), compose-and-run's
+ * reviewed-lane reason dropped (`-cen-compose-reason`), a dead name added to
+ * the hand-kept set (`-cen-dead-name`), a READS tool's effect flipped
+ * (`-cen-read-effect`), and a name removed from the baseline
+ * (`-cen-baseline-names`).
  */
 import http from 'node:http';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -38,6 +45,7 @@ const SELF = 'addressed only to the acting user (their inbox / their own board /
 
 /** Writes that are NOT held in safe mode, with the reason. */
 const NO_ASK_WRITES: ReadonlyArray<readonly [string, string]> = [
+  ['openwop:campaign-intel.propose-reallocation', `${OWN_GATE}. It reads the campaigns' live daily budgets through the acting user's own ad connections (ids out, budgets in) and opens ONE campaign-spend approval; it changes no budget (ADR 0952 D8)`],
   ['openwop:app-builder.render', DRAFT],
   ['openwop:assistant.enqueue-action', OWN_GATE],
   ['openwop:assistant.populate-board', IN_HOST],
@@ -53,6 +61,7 @@ const NO_ASK_WRITES: ReadonlyArray<readonly [string, string]> = [
   ['openwop:comments.post', 'an in-host comment; mentions notify tenant members through the inbox'],
   ['openwop:conversations.export-document', DRAFT],
   ['openwop:crm.lead.capture', 'the anonymous widget\'s bounded write — held by the surface\'s own control (ADR 0469)'],
+  ['openwop:crm.lead.qualify', 'anonymous-only evidence claim; anonHitlOnly forces the surface human gate and refuses auto-run (ADR 0954 P4)'],
   ['openwop:discovery.create-collection', IN_HOST],
   ['openwop:discovery.create-rule', IN_HOST],
   ['openwop:documents.draft', DRAFT],
@@ -61,6 +70,7 @@ const NO_ASK_WRITES: ReadonlyArray<readonly [string, string]> = [
   ['openwop:drawings.render', DRAFT],
   ['openwop:email.draft', DRAFT],
   ['openwop:email.save-draft', DRAFT],
+  ['openwop:email.submit-for-review', OWN_GATE], // ADR 0905 D5 — queues a human send review; never approves or sends
   ['openwop:feature.agent-author.nodes.persist', 'creates the agent DISABLED — a human enables it'],
   ['openwop:feature.builder-pair.nodes.suggest-edits', 'suggestions the user keeps or drops on the canvas; never applies'],
   ['openwop:feature.commerce.buyer.nodes.build-cart', 'a capped cart draft; buys nothing'],
@@ -72,6 +82,7 @@ const NO_ASK_WRITES: ReadonlyArray<readonly [string, string]> = [
   ['openwop:feature.crm.nodes.persist-segment', 'closed-world re-validated before write (ADR 0815); in-host'],
   ['openwop:feature.workflow-author.nodes.persist', 'registers a validated draft; running it is a separate, gated act'],
   ['openwop:funnels.draft', DRAFT],
+  ['openwop:funnels.generate', 'starts a FIXED, code-reviewed funnel blueprint the user asked for; it drafts a funnel and pages, and publishing is a human funnel-publish review (ADR 0948)'],
   ['openwop:intent-ledger.draft-contract', 'a draft mission contract the user approves'],
   ['openwop:interactive-artifacts.render', DRAFT],
   ['openwop:kanban.add-todo', SELF],
@@ -127,9 +138,12 @@ const READS: readonly string[] = [
   'openwop:campaign-channels.channels',
   'openwop:campaign-intel.attribution',
   'openwop:campaign-intel.budget-optimize',
+  'openwop:campaign-intel.caps',
   'openwop:campaign-intel.forecast',
   'openwop:campaign-intel.pacing',
   'openwop:campaign-intel.plan-budget',
+  'openwop:campaign-orchestration.get-campaign',
+  'openwop:campaign-orchestration.get-autonomy',
   'openwop:campaign-orchestration.status',
   'openwop:campaign-studio.get-design',
   'openwop:cdp.identity.resolve',
@@ -185,7 +199,7 @@ const READS: readonly string[] = [
   'openwop:feature.crm.nodes.segment-vocabulary',
   'openwop:feature.crm.nodes.validate-segment',
   'openwop:feature.csm.nodes.health-read',
-  'openwop:feature.csm.nodes.renewals-due', // ADR 0882 D8 — a read (effect:'read'), same predicate as health-read',
+  'openwop:feature.csm.nodes.renewals-due', // ADR 0882 D8 — a read (effect:'read'), same predicate as health-read
   'openwop:feature.insights-suite.nodes.talent-score',
   'openwop:feature.insights-suite.nodes.variance-compute',
   'openwop:feature.workflow-author.nodes.draft',
@@ -193,6 +207,7 @@ const READS: readonly string[] = [
   'openwop:feature.workflow-author.nodes.validate',
   'openwop:forms.list-forms',
   'openwop:forms.list-submissions',
+  'openwop:funnels.blueprints',
   'openwop:funnels.get',
   'openwop:funnels.list',
   'openwop:funnels.step-stats',

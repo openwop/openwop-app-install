@@ -11,6 +11,15 @@
  *   3. The bundle-v3 verifiers order rows by UTF-16 code unit and put
  *      `host.relaxations[]` in the witness preimage when non-empty — the suite's
  *      `certification-bundle-v3.ts` rule — in BOTH copies.
+ *
+ * TST-BQR-2. Red when: the wrapper stops re-rendering a pre-dispatch refusal
+ * (or loses the parse/-32603/id mapping); the header-less 0.3 exemption or the
+ * disabled-interface exemption is dropped; the run-scoped resolve on a
+ * terminal run answers anything but 409 (both the open-interrupt and the
+ * no-open-interrupt branch), or a LIVE run stops 404ing; either verifier copy
+ * sorts by a collation or ignores relaxations. The 4-row digest is ALSO pinned
+ * as a literal (sha256 of the hand-written JCS preimage), so a shared
+ * canonicalizer cannot move the expectation with it.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -91,7 +100,10 @@ describe('ADR 0744 §1 — no OpenWOP envelope on the A2A 1.0 interface URL', ()
     expect(res.body['jsonrpc']).toBeUndefined();
   });
 
-  it('a JSON-RPC body from the handler passes through unchanged', async () => {
+  // The handler answers 200, so the wrapper's `< 400` short-circuit passes it
+  // before `isOpenwopEnvelope` is consulted — this is the 200 positive control,
+  // not a witness of the envelope check.
+  it('a 200 JSON-RPC body from the handler passes through unchanged', async () => {
     const res = await rawPost(A2A_PATH, JSON.stringify({ jsonrpc: '2.0', id: 13, method: 'GetTask', params: { id: 'run_nope' } }), {
       'a2a-version': '1.0',
       authorization: `Bearer ${TOKEN}`,
@@ -100,6 +112,20 @@ describe('ADR 0744 §1 — no OpenWOP envelope on the A2A 1.0 interface URL', ()
     const error = res.body['error'] as { code?: number; data?: Array<Record<string, unknown>> };
     expect(error.code).toBe(-32001);
     expect(error.data?.[0]?.['domain']).toBe('a2a-protocol.org');
+  });
+
+  it('a DISABLED interface is untouched — its refusal keeps the host envelope', async () => {
+    process.env.OPENWOP_A2A_SERVER_ENABLED = 'false';
+    try {
+      const res = await rawPost(A2A_PATH, JSON.stringify({ jsonrpc: '2.0', id: 14, method: 'GetTask', params: { id: 'x' } }), {
+        'a2a-version': '1.0',
+      });
+      expect(res.status).toBeGreaterThanOrEqual(400);
+      expect(typeof res.body['error']).toBe('string');
+      expect(res.body['jsonrpc']).toBeUndefined();
+    } finally {
+      process.env.OPENWOP_A2A_SERVER_ENABLED = 'true';
+    }
   });
 
   it('the renderer keeps 5xx as JSON-RPC -32603 and leaves the id null when the caller sent none', () => {
@@ -215,6 +241,9 @@ describe('ADR 0744 §3 — witness digest: code-unit order + relaxations, in bot
 
   it('orders by UTF-16 code unit, not by a collation (TS and ESM copies agree)', () => {
     const want = expected(codeUnitSorted);
+    // Literal pin: sha256 of the hand-written JCS preimage
+    // [{"id":"openwop.it.x.Z_row",…},{"id":"openwop.it.x.a-row",…},{…ch-row},{…h-row}].
+    expect(want).toBe('2baf8c41437434184832ad5baf236b14a0f68e43e0fca4ead53ee53c7ebe64c4');
     expect(tsWitnessDigest(rows)).toBe(want);
     expect(mjsWitnessDigest(rows)).toBe(want);
     // Sabotage witness: an 'en' collation order is a DIFFERENT digest for these

@@ -41,6 +41,7 @@ import { fetchPublicPageResult } from '../../site/siteClient.js';
 import { getVisitorKey, consentTokenFor, useVisitorConsent } from '../../site/visitorConsent.js';
 import { VisitorConsentBanner } from '../../site/VisitorConsentBanner.js';
 import { FormEmbedProvider } from '../../forms/render/embedContext.js';
+import { FunnelCheckoutPanel, FunnelOneClickPanel, waitForPaid, type Purchase, type StepOffer } from './FunnelOfferPanel.js';
 
 interface ViewStep {
   ix: number;
@@ -49,6 +50,8 @@ interface ViewStep {
   name?: string;
   pageSlug: string;
   formContext?: { funnelId: string; stepId: string };
+  /** ADR 0948 P2c — what a money step sells (checkout, upsell, downsell). */
+  offer?: StepOffer;
 }
 interface ViewPayload {
   funnel: { slug: string; name: string };
@@ -74,6 +77,30 @@ type CallResult = { status: 'ok'; payload: ViewPayload } | { status: 'notFound' 
 /** An authored CTA URL is either an internal path or http(s) — never rendered otherwise. */
 const safeCtaUrl = (url: string): boolean => isInternalHref(url) || /^https?:\/\//i.test(url); // ADR 0836 D7
 
+/**
+ * ADR 0948 P2c — the purchase this visitor just paid for, if any. The checkout
+ * returns from Stripe with `#order=…&ft=…` in the FRAGMENT (never sent to a server,
+ * never in a Referer). It is read once, kept for this tab only (sessionStorage, per
+ * funnel), and removed from the address bar so a copied link never carries it.
+ */
+const PURCHASE_KEY = (orgId: string, slug: string): string => `funnel-purchase:${orgId}:${slug}`;
+function takePurchase(orgId: string, slug: string): Purchase | null {
+  if (typeof window === 'undefined') return null;
+  const hash = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+  const orderId = hash.get('order'); const ft = hash.get('ft');
+  if (orderId && ft) {
+    try { window.sessionStorage.setItem(PURCHASE_KEY(orgId, slug), JSON.stringify({ orderId, ft })); } catch { /* private mode: memory only */ }
+    window.history.replaceState(window.history.state, '', `${window.location.pathname}${window.location.search}`);
+    return { orderId, ft };
+  }
+  try {
+    const raw = window.sessionStorage.getItem(PURCHASE_KEY(orgId, slug));
+    const p = raw ? (JSON.parse(raw) as Partial<Purchase>) : null;
+    return p && typeof p.orderId === 'string' && typeof p.ft === 'string' ? { orderId: p.orderId, ft: p.ft } : null;
+  } catch { return null; }
+}
+const MONEY_KINDS = new Set(['checkout', 'upsell', 'downsell']);
+
 export function FunnelViewerPage({ orgId, slug }: { orgId: string; slug: string }): JSX.Element {
   const { t } = useTranslation('funnels');
   const [state, setState] = useState<ViewState>({ kind: 'loading' });
@@ -94,16 +121,29 @@ export function FunnelViewerPage({ orgId, slug }: { orgId: string; slug: string 
     vkRef.current = getVisitorKey(orgId);
     setVk(vkRef.current);
   }, [orgId, consent.decision]);
+  const [purchase] = useState<Purchase | null>(() => takePurchase(orgId, slug));
   const consentHeaders = useCallback((): Record<string, string> => {
     const token = vkRef.current ? consentTokenFor(orgId) : undefined;
-    return token ? { 'x-openwop-consent-token': token } : {};
-  }, [orgId]);
+    return {
+      ...(token ? { 'x-openwop-consent-token': token } : {}),
+      // ADR 0948 P2c — the server routes past an offer step from THIS purchase's
+      // recorded decision; the capability rides headers, never the URL.
+      ...(purchase ? { 'x-openwop-funnel-order': purchase.orderId, 'x-openwop-funnel-offer': purchase.ft } : {}),
+    };
+  }, [orgId, purchase]);
   // FRMX-1 — the step lives in the URL (`?step=ix`): browser Back walks the
   // funnel (each advance pushes), refresh re-serves the CURRENT step, and a
   // step is deep-linkable. `?step` is a VIEW pointer only — completion events
   // still come solely from the server's /next accounting.
   const [searchParams, setSearchParams] = useSearchParams();
+  // ADR 0948 D4 — a visitor RETURNING to a webinar step (ADR 0955's link) carries
+  // their registration as `?submission=`; the server derives the attendance outcome
+  // from it. Read once: it identifies the visitor's own registration, nothing else.
+  const returnSubmission = useRef<string | null>(searchParams.get('submission'));
   const stepParam = searchParams.get('step');
+  // ADR 0948 P2c — back from Stripe on the checkout step (`?paid=1` / `?canceled=1`).
+  const [payReturn, setPayReturn] = useState<'waiting' | 'slow' | 'canceled' | null>(() =>
+    searchParams.get('paid') === '1' ? 'waiting' : searchParams.get('canceled') === '1' ? 'canceled' : null);
   const stepRef = useRef<HTMLDivElement | null>(null);
   // VP-R2-0 — when advance() stamps ?step after rendering from its own
   // payload, the URL effect must NOT reload (the double-load defect). The ref
@@ -213,7 +253,8 @@ export function FunnelViewerPage({ orgId, slug }: { orgId: string; slug: string 
     const gen = ++navGen.current;
     try {
       const key = vkRef.current;
-      const q = new URLSearchParams({ from: fromStepId, ...(key ? { vk: key } : {}), ...(submissionId ? { submission: submissionId } : {}) });
+      const sub = submissionId ?? returnSubmission.current ?? undefined;
+      const q = new URLSearchParams({ from: fromStepId, ...(key ? { vk: key } : {}), ...(sub ? { submission: sub } : {}) });
       const r = await call(`/next?${q.toString()}`);
       if (gen !== navGen.current) return; // Back was clicked mid-flight — it wins
       // FN-G4 — distinguish "this advance failed" from "this funnel is gone".
@@ -250,6 +291,27 @@ export function FunnelViewerPage({ orgId, slug }: { orgId: string; slug: string 
     setAdvanceFailed(false);
     setSearchParams((prev) => { const nxt = new URLSearchParams(prev); nxt.set('step', String(toIx)); return nxt; }, { replace: true });
   }, [setSearchParams]);
+
+  // ADR 0948 P2c — after payment, wait for the webhook to mark the purchase paid,
+  // then move on; the server routes to the first offer. The return flags leave the
+  // URL so a refresh does not wait again.
+  const waitedFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (state.kind !== 'step' || payReturn !== 'waiting' || state.step.kind !== 'checkout') return;
+    // Back with `?paid=1` but no purchase in this tab (a shared link, a new tab, a
+    // dropped fragment): nothing to wait for, so never hold the visitor on a spinner.
+    if (!purchase) { setPayReturn('slow'); return; }
+    const funnelId = state.step.formContext?.funnelId;
+    if (!funnelId || waitedFor.current === state.step.stepId) return;
+    waitedFor.current = state.step.stepId;
+    const fromStepId = state.step.stepId;
+    setSearchParams((prev) => { const nxt = new URLSearchParams(prev); nxt.delete('paid'); return nxt; }, { replace: true });
+    void waitForPaid(orgId, funnelId, fromStepId, purchase).then((paid) => {
+      if (!paid) { setPayReturn('slow'); return; }
+      setPayReturn(null);
+      void advance(fromStepId);
+    });
+  }, [state, payReturn, purchase, orgId, advance, setSearchParams]);
 
   // FN-R2-9 — the tab is titled per step (funnel name — stage), undone on exit.
   useEffect(() => {
@@ -308,6 +370,8 @@ export function FunnelViewerPage({ orgId, slug }: { orgId: string; slug: string 
   // step's own `name` was already in the payload and never shown.
   const position = t('viewerStepOf', { n: step.ix + 1, total: payload.stepCount });
   const stageLabel = step.name ? `${position} · ${step.name}` : position;
+  const hideContinue = Boolean(step.offer) && MONEY_KINDS.has(step.kind)
+    && (step.kind === 'checkout' ? payReturn !== 'slow' : purchase !== null);
   return (
     <div className="u-w-full" ref={stepRef} tabIndex={-1}>
       {/* The progress header leads, so a visitor knows the shape of the
@@ -361,6 +425,28 @@ export function FunnelViewerPage({ orgId, slug }: { orgId: string; slug: string 
         <RenderSections sections={sections} mode="public" />
       </FormEmbedProvider>
 
+      {/* ADR 0948 P2c — the money steps. */}
+      {step.kind === 'checkout' && payReturn === 'waiting' ? (
+        <div className="fp-shell u-p-4"><Notice variant="info">{t('offerConfirmingPayment')}</Notice></div>
+      ) : step.kind === 'checkout' && payReturn === 'slow' ? (
+        <div className="fp-shell u-p-4"><Notice variant="info">{t('offerPaymentSlow')}</Notice></div>
+      ) : step.kind === 'checkout' && step.offer && step.formContext ? (
+        <>
+          {payReturn === 'canceled' ? <div className="fp-shell u-p-4"><Notice variant="warning">{t('offerPaymentCanceled')}</Notice></div> : null}
+          <FunnelCheckoutPanel
+            orgId={orgId} funnelId={step.formContext.funnelId} stepId={step.stepId} offer={step.offer}
+            onDemoDone={() => { void advance(step.stepId); }}
+          />
+        </>
+      ) : null}
+      {(step.kind === 'upsell' || step.kind === 'downsell') && step.offer && step.formContext && purchase ? (
+        <FunnelOneClickPanel
+          key={step.stepId}
+          orgId={orgId} funnelId={step.formContext.funnelId} stepId={step.stepId} offer={step.offer} purchase={purchase}
+          onDecided={() => { void advance(step.stepId); }}
+        />
+      ) : null}
+
       {/* FN-G4 — a failed advance keeps the step on screen and says so. */}
       {advanceFailed ? (
         <div className="fp-shell u-p-4">
@@ -380,12 +466,17 @@ export function FunnelViewerPage({ orgId, slug }: { orgId: string; slug: string 
         {/* FN-R2-7 — the primary control stays MOUNTED while advancing (the
             old Notice swap dropped keyboard focus mid-activation and shifted
             the layout). */}
-        <button
-          type="button" className="fp-btn fp-btn--primary" disabled={advancing} aria-busy={advancing}
-          onClick={() => { void advance(step.stepId); }}
-        >
-          {advancing ? t('viewerAdvancing') : advanceFailed ? t('viewerRetry') : t('viewerContinue')}
-        </button>
+        {/* ADR 0948 P2c — a money step moves on through its own panel (pay, accept or
+            decline), never a bare Continue that would skip the purchase. A slow
+            payment confirmation still offers the way on. */}
+        {hideContinue ? <span /> : (
+          <button
+            type="button" className="fp-btn fp-btn--primary" disabled={advancing} aria-busy={advancing}
+            onClick={() => { void advance(step.stepId); }}
+          >
+            {advancing ? t('viewerAdvancing') : advanceFailed ? t('viewerRetry') : t('viewerContinue')}
+          </button>
+        )}
       </div>
       {/* ADR 0860 D6 — this surface uses a visitor key, so it carries the choice. */}
       {consentLayer}

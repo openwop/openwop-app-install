@@ -206,7 +206,8 @@ COPY --chown=node:node examples/connection-packs ./examples/connection-packs
 COPY --chown=node:node build-meta ./build-meta
 
 # CPython-WASI runtime (ADR 0146 Phase 4a) — OPTIONAL, needed ONLY when an operator sets
-# `OPENWOP_CODE_EXEC_RUNTIME=wasi`. Run `scripts/sync-pythonwasm.sh` before `gcloud run deploy`
+# `OPENWOP_CODE_EXEC_RUNTIME=wasi`. (ADR 0995 D8 made that true: under NODE_ENV=production the
+# runtime used to switch on whenever this asset happened to be present.) Run `scripts/sync-pythonwasm.sh` before `gcloud run deploy`
 # to populate `backend/typescript/vendor/python-3.12.0.wasm` (SHA-256-pinned, gitignored). The
 # tracked `.gitkeep` keeps this COPY a no-op on builds that don't enable the in-process runtime.
 COPY --chown=node:node backend/typescript/vendor ./vendor

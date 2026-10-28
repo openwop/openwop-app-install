@@ -7,7 +7,9 @@
  *   - a change set in review approves with the change set's hash in the body, and
  *     a 403 / 409 shows the server's own words;
  *   - the change is shown before → after, with step reasons in plain words;
- *   - a failed clients read is said, never shown as "no clients".
+ *   - a failed clients read is said, never shown as "no clients";
+ *   - ADR 0924 D5: under client approval the in-review card sends links instead of
+ *     approving; the approvers panel shows only while the portal is on.
  *
  * Sabotage-witnessed (wave 55/56 probes, each red here): the mode switch shown
  * to non-admins; the banner shown for a live client; a failed read rendered as
@@ -17,7 +19,12 @@
  * prefix scan disabled, or its suffix scan allowed to overlap the prefix.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, cleanup, screen, fireEvent, waitFor, within } from '@testing-library/react';
+import { render as rtlRender, cleanup, screen, fireEvent, waitFor, within } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
+import type { ReactElement } from 'react';
+
+// The page keeps its view in `?view=` (ADR 0943 P4), so it renders inside a router.
+const render = (ui: ReactElement) => rtlRender(<MemoryRouter>{ui}</MemoryRouter>);
 
 type Client = typeof import('../campaignOpsClient.js');
 const h = vi.hoisted(() => ({
@@ -28,8 +35,17 @@ const h = vi.hoisted(() => ({
   getChangeSetDiff: vi.fn<Client['getChangeSetDiff']>(), requestApproval: vi.fn<Client['requestApproval']>(),
   listJobs: vi.fn<Client['listJobs']>(), approveChangeSet: vi.fn<Client['approveChangeSet']>(),
   rejectChangeSet: vi.fn<Client['rejectChangeSet']>(),
+  getTeam: vi.fn<Client['getTeam']>(),
+  listApprovers: vi.fn<Client['listApprovers']>(), addApprover: vi.fn<Client['addApprover']>(),
+  removeApprover: vi.fn<Client['removeApprover']>(), sendApprovalLinks: vi.fn<Client['sendApprovalLinks']>(),
 }));
 vi.mock('../campaignOpsClient.js', async (orig) => ({ ...(await orig<Record<string, unknown>>()), ...h }));
+vi.mock('../ClientReportsSection.js', () => ({ ClientReportsSection: () => null })); // own tests: clientReportsSection.test.tsx
+vi.mock('../ClientIntakeSection.js', () => ({ ClientIntakeSection: () => null })); // own tests: clientIntakeSection.test.tsx
+vi.mock('../ClientCollabAuditSection.js', () => ({ ClientCollabAuditSection: () => null })); // own tests: clientCollabAuditSection.test.tsx
+vi.mock('../ClientCollaboratorsPanel.js', () => ({ ClientCollaboratorsPanel: () => null })); // own tests: clientCollaboratorsPanel.test.tsx
+// ADR 0944 — the Client memory panel has its own test (clientMemoryPanel.test.tsx).
+vi.mock('../ClientMemoryPanel.js', () => ({ ClientMemoryPanel: () => null }));
 
 import { OperationsPage, stepReasonKey } from '../OperationsPage.js';
 import { splitChange } from '../ChangeDiff.js';
@@ -49,6 +65,7 @@ beforeEach(() => {
   h.listRequests.mockResolvedValue([]);
   h.listChangeSets.mockResolvedValue([]);
   h.listJobs.mockResolvedValue([]);
+  h.listApprovers.mockResolvedValue({ approvers: [], portalEnabled: false });
 });
 afterEach(cleanup);
 
@@ -64,6 +81,47 @@ describe('OperationsPage', () => {
     render(<OperationsPage />);
     expect(await screen.findByRole('button', { name: 'Switch back to preview' })).toBeTruthy();
     expect(screen.queryByText('Preview: nothing is written.')).toBeNull();
+  });
+
+  it('ADR 0962 D7: an admin picks what outside agents may do; nothing saves until Apply, and Apply saves once', async () => {
+    h.listClients.mockResolvedValue({ clients: [client('live')], agencyAdmin: true });
+    h.updateClient.mockResolvedValue({ ...client('live'), externalAgents: 'read' });
+    render(<OperationsPage />);
+    const select = await screen.findByLabelText('Outside AI agents');
+    expect((select as HTMLSelectElement).value).toBe('off');
+    // Arrowing through the options changes the value; it must not save.
+    fireEvent.change(select, { target: { value: 'request' } });
+    fireEvent.change(select, { target: { value: 'read' } });
+    expect(h.updateClient).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    await waitFor(() => expect(h.updateClient).toHaveBeenCalledTimes(1));
+    expect(h.updateClient).toHaveBeenCalledWith('o1', { externalAgents: 'read' });
+  });
+
+  it('a staged outside-agent permission never follows a switch to another client', async () => {
+    h.listClients.mockResolvedValue({ clients: [client('live'), { ...client('live'), orgId: 'o2', displayName: 'Beta', externalAgents: 'read' }], agencyAdmin: true });
+    render(<OperationsPage />);
+    fireEvent.change(await screen.findByLabelText('Outside AI agents'), { target: { value: 'request' } });
+    expect(screen.getByRole('button', { name: 'Apply' })).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('Client'), { target: { value: 'o2' } });
+    await waitFor(() => expect((screen.getByLabelText('Outside AI agents') as HTMLSelectElement).value).toBe('read'));
+    expect(screen.queryByRole('button', { name: 'Apply' })).toBeNull();
+    expect(h.updateClient).not.toHaveBeenCalled();
+  });
+
+  it('a non-admin does not see the outside-agents control', async () => {
+    render(<OperationsPage />);
+    await screen.findByText('Home page');
+    expect(screen.queryByLabelText('Outside AI agents')).toBeNull();
+  });
+
+  it('the Team tab loads the client team on demand (ADR 0943 P4)', async () => {
+    h.getTeam.mockResolvedValue({ canEdit: false, evals: { available: true }, members: [] });
+    render(<OperationsPage />);
+    expect(h.getTeam).not.toHaveBeenCalled();
+    fireEvent.click(await screen.findByRole('tab', { name: 'Team' }));
+    expect(await screen.findByText('Campaign team for Acme')).toBeTruthy();
+    expect(h.getTeam).toHaveBeenCalledWith('o1');
   });
 
   it('a failed clients read is said, not shown as no clients', async () => {
@@ -136,7 +194,45 @@ describe('helpers', () => {
   });
   it('stepReasonKey maps unknown reasons to a plain fallback', () => {
     expect(stepReasonKey('preview_only')).toBe('reason_preview_only');
+    expect(stepReasonKey('creative_blocked')).toBe('reason_creative_blocked'); // ADR 0945 D5
     expect(stepReasonKey('weird_code')).toBe('reason_other');
     expect(stepReasonKey(undefined)).toBeNull();
+  });
+
+  describe('ADR 0924 D5 — client approval', () => {
+    it('hides the approvers panel while the portal is off', async () => {
+      h.listClients.mockResolvedValue({ clients: [client('live')], agencyAdmin: true });
+      render(<OperationsPage />);
+      await screen.findByRole('button', { name: 'Switch back to preview' });
+      await waitFor(() => expect(h.listApprovers).toHaveBeenCalledWith('o1'));
+      expect(screen.queryByText('Client approvers')).toBeNull();
+    });
+
+    it('an admin adds an approver when the portal is on', async () => {
+      h.listClients.mockResolvedValue({ clients: [client('live')], agencyAdmin: true });
+      h.listApprovers.mockResolvedValue({ approvers: [], portalEnabled: true });
+      h.addApprover.mockResolvedValue({ approverId: 'ap', orgId: 'o1', email: 'ann@client.test', displayName: 'Ann', status: 'active', createdAt: '' });
+      render(<OperationsPage />);
+      expect(await screen.findByText('Client approvers')).toBeTruthy();
+      fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'Ann' } });
+      fireEvent.change(screen.getByLabelText(/^Email/), { target: { value: 'ann@client.test' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Add approver' }));
+      await waitFor(() => expect(h.addApprover).toHaveBeenCalledWith('o1', { displayName: 'Ann', email: 'ann@client.test' }));
+    });
+
+    it('under client approval an in-review change is sent to the client, never approved by the agency', async () => {
+      h.listClients.mockResolvedValue({ clients: [{ ...client('live'), approvalPolicy: 'client' }], agencyAdmin: false });
+      h.listChangeSets.mockResolvedValue([cs]);
+      h.getChangeSetDiff.mockResolvedValue({ changeSet: cs, diff: [] });
+      h.sendApprovalLinks.mockResolvedValue([{ approverId: 'ap', displayName: 'Ann', email: 'ann@client.test', url: 'https://app.test/shared/abc' }]);
+      render(<OperationsPage />);
+      const review = await screen.findByRole('region', { name: /Waiting for review/ });
+      const sendBtn = await within(review).findByRole('button', { name: 'Send to client' });
+      expect(within(review).queryByRole('button', { name: 'Approve' })).toBeNull();
+      fireEvent.click(sendBtn);
+      await waitFor(() => expect(h.sendApprovalLinks).toHaveBeenCalledWith('o1', 'cs1'));
+      expect(((await within(review).findByLabelText('Link for Ann')) as HTMLInputElement).value).toBe('https://app.test/shared/abc');
+      expect(h.approveChangeSet).not.toHaveBeenCalled();
+    });
   });
 });

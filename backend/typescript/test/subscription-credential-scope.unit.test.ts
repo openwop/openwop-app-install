@@ -2,8 +2,14 @@
  * RFC 0121 §B.7/§B.8 — pure unit coverage for the scope-safety rail.
  *   - assertSubscriptionScopeAllowed: user ok; tenant/workspace throw
  *     credential_scope_forbidden (403).
- *   - subscriptionEnabledProviders: honest-off ([]) even when the operator
- *     opt-in env is set (no lawful acquisition mechanism → dark).
+ *   - subscriptionEnabledProviders: honest-off ([]) when only the provider
+ *     opt-in env is set. CORRECTED (wave 61): since ADR 0180 the reason is the
+ *     SECOND gate (`OPENWOP_SUBSCRIPTION_AT_OWN_RISK` unset, which
+ *     `subscriptionAcquisitionConfigured()` reads), not that no lawful mechanism
+ *     exists. The two cases are TWINS of subscription-credential-at-own-risk's
+ *     "[] by default" and "[] when only the provider list is set" (one sabotage
+ *     reds both files: 8fw3g2-aor-gate / -aor-gate-cover); kept on purpose
+ *     (protected wire-honesty dedupe, grade-tests wave 61 ruling).
  *   - buildProviderAuthModes: apiKey for byok; §B.7 force-include of a
  *     subscription provider into byok (exercisable by forcing the helper input).
  */
@@ -20,19 +26,17 @@ describe('assertSubscriptionScopeAllowed (RFC 0121 §B.8)', () => {
 
   for (const scope of ['tenant', 'workspace', 'project', '']) {
     it(`throws credential_scope_forbidden/403 for scope='${scope}'`, () => {
-      try {
-        assertSubscriptionScopeAllowed(scope);
-        throw new Error('expected assertSubscriptionScopeAllowed to throw');
-      } catch (err) {
-        expect(err).toBeInstanceOf(OpenwopError);
-        expect((err as OpenwopError).code).toBe('credential_scope_forbidden');
-        expect((err as OpenwopError).httpStatus).toBe(403);
-      }
+      let err: unknown;
+      try { assertSubscriptionScopeAllowed(scope); } catch (e) { err = e; }
+      expect(err, 'assertSubscriptionScopeAllowed must throw').toBeInstanceOf(OpenwopError);
+      expect(err).toMatchObject({ code: 'credential_scope_forbidden', httpStatus: 403 });
     });
   }
 });
 
 describe('subscriptionEnabledProviders (RFC 0121 §B.9 honest-off)', () => {
+  // Twins of the at-own-risk file's two-gate cases (see header). The second
+  // gate is cleared explicitly so the outcome never rides on leaked env.
   afterEach(() => { delete process.env.OPENWOP_SUBSCRIPTION_PROVIDERS; });
 
   it('returns [] by default (env unset)', () => {
@@ -41,6 +45,7 @@ describe('subscriptionEnabledProviders (RFC 0121 §B.9 honest-off)', () => {
   });
 
   it('returns [] even when the operator opt-in env is set (no lawful mechanism → dark)', () => {
+    delete process.env.OPENWOP_SUBSCRIPTION_AT_OWN_RISK;
     process.env.OPENWOP_SUBSCRIPTION_PROVIDERS = 'anthropic,openai';
     expect(subscriptionEnabledProviders()).toEqual([]);
   });

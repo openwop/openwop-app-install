@@ -4,7 +4,7 @@
   "kind": "connection",
   "description": "HubSpot connection pack (RFC 0095) — OAuth2 (authorization-code) provider for the HubSpot CRM v3 REST API (contacts, companies, deals, tickets). ADR 0033 DEPLOY-GATED. Reach is `openapi` against HubSpot's documented REST surface (api.hubapi.com): HubSpot ships no first-party hosted MCP server, so the documented API is the honest day-1 reach (ADR 0033 §4). HubSpot was the top CRM absence vs the market-standard app surface in the ADR 0190 template research. Carries NO secret; the operator supplies the app client id/secret host-side (ADR 0024 §7).",
   "license": "Apache-2.0",
-  "engines": { "openwop": ">=1.0.0" },
+  "engines": { "openwop": ">=1.0.0 <3.0.0" },
   "provider": {
     "id": "hubspot",
     "displayName": "HubSpot",

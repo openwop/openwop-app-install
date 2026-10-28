@@ -39,9 +39,10 @@ function CatChips({ c }: { c: ConsentRecord['categories'] }): JSX.Element {
   return (
     <>
       {c.analytics ? <span className="chip chip--success">{t('categoryAnalytics')}</span> : null}
+      {c['analytics.replay'] === true ? <span className="chip chip--success">{t('categorySessionReplay')}</span> : null}
       {c.marketing ? <span className="chip chip--success">{t('categoryMarketing')}</span> : null}
       {channels.map((k) => <span key={k} className="chip chip--success">{t(`channel_${k.split('.')[1]}`)}</span>)}
-      {!c.analytics && !anyMarketing ? <span className="chip chip--muted">{t('categoryNecessaryOnly')}</span> : null}
+      {!c.analytics && !anyMarketing && c['analytics.replay'] !== true ? <span className="chip chip--muted">{t('categoryNecessaryOnly')}</span> : null}
     </>
   );
 }
@@ -49,7 +50,7 @@ function CatChips({ c }: { c: ConsentRecord['categories'] }): JSX.Element {
 type Categories = ConsentRecord['categories'];
 type CategoryKey = Exclude<keyof Categories, 'necessary'>;
 /** WhatsApp is strict explicit opt-in (ADR 0394): it never follows the umbrella. */
-const STRICT_CHANNELS: ReadonlySet<string> = new Set(['marketing.whatsapp']);
+const STRICT_CHANNELS: ReadonlySet<string> = new Set(['marketing.whatsapp', 'analytics.replay']); // ADR 0951 D1: replay is strict too
 /** The EFFECTIVE grant — what `isAllowed` answers, not the stored literal: an absent
  *  channel specific follows the `marketing` umbrella (CN2UX-3). */
 function effective(c: Categories, k: CategoryKey): boolean {
@@ -62,8 +63,12 @@ function effective(c: Categories, k: CategoryKey): boolean {
  *  channel the server adds is diffed without a code change here. */
 function historyKeys(history: readonly ConsentChange[]): CategoryKey[] {
   const channels = new Set<string>();
-  for (const h of history) for (const k of Object.keys(h.categories)) if (k.startsWith('marketing.')) channels.add(k);
-  return ['analytics', 'marketing', ...([...channels].sort() as CategoryKey[])];
+  let replay = false;
+  for (const h of history) for (const k of Object.keys(h.categories)) {
+    if (k.startsWith('marketing.')) channels.add(k);
+    if (k === 'analytics.replay') replay = true;
+  }
+  return ['analytics', ...(replay ? ['analytics.replay' as const] : []), 'marketing', ...([...channels].sort() as CategoryKey[])];
 }
 const SOURCE_KINDS = new Set(['public', 'form-optin', 'preference-center', 'email-unsubscribe', 'unsubscribe', 'crm-merge', 'workflow', 'whatsapp']);
 const HISTORY_PREVIEW = 5;
@@ -100,7 +105,7 @@ function ConsentHistory({ history, dropped }: { history: ConsentChange[] | undef
   const titleId = useId();
   if (!history || history.length === 0) return <span className="muted u-fs-12">{t('historyNone')}</span>;
   const keys = historyKeys(history);
-  const label = (k: CategoryKey): string => (k === 'analytics' ? t('categoryAnalytics') : k === 'marketing' ? t('categoryMarketing') : t(`channel_${k.split('.')[1]}`));
+  const label = (k: CategoryKey): string => (k === 'analytics' ? t('categoryAnalytics') : k === 'analytics.replay' ? t('categorySessionReplay') : k === 'marketing' ? t('categoryMarketing') : t(`channel_${k.split('.')[1]}`));
   const gapBefore = dropped > 0 ? history.length - 1 : -1; // the pinned origin follows the gap
   const shown = expanded ? history : history.slice(0, HISTORY_PREVIEW);
   return (

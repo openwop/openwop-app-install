@@ -100,6 +100,10 @@ const del = async (url: string, ctx: string): Promise<void> => {
 
 export const listOrgs = async (): Promise<Org[]> => (await get<{ orgs: Org[] }>(`${root}/orgs`, 'listOrgs')).orgs;
 
+/** ADR 0945 P5 — a product's own photos as grounded-creative sources. */
+export interface ProductSourceView { assetId: string; role: 'hero' | 'angle' | 'detail' | 'packaging' | 'label' | 'lifestyle'; sha256: string; serveUrl: string }
+export const getProductMedia = async (orgId: string, productId: string): Promise<ProductSourceView[]> =>
+  (await get<{ sources: ProductSourceView[] }>(`${orgBase(orgId)}/products/${encodeURIComponent(productId)}/media`, 'getProductMedia')).sources;
 export const listProducts = async (orgId: string): Promise<Product[]> => (await get<{ products: Product[] }>(`${orgBase(orgId)}/products`, 'listProducts')).products;
 export const createProduct = (orgId: string, body: Record<string, unknown>): Promise<Product> => post(`${orgBase(orgId)}/products`, body, 'createProduct');
 export const updateProduct = (orgId: string, productId: string, body: Record<string, unknown>): Promise<Product> => patch(`${orgBase(orgId)}/products/${encodeURIComponent(productId)}`, body, 'updateProduct');
@@ -146,11 +150,25 @@ export const storefrontPath = (orgId: string): string => `/store/${encodeURIComp
 
 /** ADR 0877 D6 — which lane this store's checkout settles on. `demo` means no card
  *  is charged; `reason` says why (and so what the owner can do about it). */
-export type PaymentsDemoReason = 'no_key' | 'anon' | 'connect_required' | 'connect_incomplete' | 'connect_disabled' | 'connect_region';
+export type PaymentsDemoReason = 'no_key' | 'anon' | 'connect_required' | 'connect_incomplete' | 'connect_disabled' | 'connect_region' | 'client_seller_required';
 export interface PaymentsReadiness {
   settlement: 'platform' | 'connect' | 'demo';
   reason?: PaymentsDemoReason;
   applicationFeePct?: number;
   connectAvailable: boolean;
+  /** ADR 0948 P0b — a client org of an agency workspace: it onboards its OWN
+   *  payment account (`startClientPayments`), never the agency's Connect page. */
+  clientOrg?: boolean;
+  /** ADR 0948 P0b — this caller may onboard the client org (its owner, with
+   *  Commerce Connect on). Present only for a client org. */
+  canOnboardClient?: boolean;
 }
+/** ADR 0948 P0b — start (or resume) a CLIENT org's own Stripe onboarding. `url` is
+ *  Stripe's hosted page, or `demo:…` on a host without a Stripe key. */
+export const startClientPayments = (orgId: string): Promise<{ url: string; mode: 'live' | 'demo' }> =>
+  post(`${root}/commerce-connect/orgs/${encodeURIComponent(orgId)}/seller/onboard`, {}, 'startClientPayments');
+/** ADR 0948 P0b — refresh a client org's seller from Stripe after its owner
+ *  returns from the hosted onboarding page. */
+export const syncClientPayments = (orgId: string): Promise<unknown> =>
+  post(`${root}/commerce-connect/orgs/${encodeURIComponent(orgId)}/seller/sync`, {}, 'syncClientPayments');
 export const getPaymentsReadiness = (orgId: string): Promise<PaymentsReadiness> => get(`${orgBase(orgId)}/payments`, 'getPaymentsReadiness');

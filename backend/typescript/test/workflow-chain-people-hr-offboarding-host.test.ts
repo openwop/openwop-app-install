@@ -54,7 +54,9 @@ afterAll(async () => { await new Promise<void>((res) => server.close(() => res()
 describe('people-hr.offboarding 1.1.0 — structure (ADR 0617 D3)', () => {
   const entry = () => getChain(CHAIN)!;
 
-  it('pack + chain versions bumped with the behavioural change', () => {
+  // Bookkeeping, not behaviour: this pins the version literals so a behavioural
+  // change to the chain cannot ship without a bump (it guards no runtime rule).
+  it('pins the pack + chain version a behavioural change must bump', () => {
     // Pack 1.5.0 → 1.5.1 and every chain one patch: ADR 0766 P3 pinned each node
     // reference (content changed; behaviour did not).
     // Pack 1.4.0 → 1.5.0 templated the trigger binding (ADR 0683): the event
@@ -139,7 +141,9 @@ describe('people-hr.onboarding 1.1.0 — structure (ADR 0622 D3): invite-host be
   const ONB = 'people-hr.onboarding';
   const entry = () => getChain(ONB)!;
 
-  it('pack + chain versions bumped with the behavioural change', () => {
+  // Bookkeeping, not behaviour: this pins the version literals so a behavioural
+  // change to the chain cannot ship without a bump (it guards no runtime rule).
+  it('pins the pack + chain version a behavioural change must bump', () => {
     // Pack 1.5.2 → 1.6.0 and both chains one minor: ADR 0903 D7 dropped the
     // provider/model defaults (the chain takes the run's AI default).
     expect(entry().packVersion).toBe('1.6.0');
@@ -191,33 +195,37 @@ describe('people-hr.onboarding 1.1.0 — structure (ADR 0622 D3): invite-host be
 describe('people-hr.offboarding 1.1.0 — a MANUAL run (no triggerData) reaches the pre-rewire terminal state', () => {
   it('the trigger passes through (payload:null), the three entry nodes still run, and the run fails at the unwired M365 connector — never reaching attest / deprovision-host', async () => {
     let cookie = '';
-    const call = async (method: string, path: string, body?: unknown): Promise<{ status: number; body: any }> => {
+    const call = async <T>(method: string, path: string, body?: unknown): Promise<{ status: number; body: T }> => {
       const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
       for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-      return { status: res.status, body: await res.json().catch(() => undefined) };
+      return { status: res.status, body: (await res.json()) as T };
     };
-    const login = await call('POST', '/host/openwop-app/test/login', { email: `offb-host-${Date.now()}@acme.test`, tenantId: `org:offb-host-${Date.now()}` });
+    const login = await call<unknown>('POST', '/host/openwop-app/test/login', { email: `offb-host-${Date.now()}@acme.test`, tenantId: `org:offb-host-${Date.now()}` });
     expect(login.status).toBe(201);
 
     const params = { employeeName: 'Jamie Offboard', ticketingBaseUrl: '', accessTicketKey: '', closeTransitionId: '', userId: '' };
     const expanded = expandChain(getChain(CHAIN)!.chain, { params });
     registerWorkflow(expanded);
-    const create = await call('POST', '/runs', { workflowId: expanded.workflowId, inputs: params });
+    const create = await call<{ runId: string }>('POST', '/runs', { workflowId: expanded.workflowId, inputs: params });
     expect(create.status, JSON.stringify(create.body)).toBe(201);
-    const runId = create.body.runId as string;
+    const runId = create.body.runId;
 
-    let snap: { status: string; error?: { code?: string } } = { status: 'pending' };
-    for (let i = 0; i < 200; i++) {
-      snap = (await call('GET', `/runs/${runId}`)).body;
-      if (['completed', 'failed', 'cancelled'].includes(snap.status)) break;
-      await new Promise((r) => setTimeout(r, 25));
+    type Snap = { status: string; error?: { code?: string } };
+    let snap: Snap = { status: 'pending' };
+    let settled = false;
+    const POLLS = 200;
+    for (let i = 0; i < POLLS && !settled; i++) {
+      snap = (await call<Snap>('GET', `/runs/${runId}`)).body;
+      settled = ['completed', 'failed', 'cancelled'].includes(snap.status);
+      if (!settled) await new Promise((r) => setTimeout(r, 25));
     }
+    if (!settled) throw new Error(`run ${runId} did not settle after ${POLLS} polls (last status: ${snap.status})`);
     expect(snap.status).toBe('failed');
     expect(snap.error?.code).toBe('openwop-app.config_invalid');
 
-    const bundle = await call('GET', `/runs/${runId}/debug-bundle`);
+    const bundle = await call<{ events?: Array<{ type: string; nodeId?: string }> }>('GET', `/runs/${runId}/debug-bundle`);
     expect(bundle.status, JSON.stringify(bundle.body)).toBe(200);
-    const list = (bundle.body.events as Array<{ type: string; nodeId?: string }>) ?? [];
+    const list = bundle.body.events ?? [];
     const completed = list.filter((e) => e.type === 'node.completed').map((e) => e.nodeId ?? '');
     expect(completed.some((id) => id.endsWith('_trigger')), 'the trigger entry node completes on a manual run').toBe(true);
     expect(completed.some((id) => id.endsWith('_accessTickets'))).toBe(true);

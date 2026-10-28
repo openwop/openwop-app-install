@@ -8,6 +8,10 @@
  *    (AI_OUTPUT_UNPARSEABLE), no longer success-with-empty.
  *  - XCH-LP-1: landing-page content generation fails typed instead of
  *    shipping branded placeholder content; SEO/CTAs derive from real content.
+ *
+ * TST-BNX-2. Red when: the retry drops the validation errors, classify stops
+ * normalizing or coerces an off-list reply to labels[0], or either myndhyve
+ * node returns success on unparseable output / boilerplate CTAs.
  */
 import { describe, expect, it } from 'vitest';
 import { structuredOutput, classify } from '../../../packs/core.openwop.ai/index.mjs';

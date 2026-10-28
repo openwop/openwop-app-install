@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.crm.nodes/1.15.0/route-lead.output.json",
+  "title": "CrmRouteLeadOutput",
+  "type": "object",
+  "required": [
+    "success",
+    "replayed",
+    "chosen",
+    "unassigned"
+  ],
+  "properties": {
+    "success": {
+      "type": "boolean",
+      "const": true
+    },
+    "replayed": {
+      "type": "boolean"
+    },
+    "chosen": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "unassigned": {
+      "type": "boolean"
+    },
+    "ruleId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "strategy": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "territory",
+        "round-robin",
+        "capacity",
+        "named",
+        null
+      ]
+    },
+    "policyVersion": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "skipped": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "sla": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "ADR 0954 D6 — the first-touch clock's inputs as of this decision."
+    }
+  },
+  "additionalProperties": false
+}

@@ -3,7 +3,11 @@
  *  - `/blog` on a bound host → the blog-INDEX prerender (a semantic post list);
  *  - `/blog/:slug` → the page prerender (posts ARE CMS pages);
  *  - `/pricing` → the page prerender for the `pricing` slug;
- *  - unknown slugs → uniform 404; every mapping is GET-served and org-pinned.
+ *  - unknown slugs → the prerender's uniform `not_found` 404.
+ * (Org pinning of the bound host is witnessed in adr0384-prerender-routes.)
+ *
+ * TST-BQR-9. Red when the `/blog`, `/blog/:slug` or `/pricing` rewrite is
+ * removed, or the blog-index prerender links posts anywhere but `/blog/:slug`.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -31,16 +35,17 @@ beforeAll(async () => {
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 afterEach(() => { delete process.env.OPENWOP_SEO_PRERENDER_DISABLED; });
 
-interface Res<T = any> { status: number; body: T }
+interface Res<T> { status: number; body: T }
+interface OrgBody { orgId: string }
+interface PageBody { pageId: string; slug: string }
 function client() {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-    for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
+    for (const c of getSetCookies(res.headers)) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]!; }
+    return { status: res.status, body: (await res.json().catch(() => ({}))) as T };
   };
-  return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b) };
+  return { post: <T>(p: string, b?: unknown) => call<T>('POST', p, b) };
 }
 
 function rawGet(path: string, headers: Record<string, string> = {}): Promise<{ status: number; body: string; headers: http.IncomingHttpHeaders }> {
@@ -61,15 +66,15 @@ const cms = (orgId: string, sfx = ''): string => `/host/openwop-app/cms/orgs/${e
 async function boundSite(): Promise<{ orgId: string; host: string; postSlug: string }> {
   const owner = client();
   await owner.post('/host/openwop-app/test/login', { email: `cd-${Date.now()}-${n++}@acme.test` });
-  const org = await owner.post('/host/openwop-app/orgs', { name: 'Domain Co' });
-  const orgId = org.body.orgId as string;
+  const org = await owner.post<OrgBody>('/host/openwop-app/orgs', { name: 'Domain Co' });
+  const orgId = org.body.orgId;
 
-  const post = await owner.post(cms(orgId, '/pages'), {
+  const post = await owner.post<PageBody>(cms(orgId, '/pages'), {
     title: 'Launch Notes', kind: 'post', sections: [{ type: 'hero', data: { heading: 'Launch Notes', subheading: 'Our launch story.' } }],
   });
   expect((await owner.post(cms(orgId, `/pages/${post.body.pageId}/publish`))).status).toBe(200);
 
-  const pricing = await owner.post(cms(orgId, '/pages'), {
+  const pricing = await owner.post<PageBody>(cms(orgId, '/pages'), {
     title: 'Pricing', sections: [{ type: 'hero', data: { heading: 'Pricing', subheading: 'Plans for every team.' } }],
   });
   expect(pricing.body.slug).toBe('pricing');
@@ -80,7 +85,7 @@ async function boundSite(): Promise<{ orgId: string; host: string; postSlug: str
   const d = await addDomain({ tenantId: 't-any', orgId, createdBy: 'u', hostname: host });
   await verifyDomain('t-any', orgId, host, async () => [[d.verificationToken]]);
   invalidateHostCache();
-  return { orgId, host, postSlug: post.body.slug as string };
+  return { orgId, host, postSlug: post.body.slug };
 }
 
 describe('ADR 0391 — custom-domain blog + pricing mapping', () => {
@@ -109,7 +114,10 @@ describe('ADR 0391 — custom-domain blog + pricing mapping', () => {
 
   it('an unknown blog slug is a uniform 404', async () => {
     const { host } = await boundSite();
-    expect((await rawGet('/blog/no-such-post', { host })).status).toBe(404);
+    const res = await rawGet('/blog/no-such-post', { host });
+    expect(res.status).toBe(404);
+    // The PRERENDER's not_found (the rewrite reached it), not a generic 404.
+    expect(JSON.parse(res.body)).toMatchObject({ error: 'not_found', message: 'Page not found.' });
   });
 
   it('the blog-index prerender route is also reachable directly (platform origin)', async () => {

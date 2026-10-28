@@ -15,6 +15,17 @@
  * So the direction is now classified before any remedy is suggested, and the
  * classification is by CONTAINMENT rather than equality — that asymmetry is the
  * whole signal. These cases pin it.
+ *
+ * `suiteCertifiesCorpusTag` is the guard's second question: is the vendored
+ * corpus tag the corpus the INSTALLED conformance suite actually certifies?
+ * New suites stamp that provenance explicitly (the suite package's
+ * `schemas/CORPUS-STAMP.json` `corpusTag`), so a harness-only suite patch release does not
+ * masquerade as a new corpus release; legacy suites without the stamp fall back
+ * to comparing the tag's version with the suite version. What breaks it: a
+ * check that accepts a tag the suite does not certify (the gate then reports a
+ * stale vendored corpus as certified), or one that ignores the stamp and
+ * refuses every harness-only patch. Sabotage witnesses (grade-tests 8f w2):
+ * dr-ahead-behind, dr-equal, dr-leaf-value, dr-stamp, dr-legacy.
  */
 
 import { describe, expect, it } from 'vitest';

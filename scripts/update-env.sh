@@ -109,6 +109,19 @@ has_all_pairs() { # has_all_pairs <rev_state output>
   local p; for p in ${PAIRS[@]+"${PAIRS[@]}"}; do grep -qxF -- "$p" <<< "$1" || { echo "$p"; return 1; }; done
 }
 
+# ADR 0991 D9 — this mints a revision and shifts traffic on the service, which
+# is a deploy as far as the service is concerned (CE-16). So it takes the
+# service's run: target and queues (bounded, fail-open) behind a live deploy or
+# certify on it, BEFORE it reads what serves. --dry-run changes nothing and
+# claims nothing.
+if [ "$DRY_RUN" -eq 0 ] && [ -f "$ROOT/scripts/lib/release-bus.sh" ]; then
+  # shellcheck source=lib/release-bus.sh
+  . "$ROOT/scripts/lib/release-bus.sh"
+  UE_TARGET="$(OPENWOP_DEPLOY_REGION="$REGION" release_bus_targets backend)"
+  ue_bus_end() { printf '{"kind":"deploy","phase":"end","what":"update-env","exit":%s,"targets":"%s"}' "$1" "$UE_TARGET"; }
+  release_bus_acquire_hold "update-env-$(hostname -s 2>/dev/null || hostname)-$$" deploy ue_bus_end \
+    ${UE_TARGET:+--targets "$UE_TARGET"} --expected-min 5 --ttl-min 20
+fi
 before=$(svc_state) || die "could not read the service's serving revision (gcloud run services describe)"
 SERVING="${before%% *}"
 serving_state=$(rev_state "$SERVING") || die "could not read the serving revision $SERVING"

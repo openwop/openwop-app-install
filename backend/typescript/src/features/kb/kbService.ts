@@ -39,9 +39,9 @@ import { cleanString, optionalCleanString } from '../../host/boundedStrings.js';
 import { buildHostSurfaceBundle } from '../../host/inMemorySurfaces.js';
 import { resolveMediaAsset } from '../../host/inMemorySurfaces.js';
 import { embedText, LOCAL_EMBEDDING_MODEL, effectiveEmbedDims } from '../../aiProviders/localEmbedding.js';
-import { resolveHeadlessEmbedderMaybeTest, resolveHeadlessEmbedderForSpecMaybeTest, type HeadlessEmbedder } from '../../host/headlessAi.js';
+import { resolveHeadlessEmbedderMaybeTest, resolveHeadlessEmbedderForSpecMaybeTest, resolveHostEmbedder, hostEmbedderEligible, type HeadlessEmbedder } from '../../host/headlessAi.js';
 import { createHash } from 'node:crypto';
-import { bm25Search, rrfFuse } from './lexicalIndex.js';
+import { bm25Search, rrfFuse, tokenize } from './lexicalIndex.js';
 import { localRerank } from './reranker.js';
 
 /** Retrieval pipeline mode (ADR 0113). `dense` = today's single-stage cosine
@@ -63,8 +63,9 @@ import { createWebResearchSurface } from '../../host/webResearchSurface.js';
 import { kbMutated, type KbEmitOptions, type KbReindexFailReason } from './emit.js'; // ADR 0643 D3 — the ONE emit helper
 import { connectionExists } from '../connections/connectionsService.js';
 import { listAssets as listMediaAssets, getCollection as getMediaCollection } from '../media/mediaService.js'; // ADR 0398 P2 — kb→media READ only (one-directional; media never imports kb)
-import { checkEmbedBudget, recordEmbedUsage, estimateTokens } from './embedBudget.js'; // ADR 0398 P3
+import { checkEmbedBudget, reserveEmbedBudget, estimateTokens } from './embedBudget.js'; // ADR 0398 P3
 import { connectionRerank, RERANK_PROVIDER } from './externalReranker.js';
+import { vertexRerank, vertexRerankEnabled } from './vertexReranker.js';
 import type { KnowledgeRetrieveArgs, KnowledgeResult } from '../../host/knowledgeSurface.js';
 import { registerCredentialRefConsumer } from '../../host/credentialRefRegistry.js';
 // ADR 0643 D1b — the scheduler-driven drain. INLINE here rather than in a sibling
@@ -99,6 +100,9 @@ import { registerJob, deleteJob } from '../../host/schedulingService.js';
 import { fenceUntrustedBlock, neutralizeUntrusted } from '../../host/untrustedContent.js';
 import { extractDocxMarkdown } from './parsers/docx.js';
 import { extractPdfPages } from './parsers/pdfPages.js';
+import { parseDocAiConfig, parseWithDocumentAi } from './parsers/documentAi.js';
+import { lexicalIndex, lexicalMaintenanceIndex } from '../../host/vector/pgLexical.js';
+import { ENRICH_DOC_CHARS, callTokens as enrichCallTokens, chunkHashOf, cachedPrefixesForCollection, llmEnrichToken, prefixesFor, purgeEnrichCacheForDoc, purgeOrphanEnrichRows, resolveLlmEnricher, type LlmEnricher, type EnrichRow, MAX_PREFIX_CHARS } from './contextualEnrichment.js';
 
 const log = createLogger('features.kb');
 
@@ -277,7 +281,7 @@ export interface InternalDocumentFields extends KbEmitOptions {
 }
 
 const PRIVILEGED_COLLECTION_FIELDS = ['collectionId', 'managed', 'boundSubject'] as const;
-const PRIVILEGED_DOCUMENT_FIELDS = ['documentId', 'revision', 'contentTrust', 'managedWrite'] as const;
+const PRIVILEGED_DOCUMENT_FIELDS = ['documentId', 'revision', 'contentTrust', 'managedWrite', 'enrichmentGeneration', 'enrichmentCache'] as const;
 
 /**
  * Refuse a privileged field that arrived through the UNTRUSTED `input` object.
@@ -335,7 +339,7 @@ export interface KnowledgeCollection {
    */
   boundSubject?: Subject;
   /** ADR 0113 — per-collection retrieval pipeline config. Absent ⇒ the env
-   *  default (`OPENWOP_KB_RETRIEVAL_MODE`, itself defaulting to `dense`). */
+   *  default (`OPENWOP_KB_RETRIEVAL_MODE`; unset ⇒ `hybrid`, ADR 0904 D5). */
   retrievalConfig?: RetrievalConfig;
   /** ADR 0351 — `<mode>:<model>:<dims>` of the vectors last written to this
    *  collection's namespace. A mismatch with the effective config means the
@@ -373,12 +377,12 @@ export interface EmbeddingSpec {
  *  the broker (no per-collection connection pin — one selection choke point). */
 export interface RetrievalConfig {
   mode?: RetrievalMode;
-  rerank?: { kind: 'local' | 'connection'; topN?: number };
+  rerank?: { kind: 'local' | 'connection' | 'vertex'; topN?: number };
   /** ADR 0351 Phase 4 — contextual enrichment of the EMBEDDED text (the stored
    *  chunk text stays raw): `heading-path` prefixes each chunk with
    *  `[title > nearest heading]` so retrieval carries document context.
    *  Deterministic (replay-safe, free). Default off. */
-  enrichment?: 'off' | 'heading-path';
+  enrichment?: 'off' | 'heading-path' | 'llm';
   /** ADR 0351 Phase 1 — which embedder vectorizes this collection. `local` =
    *  the deterministic hash embedder (default, zero-config). `provider` = the
    *  tenant's BYOK default AI provider's embeddings API (openai/google),
@@ -388,10 +392,25 @@ export interface RetrievalConfig {
 }
 
 
-function resolveEmbedderMode(col: Pick<KnowledgeCollection, 'retrievalConfig' | 'embeddingSpec'>): 'local' | 'provider' {
+/** Which PATH vectorizes a collection: the local hash, or a provider call (a tenant BYOK
+ *  key, or — ADR 0904 D1 / P5 — the operator's host embedder when the collection made no
+ *  choice and the tenant is eligible). `resolveCollectionEmbedder` says WHICH provider. */
+function resolveEmbedderMode(col: Pick<KnowledgeCollection, 'tenantId' | 'retrievalConfig' | 'embeddingSpec'>): 'local' | 'provider' {
   // ADR 0398 P3 — an explicit embeddingSpec wins; else the legacy embedder field.
   if (col.embeddingSpec) return col.embeddingSpec.provider === 'local' ? 'local' : 'provider';
-  return col.retrievalConfig?.embedder ?? 'local';
+  const chosen = col.retrievalConfig?.embedder;
+  if (chosen) return chosen;
+  return hostEmbedderEligible(col.tenantId) ? 'provider' : 'local';
+}
+
+/** ADR 0904 D1 — the provider embedder for a provider-path collection, in resolution
+ *  order: the per-collection spec → an explicit `provider` choice (the tenant's BYOK
+ *  default) → the operator host arm (the collection made no choice). Null ⇒ the dense
+ *  channel is OFF for this search (labelled lexical-only) — never a different model. */
+async function resolveCollectionEmbedder(tenantId: string, col: Pick<KnowledgeCollection, 'retrievalConfig' | 'embeddingSpec'>, dims: number): Promise<HeadlessEmbedder | null> {
+  if (col.embeddingSpec && col.embeddingSpec.provider !== 'local') return resolveHeadlessEmbedderForSpecMaybeTest(tenantId, col.embeddingSpec, dims);
+  if (col.retrievalConfig?.embedder === 'provider') return resolveHeadlessEmbedderMaybeTest(tenantId, dims);
+  return resolveHostEmbedder(tenantId, dims);
 }
 
 /** ADR 0398 P3 — the vector namespace serving a collection's reads. `override` targets a
@@ -462,21 +481,79 @@ function enrichWithPath(title: string, headingPath: readonly string[], chunk: st
   return path ? `[${path}]\n${chunk}` : chunk;
 }
 
-function enrichmentOf(col: Pick<KnowledgeCollection, 'retrievalConfig'> | null | undefined): 'off' | 'heading-path' {
-  return col?.retrievalConfig?.enrichment === 'heading-path' ? 'heading-path' : 'off';
+function enrichmentOf(col: Pick<KnowledgeCollection, 'retrievalConfig'> | null | undefined): 'off' | 'heading-path' | 'llm' {
+  const e = col?.retrievalConfig?.enrichment;
+  return e === 'heading-path' || e === 'llm' ? e : 'off';
 }
 
-/** The env-level default retrieval mode (a host operator can lift the floor for
- *  all collections without per-collection edits). Defaults to today's `dense`. */
-function envDefaultMode(): RetrievalMode {
+/** ADR 0904 D7 — the enrichment a build will ACTUALLY use, and the token it signs the
+ *  namespace with (`off` | `heading-path` | `llm:<provider>/<model>`). `llm` needs the
+ *  tenant's own key NOW; without it the build degrades to `off` (labelled by the quality
+ *  report) rather than silently embedding a half-enriched namespace. */
+interface ResolvedEnrichment { token: string; kind: 'off' | 'heading-path' | 'llm'; enricher?: LlmEnricher; degraded?: true }
+async function resolveEnrichment(tenantId: string, col: Pick<KnowledgeCollection, 'retrievalConfig'> | null | undefined): Promise<ResolvedEnrichment> {
+  const kind = enrichmentOf(col);
+  if (kind !== 'llm') return { token: kind, kind };
+  const enricher = await resolveLlmEnricher(tenantId).catch(() => null);
+  if (!enricher) {
+    log.warn('kb_llm_enrichment_unavailable', { tenantId });
+    return { token: 'off', kind: 'off', degraded: true };
+  }
+  return { token: llmEnrichToken(enricher), kind: 'llm', enricher };
+}
+
+/** ADR 0904 D7 — the EMBEDDED text of every chunk, by chunk id, under `enr`. For `llm`
+ *  it also stamps `metadata.context` (the prefix) so the keyword channels index raw +
+ *  prefix. `complete: false` ⇒ some prefix is missing (budget stop / failed call) and the
+ *  caller must not commit the namespace as built. */
+async function buildEmbedInputs(
+  tenantId: string, collectionId: string, enr: ResolvedEnrichment,
+  perDoc: ReadonlyArray<{ doc: KnowledgeDocument; meta: Array<{ id: string; metadata: ChunkRow['metadata'] }> }>,
+): Promise<{ inputs: Map<string, string>; complete: boolean }> {
+  const inputs = new Map<string, string>();
+  let complete = true;
+  for (const { doc, meta } of perDoc) {
+    if (enr.kind === 'llm' && enr.enricher) {
+      const r = await prefixesFor(tenantId, collectionId, doc, meta.map((m) => m.metadata.text), enr.enricher);
+      if (!r.complete) complete = false;
+      meta.forEach((m, i) => {
+        const prefix = r.prefixes[i];
+        if (prefix) m.metadata.context = prefix;
+        inputs.set(m.id, prefix ? `${prefix}\n\n${m.metadata.text}` : m.metadata.text);
+      });
+      continue;
+    }
+    for (const m of meta) inputs.set(m.id, enr.kind === 'heading-path' ? enrichWithPath(m.metadata.title, m.metadata.headingPath, m.metadata.text) : m.metadata.text);
+  }
+  return { inputs, complete };
+}
+
+/** ADR 0904 D5 — without the persisted lexical index, the DEFAULT stays `dense` above
+ *  this many chunks: in-memory BM25 re-reads and re-chunks the whole collection per
+ *  query, and a huge collection must not inherit that cost silently. */
+export const HYBRID_DEFAULT_MAX_CHUNKS = 5000;
+
+/** The env-level default retrieval mode (a host operator can set the floor for all
+ *  collections without per-collection edits). Unset ⇒ `hybrid` (ADR 0904 D5) — for every
+ *  collection when the persisted lexical index is configured, else up to
+ *  `HYBRID_DEFAULT_MAX_CHUNKS`, then `dense`.
+ *
+ *  D5 was gated on the P0 eval (`npm run kb:eval`, 110 docs × 4 locales × 60 queries):
+ *  hybrid beat dense on recall@5 and MRR with BOTH embedders — local-hash 0.742→0.850 /
+ *  0.665→0.773, gemini-embedding-001 0.842→0.942 / 0.812→0.902. `hybrid+rerank` (the
+ *  LOCAL reranker) stays opt-in: with gemini it lost to plain hybrid (0.842 / 0.810;
+ *  paraphrase recall 0.842→0.526), as the ADR expected of a lexical scorer reordering a
+ *  semantic channel. */
+function envDefaultMode(col: Pick<KnowledgeCollection, 'chunkCount'>): RetrievalMode {
   const v = process.env.OPENWOP_KB_RETRIEVAL_MODE;
-  return v === 'hybrid' || v === 'hybrid+rerank' ? v : 'dense';
+  if (v === 'dense' || v === 'hybrid' || v === 'hybrid+rerank') return v;
+  return lexicalIndex() || (col.chunkCount ?? 0) <= HYBRID_DEFAULT_MAX_CHUNKS ? 'hybrid' : 'dense';
 }
 
 /** Resolve the effective retrieval mode for a collection: per-collection config
  *  wins, else the env default. */
-export function resolveRetrievalMode(col: Pick<KnowledgeCollection, 'retrievalConfig'>): RetrievalMode {
-  return col.retrievalConfig?.mode ?? envDefaultMode();
+export function resolveRetrievalMode(col: Pick<KnowledgeCollection, 'retrievalConfig' | 'chunkCount'>): RetrievalMode {
+  return col.retrievalConfig?.mode ?? envDefaultMode(col);
 }
 
 // A document records HOW it was sourced, but NOT the media capability token: the
@@ -487,6 +564,9 @@ export function resolveRetrievalMode(col: Pick<KnowledgeCollection, 'retrievalCo
 export type DocSource = { kind: 'text' } | { kind: 'media' } | { kind: 'url'; url: string };
 
 export interface KnowledgeDocument {
+  /** Internal incarnation and derived prefixes; omitted from public projections. */
+  enrichmentGeneration?: string;
+  enrichmentCache?: EnrichRow[];
   documentId: string;
   collectionId: string;
   tenantId: string;
@@ -617,6 +697,75 @@ export function _setCollectionCasInterferenceForTest(fn: ((key: string, attempt:
   casInterferenceForTest = fn;
 }
 const documents = new DurableCollection<KnowledgeDocument>('kb:document', (d) => `${d.tenantId}:${d.orgId}:${d.documentId}`);
+
+function sameEnrichmentSource(a: KnowledgeDocument, b: KnowledgeDocument): boolean {
+  return a.tenantId === b.tenantId && a.orgId === b.orgId && a.collectionId === b.collectionId && a.documentId === b.documentId
+    && a.createdAt === b.createdAt && (a.revision ?? 1) === (b.revision ?? 1) && a.title === b.title && a.text === b.text
+    && (a.contentTrust ?? 'trusted') === (b.contentTrust ?? 'trusted') && JSON.stringify(a.pageOffsets) === JSON.stringify(b.pageOffsets);
+}
+function samePrefixIdentity(a: EnrichRow, b: EnrichRow): boolean {
+  return a.chunkIndex === b.chunkIndex && a.chunkHash === b.chunkHash && a.docHash === b.docHash
+    && a.titleHash === b.titleHash && a.provider === b.provider && a.model === b.model;
+}
+function publicDocument(doc: KnowledgeDocument): KnowledgeDocument {
+  const { enrichmentGeneration: _generation, enrichmentCache: _cache, ...publicRow } = doc;
+  return publicRow;
+}
+
+/** Internal build admission. A legacy row acquires its incarnation through an
+ * exact-row CAS before any model call; it is never rebound after a lost race. */
+export async function admitEnrichmentDocument(tenantId: string, collectionId: string, source: KnowledgeDocument): Promise<KnowledgeDocument | null> {
+  if (source.tenantId !== tenantId || source.collectionId !== collectionId) return null;
+  if (source.enrichmentGeneration) {
+    const fresh = await documentRow(tenantId, source.orgId, collectionId, source.documentId);
+    return fresh && fresh.enrichmentGeneration === source.enrichmentGeneration && sameEnrichmentSource(fresh, source) ? fresh : null;
+  }
+  const generation = randomUUID(); const next = { ...source, enrichmentGeneration: generation };
+  try { return await documents.compareAndSwap(source, next) ? next : null; }
+  catch {
+    const fresh = await documentRow(tenantId, source.orgId, collectionId, source.documentId).catch(() => null);
+    return fresh && fresh.enrichmentGeneration === generation && sameEnrichmentSource(fresh, source) ? fresh : null;
+  }
+}
+
+/** The document primary is the ONLY publisher of new raw context. A late
+ * response cannot recreate a deleted row or cross an identical-id replacement. */
+export async function publishEnrichmentPrefix(tenantId: string, collectionId: string, source: KnowledgeDocument, row: EnrichRow): Promise<string | null> {
+  if (!source.enrichmentGeneration || row.tenantId !== tenantId || row.collectionId !== collectionId || row.documentId !== source.documentId
+    || !Number.isSafeInteger(row.chunkIndex) || row.chunkIndex < 0 || row.chunkIndex >= MAX.chunksPerDoc
+    || !row.prefix || row.prefix.length > MAX_PREFIX_CHARS) return null;
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const fresh = await documentRow(tenantId, source.orgId, collectionId, source.documentId);
+    if (!fresh || fresh.enrichmentGeneration !== source.enrichmentGeneration || !sameEnrichmentSource(fresh, source)) return null;
+    const chunk = chunkMetaRows(fresh)[row.chunkIndex];
+    if (!chunk || row.chunkHash !== chunkHashOf(chunk.metadata.text) || row.docHash !== chunkHashOf(fresh.text.slice(0, ENRICH_DOC_CHARS))
+      || row.titleHash !== chunkHashOf(fresh.title)) return null;
+    const prior = (fresh.enrichmentCache ?? []).find(r => samePrefixIdentity(r, row));
+    if (prior) return prior.prefix; // immutable first response for this exact prompt/model
+    const col = await collectionRow(tenantId, source.orgId, collectionId);
+    if (!col) return null;
+    const entries = (fresh.enrichmentCache ?? []).filter(r => r.chunkIndex !== row.chunkIndex);
+    entries.push(row); entries.sort((a, b) => a.chunkIndex - b.chunkIndex);
+    if (entries.length > MAX.chunksPerDoc) return null;
+    const claim = await beginLexicalMutation(tenantId, source.orgId, collectionId, collectionNamespace(col));
+    let swapped: boolean;
+    try { swapped = await documents.compareAndSwap(fresh, { ...fresh, enrichmentCache: entries }); }
+    catch {
+      const seen = await documentRow(tenantId, source.orgId, collectionId, source.documentId).catch(() => null);
+      const winner = seen && seen.enrichmentGeneration === source.enrichmentGeneration && sameEnrichmentSource(seen, source)
+        ? seen.enrichmentCache?.find(r => samePrefixIdentity(r, row)) : undefined;
+      if (winner) {
+        if (claim) await claim.lex.finishMutation(tenantId, claim.owner, claim.operation);
+        return winner.prefix;
+      }
+      return null; // an unobserved write keeps its durable index claim pending
+    }
+    if (claim) await claim.lex.finishMutation(tenantId, claim.owner, claim.operation);
+    if (swapped) return row.prefix;
+  }
+  return null;
+}
+
 
 /** Vector namespaces rebuilt this process-lifetime, keyed
  *  `${tenantId}:${orgId}:${collectionId}` → the embedder SIGNATURE they were built
@@ -903,11 +1052,114 @@ export function chunkText(text: string): string[] {
   return chunkStructured(text).map((c) => c.text);
 }
 
+/** Dense vectors keep their existing owner. Lexical publication is a full,
+ * generation-fenced replacement from durable documents, never a best-effort mirror. */
 function vectorSurface(tenantId: string) {
-  return buildHostSurfaceBundle({ tenantId }).db.vector;
+  const base = buildHostSurfaceBundle({ tenantId }).db.vector;
+  return { ...base, upsert: async (args: { namespace?: string; items: unknown[] }) => base.upsert({
+    ...args, items: args.items.map(item => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return item;
+      const row = item as Record<string, unknown>; const metadata = row.metadata;
+      if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return item;
+      const { context: _context, ...rawMetadata } = metadata as Record<string, unknown>;
+      return { ...row, metadata: rawMetadata };
+    }),
+  }) };
 }
 
-interface ChunkRow { id: string; vector: number[]; metadata: { documentId: string; chunkIndex: number; title: string; text: string; contentTrust: 'trusted' | 'untrusted'; headingPath: string[]; /** ADR 0904 P2 */ pageNumber?: number } }
+async function fullNamespaceUpsert(tenantId: string, namespace: string, rows: ChunkRow[]): Promise<void> {
+  if (rows.length > 0) await vectorSurface(tenantId).upsert({ namespace, items: rows });
+}
+
+const lexicalOwner = (orgId: string, collectionId: string): string => `${orgId}/${collectionId}`;
+
+/** Invalidate BEFORE the durable source write. An uncertain write leaves a
+ * durable pending operation: other replicas use authoritative BM25 rather than
+ * certify a possibly incomplete index. Only this acknowledged operation clears. */
+async function beginLexicalMutation(tenantId: string, orgId: string, collectionId: string, namespace: string) {
+  const lex = lexicalMaintenanceIndex();
+  if (!lex) return null;
+  const owner = lexicalOwner(orgId, collectionId);
+  const operation = randomUUID();
+  await lex.beginMutation(tenantId, owner, namespace, operation);
+  const fresh = await collectionRow(tenantId, orgId, collectionId);
+  if (!fresh) {
+    await lex.retireOwner(tenantId, owner);
+    throw new OpenwopError('not_found', 'Collection not found.', 404, { collectionId });
+  }
+  return { lex, owner, operation };
+}
+
+/** ADR 0904 D9 — collections at or above this many chunks use the persisted lexical index
+ *  (`OPENWOP_KB_LEXICAL_PERSIST_MIN_CHUNKS`, default 5,000 — ADR 0871's measured shape);
+ *  below it the in-memory BM25 stays (exact, and cheap at that size). */
+export function lexicalPersistMinChunks(): number {
+  const n = Number(process.env.OPENWOP_KB_LEXICAL_PERSIST_MIN_CHUNKS);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 5000;
+}
+
+/** Would a search of this collection use the persisted lexical index right now? */
+function persistedLexicalFor(col: Pick<KnowledgeCollection, 'collectionId' | 'orgId' | 'activeSignature' | 'chunkCount'>) {
+  const lex = lexicalIndex();
+  if (!lex || (col.chunkCount ?? 0) < lexicalPersistMinChunks()) return null;
+  return lex;
+}
+
+type LexicalChannel = { hits: Array<{ id: string; score: number; relevance: number }>; metaById: Map<string, ChunkRow['metadata']> };
+
+/** Reconcile only after a durable generation change; ready searches validate
+ * bounded candidate documents rather than trusting copied index metadata. */
+async function lexicalChannel(tenantId: string, orgId: string, collectionId: string, col: KnowledgeCollection, query: string, k: number): Promise<LexicalChannel> {
+  const enrichment = await resolveEnrichment(tenantId, col);
+  const sourceRevision = textHash(JSON.stringify([CHUNKER_VERSION, enrichment.token]));
+  const lex = persistedLexicalFor(col);
+  if (lex) {
+    try {
+      const owner = lexicalOwner(orgId, collectionId);
+      const namespace = collectionNamespace(col);
+      let snapshot = await lex.ownerSnapshot(tenantId, owner);
+      if (!snapshot) {
+        await lex.ensureOwner(tenantId, owner, namespace);
+        snapshot = await lex.ownerSnapshot(tenantId, owner);
+      }
+      // Owner admission precedes the source read, so deletion can fence a
+      // paused first hydrate too. Never initialize from a stale collection.
+      const live = await collectionRow(tenantId, orgId, collectionId);
+      if (!live) {
+        await lex.retireOwner(tenantId, owner);
+        return { hits: [], metaById: new Map() };
+      }
+      if (snapshot && !snapshot.pending && collectionNamespace(live) === namespace) {
+        if (!snapshot.ready || snapshot.namespace !== namespace || (snapshot.sourceRevision ?? '') !== sourceRevision) {
+          const generation = await lex.admitNamespace(tenantId, owner, snapshot.generation, namespace, sourceRevision);
+          if (generation) {
+            const corpus = await collectionChunks(tenantId, orgId, collectionId, enrichment);
+            await lex.replaceNamespace(tenantId, owner, namespace, generation, corpus.map((r) => ({
+              id: r.id, terms: tokenize(keywordText(r.metadata)).join(' '), metadata: r.metadata,
+            })));
+          }
+        }
+        const rows = await lex.searchReady(tenantId, owner, namespace, tokenize(query), k, sourceRevision);
+        if (rows) {
+          const metaById = await currentIndexedMetadata(tenantId, orgId, collectionId, rows);
+          if (rows.every((row) => metaById.has(row.id))) {
+            return { hits: rows.map((r) => ({ id: r.id, score: r.score, relevance: clamp01(r.score) })), metaById };
+          }
+        }
+      }
+      log.warn('kb_lexical_candidates_stale', { tenantId, collectionId });
+    } catch {
+      // SQL/provider error messages can contain document/query bytes.
+      log.warn('kb_lexical_read_failed', { tenantId, collectionId });
+    }
+  }
+  const corpus = await collectionChunks(tenantId, orgId, collectionId, enrichment);
+  const metaById = new Map(corpus.map((r) => [r.id, r.metadata]));
+  const hits = bm25Search(corpus.map((r) => ({ id: r.id, text: keywordText(r.metadata) })), query, k).map((h) => ({ ...h, relevance: bm25Relevance(h.score) }));
+  return { hits, metaById };
+}
+
+interface ChunkRow { id: string; vector: number[]; metadata: { documentId: string; chunkIndex: number; title: string; text: string; contentTrust: 'trusted' | 'untrusted'; headingPath: string[]; /** ADR 0904 P2 */ pageNumber?: number; /** ADR 0904 D7 — the LLM situating prefix (embedded + keyword-indexed; never shown as the chunk) */ context?: string } }
 
 /** Build the chunk rows for one document (deterministic ids + vectors). Carries
  *  the document's content-trust onto every chunk (ADR 0038 §C) so retrieval +
@@ -950,7 +1202,9 @@ async function reconcileChunkCounts(entries: Array<{ doc: KnowledgeDocument; new
   let delta = 0;
   for (const { doc, newCount } of entries) {
     const old = doc.chunkCount ?? 0;
-    if (old !== newCount) { delta += newCount - old; doc.chunkCount = newCount; await documents.put(doc); }
+    if (old !== newCount && await documents.compareAndSwap(doc, { ...doc, chunkCount: newCount })) {
+      delta += newCount - old;
+    }
   }
   return delta;
 }
@@ -981,10 +1235,54 @@ async function docsInCollection(tenantId: string, orgId: string, collectionId: s
 
 /** The collection's chunk corpus (metadata-only) for the lexical channel — the
  *  SAME durable chunk text `hydrate` feeds the dense channel (no parallel corpus). */
-async function collectionChunks(tenantId: string, orgId: string, collectionId: string): Promise<Array<{ id: string; metadata: ChunkRow['metadata'] }>> {
+async function collectionChunks(tenantId: string, orgId: string, collectionId: string, resolved?: ResolvedEnrichment): Promise<Array<{ id: string; metadata: ChunkRow['metadata'] }>> {
   const docs = await docsInCollection(tenantId, orgId, collectionId);
-  return docs.flatMap(chunkMetaRows);
+  const rows = docs.flatMap(chunkMetaRows);
+  // ADR 0904 D7 (wart 6) — on an LLM-enriched collection the keyword channel sees raw text
+  // + the situating prefix: one cache scan for the collection, applied only where the
+  // chunk text still matches what the prefix was written for.
+  const enrichment = resolved ?? await resolveEnrichment(tenantId, await collectionRow(tenantId, orgId, collectionId));
+  if (enrichment.kind === 'llm' && enrichment.enricher) {
+    const prefixes = await cachedPrefixesForCollection(tenantId, orgId, collectionId, docs, enrichment.enricher);
+    for (const r of rows) {
+      const p = prefixes.get(r.id);
+      if (p && p.chunkHash === chunkHashOf(r.metadata.text)) r.metadata.context = p.prefix;
+    }
+  }
+  return rows;
 }
+
+/** Index rows are candidates, never document/trust authority. Re-read only the
+ *  bounded candidate documents and reject stale/deleted/foreign chunk copies. */
+async function currentIndexedMetadata(
+  tenantId: string, orgId: string, collectionId: string,
+  candidates: ReadonlyArray<{ id: string; metadata?: unknown }>,
+): Promise<Map<string, ChunkRow['metadata']>> {
+  const documentsById = new Map<string, Promise<Array<{ id: string; metadata: ChunkRow['metadata'] }>>>();
+  const accepted = new Map<string, ChunkRow['metadata']>();
+  for (const candidate of candidates) {
+    const raw = candidate.metadata;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+    const indexed = raw as Record<string, unknown>;
+    if (typeof indexed.documentId !== 'string' || !Number.isSafeInteger(indexed.chunkIndex) || Number(indexed.chunkIndex) < 0
+      || candidate.id !== `${indexed.documentId}:${indexed.chunkIndex}`) continue;
+    let chunks = documentsById.get(indexed.documentId);
+    if (!chunks) {
+      chunks = documentRow(tenantId, orgId, collectionId, indexed.documentId).then((doc) => doc ? chunkMetaRows(doc) : []);
+      documentsById.set(indexed.documentId, chunks);
+    }
+    const current = (await chunks)[Number(indexed.chunkIndex)];
+    if (!current || current.id !== candidate.id) continue;
+    const m = current.metadata;
+    if (indexed.text !== m.text || indexed.title !== m.title || indexed.contentTrust !== m.contentTrust
+      || JSON.stringify(indexed.headingPath) !== JSON.stringify(m.headingPath) || indexed.pageNumber !== m.pageNumber) continue;
+    accepted.set(candidate.id, m);
+  }
+  return accepted;
+}
+
+/** The text the keyword channels index for a chunk: raw + its LLM prefix when it has one. */
+const keywordText = (m: Pick<ChunkRow['metadata'], 'text' | 'context'>): string => (m.context ? `${m.context}\n${m.text}` : m.text);
 
 /** What hydrate resolved for this search: which embedder vectorized the
  *  namespace, and whether the dense channel is usable at all. `denseAvailable:
@@ -1024,7 +1322,9 @@ async function doHydrate(tenantId: string, orgId: string, collectionId: string):
   const embedMode = col ? resolveEmbedderMode(col) : 'local';
   const dims = effectiveEmbedDims();
 
-  const enrich = enrichmentOf(col);
+  // ADR 0904 D7 — the enrichment this build uses (its token signs the namespace).
+  const enr = await resolveEnrichment(tenantId, col);
+  const enrich = enr.token;
   // ADR 0398 P3 — the ACTIVE vector namespace (versioned only for reindexed collections;
   // the bare `collectionId` for every existing collection — backward-compatible).
   const ns = col ? collectionNamespace(col) : collectionId;
@@ -1035,7 +1335,22 @@ async function doHydrate(tenantId: string, orgId: string, collectionId: string):
     // A signature mismatch — including an ABSENT signature on a legacy pre-0351 row (review
     // fix) — drives the wipe+reconcile, so the v1→v2 re-chunk can't leave a stale tail serving.
     const changed = !!(col && col.vectorSignature !== sig);
-    const perDoc = docs.map((d) => ({ doc: d, rows: chunkRows(d, enrich) }));
+    // ADR 0904 D7 — the embedded text is built per the resolved enrichment (an `llm`
+    // prefix is an async, cached, budgeted call), then hashed into the local vector.
+    const metaPerDoc = docs.map((d) => ({ doc: d, meta: chunkMetaRows(d) }));
+    const built = await buildEmbedInputs(tenantId, collectionId, enr, metaPerDoc);
+    if (!built.complete) {
+      // Enrichment stopped (budget / a failed call): do NOT commit a half-enriched
+      // namespace under the llm signature. Not marked hydrated — the next search retries
+      // from the prefix cache. The dense channel is off for this search, labelled.
+      log.warn('kb_hydrate_enrichment_incomplete', { tenantId, collectionId });
+      return { embedMode, model: LOCAL_EMBEDDING_MODEL, denseAvailable: false };
+    }
+    const dimsLocal = effectiveEmbedDims();
+    const perDoc = metaPerDoc.map(({ doc, meta }) => ({
+      doc,
+      rows: meta.map((m) => ({ id: m.id, vector: embedText(built.inputs.get(m.id) ?? m.metadata.text, dimsLocal), metadata: m.metadata })) as ChunkRow[],
+    }));
     let chunkDelta = 0;
     if (changed) {
       // Wipe the UNION of old+new ids so a chunker change that shrinks the count doesn't
@@ -1047,7 +1362,7 @@ async function doHydrate(tenantId: string, orgId: string, collectionId: string):
       if (col) col.chunkCount = Math.max(0, col.chunkCount + delta);
     }
     const rows = perDoc.flatMap((p) => p.rows);
-    if (rows.length > 0) await vectorSurface(tenantId).upsert({ namespace: ns, items: rows });
+    await fullNamespaceUpsert(tenantId, ns, rows);
     // ADR 0643 D1a R2 — CAS, and as a DELTA. `search` has no reindex guard, so this is the
     // most reachable whole-row writer of all: a hydrate racing a cutover used to revert it.
     if (col && col.vectorSignature !== sig) {
@@ -1066,9 +1381,7 @@ async function doHydrate(tenantId: string, orgId: string, collectionId: string):
   // provider mode. ADR 0398 P3 — a per-collection embeddingSpec PINS the provider+model
   // (independent of the tenant default); absent a spec, the legacy `provider` mode resolves
   // the tenant's headless default (backward-compat).
-  const embedder = col?.embeddingSpec && col.embeddingSpec.provider !== 'local'
-    ? await resolveHeadlessEmbedderForSpecMaybeTest(tenantId, col.embeddingSpec, dims)
-    : await resolveHeadlessEmbedderMaybeTest(tenantId, dims);
+  const embedder = col ? await resolveCollectionEmbedder(tenantId, col, dims) : null;
   if (!embedder) {
     // Honest degrade: no provider ⇒ dense channel OFF (lexical-only). Do NOT
     // mark hydrated — a later search retries (the key may have been configured).
@@ -1105,11 +1418,17 @@ async function doHydrate(tenantId: string, orgId: string, collectionId: string):
     for (const row of await vecCache.listByPrefix(vecCacheDocPrefix(d))) cachedByKey.set(row.key, row);
   }
   const metaRows = perDocMeta.flatMap((p) => p.meta);
+  // ADR 0904 D7 — the embedded text per the resolved enrichment (llm prefixes cached + budgeted).
+  const built = await buildEmbedInputs(tenantId, collectionId, enr, perDocMeta);
+  if (!built.complete) {
+    log.warn('kb_hydrate_enrichment_incomplete', { tenantId, collectionId });
+    return { embedMode, model: embedder.model, denseAvailable: false };
+  }
   const rows: ChunkRow[] = [];
   const missing: Array<{ idx: number; text: string; cacheKey: string; hash: string }> = [];
   for (const m of metaRows) {
     // The enrichment prefix consumes the chunk's INTRINSIC headingPath (one derivation).
-    const embedInput = enrich === 'heading-path' ? enrichWithPath(m.metadata.title, m.metadata.headingPath, m.metadata.text) : m.metadata.text;
+    const embedInput = built.inputs.get(m.id) ?? m.metadata.text;
     const hash = textHash(embedInput);
     const cacheKey = `${tenantId}:${m.id}`;
     const cached = cachedByKey.get(cacheKey);
@@ -1142,7 +1461,9 @@ async function doHydrate(tenantId: string, orgId: string, collectionId: string):
     for (let at = 0; at < missing.length; at += EMBED_BATCH_CHUNKS) {
       const batch = missing.slice(at, at + EMBED_BATCH_CHUNKS);
       const batchTokens = batch.reduce((n, m) => n + estimateTokens(m.text), 0);
-      const budget = await checkEmbedBudget(tenantId, batchTokens);
+      const budget = embedder?.funding === 'host'
+        ? await checkEmbedBudget(tenantId, batchTokens) // transport reserves every actual attempt
+        : await reserveEmbedBudget(tenantId, batchTokens);
       if (budget.exceeded) {
         log.warn('kb_hydrate_embed_budget_reached', { tenantId, collectionId, embedded, pending: missing.length - embedded, cap: budget.cap, used: budget.used });
         return { embedMode, model: embedder.model, denseAvailable: false };
@@ -1162,11 +1483,10 @@ async function doHydrate(tenantId: string, orgId: string, collectionId: string):
         rows[miss.idx]!.vector = vectors[i]!;
         await vecCache.put({ key: miss.cacheKey, tenantId, model: embedder.model, ...(embedder.embedVersion ? { embedVersion: embedder.embedVersion } : {}), textHash: miss.hash, vector: vectors[i]! });
       }
-      await recordEmbedUsage(tenantId, batchTokens);
       embedded += batch.length;
     }
   }
-  if (rows.length > 0) await vectorSurface(tenantId).upsert({ namespace: ns, items: rows });
+  await fullNamespaceUpsert(tenantId, ns, rows);
   // ADR 0643 D1a R2 — CAS (see `commitCollection`); the chunkCount delta was committed
   // beside its reconcile above. This branch spans provider embeds, so its window is the
   // widest of the two — the signature lands only once the namespace is whole.
@@ -1202,11 +1522,20 @@ export async function listCollections(tenantId: string, orgId: string, caller?: 
 export interface CollectionQuality {
   collectionId: string;
   name: string;
-  embedder: { mode: 'local' | 'provider'; provider: string; model: string; available: boolean; pinned: boolean };
+  /** `funding`: `none` = the free local hash; `byok` = the tenant's key; `host` = the
+   *  operator's embedder (ADR 0904 D1). */
+  embedder: { mode: 'local' | 'provider'; funding: 'none' | 'byok' | 'host'; provider: string; model: string; available: boolean; pinned: boolean };
   dims: number;
   retrievalMode: RetrievalMode;
-  rerank: 'none' | 'local' | 'connection';
-  enrichment: 'off' | 'heading-path';
+  rerank: 'none' | 'local' | 'connection' | 'vertex';
+  availableRerankers: Array<'local' | 'connection' | 'vertex'>;
+  enrichment: 'off' | 'heading-path' | 'llm';
+  /** ADR 0904 D7 — `llm` is configured but the tenant's own AI key does not resolve now,
+   *  so builds run un-enriched (labelled here, never silently). */
+  enrichmentUnavailable?: true;
+  /** ADR 0904 D7 — tokens a FULL LLM enrichment of this collection would cost on the
+   *  tenant's key (shown before enabling it; counts against the daily embed cap). */
+  enrichmentEstimateTokens?: number;
   documentCount: number;
   chunkCount: number;
   /** `current` = the serving vectors match the configuration; `unbuilt` = never indexed
@@ -1217,25 +1546,40 @@ export interface CollectionQuality {
   servingSignature: string | null;
 }
 
+/** ADR 0904 D7 — the cost of a full LLM enrichment, from the collection's COUNTS (the
+ *  quality report is read on every page load, so it must not scan the corpus): one call
+ *  per chunk, each carrying its document (≈ chunks-per-doc × 300 tokens, capped at the
+ *  32k-char slice) plus the chunk, instructions and output. An estimate, labelled as one. */
+function enrichmentEstimate(col: Pick<KnowledgeCollection, 'chunkCount' | 'documentCount'>): number {
+  const chunks = Math.max(0, col.chunkCount ?? 0);
+  if (chunks === 0) return 0;
+  const perDoc = chunks / Math.max(1, col.documentCount ?? 1);
+  return Math.round(chunks * (Math.min(ENRICH_DOC_CHARS / 4, perDoc * 300) + enrichCallTokens('', '')  + 300));
+}
+
 export async function collectionQuality(tenantId: string, orgId: string, caller?: SubjectCaller): Promise<CollectionQuality[]> {
   const cols = await listCollections(tenantId, orgId, caller); // the gated listing — one read door
   const dims = effectiveEmbedDims();
   const out: CollectionQuality[] = [];
+  const availableRerankers: CollectionQuality['availableRerankers'] = ['local'];
+  if (cols.length > 0 && await connectionExists({ tenantId, provider: RERANK_PROVIDER }).catch(() => false)) availableRerankers.push('connection');
+  if (vertexRerankEnabled() && !tenantId.startsWith('anon:')) availableRerankers.push('vertex');
   for (const col of cols) {
     const embedMode = resolveEmbedderMode(col);
-    const enrich = enrichmentOf(col);
+    const enr = await resolveEnrichment(tenantId, col);
+    const enrich = enr.token;
     let embedder: CollectionQuality['embedder'];
     let expectedSignature: string | null;
     if (embedMode === 'local') {
-      embedder = { mode: 'local', provider: 'local', model: LOCAL_EMBEDDING_MODEL, available: true, pinned: !!col.embeddingSpec };
+      embedder = { mode: 'local', funding: 'none', provider: 'local', model: LOCAL_EMBEDDING_MODEL, available: true, pinned: !!col.embeddingSpec };
       expectedSignature = signatureForResolved(false, LOCAL_EMBEDDING_MODEL, dims, enrich);
     } else {
-      const resolved = col.embeddingSpec && col.embeddingSpec.provider !== 'local'
-        ? await resolveHeadlessEmbedderForSpecMaybeTest(tenantId, col.embeddingSpec, dims).catch(() => null)
-        : await resolveHeadlessEmbedderMaybeTest(tenantId, dims).catch(() => null);
+      const resolved = await resolveCollectionEmbedder(tenantId, col, dims).catch(() => null);
+      // The resolved embedder SAYS who pays; the config shape answers only when nothing resolved.
+      const funding = resolved?.funding ?? (col.embeddingSpec || col.retrievalConfig?.embedder === 'provider' ? 'byok' : 'host');
       embedder = resolved
-        ? { mode: 'provider', provider: resolved.provider, model: resolved.model, available: true, pinned: !!col.embeddingSpec }
-        : { mode: 'provider', provider: col.embeddingSpec?.provider ?? 'unresolved', model: col.embeddingSpec?.model ?? 'unavailable', available: false, pinned: !!col.embeddingSpec };
+        ? { mode: 'provider', funding, provider: resolved.provider, model: resolved.model, available: true, pinned: !!col.embeddingSpec }
+        : { mode: 'provider', funding, provider: col.embeddingSpec?.provider ?? 'unresolved', model: col.embeddingSpec?.model ?? 'unavailable', available: false, pinned: !!col.embeddingSpec };
       expectedSignature = resolved ? signatureForEmbedder(resolved, dims, enrich) : null;
     }
     const servingSignature = col.activeSignature ?? col.vectorSignature ?? null;
@@ -1252,7 +1596,10 @@ export async function collectionQuality(tenantId: string, orgId: string, caller?
       dims,
       retrievalMode: mode,
       rerank: mode === 'hybrid+rerank' ? (col.retrievalConfig?.rerank?.kind ?? 'local') : 'none',
-      enrichment: enrich,
+      availableRerankers,
+      enrichment: enrichmentOf(col),
+      ...(enr.degraded ? { enrichmentUnavailable: true as const } : {}),
+      ...(enrichmentOf(col) === 'llm' || enrichmentOf(col) === 'off' ? { enrichmentEstimateTokens: enrichmentEstimate(col) } : {}),
       documentCount: col.documentCount,
       chunkCount: col.chunkCount,
       indexState,
@@ -1469,11 +1816,16 @@ export async function setRetrievalConfig(
   if (mode !== undefined && mode !== 'dense' && mode !== 'hybrid' && mode !== 'hybrid+rerank') {
     throw new OpenwopError('validation_error', '`mode` MUST be one of dense | hybrid | hybrid+rerank.', 400, { field: 'mode' });
   }
-  if (input.embedder !== undefined && input.embedder !== 'local' && input.embedder !== 'provider') {
-    throw new OpenwopError('validation_error', '`embedder` MUST be one of local | provider.', 400, { field: 'embedder' });
+  if (input.embedder !== undefined && input.embedder !== 'local' && input.embedder !== 'provider' && input.embedder !== 'default') {
+    throw new OpenwopError('validation_error', '`embedder` MUST be one of default | local | provider.', 400, { field: 'embedder' });
   }
-  if (input.enrichment !== undefined && input.enrichment !== 'off' && input.enrichment !== 'heading-path') {
-    throw new OpenwopError('validation_error', '`enrichment` MUST be one of off | heading-path.', 400, { field: 'enrichment' });
+  if (input.enrichment !== undefined && input.enrichment !== 'off' && input.enrichment !== 'heading-path' && input.enrichment !== 'llm') {
+    throw new OpenwopError('validation_error', '`enrichment` MUST be one of off | heading-path | llm.', 400, { field: 'enrichment' });
+  }
+  // ADR 0904 D7 — LLM enrichment is billed to the tenant's OWN key, per chunk. No key ⇒
+  // REFUSED here, at config time — never accepted and then silently degraded at ingest.
+  if (input.enrichment === 'llm' && !(await resolveLlmEnricher(tenantId).catch(() => null))) {
+    throw new OpenwopError('validation_error', 'AI context enrichment uses your own AI provider key, and none is set. Add a default AI provider key first.', 422, { field: 'enrichment', reason: 'no_byok_text_provider' });
   }
   // MERGE with the existing config (ADR 0351 review) — with multiple knobs
   // (mode / embedder / rerank) each PATCHed independently by the UI, replace
@@ -1481,7 +1833,10 @@ export async function setRetrievalConfig(
   const cfg: RetrievalConfig = { ...(col.retrievalConfig ?? {}) };
   if (mode) cfg.mode = mode;
   if (input.embedder === 'local' || input.embedder === 'provider') cfg.embedder = input.embedder;
-  if (input.enrichment === 'off' || input.enrichment === 'heading-path') cfg.enrichment = input.enrichment;
+  // ADR 0904 D1 — `default` CLEARS the choice: the collection follows the deployment
+  // (the operator host embedder where offered, else the local hash).
+  if (input.embedder === 'default') delete cfg.embedder;
+  if (input.enrichment === 'off' || input.enrichment === 'heading-path' || input.enrichment === 'llm') cfg.enrichment = input.enrichment;
   const rerank = input.rerank as { kind?: unknown; connectionId?: unknown; topN?: unknown } | undefined;
   if (rerank && rerank.kind === 'local') {
     cfg.rerank = { kind: 'local' };
@@ -1498,8 +1853,16 @@ export async function setRetrievalConfig(
     const topNRaw = Number(rerank.topN);
     const topN = Number.isFinite(topNRaw) && topNRaw >= 1 ? Math.min(Math.floor(topNRaw), 50) : undefined;
     cfg.rerank = { kind: 'connection', ...(topN !== undefined ? { topN } : {}) };
+  } else if (rerank && rerank.kind === 'vertex') {
+    // ADR 0904 D8 — operator-funded; selectable only where the operator turned it on.
+    if (!vertexRerankEnabled() || tenantId.startsWith('anon:')) {
+      throw new OpenwopError('validation_error', 'The Vertex AI reranker is not enabled on this host.', 422, { field: 'rerank.kind', reason: 'vertex_rerank_not_configured' });
+    }
+    const topNRaw = Number(rerank.topN);
+    const topN = Number.isFinite(topNRaw) && topNRaw >= 1 ? Math.min(Math.floor(topNRaw), 50) : undefined;
+    cfg.rerank = { kind: 'vertex', ...(topN !== undefined ? { topN } : {}) };
   } else if (rerank && rerank.kind !== undefined) {
-    throw new OpenwopError('validation_error', '`rerank.kind` MUST be one of local | connection.', 400, { field: 'rerank.kind' });
+    throw new OpenwopError('validation_error', '`rerank.kind` MUST be one of local | connection | vertex.', 400, { field: 'rerank.kind' });
   }
   // ADR 0643 D1a R2 — CAS. `connectionExists` above is a broker round-trip, so this read
   // -modify-write straddles a network call and used to be able to revert a cutover.
@@ -1512,6 +1875,13 @@ export async function setRetrievalConfig(
 export async function deleteCollection(tenantId: string, orgId: string, collectionId: string, caller?: SubjectCaller): Promise<void> {
   const col = await readableCollection(tenantId, orgId, collectionId, caller);
   if (!col) throw new OpenwopError('not_found', 'Collection not found.', 404, { collectionId });
+  const lex = lexicalMaintenanceIndex();
+  if (lex) {
+    await lex.retireOwner(tenantId, lexicalOwner(orgId, collectionId));
+    const namespaces = new Set([collectionNamespace(col), collectionId,
+      ...(col.pendingSignature ? [collectionNamespace(col, col.pendingSignature)] : [])]);
+    for (const namespace of namespaces) await lex.purgeNamespace(tenantId, namespace);
+  }
   // DEBT-2 — safe even though this drives deletes: listByPrefix is the
   // authoritative PRIMARY-key scan (no secondary-index marker layer to miss).
   const docs = await docsInCollection(tenantId, orgId, collectionId);
@@ -1530,6 +1900,7 @@ export async function deleteCollection(tenantId: string, orgId: string, collecti
   }
   for (const d of docs) {
     await purgeVecCacheForDoc(d);
+    await purgeEnrichCacheForDoc(tenantId, collectionId, d.documentId); // ADR 0904 D7
     await purgeDocRevisionsForDoc(d);
     await documents.delete(`${tenantId}:${orgId}:${d.documentId}`);
   }
@@ -1576,7 +1947,7 @@ export async function listDocuments(tenantId: string, orgId: string, collectionI
   return (await docsInCollection(tenantId, orgId, collectionId)) // DEBT-2 — bounded org slice
     .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
     // Drop the (potentially large) full text from the list projection.
-    .map(({ text: _text, ...rest }) => rest);
+    .map(({ text: _text, enrichmentGeneration: _generation, enrichmentCache: _cache, ...rest }) => rest);
 }
 
 export async function getDocument(tenantId: string, orgId: string, collectionId: string, documentId: string, caller?: SubjectCaller): Promise<KnowledgeDocument | null> {
@@ -1585,7 +1956,8 @@ export async function getDocument(tenantId: string, orgId: string, collectionId:
   // exposed. A refused collection answers null here, the same uniform not-found
   // an absent document gives.
   if (!(await readableCollection(tenantId, orgId, collectionId, caller, true))) return null; // G8 — a content read
-  return documentRow(tenantId, orgId, collectionId, documentId);
+  const doc = await documentRow(tenantId, orgId, collectionId, documentId);
+  return doc ? publicDocument(doc) : null;
 }
 
 /** The raw document row, with NO subject gate (the already-authorized internals). */
@@ -1649,6 +2021,7 @@ export async function ingestDocument(
     // its source entity's id so re-index is a deterministic delete+re-ingest);
     // otherwise a random id.
     documentId: typeof internal.documentId === 'string' && internal.documentId.length > 0 ? internal.documentId : randomUUID(),
+    enrichmentGeneration: randomUUID(),
     collectionId,
     tenantId,
     orgId,
@@ -1675,16 +2048,21 @@ export async function ingestDocument(
   // local vectors into a provider-signed namespace — it defers vectorization to
   // the next hydrate (the documented self-heal path), which batch-embeds via
   // the provider + durable cache (ADR 0351 Phase 1).
-  const rows = embedMode === 'local' ? chunkRows(doc, enrichmentOf(col)) : [];
-  doc.chunkCount = embedMode === 'local' ? rows.length : chunkText(doc.text).length;
+  // ADR 0904 D7 — an `llm`-enriched collection also defers: its prefix is an async,
+  // budgeted call that belongs to the hydrate/reindex build, not to this request.
+  const inline = embedMode === 'local' && enrichmentOf(col) !== 'llm';
+  const rows = inline ? chunkRows(doc, enrichmentOf(col) as 'off' | 'heading-path') : [];
+  doc.chunkCount = inline ? rows.length : chunkText(doc.text).length;
 
-  if (embedMode === 'local') await hydrate(tenantId, orgId, collectionId); // ensure the namespace exists before adding
+  if (inline) await hydrate(tenantId, orgId, collectionId); // ensure the namespace exists before adding
   // Durable doc FIRST, then the (ephemeral) vectors — so a crash between the two
   // never leaves orphan vectors without a backing document. If the upsert fails,
   // drop the hydrate marker: the next search rebuilds the namespace from durable
   // docs (which now includes this one), so the doc self-heals into searchability.
+  const lexicalMutation = await beginLexicalMutation(tenantId, orgId, collectionId, collectionNamespace(col));
   await documents.put(doc);
-  if (embedMode !== 'local') {
+  if (lexicalMutation) await lexicalMutation.lex.finishMutation(tenantId, lexicalMutation.owner, lexicalMutation.operation);
+  if (!inline) {
     hydrated.delete(hydrateKey(tenantId, orgId, collectionId)); // next search hydrates + embeds this doc
   } else if (rows.length > 0) {
     try {
@@ -1715,7 +2093,7 @@ export async function ingestDocument(
   // Awaited (D6); `kbMutated` never throws.
   await kbMutated({ entity: 'document', verb: 'ingested', tenantId, orgId, collectionId, documentId: doc.documentId, ...(internal.origin ? { origin: internal.origin } : {}), ...(internal.silent ? { silent: true } : {}) });
 
-  const { text: _t, ...projection } = doc;
+  const { text: _t, enrichmentGeneration: _generation, enrichmentCache: _cache, ...projection } = doc;
   return projection;
 }
 
@@ -1736,6 +2114,7 @@ export async function deleteDocument(tenantId: string, orgId: string, collection
   if (!doc) throw new OpenwopError('not_found', 'Document not found.', 404, { documentId });
   await removeDocumentRow(doc);
   await purgeVecCacheForDoc(doc); // ADR 0351 — no orphan provider-vector cache rows
+  await purgeEnrichCacheForDoc(tenantId, collectionId, documentId); // ADR 0904 D7 — prefixes carry document-derived text
   await purgeDocRevisionsForDoc(doc); // KB-CODE-10 — no orphan revision-log rows
   // CS-DATA-1 — kernels citing a DELETED source are stale too: fire the same
   // staleness seam a content change does. Best-effort (never throws); awaited (D6).
@@ -1752,6 +2131,14 @@ export async function deleteDocument(tenantId: string, orgId: string, collection
 async function removeDocumentRow(doc: KnowledgeDocument): Promise<void> {
   const { tenantId, orgId, collectionId } = doc;
   const col = await collectionRow(tenantId, orgId, collectionId);
+  const lexicalMutation = await beginLexicalMutation(tenantId, orgId, collectionId,
+    col ? collectionNamespace(col) : `${orgId}/${collectionId}`);
+  if (lexicalMutation) {
+    const namespaces = new Set([col ? collectionNamespace(col) : `${orgId}/${collectionId}`, collectionId,
+      ...(col?.pendingSignature ? [collectionNamespace(col, col.pendingSignature)] : [])]);
+    for (const namespace of namespaces) await lexicalMutation.lex.deleteDocument(
+      tenantId, lexicalMutation.owner, lexicalMutation.operation, namespace, doc.documentId);
+  }
   // KB-4 (SECURITY/RETENTION). This used to wipe with `chunkIds(doc)` — the CURRENT
   // chunker over the current text — while `deleteCollection`, the reindex cutover and
   // `cancelReindex` all use the `staleWipeIds` UNION for the documented reason that a
@@ -1773,6 +2160,8 @@ async function removeDocumentRow(doc: KnowledgeDocument): Promise<void> {
   // names as its own rationale. Best-effort second delete, same ids, same bound.
   if (col) await gcLegacyNamespace(tenantId, col, ids);
   await documents.delete(`${tenantId}:${orgId}:${doc.documentId}`);
+  if (lexicalMutation) await lexicalMutation.lex.finishMutation(tenantId, lexicalMutation.owner, lexicalMutation.operation);
+  hydrated.delete(hydrateKey(tenantId, orgId, collectionId));
   if (col) {
     // ADR 0643 D1a R2 — same delta-under-CAS rule as `ingestDocument`.
     const now = new Date().toISOString();
@@ -1818,7 +2207,7 @@ export async function upsertDocument(
     // unchanged bio would otherwise keep its stored `trusted` label forever.
     const sameTrust = (prior.contentTrust === 'untrusted' ? 'untrusted' : 'trusted') === (input.contentTrust === 'untrusted' ? 'untrusted' : 'trusted');
     if (sameText && sameTitle && sameTrust) {
-      const { text: _t, ...projection } = prior;
+      const { text: _t, enrichmentGeneration: _generation, enrichmentCache: _cache, ...projection } = prior;
       return projection;
     }
     // Internal replace (KB-CODE-9/10): PRESERVE the per-chunk provider-vector
@@ -1928,13 +2317,20 @@ export async function ingestMediaCollection(
 /** ADR 0351 — how a search was actually embedded, for the honesty label on
  *  responses. `lexical-only` = provider mode with no resolvable embedder (or a
  *  query-embed failure): the dense channel was OFF for this search. */
-export interface EmbeddingInfo { mode: 'local' | 'provider' | 'lexical-only'; model?: string }
+export interface EmbeddingInfo {
+  mode: 'local' | 'provider' | 'lexical-only';
+  model?: string;
+  /** ADR 0904 — provider + who pays, for provenance (Vertex and BYOK Gemini share a
+   *  model id). Present on `provider` searches. */
+  provider?: string;
+  funding?: 'byok' | 'host';
+}
 
 /** ADR 0351 Phase 4 (CSG-KB-8) — which reranker the config REQUESTED vs what was
  *  actually APPLIED, for the honesty label: a connection-reranker failure
  *  degrades to the local deterministic reranker as `local-degraded`. Present
  *  only on `hybrid+rerank` searches that reached the rerank stage. */
-export interface RerankInfo { requested: 'local' | 'connection'; applied: 'local' | 'connection' | 'local-degraded' }
+export interface RerankInfo { requested: 'local' | 'connection' | 'vertex'; applied: 'local' | 'connection' | 'vertex' | 'local-degraded' }
 
 export async function search(tenantId: string, orgId: string, collectionId: string, queryRaw: unknown, topKRaw: unknown, mode: RetrievalMode = 'dense', caller?: SubjectCaller): Promise<SearchHit[]> {
   return (await searchDetailed(tenantId, orgId, collectionId, queryRaw, topKRaw, mode, caller)).hits;
@@ -1951,17 +2347,29 @@ export async function searchDetailed(tenantId: string, orgId: string, collection
   // (a local-hash query against provider chunk vectors is noise, not fallback).
   let queryVector: number[] | null = null;
   let embedding: EmbeddingInfo;
-  if (status.embedMode === 'local') {
+  if (status.embedMode === 'local' && !status.denseAvailable) {
+    // ADR 0904 D7 — a local namespace whose build did not complete (an LLM-enriched build
+    // stopped on budget or a failed call): the dense channel is off, labelled.
+    embedding = { mode: 'lexical-only' };
+  } else if (status.embedMode === 'local') {
     queryVector = embedText(query, effectiveEmbedDims()); // KB-CODE-12 — match the namespace width
     embedding = { mode: 'local', model: status.model };
   } else if (status.denseAvailable && status.embedder) {
-    try {
-      // ADR 0904 D2 — embedded AS A QUERY (Google RETRIEVAL_QUERY, Cohere search_query).
-      queryVector = (await status.embedder.embed([query], 'query'))[0] ?? null;
-      embedding = { mode: 'provider', model: status.model };
-    } catch {
-      queryVector = null; // provider hiccup at query time — degrade, labeled
+    // ADR 0904 D1 (architect A3) — the QUERY embed is metered against the same daily cap
+    // as indexing (it was free, so the operator arm's spend had no ceiling at query time).
+    // Over the cap ⇒ this search is lexical-only, labelled, like any other degrade.
+    const queryTokens = estimateTokens(query);
+    if (status.embedder.funding !== 'host' && (await reserveEmbedBudget(tenantId, queryTokens)).exceeded) {
       embedding = { mode: 'lexical-only' };
+    } else {
+      try {
+        // ADR 0904 D2 — embedded AS A QUERY (Google/Vertex RETRIEVAL_QUERY, Cohere search_query).
+        queryVector = (await status.embedder.embed([query], 'query'))[0] ?? null;
+        embedding = { mode: 'provider', model: status.model, provider: status.embedder.provider, funding: status.embedder.funding ?? 'byok' };
+      } catch {
+        queryVector = null; // provider hiccup at query time — degrade, labeled
+        embedding = { mode: 'lexical-only' };
+      }
     }
   } else {
     embedding = { mode: 'lexical-only' };
@@ -1970,9 +2378,7 @@ export async function searchDetailed(tenantId: string, orgId: string, collection
   // Dense channel unavailable ⇒ lexical-only over the durable corpus (honest
   // degrade for ANY requested mode — better ranked hits than none).
   if (!queryVector) {
-    const corpus = await collectionChunks(tenantId, orgId, collectionId);
-    const metaById = new Map(corpus.map((r) => [r.id, r.metadata]));
-    const lexical = bm25Search(corpus.map((r) => ({ id: r.id, text: r.metadata.text })), query, Math.max(topK, HYBRID_CANDIDATES));
+    const { hits: lexical, metaById } = await lexicalChannel(tenantId, orgId, collectionId, col, query, Math.max(topK, HYBRID_CANDIDATES));
     const hits: SearchHit[] = lexical.map((f) => {
       const m = metaById.get(f.id);
       return {
@@ -1985,7 +2391,7 @@ export async function searchDetailed(tenantId: string, orgId: string, collection
         contentTrust: m?.contentTrust === 'untrusted' ? 'untrusted' : 'trusted',
         headingPath: m?.headingPath ?? [],
         ...(m?.pageNumber !== undefined ? { pageNumber: m.pageNumber } : {}),
-        relevance: bm25Relevance(f.score),
+        relevance: f.relevance,
       };
     });
     return { hits: hits.slice(0, topK), embedding };
@@ -1995,7 +2401,9 @@ export async function searchDetailed(tenantId: string, orgId: string, collection
   // has something to reorder.
   const denseK = mode === 'dense' ? topK : Math.max(topK, HYBRID_CANDIDATES);
   const res = await vectorSurface(tenantId).query({ namespace: collectionNamespace(col), vector: queryVector, topK: denseK });
-  const matches = (res.matches ?? []) as Array<{ id: string; score: number; metadata?: ChunkRow['metadata'] }>;
+  const indexedMatches = (res.matches ?? []) as Array<{ id: string; score: number; metadata?: ChunkRow['metadata'] }>;
+  const canonical = await currentIndexedMetadata(tenantId, orgId, collectionId, indexedMatches);
+  const matches = indexedMatches.filter((m) => canonical.has(m.id)).map((m) => ({ ...m, metadata: canonical.get(m.id)! }));
   const denseHits: SearchHit[] = matches.map((m) => ({
     chunkId: m.id,
     documentId: m.metadata?.documentId ?? '',
@@ -2014,16 +2422,19 @@ export async function searchDetailed(tenantId: string, orgId: string, collection
   // ranked lists (ADR 0113). Deterministic ⇒ replay-safe, nothing recorded. The
   // metadata for every chunk (text/title/trust) comes from the corpus map, so a
   // lexical-only hit (no dense match) is still fully projected — with its trust.
-  const corpus = await collectionChunks(tenantId, orgId, collectionId);
-  const metaById = new Map(corpus.map((r) => [r.id, r.metadata]));
-  const lexical = bm25Search(corpus.map((r) => ({ id: r.id, text: r.metadata.text })), query, HYBRID_CANDIDATES);
+  // The lexical await may cross a delete or source replacement. Revalidate the
+  // earlier dense candidates before fusing or sending text to a reranker.
+  const { hits: lexical, metaById } = await lexicalChannel(tenantId, orgId, collectionId, col, query, HYBRID_CANDIDATES);
+  const currentDense = await currentIndexedMetadata(tenantId, orgId, collectionId, matches);
+  const currentDenseHits = denseHits.filter(h => currentDense.has(h.chunkId));
+  for (const [id, metadata] of currentDense) if (!metaById.has(id)) metaById.set(id, metadata);
   // ADR 0904 D4 — the calibrated relevance of each candidate: its dense cosine when the
-  // dense channel matched it, else its saturated BM25 (see `bm25Relevance`).
-  const denseRelevance = new Map(denseHits.map((h) => [h.chunkId, h.relevance]));
-  const lexicalRelevance = new Map(lexical.map((l) => [l.id, bm25Relevance(l.score)]));
+  // dense channel matched it, else its keyword relevance (see `bm25Relevance`).
+  const denseRelevance = new Map(currentDenseHits.map((h) => [h.chunkId, h.relevance]));
+  const lexicalRelevance = new Map(lexical.map((l) => [l.id, l.relevance]));
   // Fuse into a WIDER candidate pool; truncation to top-k happens after the
   // optional rerank stage (so rerank can promote a candidate past the cut).
-  const fused = rrfFuse([denseHits.map((h) => ({ id: h.chunkId })), lexical], DEFAULT_RRF_K, HYBRID_CANDIDATES);
+  const fused = rrfFuse([currentDenseHits.map((h) => ({ id: h.chunkId })), lexical], DEFAULT_RRF_K, HYBRID_CANDIDATES);
   const candidates: SearchHit[] = fused.map((f) => {
     const m = metaById.get(f.id);
     return {
@@ -2058,6 +2469,16 @@ export async function searchDetailed(tenantId: string, orgId: string, collection
       }
       const degraded = localRerank(query, candidates.map((c) => ({ id: c.chunkId, text: c.text, title: c.title })), topK);
       return { hits: degraded.map((r) => ({ ...byId.get(r.id)!, score: r.score })), embedding, rerank: { requested: 'connection', applied: 'local-degraded' } };
+    }
+    if (rerankCfg?.kind === 'vertex') {
+      // ADR 0904 D8 — the Vertex ranking API (operator-enabled only); same degrade rule.
+      const topN = rerankCfg.topN !== undefined ? Math.min(rerankCfg.topN, topK) : topK;
+      const ranked = await vertexRerank(tenantId, query, candidates.map((c) => ({ id: c.chunkId, text: c.text, title: c.title })), topN);
+      if (ranked !== null) {
+        return { hits: ranked.map((r) => ({ ...byId.get(r.id)!, score: r.score, relevance: clamp01(r.score) })), embedding, rerank: { requested: 'vertex', applied: 'vertex' } };
+      }
+      const degraded = localRerank(query, candidates.map((c) => ({ id: c.chunkId, text: c.text, title: c.title })), topK);
+      return { hits: degraded.map((r) => ({ ...byId.get(r.id)!, score: r.score })), embedding, rerank: { requested: 'vertex', applied: 'local-degraded' } };
     }
     const reranked = localRerank(query, candidates.map((c) => ({ id: c.chunkId, text: c.text, title: c.title })), topK);
     return { hits: reranked.map((r) => ({ ...byId.get(r.id)!, score: r.score })), embedding, rerank: { requested: 'local', applied: 'local' } };
@@ -2393,8 +2814,39 @@ function pagesWithin(extracted: ExtractedText, stored: string): { pageOffsets?: 
   return kept.length > 0 ? { pageOffsets: kept } : {};
 }
 
+const PPTX_MIME = 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+
 async function extractTextFromBytes(tenantId: string, buffer: Buffer, contentType: string): Promise<ExtractedText> {
+  // ADR 0904 P6 — the operator's Document AI Layout Parser, when configured, for PDF and
+  // PPTX. Its own layout blocks give headings/tables/pages, and a SCANNED PDF (no text
+  // layer) only yields text this way. The page count is read first so the daily page cap
+  // is checked before anything is sent; any skip or failure is the in-process parser.
+  const mime = contentType.toLowerCase().split(';')[0]!.trim();
+  if ((mime === 'application/pdf' || mime === PPTX_MIME) && documentAiConfigured()) {
+    const pages = await pageCountOf(buffer, mime).catch(() => 0);
+    const r = await parseWithDocumentAi(tenantId, buffer, mime, pages);
+    if (r.kind === 'parsed') return { text: r.text, ...(r.pageOffsets.length > 0 ? { pageOffsets: r.pageOffsets } : {}) };
+    log.info('kb_docai_skipped', { tenantId, reason: r.reason, pages });
+  }
   return extractStructured(tenantId, buffer, contentType);
+}
+
+function documentAiConfigured(): boolean {
+  try { return parseDocAiConfig() !== null; } catch { return false; }
+}
+
+/** The file's real page count, read before any Document AI call: pdf.js (patched, eval
+ *  off) for a PDF; the slide entries for a PPTX (its ZIP is checked to BE a ZIP first). */
+async function pageCountOf(buffer: Buffer, mime: string): Promise<number> {
+  if (mime === 'application/pdf') {
+    const { getDocumentProxy } = await loadUnpdf();
+    const document = await getDocumentProxy(new Uint8Array(buffer), { isEvalSupported: false });
+    try { return document.numPages; } finally { await document.loadingTask.destroy(); }
+  }
+  if (!officeBytesMatchMime(mime, buffer)) return 0;
+  const { default: JSZip } = await import('jszip');
+  const zip = await JSZip.loadAsync(buffer);
+  return Object.keys(zip.files).filter((n) => /^ppt\/slides\/slide\d+\.xml$/.test(n)).length;
 }
 
 async function extractStructured(tenantId: string, buffer: Buffer, contentType: string): Promise<ExtractedText> {
@@ -2639,7 +3091,7 @@ interface ReindexJob {
   /** ADR 0398 P3 (review fix) — enrichment is BAKED at start (it's part of `toSig`), so a
    *  mid-reindex config change can't make drain embed with a different enrichment than the
    *  target namespace assumes. */
-  enrich: 'off' | 'heading-path';
+  enrich: string; // ADR 0904 D7 — the enrichment TOKEN (`off` | `heading-path` | `llm:<provider>/<model>`)
   fromSig: string; toSig: string;
   /**
    * KB-2 R2 — the STAGING NAMESPACE, stamped at `startReindex` rather than re-derived
@@ -2800,7 +3252,7 @@ function validateEmbeddingSpec(v: unknown): EmbeddingSpec {
 
 /** The signature a target spec resolves to (mirrors hydrate's sig; `model` is the resolved
  *  provider model, or LOCAL_EMBEDDING_MODEL for the local floor). */
-function signatureForResolved(providerMode: boolean, model: string, dims: number, enrich: 'off' | 'heading-path'): string {
+function signatureForResolved(providerMode: boolean, model: string, dims: number, enrich: string): string {
   return `${providerMode ? 'provider' : 'local'}:${model}:${dims}:${enrich}:v${CHUNKER_VERSION}`;
 }
 
@@ -2809,8 +3261,12 @@ function signatureForResolved(providerMode: boolean, model: string, dims: number
  *  appended, so a provider whose document side changed gets a new namespace and is
  *  re-embedded; every other signature is byte-identical to before, so OpenAI, Cohere and
  *  local collections are not rebuilt. */
-function signatureForEmbedder(embedder: Pick<HeadlessEmbedder, 'model' | 'embedVersion'>, dims: number, enrich: 'off' | 'heading-path'): string {
-  const base = signatureForResolved(true, embedder.model, dims, enrich);
+function signatureForEmbedder(embedder: Pick<HeadlessEmbedder, 'model' | 'embedVersion' | 'funding'>, dims: number, enrich: string): string {
+  // ADR 0904 D1 — the operator arm signs `host:` (its vectors are the operator's, and
+  // provenance must tell Vertex from BYOK Gemini, which share a model id — architect A8).
+  const base = embedder.funding === 'host'
+    ? `host:${embedder.model}:${dims}:${enrich}:v${CHUNKER_VERSION}`
+    : signatureForResolved(true, embedder.model, dims, enrich);
   return embedder.embedVersion ? `${base}:${embedder.embedVersion}` : base;
 }
 
@@ -2891,7 +3347,8 @@ export async function startReindex(tenantId: string, orgId: string, collectionId
   if (col.managed) throw new OpenwopError('validation_error', `This collection is managed (synced from ${col.managed}); its embedding is not reindexable here.`, 400, { collectionId });
   const spec = validateEmbeddingSpec(specInput);
   const dims = effectiveEmbedDims();
-  const enrich = enrichmentOf(col);
+  const enr = await resolveEnrichment(tenantId, col);
+  const enrich = enr.token; // ADR 0904 D7 — baked into the job; the drain must build the same
   const providerMode = spec.provider !== 'local';
   let toSig = signatureForResolved(false, LOCAL_EMBEDDING_MODEL, dims, enrich);
   if (providerMode) {
@@ -2909,9 +3366,12 @@ export async function startReindex(tenantId: string, orgId: string, collectionId
   if (totalChunks > reindexMaxChunks()) {
     throw new OpenwopError('validation_error', `Reindex exceeds the ${reindexMaxChunks()}-chunk ceiling (${totalChunks} chunks).`, 400, { totalChunks, cap: reindexMaxChunks() });
   }
-  const costEstimateTokens = providerMode
+  const costEstimateTokens = (providerMode
     ? perDoc.reduce((n, p) => n + p.meta.reduce((m, c) => m + estimateTokens(enrich === 'heading-path' ? enrichWithPath(c.metadata.title, c.metadata.headingPath, c.metadata.text) : c.metadata.text), 0), 0)
-    : 0;
+    : 0)
+    // ADR 0904 D7 — an LLM-enriched build also pays one call per chunk (the cache absorbs
+    // unchanged chunks, so this is the ceiling, not the expectation).
+    + (enr.kind === 'llm' ? perDoc.reduce((n, p) => n + p.meta.reduce((m, c) => m + enrichCallTokens(p.doc.text, c.metadata.text), 0), 0) : 0);
   const now = new Date().toISOString();
   const key = reindexKey(tenantId, orgId, collectionId);
   // The generation CONTINUES from whatever row we are replacing — it never resets. A
@@ -3220,6 +3680,12 @@ async function drainReindexCore(tenantId: string, orgId: string, collectionId: s
   const providerMode = job.targetSpec.provider !== 'local';
   const embedder = providerMode ? await resolveHeadlessEmbedderForSpecMaybeTest(tenantId, job.targetSpec, dims) : null;
   if (providerMode && !embedder) return fail('embedder-unavailable', `embedder for '${job.targetSpec.provider}' became unavailable`);
+  // ADR 0904 D7 — an LLM-enriched build needs the SAME model it was signed with.
+  let enricher: LlmEnricher | null = null;
+  if (enrich.startsWith('llm:')) {
+    enricher = await resolveLlmEnricher(tenantId).catch(() => null);
+    if (!enricher || llmEnrichToken(enricher) !== enrich) return fail('embedder-unavailable', 'the enrichment model changed or the tenant AI key is unavailable');
+  }
 
   // The FULL deterministic chunk list (stable order), so `embeddedChunks` is a resume cursor.
   const docs = await docsInCollection(tenantId, orgId, collectionId);
@@ -3228,6 +3694,7 @@ async function drainReindexCore(tenantId: string, orgId: string, collectionId: s
     metadata: c.metadata,
     embedInput: enrich === 'heading-path' ? enrichWithPath(c.metadata.title, c.metadata.headingPath, c.metadata.text) : c.metadata.text,
   })));
+  const docById = new Map(docs.map((d) => [d.documentId, d]));
   // KB-2 R2 — see `ReindexJob.stagingNamespace`. An UNSTAMPED job predates the KB-1
   // namespace change, so its cursor points into a namespace this build no longer
   // derives; resuming would leave chunks [0, embeddedChunks) permanently missing from
@@ -3249,10 +3716,28 @@ async function drainReindexCore(tenantId: string, orgId: string, collectionId: s
   while (processed < maxChunks && job.embeddedChunks < allChunks.length) {
     const take = Math.min(EMBED_BATCH_CHUNKS, maxChunks - processed, allChunks.length - job.embeddedChunks);
     const batch = allChunks.slice(job.embeddedChunks, job.embeddedChunks + take);
+    if (enricher) {
+      // ADR 0904 D7 — this batch's prefixes (cached per chunk; misses are budgeted calls).
+      let complete = true;
+      for (const documentId of [...new Set(batch.map((b) => b.metadata.documentId))]) {
+        const doc = docById.get(documentId);
+        if (!doc) continue;
+        const docChunks = allChunks.filter((c) => c.metadata.documentId === documentId);
+        const r = await prefixesFor(tenantId, collectionId, doc, docChunks.map((c) => c.metadata.text), enricher);
+        if (!r.complete) complete = false;
+        docChunks.forEach((c, i) => {
+          const prefix = r.prefixes[i];
+          if (prefix) { c.metadata.context = prefix; c.embedInput = `${prefix}\n\n${c.metadata.text}`; }
+        });
+      }
+      if (!complete) { job.status = 'paused'; job.error = 'AI context enrichment stopped (daily budget or a failed call). Resumes on the next drain.'; job.updatedAt = new Date().toISOString(); const r = await commitOurs(); return projectJob(r.job ?? job); }
+    }
     const batchTokens = providerMode ? batch.reduce((n, b) => n + estimateTokens(b.embedInput), 0) : 0;
     if (providerMode) {
-      const budget = await checkEmbedBudget(tenantId, batchTokens);
-      if (budget.exceeded) { job.status = 'paused'; job.error = `Daily embed budget reached (${budget.cap} tokens; ${budget.used} used). Resumes at 00:00 UTC.`; job.updatedAt = new Date().toISOString(); const r = await commitOurs(); return projectJob(r.job ?? job); }
+      const budget = embedder?.funding === 'host'
+        ? await checkEmbedBudget(tenantId, batchTokens) // transport reserves every actual attempt
+        : await reserveEmbedBudget(tenantId, batchTokens);
+      if (budget.exceeded) { job.status = 'paused'; job.error = 'unavailable' in budget && budget.unavailable ? 'Embedding budget reservation unavailable; retry the drain.' : `Daily embed budget reached (${budget.cap} tokens; ${budget.used} used). Resumes at 00:00 UTC.`; job.updatedAt = new Date().toISOString(); const r = await commitOurs(); return projectJob(r.job ?? job); }
     }
     let vectors: number[][];
     try {
@@ -3272,7 +3757,7 @@ async function drainReindexCore(tenantId: string, orgId: string, collectionId: s
       return projectJob(fresh ?? job);
     }
     await vectorSurface(tenantId).upsert({ namespace: stagingNs, items: batch.map((b, i) => ({ id: b.id, vector: vectors[i]!, metadata: b.metadata })) });
-    if (providerMode) { await recordEmbedUsage(tenantId, batchTokens); job.costSpentTokens += batchTokens; }
+    if (providerMode) job.costSpentTokens += batchTokens;
     job.embeddedChunks += batch.length;
     processed += batch.length;
     // `progressAt` moves ONLY here, where the cursor actually advanced (review Should 3).
@@ -3589,9 +4074,15 @@ export async function eraseSubjectKb(tenantId: string, subjectKey: string): Prom
         continue;
       }
       if (doc.createdBy === subjectKey) {
-        doc.createdBy = ERASED_ACTOR;
-        await documents.put(doc);
-        attributionsAnonymized += 1;
+        let settled = false;
+        for (let attempt = 0; attempt < 6; attempt++) {
+          const fresh = await documentRow(tenantId, col.orgId, col.collectionId, doc.documentId);
+          if (!fresh || fresh.createdBy !== subjectKey) { settled = true; break; }
+          if (await documents.compareAndSwap(fresh, { ...fresh, createdBy: ERASED_ACTOR })) {
+            attributionsAnonymized++; settled = true; break;
+          }
+        }
+        if (!settled) throw new OpenwopError('conflict', 'Document attribution changed concurrently; retry erasure.', 409, { reason: 'document_cas_exhausted' });
       }
     }
     if (col.createdBy === subjectKey || col.updatedBy === subjectKey) {
@@ -3664,6 +4155,8 @@ export async function purgeOrphanKbDerivedRows(tenantId: string, cutoffIso: stri
     await vecCache.delete(row.key);
     deleted += 1;
   }
+  // ADR 0904 D7 — orphaned LLM prefixes (document-derived text), same rule as the vector cache.
+  deleted += await purgeOrphanEnrichRows(tenantId, live, (documentId) => upsertsInFlight.has(`${tenantId}:${documentId}`));
   for (const row of await docRevisions.listByPrefix(`${tenantId}:`)) {
     if (row.tenantId !== tenantId) continue; // KB-7 — see above
     if (live.has(row.documentId)) continue;

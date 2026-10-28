@@ -12,9 +12,29 @@
  * deleted 2026-10-17 (/grade-tests wave 53; WALK-REPLAY-1).
  *
  * Together: backend pins WHAT the tour references; FE pins the registry HAS
- * them; the e2e pins they RESOLVE live. No half is vacuous.
+ * them. Whether the FE registry RESOLVES them at runtime is NOT tested anywhere
+ * (corrected grade-tests w63: this line used to say "the e2e pins they RESOLVE
+ * live. No half is vacuous" two sentences after saying that e2e was deleted).
+ *
+ * The id lists below are a deliberate change-detector: literal canonical sets,
+ * so an edit to a shipped walkthrough definition fails here on purpose.
+ *
+ * The ADR 0440 identity block reads BOTH detection rules through the product,
+ * never a copy: the page's rule is `workflowKind()` (`host/workflowId.ts`, the
+ * `kind` the list route stamps) and the ctx rule is what
+ * `buildWalkthroughsSurface(...).listWalkthroughs()` actually returns for the
+ * chain-backed system walkthroughs `registerWalkthroughWorkflows()` registers.
+ * (Round 1 found the block re-implementing surface.ts's private `isWalkthrough`
+ * over the in-tree fixture metadata — which production does not read: the
+ * chain-backed registration re-marks `walkthrough: true` in its postProcess.)
  */
-import { describe, it, expect } from 'vitest';
+import { beforeAll, describe, it, expect } from 'vitest';
+import { openStorage } from '../src/storage/index.js';
+import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
+import { workflowKind } from '../src/host/workflowId.js';
+import { buildWalkthroughsSurface } from '../src/features/walkthroughs/surface.js';
+import { registerWalkthroughWorkflows } from '../src/features/walkthroughs/feature.js';
+import { loadWorkflowChainPacks, defaultWorkflowChainPackRoots, _resetChainRegistryForTest } from '../src/host/workflowChainPackLoader.js';
 // ADR 0435 — the two SAMPLE walkthroughs moved out of the builtin set into the
 // `demo-walkthroughs` seeder; their definitions now live with that seeder. The
 // page-spotlight walkthroughs are still builtins (manual-test infrastructure).
@@ -114,33 +134,36 @@ describe('P4-continuation page spotlights coverage', () => {
  * ADR 0440 P1 (UX-review follow-up) — the walkthrough surfaces use TWO
  * detection rules for one concept:
  *
- *   - `/walkthroughs` (the page) filters on `workflowId.startsWith('walkthrough.')`
+ *   - `/walkthroughs` (the page) reads the summary's `kind`, which the list
+ *     route stamps from `workflowKind(workflowId)` (the `walkthrough.` prefix)
  *   - `ctx.features.walkthroughs.listWalkthroughs` filters on `metadata.walkthrough`
  *
- * They agree today only because all three creation paths (seeded, recorded,
- * agent-authored) happen to set both. Nothing enforced it — and a definition
- * that satisfies one rule but not the other is INVISIBLE on one surface while
- * live on the other, which is exactly the failure mode ADR 0440 exists to fix
- * (an autosave used to strip `metadata.walkthrough`, dropping walkthroughs out
- * of the ctx surface while the page kept listing them).
+ * A definition that satisfies one rule but not the other is INVISIBLE on one
+ * surface while live on the other, which is exactly the failure mode ADR 0440
+ * exists to fix (an autosave used to strip `metadata.walkthrough`, dropping
+ * walkthroughs out of the ctx surface while the page kept listing them).
+ * Witnessed (grade-tests w63 r2): the registration's `walkthrough: true`
+ * re-mark dropped → case 2 red; `workflowKind` answering 'workflow' → both red.
  */
 describe('walkthrough identity — the two detection rules agree (ADR 0440)', () => {
-  const isWalkthroughFlagged = (d: { metadata?: Record<string, unknown> }): boolean =>
-    d.metadata?.walkthrough === true || d.metadata?.tour === true;
-
-  it('every flagged builtin also carries the `walkthrough.*` id prefix', () => {
-    const flagged = WALKTHROUGH_WORKFLOWS.filter(isWalkthroughFlagged);
-    expect(flagged.length).toBeGreaterThan(0); // no vacuous pass
-    for (const def of flagged) {
-      expect(def.workflowId, `${def.workflowId} is flagged but lacks the prefix`).toMatch(/^(walkthrough|tour)\./);
-    }
+  let listed: string[] = [];
+  beforeAll(async () => {
+    initHostExtPersistence(await openStorage('memory://'));
+    _resetChainRegistryForTest();
+    loadWorkflowChainPacks({ roots: defaultWorkflowChainPackRoots() });
+    registerWalkthroughWorkflows();
+    const out = await buildWalkthroughsSurface({ tenantId: 't-wc-identity' }).listWalkthroughs!({}) as { walkthroughs: Array<{ walkthroughId: string }> };
+    listed = out.walkthroughs.map((w) => w.walkthroughId);
   });
 
-  it('every `walkthrough.*` builtin is also flagged', () => {
-    const prefixed = WALKTHROUGH_WORKFLOWS.filter((d) => /^(walkthrough|tour)\./.test(d.workflowId));
+  it('every walkthrough the ctx surface lists carries the page rule\'s `walkthrough` kind', () => {
+    expect(listed.length).toBeGreaterThan(0); // no vacuous pass
+    for (const id of listed) expect(workflowKind(id), `${id} is listed by ctx but the page reads it as a plain workflow`).toBe('walkthrough');
+  });
+
+  it('every system walkthrough the page rule calls a walkthrough is listed by the ctx surface', () => {
+    const prefixed = WALKTHROUGH_WORKFLOWS.map((d) => d.workflowId).filter((id) => workflowKind(id) === 'walkthrough');
     expect(prefixed.length).toBeGreaterThan(0);
-    for (const def of prefixed) {
-      expect(isWalkthroughFlagged(def), `${def.workflowId} has the prefix but is not flagged`).toBe(true);
-    }
+    for (const id of prefixed) expect(listed, `${id} has the page kind but the ctx surface does not list it`).toContain(id);
   });
 });

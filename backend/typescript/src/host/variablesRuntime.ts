@@ -78,6 +78,23 @@ export async function hydrateRunVariables(runId: string): Promise<void> {
 }
 
 /**
+ * Read authoritative historical evidence without consulting or changing a live
+ * run's cache (ADR 0964 D1). Retention/deletion owns the durable key; a warm
+ * cache must never resurrect it for replay. Storage errors propagate so the
+ * replay caller can fail closed. A malformed or missing bag supplies no evidence.
+ */
+export async function readPersistedRunVariables(runId: string): Promise<Record<string, unknown> | null> {
+  const storage = tryDurableStorage();
+  if (!storage) return null;
+  const raw = await storage.kvGet(key(runId));
+  if (!raw) return null;
+  const value: unknown = JSON.parse(raw);
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+/**
  * Build the initial variable bag for a new run. `variableDecls` comes
  * from `workflow.variables[]`; `inputs` is `POST /v1/runs.inputs`
  * (typically an object keyed by variable name, but the function
@@ -158,6 +175,21 @@ export function snapshotRunVariables(runId: string): Record<string, unknown> | n
 }
 
 /**
+ * Seal a completed run's cached bag with the SAME known-secret scrub its durable
+ * copy already receives (ADR 0779 D4 / ADR 0964 D1). Call before releasing that
+ * run's secret registry: its parent may read this cache after the child returns,
+ * when the child-only key would otherwise no longer be known to the scrubber.
+ * Active bags retain their live values until completion; no new store is created.
+ */
+export function redactCompletedRunVariables(runId: string): void {
+  const bag = runVariables.get(runId);
+  if (!bag) return;
+  const serialized = JSON.parse(JSON.stringify(Object.fromEntries(bag.entries()))) as Record<string, unknown>;
+  const redacted = stripKnownRunSecrets(serialized);
+  runVariables.set(runId, new Map(Object.entries(redacted)));
+}
+
+/**
  * Set a single variable. Future scope (HVMAP-2 mid-run mutation seam)
  * will expose this via a `POST /v1/host/openwop-app/test/runs/:runId/
  * variables` endpoint; today only the suite-init seeding path uses
@@ -194,3 +226,28 @@ export function clearRunVariables(runId: string): void {
 export function __resetAllRunVariablesForTests(): void {
   runVariables.clear();
 }
+
+/**
+ * ADR 0964 D2 — put a chain's forwarded params into the run bag under their bare
+ * names, where a `core.subWorkflow` / `core.dispatch` `inputMapping` reads them.
+ * Never overwrites a value the bag already holds (a resume, or a variable of that
+ * name the run set). Called by the executor at the start of every run body, with
+ * the definition it is running, so a fork and a child run get the same values.
+ */
+export function applyForwardedParams(runId: string, metadata: unknown): void {
+  const m = (metadata ?? {}) as { forwardedParams?: unknown; forwardedParamAliases?: unknown };
+  const isMap = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
+  if (!isMap(m.forwardedParams) && !isMap(m.forwardedParamAliases)) return;
+  const bag = snapshotRunVariables(runId) ?? {};
+  if (isMap(m.forwardedParams)) {
+    for (const [name, value] of Object.entries(m.forwardedParams)) {
+      if (bag[name] === undefined && value !== undefined) setRunVariable(runId, name, value);
+    }
+  }
+  if (isMap(m.forwardedParamAliases)) {
+    for (const [name, alias] of Object.entries(m.forwardedParamAliases)) {
+      if (typeof alias === 'string' && bag[name] === undefined && bag[alias] !== undefined) setRunVariable(runId, name, bag[alias]);
+    }
+  }
+}
+

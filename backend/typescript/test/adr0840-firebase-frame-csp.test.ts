@@ -18,6 +18,11 @@
  *
  * What this cannot show is what the CDN actually SENDS (which rule wins, replace
  * versus append). That is measured live (ADR 0840 P3, `verify-deploy.sh`).
+ *
+ * TST-BWB-4 (grade-tests w62): red when a frame/entry rule's source is renamed or moved
+ * under `/api/v1/`, when `pluginIframeCsp()` changes without firebase.json, or when an
+ * installed frontend-plugin pack declares `connectSrc`. The connectSrc scan must see at
+ * least the 3 frontend-plugin packs measured in packs/ (a scan of nothing would pass).
  */
 import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
@@ -52,13 +57,16 @@ describe('ADR 0840 D3 — Firebase plugin header rules', () => {
   it('no installed plugin declares connectSrc (a Firebase rule cannot vary per plugin)', () => {
     const packsDir = join(ROOT, 'packs');
     const declaring: string[] = [];
+    let scanned = 0;
     for (const d of existsSync(packsDir) ? readdirSync(packsDir) : []) {
       const manifest = join(packsDir, d, 'pack.json');
       if (!existsSync(manifest)) continue;
       const m = JSON.parse(readFileSync(manifest, 'utf8')) as { kind?: string; uiPlugins?: { pluginId: string; connectSrc?: unknown[] }[] };
       if (m.kind !== 'frontend-plugin') continue;
+      scanned += 1;
       for (const p of m.uiPlugins ?? []) if (Array.isArray(p.connectSrc) && p.connectSrc.length) declaring.push(`${d}/${p.pluginId}`);
     }
+    expect(scanned, 'frontend-plugin manifests scanned (measured 3)').toBeGreaterThanOrEqual(3);
     expect(declaring).toEqual([]);
   });
 });

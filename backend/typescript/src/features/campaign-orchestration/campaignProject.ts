@@ -87,6 +87,12 @@ export function registerCampaignProjectHooks(): void {
   registerRunProjectResolver('campaign', async (tenantId, metadata) => {
     const block = isObj(metadata.campaignOrchestration) ? metadata.campaignOrchestration
       : isObj(metadata.campaignChannel) ? metadata.campaignChannel : undefined;
+    // ADR 0941 D2b — a tagged run names its campaign; a pre-0941 block (and the
+    // channel block) names only the brief, resolved through the brief index.
+    if (block && typeof block.campaignId === 'string' && block.campaignId) {
+      const tagged = await getCampaign(tenantId, block.campaignId);
+      return tagged ? getCampaignProjectId(tenantId, tagged.id) : undefined;
+    }
     const briefId = block && typeof block.briefId === 'string' ? block.briefId : undefined;
     if (!briefId) return undefined;
     const campaign = await getCampaignByBrief(tenantId, briefId);

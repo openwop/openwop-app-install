@@ -11,7 +11,8 @@
  *       lands in the catalog.
  *
  * This is the integration wiring proof — it deliberately does NOT re-test the
- * units already covered: `tour-author-tool.test.ts` (the tool's `run` synthesis)
+ * units already covered: `walkthrough-author-tool.test.ts` (the tool's `run` synthesis;
+ * CORRECTED wave 63 — this used to cite its pre-ADR 0376 name `tour-author-tool.test.ts`)
  * and the two allowlist guardrail tests (which pin the CONSTANT
  * `DEFAULT_ON_AGENT_TOOL_IDS`, not the resolver's output for an agent).
  */
@@ -40,7 +41,7 @@ beforeAll(async () => {
   const storage = await openStorage('memory://');
   initHostExtPersistence(storage);
   ensureNodesRegistered();
-  registerWalkthroughNodes(); // the ui.tour.* node types must exist for DAG validation
+  registerWalkthroughNodes(); // the ui.walkthrough.* node types must exist for DAG validation (ADR 0376 renamed ui.tour.*)
   createHostAdapterSuite({ storage });
   registerWalkthroughAuthorTool();
 });
@@ -65,7 +66,7 @@ describe('Enrich-with-AI reachability — the ADR 0368 P3 grant, end-to-end (no 
       .map((def) => ({ def, validate: () => ({ ok: true as const }) }));
     expect(tools.some((t) => t.def.name === WALKTHROUGH_REGISTER_DRAFT_TOOL_ID), 'the tool must be OFFERED').toBe(true);
 
-    const before = listRegisteredWorkflows({ includeTransient: true, includeArchived: true }).length;
+    const beforeIds = new Set(listRegisteredWorkflows({ includeTransient: true, includeArchived: true }).map((d) => d.workflowId));
 
     // Script the model: round 1 emits the register-draft call with enriched
     // steps (as the Enrich composer prompt drives it to); round 2 finalizes.
@@ -93,13 +94,13 @@ describe('Enrich-with-AI reachability — the ADR 0368 P3 grant, end-to-end (no 
     expect(ret, 'the tour tool must have been executed').toBeTruthy();
     expect((ret as { status?: string }).status).toBe('ok');
 
-    // The register-draft EFFECT: exactly one new transient tour draft in the catalog.
-    const after = listRegisteredWorkflows({ includeTransient: true, includeArchived: true });
-    expect(after.length).toBe(before + 1);
-    const draft = after.find((d) =>
-      (d.metadata as { lifecycle?: { transient?: boolean } }).lifecycle?.transient === true
-      && (d.metadata as { walkthrough?: boolean }).walkthrough === true);
-    expect(draft, 'a transient tour draft must be registered').toBeTruthy();
+    // The register-draft EFFECT: exactly one NEW definition (by id, not by count, so a
+    // registration elsewhere in the worker cannot stand in), and it is a transient tour draft.
+    const added = listRegisteredWorkflows({ includeTransient: true, includeArchived: true }).filter((d) => !beforeIds.has(d.workflowId));
+    expect(added.map((d) => d.workflowId), 'exactly one definition was registered by this loop').toHaveLength(1);
+    const draft = added[0];
+    expect((draft!.metadata as { lifecycle?: { transient?: boolean } }).lifecycle?.transient, 'the draft is transient').toBe(true);
+    expect((draft!.metadata as { walkthrough?: boolean }).walkthrough, 'the draft is a walkthrough').toBe(true);
     registered.push(draft!.workflowId);
     expect(draft!.nodes.map((n) => n.typeId)).toEqual(['ui.walkthrough.step', 'ui.walkthrough.checkpoint']);
   });

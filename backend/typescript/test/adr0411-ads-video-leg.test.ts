@@ -13,6 +13,11 @@
  *  - Google/LinkedIn + video → `video_unsupported_platform` (not reel targets).
  *  - The defence-in-depth misfire guard: a LIVE image leg fed an actually-`video/*`
  *    asset fails closed `media_asset_wrong_kind` (never POST video bytes to adimages).
+ *
+ * TST-BQR-11. Red when: Google/LinkedIn video is not refused; a LIVE video
+ * dispatch is not refused before egress; the advideos plan carries real bytes
+ * or the creative loses `video_data`/its placeholders; TikTok's creative is not
+ * SINGLE_VIDEO; the live image leg's video-content-type guard is removed.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import http from 'node:http';
@@ -47,7 +52,7 @@ describe('ADR 0411 §P3c — ads video-dispatch leg', () => {
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
     process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE = 'true';
     const app = await createApp({ port: 18987, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-    storage = app.locals.storage;
+    storage = app.locals.storage as Storage;
     await __resetConnectionsStore();
 
     const [meta, google, tiktok, linkedin] = [recorder(), recorder(), recorder(), recorder()];
@@ -59,7 +64,7 @@ describe('ADR 0411 §P3c — ads video-dispatch leg', () => {
     process.env.OPENWOP_LINKEDIN_ADS_API_BASE = `http://127.0.0.1:${(linkedin.address() as AddressInfo).port}`;
     await createSecretConnection({ tenantId: 'tads', provider: 'meta-ads', kind: 'bearer', secret: 'META_TOKEN', scope: 'user', userId: 'u1' });
     await createSecretConnection({ tenantId: 'tads', provider: 'tiktok-ads', kind: 'bearer', secret: 'TT_TOKEN', scope: 'user', userId: 'u1' });
-    await storage.insertRun({ runId: 'run-1', workflowId: 'w', tenantId: 'tads', status: 'pending', inputs: null, metadata: {}, configurable: {}, createdAt: 'x', updatedAt: 'x' });
+    await storage.insertRun({ runId: 'run-1', workflowId: 'w', tenantId: 'tads', status: 'pending', inputs: null, metadata: {}, configurable: {}, createdAt: '2026-07-01T00:00:00.000Z', updatedAt: '2026-07-01T00:00:00.000Z' });
   });
 
   afterAll(async () => {
@@ -141,6 +146,7 @@ describe('ADR 0411 §P3c — ads video-dispatch leg', () => {
     expect(out.outcome).toBe('failed');
     if (out.outcome !== 'failed') return;
     expect(out.error).toBe('video_unsupported_platform');
+    expect(hits).toHaveLength(0);
   });
 
   it('misfire guard: a LIVE image leg fed an actually-video/* asset fails closed media_asset_wrong_kind — no adimages POST', async () => {

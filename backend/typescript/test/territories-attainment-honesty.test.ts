@@ -24,6 +24,9 @@ import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { transitionModelViaReview } from './territoryReview.js';
 import { eraseSubject } from '../src/host/subjectErasure.js';
+import type { Territory, TerritoryModel } from '../src/features/territories/entities/territories.js';
+import type { Quota, TerritoryAttainment } from '../src/features/territories/entities/quota.js';
+import type { Pipeline } from '../src/features/crm/entities/pipelines.js';
 
 let BASE: string;
 let server: http.Server;
@@ -39,15 +42,20 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
-interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; put: (p: string, b?: unknown) => Promise<Res> }
+interface Res<T> { status: number; body: T }
+interface Client {
+  get: <T = unknown>(p: string) => Promise<Res<T>>;
+  post: <T = unknown>(p: string, b?: unknown) => Promise<Res<T>>;
+  put: <T = unknown>(p: string, b?: unknown) => Promise<Res<T>>;
+}
 function client(): Client {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
     const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
+    // The one JSON boundary: each call site names the body's type (product types or a local interface).
+    return { status: res.status, body: out as T };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), put: (p, b) => call('PUT', p, b) };
 }
@@ -57,7 +65,7 @@ async function admin(): Promise<{ owner: Client; orgId: string; tenantId: string
   const tenantId = `org:terh-${Date.now()}-${n++}`;
   const owner = client();
   await owner.post('/host/openwop-app/test/login', { email: `o-${Date.now()}-${n++}@acme.test`, tenantId });
-  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   return { owner, orgId: org.body.orgId, tenantId };
 }
@@ -72,9 +80,9 @@ async function oneTerritory(
   deals: Array<{ amount: number; currency?: string; status?: string }>,
   quota?: { amount: number; currency?: string; period?: string } | Array<{ amount: number; currency?: string; period: string }>,
   reportPeriod: string | null = '2026-Q1',
-): Promise<any> {
-  const pipe = (await owner.get(`${crm(orgId)}/pipelines`)).body.pipelines[0];
-  const qualified = pipe.stages.find((s: any) => s.probability === 30);
+): Promise<TerritoryAttainment> {
+  const pipe = (await owner.get<{ pipelines: Pipeline[] }>(`${crm(orgId)}/pipelines`)).body.pipelines[0]!;
+  const qualified = pipe.stages.find((s) => s.probability === 30)!;
   for (const [i, d] of deals.entries()) {
     await owner.post(`${crm(orgId)}/deals`, {
       title: `D${i}`, amount: d.amount, ...(d.currency ? { currency: d.currency } : {}),
@@ -82,8 +90,8 @@ async function oneTerritory(
       closeDate: '2026-02-10', pipelineId: pipe.pipelineId, stageId: qualified.stageId,
     });
   }
-  const modelId = (await owner.post(`${t(orgId)}/models`, { name: `M${n++}` })).body.modelId;
-  const terr = (await owner.post(`${t(orgId)}/models/${modelId}/territories`, { name: 'All' })).body;
+  const modelId = (await owner.post<{ modelId: string }>(`${t(orgId)}/models`, { name: `M${n++}` })).body.modelId;
+  const terr = (await owner.post<Territory>(`${t(orgId)}/models/${modelId}/territories`, { name: 'All' })).body;
   await owner.post(`${t(orgId)}/models/${modelId}/rules`, { target: 'deal', territoryId: terr.territoryId, priority: 10, filter: { field: 'amount', op: 'gte', value: 0 } });
   for (const q of quota === undefined ? [] : Array.isArray(quota) ? quota : [quota]) {
     const put = await owner.put(`${t(orgId)}/models/${modelId}/territories/${terr.territoryId}/quota`, { period: q.period ?? '2026-Q1', amount: q.amount, ...(q.currency ? { currency: q.currency } : {}) });
@@ -91,9 +99,11 @@ async function oneTerritory(
   }
   await transitionModelViaReview(owner, t(orgId), modelId);
   const qs = reportPeriod ? `?period=${reportPeriod}` : '';
-  const rep = await owner.get(`${t(orgId)}/models/${modelId}/attainment${qs}`);
+  const rep = await owner.get<{ territories: TerritoryAttainment[] }>(`${t(orgId)}/models/${modelId}/attainment${qs}`);
   expect(rep.status, JSON.stringify(rep.body)).toBe(200);
-  return rep.body.territories.find((x: any) => x.territoryId === terr.territoryId);
+  const row = rep.body.territories.find((x) => x.territoryId === terr.territoryId);
+  if (!row) throw new Error(`no attainment row for ${terr.territoryId}`);
+  return row;
 }
 
 describe('TER2-B1 — the ratio is a claim, and round 1 never checked it', () => {
@@ -205,16 +215,16 @@ describe('review fold-ins — defects the independent pass found in the fix', ()
     // "denominator nobody authored" TER2-B2 is about — and it went undetected because a
     // currency-LESS row never entered the currency set at all.
     const { __putQuotaForErasure } = await import('../src/features/territories/entities/quota.js');
-    const pipe = (await owner.get(`${crm(orgId)}/pipelines`)).body.pipelines[0];
-    const qualified = pipe.stages.find((s: any) => s.probability === 30);
+    const pipe = (await owner.get<{ pipelines: Pipeline[] }>(`${crm(orgId)}/pipelines`)).body.pipelines[0]!;
+    const qualified = pipe.stages.find((s) => s.probability === 30)!;
     await owner.post(`${crm(orgId)}/deals`, { title: 'D', amount: 1000, currency: 'USD', closeDate: '2026-02-10', pipelineId: pipe.pipelineId, stageId: qualified.stageId });
-    const modelId = (await owner.post(`${t(orgId)}/models`, { name: 'Legacy' })).body.modelId;
-    const terr = (await owner.post(`${t(orgId)}/models/${modelId}/territories`, { name: 'All' })).body;
+    const modelId = (await owner.post<{ modelId: string }>(`${t(orgId)}/models`, { name: 'Legacy' })).body.modelId;
+    const terr = (await owner.post<Territory>(`${t(orgId)}/models/${modelId}/territories`, { name: 'All' })).body;
     await owner.post(`${t(orgId)}/models/${modelId}/rules`, { target: 'deal', territoryId: terr.territoryId, priority: 10, filter: { field: 'amount', op: 'gte', value: 0 } });
     expect((await owner.put(`${t(orgId)}/models/${modelId}/territories/${terr.territoryId}/quota`, { period: '2026-Q2', amount: 100_000, currency: 'USD' })).status).toBe(200);
     await transitionModelViaReview(owner, t(orgId), modelId);
 
-    const before = (await owner.get(`${t(orgId)}/models/${modelId}/attainment`)).body.territories[0];
+    const before = (await owner.get<{ territories: TerritoryAttainment[] }>(`${t(orgId)}/models/${modelId}/attainment`)).body.territories[0]!;
     expect(before.currency).toBe('USD');                 // control: one real row, fine
     expect(before.ratioUnavailable).toBeUndefined();
 
@@ -226,7 +236,7 @@ describe('review fold-ins — defects the independent pass found in the fix', ()
       territoryId: terr.territoryId, period: '2026-Q1', amount: 50_000, repSplits: [],
       updatedAt: new Date().toISOString(),
     });
-    const after = (await owner.get(`${t(orgId)}/models/${modelId}/attainment`)).body.territories[0];
+    const after = (await owner.get<{ territories: TerritoryAttainment[] }>(`${t(orgId)}/models/${modelId}/attainment`)).body.territories[0]!;
     expect(after.quota).toBe(150_000);                   // the sum is still reported…
     expect(after.quotaCurrencyMixed).toBe(true);         // …but it claims no unit
     expect(after.currency).toBeUndefined();
@@ -250,31 +260,37 @@ describe('review fold-ins — defects the independent pass found in the fix', ()
 
   it('M2: the model AUTHOR is erased too — the commit counted three subject fields, there were four', async () => {
     const { owner, orgId, tenantId } = await admin();
-    const me = (await owner.get('/host/openwop-app/me')).body;
-    const modelId = (await owner.post(`${t(orgId)}/models`, { name: 'Authored' })).body.modelId;
-    const before = (await owner.get(`${t(orgId)}/models`)).body.models.find((m: any) => m.modelId === modelId);
-    expect(before.createdBy).toBeTruthy();
-    await eraseSubject(tenantId, before.createdBy);
-    const after = (await owner.get(`${t(orgId)}/models`)).body.models.find((m: any) => m.modelId === modelId);
-    expect(after.createdBy).toBe('[erased]');
-    expect(me).toBeTruthy();
+    const modelId = (await owner.post<{ modelId: string }>(`${t(orgId)}/models`, { name: 'Authored' })).body.modelId;
+    const before = (await owner.get<{ models: TerritoryModel[] }>(`${t(orgId)}/models`)).body.models.find((m) => m.modelId === modelId);
+    const author = before?.createdBy;
+    expect(author).toMatch(/\S/); // the acting user stamped it
+    if (!author) throw new Error('model has no author');
+    await eraseSubject(tenantId, author);
+    const after = (await owner.get<{ models: TerritoryModel[] }>(`${t(orgId)}/models`)).body.models.find((m) => m.modelId === modelId);
+    expect(after?.createdBy).toBe('[erased]');
   });
 });
 
 describe('TER2-B3 — an amount with no currency is not an amount of money', () => {
   it('refuses a quota amount with no currency, naming the field', async () => {
     const { owner, orgId } = await admin();
-    const modelId = (await owner.post(`${t(orgId)}/models`, { name: 'NoCur' })).body.modelId;
-    const terr = (await owner.post(`${t(orgId)}/models/${modelId}/territories`, { name: 'All' })).body;
-    const res = await owner.put(`${t(orgId)}/models/${modelId}/territories/${terr.territoryId}/quota`, { period: '2026-Q1', amount: 5000 });
+    const modelId = (await owner.post<{ modelId: string }>(`${t(orgId)}/models`, { name: 'NoCur' })).body.modelId;
+    const terr = (await owner.post<Territory>(`${t(orgId)}/models/${modelId}/territories`, { name: 'All' })).body;
+    const res = await owner.put<{ error: string; message: string; details: unknown }>(`${t(orgId)}/models/${modelId}/territories/${terr.territoryId}/quota`, { period: '2026-Q1', amount: 5000 });
     expect(res.status).toBe(400);
-    expect(JSON.stringify(res.body)).toMatch(/currency/i);
+    expect(res.body).toMatchObject({
+      error: 'validation_error',
+      message: 'A quota amount needs a currency — pick one so attainment can be compared against the deals it is measured by.',
+      details: { field: 'currency' },
+    });
+    // Nothing was saved by the refused PUT.
+    expect((await owner.get<{ quotas: Quota[] }>(`${t(orgId)}/models/${modelId}/quotas`)).body.quotas).toEqual([]);
   });
 
   it('a ZERO quota needs no currency — there is no unit to get wrong', async () => {
     const { owner, orgId } = await admin();
-    const modelId = (await owner.post(`${t(orgId)}/models`, { name: 'Zero' })).body.modelId;
-    const terr = (await owner.post(`${t(orgId)}/models/${modelId}/territories`, { name: 'All' })).body;
+    const modelId = (await owner.post<{ modelId: string }>(`${t(orgId)}/models`, { name: 'Zero' })).body.modelId;
+    const terr = (await owner.post<Territory>(`${t(orgId)}/models/${modelId}/territories`, { name: 'All' })).body;
     const res = await owner.put(`${t(orgId)}/models/${modelId}/territories/${terr.territoryId}/quota`, { period: '2026-Q1', amount: 0 });
     expect(res.status, JSON.stringify(res.body)).toBe(200);
   });
@@ -301,8 +317,8 @@ describe('TER2-B4 — subject erasure never reached territories', () => {
     const { owner, orgId, tenantId } = await admin();
     const gone = 'user:rep-gone';
     const stays = 'user:rep-stays';
-    const modelId = (await owner.post(`${t(orgId)}/models`, { name: 'Erase' })).body.modelId;
-    const terr = (await owner.post(`${t(orgId)}/models/${modelId}/territories`, {
+    const modelId = (await owner.post<{ modelId: string }>(`${t(orgId)}/models`, { name: 'Erase' })).body.modelId;
+    const terr = (await owner.post<Territory>(`${t(orgId)}/models/${modelId}/territories`, {
       name: 'West', managerSubjectId: gone, memberSubjectIds: [gone, stays],
     })).body;
     expect((await owner.put(`${t(orgId)}/models/${modelId}/territories/${terr.territoryId}/quota`, {
@@ -314,27 +330,27 @@ describe('TER2-B4 — subject erasure never reached territories', () => {
     // was broken: the eraser existed nowhere, so nothing was registered to call.
     await eraseSubject(tenantId, gone);
 
-    const after = (await owner.get(`${t(orgId)}/models/${modelId}/territories`)).body.territories.find((x: any) => x.territoryId === terr.territoryId);
-    expect(after.memberSubjectIds).toEqual([stays]);
-    expect(after.managerSubjectId).toBeUndefined();
+    const after = (await owner.get<{ territories: Territory[] }>(`${t(orgId)}/models/${modelId}/territories`)).body.territories.find((x) => x.territoryId === terr.territoryId);
+    expect(after?.memberSubjectIds).toEqual([stays]);
+    expect(after?.managerSubjectId).toBeUndefined();
 
-    const quotas = (await owner.get(`${t(orgId)}/models/${modelId}/quotas`)).body.quotas;
-    const split = quotas[0].repSplits;
-    expect(split.find((s: any) => s.subjectId === gone)).toBeUndefined();
-    expect(split.find((s: any) => s.subjectId === stays).amount).toBe(6000);
+    const quotas = (await owner.get<{ quotas: Quota[] }>(`${t(orgId)}/models/${modelId}/quotas`)).body.quotas;
+    const split = quotas[0]!.repSplits;
+    expect(split.find((s) => s.subjectId === gone)).toBeUndefined();
+    expect(split.find((s) => s.subjectId === stays)?.amount).toBe(6000);
     // The amount SURVIVES under the sentinel: erasure is a privacy action, not a
     // quiet restatement of what the territory was asked to sell.
-    expect(split.find((s: any) => s.subjectId === 'user:[erased]').amount).toBe(4000);
+    expect(split.find((s) => s.subjectId === 'user:[erased]')?.amount).toBe(4000);
   });
 
   it('leaves another subject alone (the negative control)', async () => {
     const { owner, orgId, tenantId } = await admin();
     const keep = 'user:rep-keep';
-    const modelId = (await owner.post(`${t(orgId)}/models`, { name: 'Erase2' })).body.modelId;
-    const terr = (await owner.post(`${t(orgId)}/models/${modelId}/territories`, { name: 'East', managerSubjectId: keep, memberSubjectIds: [keep] })).body;
+    const modelId = (await owner.post<{ modelId: string }>(`${t(orgId)}/models`, { name: 'Erase2' })).body.modelId;
+    const terr = (await owner.post<Territory>(`${t(orgId)}/models/${modelId}/territories`, { name: 'East', managerSubjectId: keep, memberSubjectIds: [keep] })).body;
     await eraseSubject(tenantId, 'user:somebody-else');
-    const after = (await owner.get(`${t(orgId)}/models/${modelId}/territories`)).body.territories.find((x: any) => x.territoryId === terr.territoryId);
-    expect(after.memberSubjectIds).toEqual([keep]);
-    expect(after.managerSubjectId).toBe(keep);
+    const after = (await owner.get<{ territories: Territory[] }>(`${t(orgId)}/models/${modelId}/territories`)).body.territories.find((x) => x.territoryId === terr.territoryId);
+    expect(after?.memberSubjectIds).toEqual([keep]);
+    expect(after?.managerSubjectId).toBe(keep);
   });
 });

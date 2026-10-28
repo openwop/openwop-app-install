@@ -10,6 +10,9 @@
  *   - composition with ADR 0033 readiness: an un-ready required connection
  *     forces a proposal even for an allowlisted auto workflow (most-restrictive).
  *
+ * TST-BLP-2. Red when: the heartbeat ignores a `deny` verdict (the card runs),
+ * treats `review` as runnable, or inverts the guided HIGH-priority split.
+ *
  * @see docs/adr/0036-agent-profile-policy-enforcement.md
  */
 
@@ -82,6 +85,8 @@ describe('runHeartbeatOnce — agentProfile policy enforcement (ADR 0036)', () =
     });
     const res = await runHeartbeatOnce(deps, entry);
     expect(res.picked).toBe(false);
+    // The skip is the POLICY's, not "no eligible tasks" / "no boards".
+    expect(res.reason).toBe('policy_denied');
     expect(res.runId).toBeUndefined();
     expect(res.proposed).toBeUndefined();
   });

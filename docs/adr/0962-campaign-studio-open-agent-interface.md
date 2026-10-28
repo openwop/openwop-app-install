@@ -1,6 +1,6 @@
 # ADR 0962 — Campaign Studio open agent interface (MCP, A2A later)
 
-Status: Proposed
+Status: Accepted (P0–P1 implemented, P2 partly implemented 2026-10-20; P2 rest, P3–P4 open)
 
 Date: 2026-10-19
 
@@ -124,6 +124,118 @@ on (0921 D5); an unknown or foreign `clientId` gets the same not-found.
    retries with `inputResponses` answering the gate ⇒ refused; a human in the
    role approves in the inbox ⇒ run proceeds; the audit chain shows both.
 
+> **CORRECTED 2026-10-20 (P0 build, /architect): D4.1 is enforced on the MCP lane,
+> not by ACLs in pack config — yet.** Measured: an approve-mode 0942 gate was
+> already refused over MCP (its compiled role refs make `needsNamedApprover` hold),
+> but nine content gates on campaign chains carry no ACL (seven `core.approvalGate`
+> in campaign-brief / campaign-channels, two `core.chat.approvalGate` in
+> campaign-journeys), and the 0942 gate in legacy mode suspends with none. Putting
+> `approverRoleRefs` on those nine in pack config would **lock humans out**: role
+> refs resolve only against `run.metadata.approverOrgId`
+> (`approverResolution.ts`, `routes/interrupts.ts`), and brief/channel/journey runs
+> started outside a campaign carry none, so the role would resolve to nobody.
+> - **As built:** `mcpSemantics.resumeInterrupt` refuses every approval interrupt on
+>   a **campaign run** with the existing "decide it in the inbox" text, before
+>   anything is consumed. A campaign run carries the ADR 0941 tag, the ADR 0921
+>   client stamp, or a definition expanded from a `campaign-` chain (provenance
+>   survives a from-chain copy), itself or on any ancestor (bounded; a missing or
+>   too-deep ancestor fails closed) — `host/campaignRunGuard.ts`.
+> - **Ratchets** (`test/adr0962-p0-campaign-gates.test.ts`, real chain loader): every
+>   gate in a campaign chain is the 0942 gate or one of the nine identity-pinned open
+>   gates (shrink-only); every campaign chain id, and only those, starts `campaign-`;
+>   the guard's metadata keys equal the features' keys.
+> - **D4.1b (open):** ACLs on the nine gates once P1's D3 client stamping gives
+>   every campaign chain run an `approverOrgId`. The pinned list shrinks to zero then.
+>
+> > **CORRECTED 2026-10-25 (ADR 0955 P5): the pinned list is TWELVE, not nine.** The three
+> > new journey blueprints (`abandoned-signup`, `post-webinar`, `welcome-email-sms`) each carry
+> > a `#signoff` `core.chat.approvalGate` of the same kind as welcome-series and
+> > re-engage-contact: a per-contact human sign-off before the first send, usually on a run
+> > that has no `approverOrgId`. They are pinned open for the same reason as those two, and
+> > they are covered by the same MCP guard through `campaign-` chain provenance. They are not
+> > routed through the 0942 autonomy gate. Under an `auto` policy that gate would let a
+> > journey start sending with no human at all, which ADR 0955 does not decide. D4.1b now
+> > covers twelve gates (five in campaign-journeys).
+> - **X5 is unchanged by P0.** The token lane's unsigned body voter (ISWF-23) and
+>   the session lane's Editor floor on the nine open gates still apply to humans.
+>   P0 closes X1 (an external agent satisfying a campaign gate), not X5.
+
+> **D4.2 as built:** ADR 0942 P2 already refuses the run's `actingUserId` and owner
+> on every 0942 gate, trusted or not (stricter than "when untrusted"). An MCP run's
+> `actingUserId` is the key's principal, so the key owner's inbox vote on their
+> agent's request is refused, and the agent's own retry is refused by D4.1. P0 adds
+> the witnesses in `test/adr0942-p2-autonomy-gate.test.ts`.
+
+> **D8 as built:** agent manifest `a2aExposed: false` (loader → registry). One helper,
+> `a2aListedAgents()` / `isA2aDispatchable()` in `host/a2aCard.ts`, feeds the 0.3
+> card and both `message/send` lanes; a hidden agent is refused exactly as an
+> unknown one. Every agent in the five `vendor.openwop-app.campaign-*.agents` packs
+> carries the flag, and a ratchet holds every future one (0943's team lands there).
+> **Q3 answered:** `runAgentDispatch` is deterministic (no model call, no tool
+> execution), so D8 is defence in depth plus no longer leaking campaign agent ids
+> and labels on the public card.
+
+> **P1 as built (2026-10-20):** the read tools are the chain pack
+> `core.openwop.workflows.campaign-studio-mcp` (`campaign-studio.mcp.{list,get,
+> performance,pending-gates,run-status,explain}`, internal), registered chain-backed
+> from campaign-ops with the ADR 0087 gates merged in (`features/campaign-ops/
+> mcpTools.ts`; `mcpFeatureToggle: campaign-orchestration`, `mcpSafetyTier: read`).
+> Backing nodes are `feature.campaign-ops.nodes.mcp-*` (role `read`, D6 class
+> `none`). Every read goes through ONE helper, `bindExternalRead`
+> (`features/campaign-ops/externalRead.ts`):
+> - **Access first:** a foreign, unknown or other-client-bound client is one
+>   `not_found`, so `external_agents_off` cannot confirm a client exists.
+> - **D7:** an external run (MCP-started or untrusted) needs the client's
+>   `externalAgents` to be `read` or `request`. Absent or unknown means `off`. The
+>   field is set on `PATCH …/campaign-ops/clients/:orgId` (`host:members:manage`),
+>   and an agency-admin select sits in the campaign-ops client bar (4 locales).
+> - **D3 corrected:** `bindRunToClient` never stamped. The bind now stamps the run
+>   with the ADR 0921 client stamp and `approverOrgId` (first writer wins via
+>   `mergeRunMetadata(ifAbsentKey)`, then verified). A run already naming another
+>   approver org is refused. This is what D4.1b needs.
+> - **Pending gates** are bounded (newest 50 campaigns × 20 runs, `truncated` when
+>   capped) and carry titles, roles and counts, never payload content.
+> - **`campaign_explain`** reads the 0942 gate decisions from the run's own events
+>   (decision, ruleId, layer) plus any waiting gate's rule, and links `/runs/<id>`.
+>   The 0960 replay view is not built yet.
+> - `request` is accepted now, but no request tool exists until P2.
+
+> **P2 as built (2026-10-20): `campaign_request_change` only.** Its chain is
+> `campaign-studio.mcp.request-change` (write tier, `mcpApproval: 'never'`). An
+> MRTR confirmation would be the agent confirming itself (X1). The backing node
+> calls `externalRead.mcpRequestChange`:
+> - **Bind:** `bindExternal(…, 'request')` needs `workspace:write` on the client
+>   and `externalAgents === 'request'`. A `read`-only client is refused with
+>   `external_agents_read_only`, after the not-found check.
+> - **Request:** the call writes a change request through ADR 0923's
+>   `createRequest`, so duplicate detection, the 1–10 asset rule and the
+>   inactive-client refusal are unchanged. It records `via: {protocol:'mcp', runId}`.
+> - **Run:** it starts the change-request run through a launcher seam. The result
+>   is `awaiting-input`, never "done".
+>
+> **Three further corrections from building P2:**
+> - **No `parentRunId` link.** `startWorkflowRun` takes none, and adding one would
+>   change sub-run semantics. Instead, the child's `source` and `trustBoundary`
+>   are COPIED from the calling MCP run, never asserted, plus
+>   `openwop-app.externalAgent.viaRunId`. Its client stamp already makes it a
+>   campaign run for D4.1.
+> - **D4.3 for this lane is ADR 0924's unconditional human approval of the change
+>   set**, with separation of duties: the person behind the key cannot approve it.
+>   It is not the 0942 floor, because the 0942 chokepoint on campaign-ops execute is
+>   ADR 0942 P3b. **P3b requirement:** that chokepoint must take `mcpOrigin` from the
+>   run's own `source`/`trustBoundary` when the run carries no autonomy stamp,
+>   because the stamp contributor stamps only ADR 0941-tagged runs.
+> - **Two authority layers.** A write-tier MCP tool's gate needs `workspace:write` in
+>   the caller's workspace (MCP authority is workspace-wide, X2). The node then needs
+>   `workspace:write` on the CLIENT. An agency operator is a workspace editor with a
+>   role on each client; root roles do not reach client orgs.
+>
+> **Still OPEN, with nothing stubbed:**
+> - `campaign_draft_creative`: needs ADR 0946's variant-set chain (#5088 is the store only).
+> - `campaign_propose_budget_change`: needs ADR 0952 P3 (#5078).
+> - `campaign_propose_experiment`: needs ADR 0949's pre-registration chain.
+> - The P2 exit's budget-change end to end follows #5078.
+
 ### D5 — Inbound content is untrusted all the way down
 
 - `trustBoundary: 'untrusted'` is already stamped (`mcpSemantics.ts:404`);
@@ -195,9 +307,9 @@ Three narrowing switches, all existing or additive: the deployment switch
 
 | Phase | Scope | Exit criteria |
 |---|---|---|
-| P0 | D4.1 ACL ratchet + D4.2 self-approval refusal in the 0942 gate; D8 A2A exclusion | MRTR self-approval test red before, green after; A2A 0.3 card lists no team agent |
-| P1 | Read tools + `campaign-studio.mcp` chain pack + `externalAgents` field | Route test via the MCP mount: client B invisible to an A-only operator; `/v1/tools` lists them only with the toggle on |
-| P2 | Request tools (change, creative draft, budget, experiment) + D4.3 clamp | End-to-end: Claude-style client requests a budget change, gate lands in the inbox, MCP retry refused, human approval proceeds |
+| P0 | D4.1 ACL ratchet + D4.2 self-approval refusal in the 0942 gate; D8 A2A exclusion | MRTR self-approval test red before, green after; A2A 0.3 card lists no team agent — **implemented 2026-10-20** (branch `feat/mcp-0962-p0`, stacked on ADR 0942 P2): D4.1 as corrected above |
+| P1 | Read tools + `campaign-studio.mcp` chain pack + `externalAgents` field | Route test via the MCP mount: client B invisible to an A-only operator; `/v1/tools` lists them only with the toggle on — **implemented 2026-10-20** (`test/adr0962-p1-mcp-read-tools.test.ts`, branch `feat/mcp-0962-p1`) |
+| P2 | Request tools (change, creative draft, budget, experiment) + D4.3 clamp | End-to-end: Claude-style client requests a budget change, gate lands in the inbox, MCP retry refused, human approval proceeds — **`campaign_request_change` implemented 2026-10-20** (branch `feat/mcp-0962-p2`); creative / budget / experiment wait on 0946 / #5078 / 0949 (see P2 note) |
 | P3 | `campaign_brief_to_launch` (after 0961) + UI card + attribution | Command center shows claimed client + principal |
 | P4 | A2A study: authenticated extended card, tenant-scoped skills | Decision recorded; RFC filed if the card shape changes |
 
@@ -225,10 +337,10 @@ Do not build P4 without `/prd` first.
 1. **(David)** May a client ever let an external agent act without a human gate
    (`externalAgents: 'auto-within-caps'`, inside 0952 spend caps)? Recommended:
    not in v1.
+   **Decided (2026-10-19, David): No. Every external effect from an MCP-started run waits for a named person (ADR 0942 D10 floor). Revisit only as a separate per-client opt-in if a real need appears.**
 2. **(David)** Is the MCP mount on in production for the agency demo? (ADR 0788
    turned it off on 2026-09-30 pending its fixes; re-measure before P1.)
-3. Can the A2A 0.3 `runAgentDispatch` lane reach live tools? If not, D8's
-   exclusion is defence in depth; if so, it is a P0 Blocker.
+3. ~~Can the A2A 0.3 `runAgentDispatch` lane reach live tools?~~ **Answered (P0): no** — it is deterministic (`agentDispatch.ts` "no model call"); D8 is defence in depth.
 4. Should `campaign_pending_gates` be callable at all by an external agent, given
    it reveals which roles are bottlenecks? Recommended: yes, titles only.
 5. Should a run started by an `owk_` key whose issuer later loses the client role
@@ -250,3 +362,45 @@ Do not build P4 without `/prd` first.
   publishes, sends or spends; every campaign gate declares a role ACL so an
   external agent can never approve its own request. Per-client `externalAgents`
   switch (default off). A2A deferred. No RFC for the MCP phases."
+
+
+### Recovery composition review — 2026-10-25 (validation pending)
+
+This host-extension work composes the original MCP P0/P1/P2 history with the
+current four-tool strategist, client memory/report nodes and autonomy veto
+refusal. The campaign-ops pack is the union (15 nodes, version 1.3.0), and the
+strategist preserves its current prompts/tools with the A2A exposure restriction
+(1.4.1). No new normative wire contract or advertised capability is introduced.
+
+The external read boundary now refuses a missing source run and validates all
+client stamps through the existing canonical reader before binding or reading.
+A same-client legacy binding repairs its missing approver org only after the
+primary binding is confirmed, then verifies both fields. Source performance
+reads also check the connectors feature's live access. Conflicting/malformed
+bindings, unavailable gate definitions and approval external-event waits fail
+closed. Pending-gate and run-status summaries never return arbitrary gate
+prompt/title text or interrupt bearer tokens. The client access editor's state
+is owned by its selected client, so a staged permission cannot follow a switch.
+
+Regression cases are authored for those paths; no tests from this composed
+stack have run while PR #5207 owns the guarded canonical slot. New source flags
+and per-client outside-agent permissions remain unchanged. Only the reviewed
+request path is exposed; wider external writes and A2A campaign dispatch remain
+unavailable. The next slot must regenerate and review all census and pack
+metadata, run focused tests and then pass full canonical CI before merge.
+
+
+### Recovery qualification — 2026-10-25
+
+Native backend typecheck and 20 focused runtime files (238 cases) pass,
+including the real MCP request replay, immutable stage decision inheritance,
+client binding and privacy refusals, and existing spend/veto/fork fences.
+Pack-surface parity passes all six cases. The regenerated floor adds only
+start-stage and mcp-request-change to the served side-effect set; there are
+377 floor entries, 334 served, 43 undischarged and zero unresolved. No waiver
+is added. Frontend lint, canonical build, test types and 16 focused files
+(97 cases) pass, including public navigation and client-switch state. The
+public shell now loads only on public routes, retaining 1,095 bytes of entry
+budget headroom. Whole-slot peaks were 4.56 GiB backend and 3.27 GiB frontend,
+with no swap growth or resource stop. Full composed canonical CI remains
+required before merge; this qualification makes no production change.

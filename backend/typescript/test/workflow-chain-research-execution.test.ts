@@ -5,13 +5,23 @@
  * `search` (core.web.search) → `synthesize` (core.ai.chatCompletion) →
  * `notify` (feature.notifications.nodes.notify).
  *
- * MODE CHOSEN: honest-failure via the REAL executor — the same contract
- * `workflow-chain-exec-ops-execution.test.ts` documents. `synthesize`'s
- * config omits `provider`/`model` (an operator-configurable template, not a
- * hardcoded credential), so the run runs `search` for REAL (proving genuine
- * wiring against the host's `ctx.webSearch` surface) and then fails cleanly
- * at `synthesize` with `error.code === 'provider_not_supported'` — never
- * silently skipped, never reaching `notify`.
+ * MODE CHOSEN: honest-failure via the REAL executor. The chain freezes a real
+ * provider into `synthesize` at expansion (ADR 0903 P3) and the test tenant has
+ * no BYOK credential, so the run runs `search` for REAL against the host's
+ * `ctx.webResearch` surface — with every search / AI key cleared around the case,
+ * that is the `engine: 'demo'` placeholder (`webResearchSurface.ts`), never a live
+ * provider — and then fails cleanly at `synthesize` with
+ * `error.code === 'openwop-app.byok_required'`, never reaching `notify`.
+ *
+ * §CORRECTION (/grade-tests 8f W5): `core.web.search` now executes the HOST node
+ * (`src/bootstrap/nodes.ts` `webSearchNode`), not `packs/core.openwop.web-search`
+ * as the history below says, and that node falls back to the first string input
+ * (`findFirstStringValue`) when `query` is absent. So the `question`→`query`
+ * rename this file witnessed is now DOUBLE-GUARDED: reverting it no longer fails
+ * a run (8fw5g6-rs-query, sabotaging the pack, was vacuous). What this case can
+ * still prove is that the host node threads the run's query through the search
+ * surface (8fw5g6-rs-query-r2) and that its results reach the node outputs
+ * (8fw5g6-rs-results).
  *
  * BUG FOUND + FIXED AT THE ROOT (`examples/workflow-chain-packs/research/
  * pack.json`):
@@ -60,7 +70,7 @@
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { getSetCookies } from './headerCookies.js';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
@@ -82,11 +92,17 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
-interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res> }
+/** Search / AI keys the host could read: cleared per case, restored after (rule: no live provider). */
+const PROVIDER_KEYS = ['OPENWOP_WEBSEARCH_API_KEY', 'OPENWOP_WEBSEARCH_ENGINE', 'OPENWOP_WEBSEARCH_BASE_URL', 'BRAVE_API_KEY', 'TAVILY_API_KEY', 'SERPAPI_API_KEY', 'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY', 'OPENWOP_MOCK_PROVIDER_ENABLED'] as const;
+const savedKeys = new Map<string, string | undefined>();
+beforeEach(() => { for (const k of PROVIDER_KEYS) { savedKeys.set(k, process.env[k]); delete process.env[k]; } });
+afterEach(() => { for (const k of PROVIDER_KEYS) { const v = savedKeys.get(k); if (v === undefined) delete process.env[k]; else process.env[k] = v; } });
+
+interface Res<T> { status: number; body: T }
+interface Client { get: <T>(p: string) => Promise<Res<T>>; post: <T>(p: string, b?: unknown) => Promise<Res<T>> }
 function client(): Client {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
@@ -94,41 +110,40 @@ function client(): Client {
     });
     const sc = getSetCookies(res.headers);
     for (const c of sc as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
+    return { status: res.status, body: (await res.json()) as T };
   };
-  return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b) };
+  return { get: <T>(p: string) => call<T>('GET', p), post: <T>(p: string, b?: unknown) => call<T>('POST', p, b) };
 }
 
 let n = 0;
-async function ownerOrg(): Promise<{ owner: Client; orgId: string; tenantId: string }> {
+async function ownerLogin(): Promise<{ owner: Client; tenantId: string }> {
   const tenantId = `org:researchchain-${Date.now()}-${n++}`;
   const owner = client();
-  const r = await owner.post('/host/openwop-app/test/login', { email: `researchchain-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await owner.post<unknown>('/host/openwop-app/test/login', { email: `researchchain-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
-  expect(org.status, JSON.stringify(org.body)).toBe(201);
-  return { owner, orgId: org.body.orgId, tenantId };
+  return { owner, tenantId };
 }
 
 interface RunSnapshot { status: string; error?: { code: string; message: string } }
+const POLLS = 80;
+/** Poll until the run settles; THROWS (naming the run and the poll count) if it never does. */
 async function pollRun(owner: Client, runId: string): Promise<RunSnapshot> {
   let snap: RunSnapshot = { status: 'pending' };
-  for (let i = 0; i < 80; i++) {
-    const r = await owner.get(`/runs/${runId}`);
+  for (let i = 0; i < POLLS; i++) {
+    const r = await owner.get<RunSnapshot>(`/runs/${runId}`);
     expect(r.status, JSON.stringify(r.body)).toBe(200);
-    snap = r.body as RunSnapshot;
-    if (snap.status === 'completed' || snap.status === 'failed' || snap.status === 'cancelled' || snap.status.startsWith('waiting')) break;
+    snap = r.body;
+    if (snap.status === 'completed' || snap.status === 'failed' || snap.status === 'cancelled' || snap.status.startsWith('waiting')) return snap;
     await new Promise((res) => setTimeout(res, 25));
   }
-  return snap;
+  throw new Error(`run ${runId} did not settle after ${POLLS} polls (last status: ${snap.status})`);
 }
 
 interface BundleEvent { type?: string; nodeId?: string; payload?: Record<string, unknown> }
 async function bundleEvents(owner: Client, runId: string): Promise<BundleEvent[]> {
-  const b = await owner.get(`/runs/${runId}/debug-bundle`);
+  const b = await owner.get<{ events?: BundleEvent[] }>(`/runs/${runId}/debug-bundle`);
   expect(b.status, JSON.stringify(b.body)).toBe(200);
-  return (b.body.events as BundleEvent[]) ?? [];
+  return b.body.events ?? [];
 }
 function completedOutputs(events: BundleEvent[], nodeSuffix: string): Record<string, unknown> {
   const ev = events.find((e) => e.type === 'node.completed' && e.nodeId?.endsWith(`_${nodeSuffix}`));
@@ -138,7 +153,7 @@ function completedOutputs(events: BundleEvent[], nodeSuffix: string): Record<str
 
 describe('research.web-brief — real reads, honest missing-credential failure', () => {
   it('runs the search node for real (the query fix) and fails cleanly at synthesize (no BYOK credential)', async () => {
-    const { owner } = await ownerOrg();
+    const { owner } = await ownerLogin();
 
     const found = getChain('research.web-brief');
     expect(found, 'research.web-brief chain must be loaded at boot').toBeTruthy();
@@ -146,9 +161,9 @@ describe('research.web-brief — real reads, honest missing-credential failure',
     const expanded = expandChain(found!.chain, { params });
     registerWorkflow(expanded);
 
-    const create = await owner.post('/runs', { workflowId: expanded.workflowId, inputs: params });
+    const create = await owner.post<{ runId: string }>('/runs', { workflowId: expanded.workflowId, inputs: params });
     expect(create.status, JSON.stringify(create.body)).toBe(201);
-    const runId = create.body.runId as string;
+    const runId = create.body.runId;
 
     const snap = await pollRun(owner, runId);
     expect(snap.status).toBe('failed');
@@ -167,12 +182,18 @@ describe('research.web-brief — real reads, honest missing-credential failure',
     // completes with the real query threaded through and real results.
     const searchOutputs = completedOutputs(events, 'search');
     expect(searchOutputs.query).toBe('What is OpenWOP?');
-    expect(Array.isArray(searchOutputs.results)).toBe(true);
-    expect((searchOutputs.results as unknown[]).length).toBeGreaterThan(0);
+    // With no key configured the surface answers its labelled demo placeholder;
+    // the expected URL is built by hand (encodeURIComponent of the query).
+    expect(searchOutputs.engine).toBe('demo');
+    expect(searchOutputs.results).toEqual([expect.objectContaining({
+      url: 'https://duckduckgo.com/?q=What%20is%20OpenWOP%3F',
+      title: 'Web search: What is OpenWOP?',
+      rank: 1,
+    })]);
 
     // synthesize is where it fails — never silently skipped or reached notify.
     const failedEvent = events.find((e) => e.type === 'node.failed');
     expect(failedEvent?.nodeId?.endsWith('_synthesize')).toBe(true);
-    expect(events.some((e) => e.type === 'node.completed' && e.nodeId?.endsWith('_notify'))).toBe(false);
+    expect(events.filter((e) => e.nodeId?.endsWith('_notify')).map((e) => e.type)).toEqual([]); // never started
   });
 });

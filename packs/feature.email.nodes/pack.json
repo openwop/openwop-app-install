@@ -1,12 +1,19 @@
 {
   "name": "feature.email.nodes",
-  "version": "1.2.1",
+  "version": "1.3.0",
   "kind": "node",
-  "description": "Email feature node pack — read/render nodes over the ctx.features.email surface. list-templates reads an org's templates; render interpolates a template for a contact ({{contact.*}}). The campaign send (fan-out + provider dispatch) is a deliberate follow-on, not a workflow node.",
+  "description": "Email feature node pack — read/render nodes over the ctx.features.email surface, plus submit-for-review (a side effect: it queues the campaign's send approval; it never approves or sends). list-templates reads an org's templates; render interpolates a template for a contact ({{contact.*}}).",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
-  "keywords": ["feature", "email", "marketing", "templates"],
-  "engines": { "openwop": ">=1.0.0 <3.0.0" },
+  "keywords": [
+    "feature",
+    "email",
+    "marketing",
+    "templates"
+  ],
+  "engines": {
+    "openwop": ">=1.0.0 <3.0.0"
+  },
   "nodes": [
     {
       "typeId": "feature.email.nodes.list-templates",
@@ -34,7 +41,23 @@
       "category": "integration",
       "role": "read",
       "capabilities": []
+    },
+    {
+      "typeId": "feature.email.nodes.submit-for-review",
+      "version": "1.0.0",
+      "label": "Email: Submit for Review",
+      "description": "Submits a draft email campaign for send review over ctx.features.email.submitForReview (one approval row per campaign; a resubmit repins it). Inputs: { orgId, campaignId }. Output: { campaignId, status, approvalId, templateVersion }. A human approves in the Approvals inbox; this node can never approve or send.",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": [
+        "side-effectful"
+      ]
     }
   ],
-  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+  "runtime": {
+    "language": "javascript",
+    "format": "esm",
+    "entry": "./index.mjs",
+    "minRuntimeVersion": "node>=20"
+  }
 }

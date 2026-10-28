@@ -4,27 +4,75 @@
  *  queryable; neverPublic), find-or-create by deterministic externalKey (a
  *  webhook retry never duplicates), messageId-idempotent CAS appends, thread
  *  cap, inbound-reply re-open, CAS status transitions, tenant/org isolation,
- *  and host.servicedesk.ticket.* emission.
+ *  and host.servicedesk.ticket.* emission (asserted through a pass-through spy
+ *  on `emitHostEvent`: exact type + ids-only payload).
+ * P5: the PUBLIC widget thread is read through the real route, so the
+ * redaction asserted is the product's `publicView`, not a copy of it.
+ *
+ * PROTECTED (security floor / PII / org isolation; ADR 0422 + ADR 0878).
+ * Ceiling, PROTECTED-LOW (SD-OBS-SEAM-1): the inbound multi-observer FAN-OUT
+ * has no reachable test seam (`notifyInboundObserver` is private to
+ * connections/inboundWebhooks.ts and is reached only by a provider-signed
+ * webhook through `handleInboundEvent`), so that case asserts registration
+ * only and the dedupe probe sd-observer stays vacuous by design.
+ * The service-desk toggles are GLOBAL config writes (`saveConfig` is not
+ * tenant-scoped): their stored state is captured before the file and restored
+ * after it. Sabotage witnesses (grade-tests 8f w2): sd-* in g4-probes.json and
+ * g4-reprobes.json.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/index.js';
 import { createTicket, appendMessage, setStatus, assignTicket, getTicket, listTickets, TICKET_TYPE } from '../src/features/service-desk/tickets.js';
 import { MAX_MESSAGES_PER_TICKET } from '../src/features/service-desk/ticketTypes.js';
+import { getStoredConfig, saveConfig, deleteConfig } from '../src/host/featureToggles/service.js';
+import { getToggleDefault } from '../src/host/featureToggles/registry.js';
+import type { HostEvent } from '../src/host/hostEventDispatcher.js';
+import type { FormDef, Submission } from '../src/features/forms/formsService.js';
+import type { ToggleConfig } from '../src/host/featureToggles/types.js';
+
+/** Every host event the product emitted, recorded by a PASS-THROUGH spy (the real
+ *  dispatcher still runs). Every export of the module is kept (wave 42). */
+const emitted = vi.hoisted(() => [] as Array<{ type: string; tenantId: string; payload: Record<string, unknown> }>);
+vi.mock('../src/host/hostEventDispatcher.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../src/host/hostEventDispatcher.js')>();
+  return {
+    ...real,
+    emitHostEvent: (event: HostEvent): Promise<void> => {
+      emitted.push({ type: event.type, tenantId: event.tenantId, payload: event.payload });
+      return real.emitHostEvent(event);
+    },
+  };
+});
 
 let server: http.Server;
+let HTTP_BASE = '';
 const T = 'tenant-sd-1';
 const ORG = 'org-1';
 const BASE = { tenantId: T, orgId: ORG, subject: 'Printer on fire', channel: 'manual', createdBy: 'u1' };
+const TOGGLES = ['service-desk', 'service-desk.widget'] as const;
+const priorToggles = new Map<string, ToggleConfig | null>();
+
+/** Turn a (global) toggle ON from its registry default. */
+async function toggleOn(id: (typeof TOGGLES)[number]): Promise<void> {
+  await saveConfig({ ...getToggleDefault(id)!, status: 'on' }, 'test');
+}
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { void (server.address() as AddressInfo); res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { HTTP_BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  for (const id of TOGGLES) priorToggles.set(id, await getStoredConfig(id));
 });
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
+afterAll(async () => {
+  for (const id of TOGGLES) {
+    const prior = priorToggles.get(id) ?? null;
+    if (prior) await saveConfig(prior, 'test'); else await deleteConfig(id, 'test');
+  }
+  await new Promise<void>((res) => server.close(() => res()));
+});
 
 describe('ticket lifecycle', () => {
   it('creates, find-or-creates by externalKey (retry-safe), and appends idempotently', async () => {
@@ -88,15 +136,21 @@ describe('kernel discipline', () => {
   });
 
   it('emits host.servicedesk.ticket.* on mutations (ids-only payload)', async () => {
-    const { onHostEventForTest } = await import('../src/host/hostEventDispatcher.js').then((m) => ({ onHostEventForTest: (m as Record<string, unknown>).__testOnEmit }));
-    // The dispatcher's fanout needs boot deps; assert via the emit path being
-    // fire-and-forget safe in this harness (no throw) and the service surface
-    // recording mutations — the event CONTRACT (type names + ids-only) is
-    // asserted structurally here.
     const { ticket } = await createTicket({ ...BASE, subject: 'Event check', externalKey: 'form:evt' });
     const after = await setStatus(T, ticket.ticketId, 'pending', 'user:u1');
-    expect(after.status).toBe('pending'); // mutation path exercised end-to-end incl. emit (no-throw)
-    expect(typeof onHostEventForTest === 'function' || onHostEventForTest === undefined).toBe(true);
+    expect(after.status).toBe('pending');
+    const mine = emitted.filter((e) => e.payload.ticketId === ticket.ticketId);
+    expect(mine.map((e) => e.type)).toEqual(['host.servicedesk.ticket.created', 'host.servicedesk.ticket.status-changed']);
+    // The exact ids-only payload: no subject, no messages, no bodies.
+    expect(mine[1]).toEqual({
+      type: 'host.servicedesk.ticket.status-changed',
+      tenantId: T,
+      payload: { ticketId: ticket.ticketId, orgId: ORG, status: 'pending', channel: 'manual', from: 'open', actor: 'user:u1' },
+    });
+    for (const e of mine) {
+      expect(Object.keys(e.payload)).not.toContain('subject');
+      expect(Object.keys(e.payload)).not.toContain('messages');
+    }
   });
 });
 
@@ -104,9 +158,7 @@ describe('ADR 0422 P2 — intake', () => {
   it('whatsapp inbound files onto ONE continuous ticket; provider retries dedupe; unconfigured no-ops', async () => {
     const { onWhatsAppInboundForTickets, setIntakeConfig } = await import('../src/features/service-desk/intake.js');
     // ADR 0878 D9 — intake files only while Service desk is ON.
-    const { saveConfig } = await import('../src/host/featureToggles/service.js');
-    const { getToggleDefault } = await import('../src/host/featureToggles/registry.js');
-    await saveConfig({ ...getToggleDefault('service-desk')!, status: 'on' }, 'test');
+    await toggleOn('service-desk');
     const t2 = 'tenant-sd-intake';
     // Unconfigured: no ticket minted.
     await onWhatsAppInboundForTickets({ tenantId: t2, connectionId: 'conn-1', body: { From: '+15550001', Body: 'help', MessageSid: 'SMa' } });
@@ -136,15 +188,17 @@ describe('ADR 0422 P2 — intake', () => {
     registerServiceDeskIntake(); // registers after — reuses the marker
     // ADR 0850 D1 — the form sink now reads the service-desk toggle (FRMWF-13: it
     // was the only sink that read none), so the tenant has it on here.
-    const { saveConfig } = await import('../src/host/featureToggles/service.js');
-    const { getToggleDefault } = await import('../src/host/featureToggles/registry.js');
-    await saveConfig({ ...getToggleDefault('service-desk')!, status: 'on' }, 'test');
+    await toggleOn('service-desk');
     // ADR 0850 D1 — a form files tickets only when it opted in, into its own org.
-    const form = { formId: 'form-1', tenantId: t3, orgId: 'org-f', title: 'Support request', status: 'published', fields: [], createTicket: true };
+    const at = '2026-07-18T00:00:00.000Z';
+    const form: FormDef = {
+      formId: 'form-1', tenantId: t3, orgId: 'org-f', title: 'Support request', status: 'published', fields: [],
+      createToContact: false, createTicket: true, createdBy: 'admin-1', createdAt: at, updatedAt: at,
+    };
     // A real submission carries its form's org; the ticket files into that org.
-    const submission = { submissionId: 'sub-1', tenantId: t3, orgId: 'org-f', values: { email: 'a@b.co', message: 'it broke' } };
-    await runSubmissionSinks(form as never, submission as never);
-    await runSubmissionSinks(form as never, submission as never); // sink retry — idempotent
+    const submission: Submission = { submissionId: 'sub-1', tenantId: t3, orgId: 'org-f', formId: 'form-1', values: { email: 'a@b.co', message: 'it broke' }, meta: {}, createdAt: at };
+    await runSubmissionSinks(form, submission);
+    await runSubmissionSinks(form, submission); // sink retry — idempotent
     const tickets = await listTickets(t3, 'org-f');
     expect(tickets).toHaveLength(1);
     expect(tickets[0]!.channel).toBe('form');
@@ -153,21 +207,26 @@ describe('ADR 0422 P2 — intake', () => {
   });
 
   it('the multi-observer seam runs BOTH registrants (window ledger + tickets coexist)', async () => {
+    // PROTECTED-LOW (SD-OBS-SEAM-1) — kept by ruling, NOT a witness of its title.
+    // The fan-out (`notifyInboundObserver`) is private to inboundWebhooks.ts and
+    // reachable only through a provider-signed webhook, and no test-only seam is
+    // exported, so this case can assert only that REGISTERING several observers
+    // on one provider is accepted and invokes none of them. That both registrants
+    // run, and that a re-registered fn is not run twice, is UNWITNESSED here
+    // (probe sd-observer is vacuous by design). The earlier "covered structurally
+    // by the intake test above" comment was false: the intake test calls the
+    // ticket handler directly and never goes through the observer list.
     const { registerInboundObserver } = await import('../src/features/connections/inboundWebhooks.js');
     const calls: string[] = [];
     const a = async (): Promise<void> => { calls.push('a'); };
     const b = async (): Promise<void> => { calls.push('b'); };
-    registerInboundObserver('test-provider' as never, a);
-    registerInboundObserver('test-provider' as never, b);
-    registerInboundObserver('test-provider' as never, a); // same fn re-registered = no dup
-    const mod = await import('../src/features/connections/inboundWebhooks.js');
-    const notify = (mod as Record<string, unknown>).__notifyInboundObserverForTest as ((p: string, e: unknown) => Promise<void>) | undefined;
-    if (notify) {
-      await notify('test-provider', { tenantId: 't', connectionId: 'c', body: {}, now: 0 });
-      expect(calls).toEqual(['a', 'b']);
-    } else {
-      expect(calls).toEqual([]); // covered structurally by the intake test above
-    }
+    // A real provider id (no cast). Nothing in this file sends a zoom webhook.
+    expect(() => {
+      registerInboundObserver('zoom-webinar', a);
+      registerInboundObserver('zoom-webinar', b);
+      registerInboundObserver('zoom-webinar', a); // same fn re-registered = no dup (unwitnessed)
+    }).not.toThrow();
+    expect(calls, 'registration must never invoke an observer').toEqual([]);
   });
 });
 
@@ -177,12 +236,7 @@ describe('ADR 0422 P3 — the governed agent lane', () => {
     return createAgentToolProvider({ tenantId: scope.tenantId, runId: 'run-sd', ...(scope.actingUserId ? { actingUserId: scope.actingUserId } : {}) }).executeTool({ name, input });
   };
 
-  const enableServiceDesk = async () => {
-    const { saveConfig } = await import('../src/host/featureToggles/service.js');
-    const { getToggleDefault } = await import('../src/host/featureToggles/registry.js');
-    const d = getToggleDefault('service-desk');
-    await saveConfig({ ...d!, status: 'on' }, 'test');
-  };
+  const enableServiceDesk = (): Promise<void> => toggleOn('service-desk');
 
   // CHAT-FIRST-PORT-AUDIT D8: the agent tools now share the routes' org-scope
   // predicate, so the acting user needs a real membership + scope in the ticket's
@@ -245,10 +299,15 @@ describe('ADR 0422 P3 — the governed agent lane', () => {
     // @ts-expect-error — .mjs pack module has no type declarations (pure-JS node pack).
     const { nodes } = await import('../../../packs/feature.service-desk.nodes/index.mjs');
     await expect(nodes['feature.service-desk.nodes.list-tickets']({ inputs: {}, features: {} })).rejects.toMatchObject({ code: 'host_capability_missing' });
+    // Own fixtures (shuffle-safe): one ticket in ORG, one in another org of the same tenant.
+    const { ticket: mineTicket } = await createTicket({ ...BASE, subject: 'Pack read', externalKey: 'form:pack-mine' });
+    const { ticket: otherTicket } = await createTicket({ ...BASE, orgId: 'org-other-pack', subject: 'Pack other', externalKey: 'form:pack-other' });
     const { buildServiceDeskSurface } = await import('../src/features/service-desk/surface.js');
     const out = await nodes['feature.service-desk.nodes.list-tickets']({ inputs: { orgId: ORG }, features: { 'service-desk': buildServiceDeskSurface({ tenantId: T, runId: 'r' }) } });
     expect(out.status).toBe('success');
-    expect(Array.isArray(out.outputs.tickets)).toBe(true);
+    const ids = (out.outputs.tickets as Array<{ ticketId: string }>).map((t) => t.ticketId);
+    expect(ids).toContain(mineTicket.ticketId);
+    expect(ids, 'the pack read crossed into another org').not.toContain(otherTicket.ticketId);
   });
 
   // CHAT-FIRST-PORT-AUDIT D8 — cross-org isolation within a SHARED tenant.
@@ -322,6 +381,10 @@ describe('ADR 0422 P3 — the governed agent lane', () => {
 describe('ADR 0422 P4 — SLA clocks', () => {
   it('stamps sla_due_at from the priority table, sweeps a breach exactly once, settles on solve', async () => {
     const { sweepSlaTimers, slaTimers } = await import('../src/features/service-desk/sla.js');
+    // The sweep fires only while Service desk is ON (it suppresses otherwise), so
+    // this case sets the toggle itself instead of inheriting it from an earlier
+    // case (it went red under --sequence.seed=17 before this line).
+    await toggleOn('service-desk');
     const t4 = 'tenant-sd-sla';
     const { ticket } = await createTicket({ tenantId: t4, orgId: 'org-s', subject: 'SLA me', channel: 'manual', priority: 'urgent', externalKey: 'form:sla-1', createdBy: 'u1', slaHoursByPriority: { urgent: 1 } });
     expect(ticket.slaDueAt).toBeTruthy();
@@ -369,21 +432,33 @@ describe('ADR 0422 P5 — the public widget lane', () => {
 
   it('the visitor thread is find-or-create per visitor and the public view never contains internal notes', async () => {
     const { setIntakeConfig } = await import('../src/features/service-desk/intake.js');
-    const t5 = 'tenant-sd-widget';
+    const { mintPublicIntakeKey } = await import('../src/features/service-desk/widgetRoutes.js');
+    const t5 = 'tenant-sd-widget-thread';
+    await toggleOn('service-desk');
+    await toggleOn('service-desk.widget');
     await setIntakeConfig(t5, 'org-w', 'admin-1');
-    const { ticket } = await createTicket({
-      tenantId: t5, orgId: 'org-w', subject: 'Widget: hello', channel: 'widget',
-      externalKey: 'widget:visitor-abc',
-      firstMessage: { messageId: 'w:visitor-abc:1', body: 'hello', author: 'visitor', direction: 'inbound' },
-      createdBy: 'system:service-desk-widget',
-    });
+    const key = await mintPublicIntakeKey(t5);
+    const PUB = `${HTTP_BASE}/host/openwop-app/public-service-desk/${key}`;
+
+    // The visitor's first message mints the session and the thread (the real route).
+    const sent = await fetch(`${PUB}/messages`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ body: 'hello' }) });
+    expect(sent.status).toBe(201);
+    const { visitorToken, ticket } = (await sent.json()) as { visitorToken: string; ticket: { ticketId: string } };
+    // A second message with the token lands on the SAME thread (find-or-create per visitor).
+    const again = await fetch(`${PUB}/messages`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ body: 'anyone there?', visitorToken }) });
+    expect(again.status).toBe(201);
+    expect(((await again.json()) as { ticket: { ticketId: string } }).ticket.ticketId).toBe(ticket.ticketId);
+
     await appendMessage(t5, ticket.ticketId, { messageId: 'note-1', body: 'internal: refund approved up to $50', author: 'user:agent1', direction: 'internal' });
     await appendMessage(t5, ticket.ticketId, { messageId: 'out-1', body: 'We are on it!', author: 'user:agent1', direction: 'outbound' });
-    // The public projection (what the widget routes serve).
-    const full = await getTicket(t5, ticket.ticketId);
-    const publicMessages = full!.messages.filter((m) => m.direction !== 'internal');
-    expect(full!.messages).toHaveLength(3);
-    expect(publicMessages).toHaveLength(2);
-    expect(JSON.stringify(publicMessages)).not.toContain('refund approved'); // the internal note NEVER leaks
+    expect((await getTicket(t5, ticket.ticketId))!.messages, 'premise: the internal note IS on the thread').toHaveLength(4);
+
+    // What the widget route actually serves the visitor.
+    const read = await fetch(`${PUB}/thread`, { headers: { 'x-visitor-token': visitorToken } });
+    expect(read.status).toBe(200);
+    const view = (await read.json()) as { ticket: { messages: Array<Record<string, unknown>> } };
+    expect(view.ticket.messages.map((m) => m.body)).toEqual(['hello', 'anyone there?', 'We are on it!']);
+    expect(JSON.stringify(view)).not.toContain('refund approved'); // the internal note NEVER leaks
+    for (const m of view.ticket.messages) expect(Object.keys(m).sort()).toEqual(['at', 'body', 'direction']); // no author / internal ids
   });
 });

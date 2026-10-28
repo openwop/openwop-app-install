@@ -11,10 +11,11 @@ import express, { type Request, type Response } from 'express';
 import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { authorizeOrgScope, requireString, optionalString } from '../featureRoute.js';
+import { getSenderHealth, resumeSender, warmupRemaining } from '../crm/senderHealth.js';
 import { VENDOR_ROOT } from '../../middleware/protocolVersion.js';
 import { checkEntitlement } from '../../host/entitlementSeam.js';
-import { CONTACT_STAGES, type ContactStage } from '../crm/contactsService.js';
-import { getConsent, mergeConsentCategories, fullMarketingOptOut, isErasureTombstoned } from '../consent/consentService.js';
+import { CONTACT_STAGES, resolveContactSurvivor, type ContactStage } from '../crm/contactsService.js';
+import { getConsent, mergeConsentCategories, fullMarketingOptOut, isErasureTombstoned, assertNotErased } from '../consent/consentService.js';
 
 /** The channels the EMAIL preference-center page manages. Deliberately NOT the
  *  full `MARKETING_CHANNELS`: `marketing.whatsapp` (ADR 0394) is strict
@@ -25,7 +26,8 @@ type PreferenceChannel = (typeof PREFERENCE_CHANNELS)[number];
 import { addSuppression, suppressionBlocksSend } from '../crm/suppressionService.js';
 import {
   listTemplates, getTemplate, createTemplate, updateTemplate, deleteTemplate, type EmailBodyFormat,
-  listTemplateVersions, getTemplateVersion, restoreTemplateVersion, templateVersionOf, emailApprovalGateOn, setEmailApprovers, assertSendAllowed,
+  listTemplateVersions, getTemplateVersion, restoreTemplateVersion, templateVersionOf, emailApprovalGateOn, emailWarmupOn, setEmailApprovers, assertSendAllowed,
+  listTopics, createTopic, updateTopic, deleteTopic, MAX_TOPICS_PER_ORG,
   listCampaigns, getCampaign, createCampaign, deleteCampaign, listSends, sendCampaign, sendTestEmail,
   getEmailSettings, setSenderAddress,
 } from './emailService.js';
@@ -34,9 +36,10 @@ import { renderMarkdownPreview } from './safeMarkdown.js';
 import { diffText } from '../../host/textDiff.js';
 import { resolveEligibleApprovers } from '../../host/approverResolution.js';
 import { submitForReview, withdrawReview } from './sendApproval.js';
+import { setTopicOptOut, listTopicOptOuts } from '../consent/topicOptOuts.js';
 
 /** ADR 0256 — narrow an untrusted body field to a known body format (else undefined). */
-const parseFormat = (v: unknown): EmailBodyFormat | undefined => (v === 'markdown' ? 'markdown' : v === 'text' ? 'text' : undefined);
+const parseFormat = (v: unknown): EmailBodyFormat | undefined => (v === 'markdown' ? 'markdown' : v === 'text' ? 'text' : v === 'sms' ? 'sms' : undefined);
 /** ADR 0905 D1 — the optimistic-concurrency token: `expectedVersion` in the body, or an
  *  `If-Match` header (`"3"`, `3` or `W/"3"`). Absent ⇒ undefined (last writer wins);
  *  present but not a positive integer ⇒ 400, never silently ignored. */
@@ -125,6 +128,32 @@ export function registerEmailRoutes(deps: RouteDeps): void {
     return ctx;
   };
 
+  // ── ADR 0955 D7 — sending health (the per-sender breaker) ──
+  // Read by any member of the org; RESUME is a person's act only: a browser session (an API key
+  // or an agent token carries none) holding `host:members:manage` on that org. No workflow verb,
+  // no agent tool — the breaker is never resumed `auto`.
+  app.get(`${ORG}/deliverability`, async (req, res, next) => {
+    try {
+      const { orgId, tenantId } = await authz(req, 'workspace:read');
+      const health = await getSenderHealth(tenantId, orgId);
+      const canResume = !!req.cookieSession && await authorizeOrgScope(req, FEATURE, 'host:members:manage').then(() => true, () => false);
+      // ADR 0955 D7 (P4b) — the warm-up ceiling, when the workspace has it on.
+      const w = (await emailWarmupOn(tenantId)) ? await warmupRemaining(tenantId, orgId) : null;
+      const warmup = w && Number.isFinite(w.cap) ? { day: w.day + 1, cap: w.cap, remaining: w.remaining } : null;
+      res.json({ ...health, canResume, warmup });
+    } catch (err) { next(err); }
+  });
+  app.post(`${ORG}/deliverability/resume`, async (req, res, next) => {
+    try {
+      if (!req.cookieSession) {
+        throw new OpenwopError('forbidden_scope', 'Only a person signed in to the app can resume sending.', 403, { reason: 'person_required' });
+      }
+      const { orgId, tenantId, user } = await authz(req, 'host:members:manage');
+      const state = await resumeSender(tenantId, orgId, user.userId);
+      res.json({ state });
+    } catch (err) { next(err); }
+  });
+
   // ── settings (sender identity — required before campaigns can send) ──
   app.get(`${ORG}/settings`, async (req, res, next) => {
     try {
@@ -197,7 +226,7 @@ export function registerEmailRoutes(deps: RouteDeps): void {
       const { orgId, tenantId } = await authz(req, 'webhooks:manage'); // ADR 0848 D3
       const body = (req.body ?? {}) as Record<string, unknown>;
       const provider = typeof body.provider === 'string' ? body.provider : '';
-      if (!isBounceProvider(provider)) throw new OpenwopError('validation_error', 'provider must be sendgrid or postmark.', 400, { field: 'provider' });
+      if (!isBounceProvider(provider)) throw new OpenwopError('validation_error', 'provider must be sendgrid, postmark or ses.', 400, { field: 'provider' });
       const verificationSecret = requireString(body.verificationSecret, 'verificationSecret');
       const cfg = await setWebhookConfig({
         tenantId, orgId, provider, verificationSecret,
@@ -233,8 +262,14 @@ export function registerEmailRoutes(deps: RouteDeps): void {
         }).catch(() => null)),
       })));
       const settings = await getEmailSettings(tenantId, orgId);
+      // ADR 0994 D1 — which connected provider each kind of email would use, in its
+      // purpose's preference order (null = nothing connected).
+      const connected = new Set(providers.filter((p) => p.connected).map((p) => p.provider));
+      const firstConnected = (purpose: 'transactional' | 'marketing'): string | null =>
+        emailSendProviders(purpose).find((p) => connected.has(p)) ?? null;
       res.json({
         providers,
+        routing: { transactional: firstConnected('transactional'), marketing: firstConnected('marketing') },
         defaultProvider: process.env.OPENWOP_EMAIL_DEFAULT_PROVIDER ?? null,
         senderAddress: settings?.senderAddress ?? null,
       });
@@ -246,7 +281,10 @@ export function registerEmailRoutes(deps: RouteDeps): void {
     try {
       const { user, orgId, tenantId } = await authz(req, 'workspace:write');
       const body = (req.body ?? {}) as Record<string, unknown>;
-      const t = await createTemplate({ tenantId, orgId, name: requireString(body.name, 'name'), subject: requireString(body.subject, 'subject'), body: requireString(body.body, 'body'), ...(parseFormat(body.format) ? { format: parseFormat(body.format) } : {}), createdBy: user.userId });
+      // ADR 0955 D8 — an SMS template has no subject line.
+      const fmt = parseFormat(body.format);
+      const subject = fmt === 'sms' ? (typeof body.subject === 'string' ? body.subject : '') : requireString(body.subject, 'subject');
+      const t = await createTemplate({ tenantId, orgId, name: requireString(body.name, 'name'), subject, body: requireString(body.body, 'body'), ...(fmt ? { format: fmt } : {}), createdBy: user.userId });
       res.status(201).json(t);
     } catch (err) { next(err); }
   });
@@ -358,6 +396,9 @@ export function registerEmailRoutes(deps: RouteDeps): void {
       const stage = optionalString(body.stage);
       if (stage && !CONTACT_STAGES.includes(stage as ContactStage)) throw new OpenwopError('validation_error', '`stage` is not a valid contact stage.', 400, { field: 'stage' });
       const segmentId = optionalString(body.segmentId);
+      // ADR 0941 P2 — the MarketingCampaign this send belongs to; `createCampaign`
+      // refuses a dangling or cross-org id (a uniform 404).
+      const marketingCampaignId = optionalString(body.marketingCampaignId);
       // Mutual-exclusivity + segment-existence are enforced in `createCampaign`
       // itself (ADR 0211 §2) so every caller — this route, a replay/fork, a
       // future workflow verb — gets the same 400, not just the HTTP path.
@@ -365,6 +406,8 @@ export function registerEmailRoutes(deps: RouteDeps): void {
         tenantId, orgId, templateId,
         ...(stage ? { stage: stage as ContactStage } : {}),
         ...(segmentId ? { segmentId } : {}),
+        ...(marketingCampaignId ? { marketingCampaignId } : {}),
+        ...(optionalString(body.topicId) ? { topicId: optionalString(body.topicId)! } : {}),
         createdBy: user.userId,
       });
       res.status(201).json(c);
@@ -381,6 +424,36 @@ export function registerEmailRoutes(deps: RouteDeps): void {
       res.status(204).end();
     } catch (err) { next(err); }
   });
+  // ── ADR 0905 D7 — subscription topics (opt-out lists; the ASM-group port) ──
+  app.get(`${ORG}/topics`, async (req, res, next) => {
+    try { const { orgId, tenantId } = await authz(req, 'workspace:read'); res.json({ topics: await listTopics(tenantId, orgId), max: MAX_TOPICS_PER_ORG }); }
+    catch (err) { next(err); }
+  });
+  app.post(`${ORG}/topics`, async (req, res, next) => {
+    try {
+      const { user, orgId, tenantId } = await authz(req, 'workspace:write');
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const t = await createTopic({ tenantId, orgId, name: requireString(body.name, 'name'), ...(typeof body.description === 'string' ? { description: body.description } : {}), createdBy: user.userId });
+      res.status(201).json(t);
+    } catch (err) { next(err); }
+  });
+  app.patch(`${ORG}/topics/:topicId`, async (req, res, next) => {
+    try {
+      const { orgId, tenantId } = await authz(req, 'workspace:write');
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const t = await updateTopic(tenantId, orgId, req.params.topicId, { ...(typeof body.name === 'string' ? { name: body.name } : {}), ...(typeof body.description === 'string' ? { description: body.description } : {}) });
+      if (!t) throw new OpenwopError('not_found', 'Topic not found.', 404, { topicId: req.params.topicId });
+      res.json(t);
+    } catch (err) { next(err); }
+  });
+  app.delete(`${ORG}/topics/:topicId`, async (req, res, next) => {
+    try {
+      const { orgId, tenantId } = await authz(req, 'workspace:write');
+      if (!(await deleteTopic(tenantId, orgId, req.params.topicId))) throw new OpenwopError('not_found', 'Topic not found.', 404, { topicId: req.params.topicId });
+      res.status(204).end();
+    } catch (err) { next(err); }
+  });
+
   // ADR 0905 D3 — send review. Submit queues (or re-pins) the ONE `email-campaign-send`
   // row; the decision happens in the shared Approvals inbox (`/approvals/:id/claim|reject`).
   app.post(`${ORG}/campaigns/:campaignId/submit-review`, async (req, res, next) => {
@@ -596,7 +669,8 @@ export function registerEmailRoutes(deps: RouteDeps): void {
       const rec = await getConsent(row.tenantId, row.contactId);
       const current = {} as Record<PreferenceChannel, boolean>;
       for (const ch of PREFERENCE_CHANNELS) current[ch] = (rec?.categories[`marketing.${ch}`] ?? rec?.categories.marketing) === true;
-      res.status(200).type('html').send(renderPreferencesPage(req.params.token, current, 'form', publicPageBundle(locale), locale));
+      const topicView = await topicViewFor(row);
+      res.status(200).type('html').send(renderPreferencesPage(req.params.token, current, 'form', publicPageBundle(locale), locale, topicView));
     } catch (err) { next(err); }
   });
   app.post(`${PUB}/p/:token`, urlencoded, async (req, res, next) => {
@@ -607,9 +681,15 @@ export function registerEmailRoutes(deps: RouteDeps): void {
       const row = await resolvePreferencesToken(req.params.token);
       if (!row) { log.info('public token refused', { kind: 'preferences' }); sendPublicError(res, 404, 'unknownPreferencesLink', locale); return; }
       const body = (req.body ?? {}) as Record<string, unknown>;
-      const on = (k: PreferenceChannel): boolean => { const v = body[k]; return v === 'on' || v === 'true' || v === '1'; };
+      const on = (k: string): boolean => { const v = body[k]; return v === 'on' || v === 'true' || v === '1'; };
       const choice = { email: on('email'), sms: on('sms'), push: on('push') };
       const anyOn = choice.email || choice.sms || choice.push;
+      // ADR 0905 D7 — topics: a CLOSED world (only the token's org topics, at most 20), so
+      // an unauthenticated form cannot mint rows. Unticking narrows (always accepted);
+      // re-ticking an opted-out topic WIDENS and rides the same fresh-link rule below.
+      const topicView = await topicViewFor(row);
+      const topicChoice = new Map(topicView.topics.map((t) => [t.topicId, on(`topic:${t.topicId}`)]));
+      const topicWidening = topicView.topics.some((t) => topicChoice.get(t.topicId) && topicView.optedOut.has(t.topicId));
       // ADR 0655 D3 (EMWF-3 / EM-UX-23) — NARROWING is accepted from this link
       // forever (the opt-out must keep working); WIDENING — any channel turning ON
       // whose EFFECTIVE stored value is off — needs a FRESH link and a clean
@@ -620,7 +700,7 @@ export function registerEmailRoutes(deps: RouteDeps): void {
       const stored = await getConsent(row.tenantId, row.contactId);
       const effective = (ch: PreferenceChannel): boolean =>
         (stored?.categories[`marketing.${ch}`] ?? stored?.categories.marketing ?? false) === true;
-      const widening = PREFERENCE_CHANNELS.some((ch) => choice[ch] && !effective(ch));
+      const widening = PREFERENCE_CHANNELS.some((ch) => choice[ch] && !effective(ch)) || topicWidening;
       if (widening) {
         const ageMs = Date.now() - Date.parse(row.createdAt);
         const fresh = Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= preferenceWidenMs();
@@ -632,7 +712,7 @@ export function registerEmailRoutes(deps: RouteDeps): void {
           log.info('preference-center re-grant refused', { tenantId: row.tenantId, reason: refused, fresh });
           const current = {} as Record<PreferenceChannel, boolean>;
           for (const ch of PREFERENCE_CHANNELS) current[ch] = effective(ch);
-          res.status(409).type('html').send(renderPreferencesPage(req.params.token, current, refused, publicPageBundle(locale), locale));
+          res.status(409).type('html').send(renderPreferencesPage(req.params.token, current, refused, publicPageBundle(locale), locale, topicView));
           return;
         }
       }
@@ -682,10 +762,19 @@ export function registerEmailRoutes(deps: RouteDeps): void {
         if (err instanceof OpenwopError && err.code === 'subject_erased') {
           const current = {} as Record<PreferenceChannel, boolean>;
           for (const ch of PREFERENCE_CHANNELS) current[ch] = effective(ch);
-          res.status(409).type('html').send(renderPreferencesPage(req.params.token, current, 'refused-erased', publicPageBundle(locale), locale));
+          res.status(409).type('html').send(renderPreferencesPage(req.params.token, current, 'refused-erased', publicPageBundle(locale), locale, topicView));
           return;
         }
         throw err;
+      }
+      // ADR 0905 D7 — topic opt-outs through the ONE consent owner (narrowing; a re-tick
+      // only reaches here past the widening gate above).
+      if (topicView.orgId) {
+        for (const t of topicView.topics) {
+          const want = topicChoice.get(t.topicId) === true;
+          if (want === !topicView.optedOut.has(t.topicId)) continue; // unchanged
+          await setTokenTopicOptOut(row, topicView.orgId, t.topicId, !want);
+        }
       }
       let overlayFailed = false;
       if (!anyOn && row.email) {
@@ -707,7 +796,7 @@ export function registerEmailRoutes(deps: RouteDeps): void {
       // durable write that did not land is not a 2xx. (NOT a machine-caller
       // argument: nothing but a human browser ever posts here. See /u above.)
       res.status(overlayFailed ? 503 : 200).type('html')
-        .send(renderPreferencesPage(req.params.token, choice, overlayFailed ? 'partial' : 'saved', publicPageBundle(locale), locale));
+        .send(renderPreferencesPage(req.params.token, choice, overlayFailed ? 'partial' : 'saved', publicPageBundle(locale), locale, await topicViewFor(row)));
     } catch (err) { next(err); }
   });
 }
@@ -869,8 +958,50 @@ ${PUBLIC_PAGE_STYLE}
 /** ADR 0655 D3 — days a preferences link may WIDEN consent (narrowing is forever). */
 function preferenceWidenMs(): number { const n = Number(process.env.OPENWOP_EMAIL_PREFERENCE_WIDEN_DAYS ?? 30); return (Number.isFinite(n) && n > 0 ? n : 30) * 86_400_000; }
 
-function renderPreferencesPage(token: string, current: Record<PreferenceChannel, boolean>, state: 'form' | 'saved' | 'partial' | 'refused-stale' | 'refused-suppressed' | 'refused-erased', t: PublicPageT, locale: string): string {
+/** ADR 0905 D7 — the token's org topics + the recipient's opt-outs among them. */
+interface TopicView { orgId: string | null; topics: { topicId: string; name: string; description?: string }[]; optedOut: Set<string> }
+interface PreferenceTopicOwner { tenantId: string; campaignId: string; contactId: string; orgId?: string }
+async function topicViewFor(row: PreferenceTopicOwner): Promise<TopicView> {
+  // A legacy token has channel authority only. Never borrow topic authority from
+  // a campaign id that can be deleted and recreated in a different workspace.
+  if (!row.orgId || await isErasureTombstoned(row.tenantId, row.contactId)) return { orgId: null, topics: [], optedOut: new Set() };
+  const recipient = await resolveContactSurvivor(row.tenantId, row.contactId);
+  if (!recipient || await isErasureTombstoned(row.tenantId, recipient.contactId)) return { orgId: null, topics: [], optedOut: new Set() };
+  const topics = (await listTopics(row.tenantId, row.orgId)).slice(0, MAX_TOPICS_PER_ORG)
+    .map((x) => ({ topicId: x.topicId, name: x.name, ...(x.description ? { description: x.description } : {}) }));
+  const optedOut = await listTopicOptOuts(row.tenantId, row.orgId, recipient.contactId, topics.map((x) => x.topicId));
+  return { orgId: row.orgId, topics, optedOut };
+}
+
+async function setTokenTopicOptOut(row: PreferenceTopicOwner, orgId: string, topicId: string, optedOut: boolean): Promise<void> {
+  if (!row.orgId || row.orgId !== orgId) throw new OpenwopError('conflict', 'This link has no topic authority.', 409);
+  for (let attempt = 0; attempt < 4; attempt++) {
+    await assertNotErased(row.tenantId, row.contactId);
+    const recipient = await resolveContactSurvivor(row.tenantId, row.contactId);
+    if (!recipient) throw new OpenwopError('not_found', 'This recipient is no longer available.', 404);
+    await setTopicOptOut(row.tenantId, orgId, recipient.contactId, topicId, optedOut, 'preference-center');
+    await assertNotErased(row.tenantId, row.contactId);
+    // A merge may finish between resolution and the topic write, after its own
+    // fold already ran. Follow the current owner again before reporting saved.
+    const after = await resolveContactSurvivor(row.tenantId, row.contactId);
+    if (after?.contactId === recipient.contactId) return;
+  }
+  throw new OpenwopError('conflict', 'The recipient changed concurrently; retry the preference update.', 409);
+}
+
+function renderPreferencesPage(token: string, current: Record<PreferenceChannel, boolean>, state: 'form' | 'saved' | 'partial' | 'refused-stale' | 'refused-suppressed' | 'refused-erased', t: PublicPageT, locale: string, topicView?: TopicView): string {
   const action = `${VENDOR_ROOT}/public-email/p/${escapeHtml(encodeURIComponent(token))}`;
+  const topicRows = (topicView?.topics ?? []).map((tp) => `
+      <label style="display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border:1px solid #d5d5d5;border-radius:8px;cursor:pointer">
+        <input type="checkbox" name="${escapeHtml(`topic:${tp.topicId}`)}" ${topicView!.optedOut.has(tp.topicId) ? '' : 'checked'} style="width:18px;height:18px;margin-top:2px">
+        <span><span>${escapeHtml(tp.name)}</span>${tp.description ? `<br><span style="color:#555;font-size:0.85rem">${escapeHtml(tp.description)}</span>` : ''}</span>
+      </label>`).join('\n');
+  const topicsBlock = topicRows ? `
+      <fieldset style="border:0;padding:0;margin:8px 0 0;display:flex;flex-direction:column;gap:10px">
+        <legend style="font-weight:600;margin-bottom:4px">${escapeHtml(t('topicsLegend'))}</legend>
+        <p style="margin:0;color:#555;font-size:0.85rem">${escapeHtml(t('topicsLede'))}</p>
+${topicRows}
+      </fieldset>` : '';
   const rows = PREFERENCE_CHANNELS.map((ch) => `
       <label style="display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid #d5d5d5;border-radius:8px;cursor:pointer">
         <input type="checkbox" name="${escapeHtml(ch)}" ${current[ch] ? 'checked' : ''} style="width:18px;height:18px">
@@ -897,7 +1028,7 @@ ${PUBLIC_PAGE_STYLE}
       <fieldset style="border:0;padding:0;margin:0;display:flex;flex-direction:column;gap:10px">
         <legend style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)">${escapeHtml(t('marketingTypesLegend'))}</legend>
 ${rows}
-      </fieldset>
+      </fieldset>${topicsBlock}
       <button type="submit" style="margin-top:8px;padding:11px 16px;border:0;border-radius:8px;background:#1c1c1c;color:#ffffff;font-size:0.95rem;cursor:pointer">${escapeHtml(t('savePreferences'))}</button>
     </form>
   </main>

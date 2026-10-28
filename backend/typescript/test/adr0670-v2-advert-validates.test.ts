@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import Ajv2020 from 'ajv/dist/2020.js';
+import { Ajv2020 } from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -26,6 +26,11 @@ import type { AppConfig } from '../src/index.js';
  * the record was schema-INVALID. The description is stale corpus prose; the
  * properties are the contract. A human reading caught it once. This catches it
  * every time.
+ *
+ * Tracker TST-BGF-6. Red when: a family record carries an undeclared facet (the
+ * schema validation); `stripSupported` leaves a `supported` seat; a declared family
+ * goes missing; `workflowChainPacks.subChains` drops `maxDepth`; or the mcp record
+ * advertises a relative `serverUrls` entry.
  */
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
@@ -33,7 +38,7 @@ const V2 = join(ROOT, 'schemas', 'v2');
 
 function validator() {
   const ajv = new Ajv2020({ strict: false, allErrors: true });
-  (addFormats as unknown as (a: unknown) => void)(ajv);
+  addFormats(ajv);
   // Register every sibling so `$ref`s between them resolve. The schemas
   // reference each other by bare filename.
   for (const f of readdirSync(V2)) {
@@ -53,7 +58,7 @@ function validator() {
   return fn;
 }
 
-const CONFIG = { serviceName: 'test', serviceVersion: '0.0.1' } as unknown as AppConfig;
+const CONFIG: AppConfig = { port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false };
 
 describe('ADR 0670 — the published v2 advertisement satisfies the v2 schema', () => {
   it('the vendored v2 schema tree is present — an absent tree must fail, not skip', () => {
@@ -75,7 +80,7 @@ describe('ADR 0670 — the published v2 advertisement satisfies the v2 schema', 
     expect(ok).toBe(true);
   });
 
-  it('the two ADR 0670 families are in the document — and the three that failed are NOT', () => {
+  it('the two ADR 0670 families are in the document, with the three later ones; `sandbox` stays an honest opt-out', () => {
     // Non-vacuity for the assertion above: an advertisement that declared
     // NOTHING would also validate. This pins what the validation is validating.
     //
@@ -132,7 +137,7 @@ describe('ADR 0670 — the published v2 advertisement satisfies the v2 schema', 
     // Both records are built but withheld (`V2_PROJECT_A2A` / `V2_PROJECT_MCP`,
     // behaviour gaps), so they are spliced in here: projecting one later must not
     // be the first time anything validated it.
-    const saved = { r: process.env.OPENWOP_V1_RETIRED, a: process.env.OPENWOP_A2A_SERVER_ENABLED };
+    const saved = { a: process.env.OPENWOP_A2A_SERVER_ENABLED };
     process.env.OPENWOP_A2A_SERVER_ENABLED = 'true';
     _setV2ProjectA2aForTest(true);
     try {
@@ -149,7 +154,6 @@ describe('ADR 0670 — the published v2 advertisement satisfies the v2 schema', 
       expect(JSON.stringify([(doc['a2a'] as Record<string, unknown>)['profiles'], withMcp.mcp['profiles']])).not.toContain('-legacy');
     } finally {
       _setV2ProjectA2aForTest(undefined);
-      if (saved.r === undefined) delete process.env.OPENWOP_V1_RETIRED; else process.env.OPENWOP_V1_RETIRED = saved.r;
       if (saved.a === undefined) delete process.env.OPENWOP_A2A_SERVER_ENABLED; else process.env.OPENWOP_A2A_SERVER_ENABLED = saved.a;
     }
   });

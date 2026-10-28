@@ -172,10 +172,10 @@ describe('the control loop', () => {
 
 describe('node pack (honest-off)', () => {
   it('task/decide/status fail with host_capability_missing without the surface', async () => {
-    // @ts-expect-error — .mjs pack module has no type declarations (pure-JS node pack).
+    // Typed by the ambient pack declaration in test/feature-packs.d.ts.
     const { nodes } = await import('../../../packs/feature.computer-use.nodes/index.mjs');
     for (const id of ['task', 'decide', 'status']) {
-      await expect(nodes[`feature.computer-use.nodes.${id}`]({ inputs: {}, features: {} }))
+      await expect(nodes[`feature.computer-use.nodes.${id}`]!({ inputs: {}, features: {} }))
         .rejects.toMatchObject({ code: 'host_capability_missing' });
     }
   });
@@ -183,14 +183,15 @@ describe('node pack (honest-off)', () => {
   it('task wraps the surface end-to-end', async () => {
     const { buildComputerUseSurface, __resetMockAdapter } = await import('../src/features/computer-use/feature.js');
     __resetMockAdapter();
-    // @ts-expect-error — .mjs pack module has no type declarations (pure-JS node pack).
+    // Typed by the ambient pack declaration in test/feature-packs.d.ts.
     const { nodes } = await import('../../../packs/feature.computer-use.nodes/index.mjs');
     const ctx = {
       inputs: { orgId: 'org-1', task: mockTask([act('n1', 'screenshot')]), startUrl: BASE_INPUT.startUrl, allowedOrigins: BASE_INPUT.allowedOrigins },
       features: { 'computer-use': buildComputerUseSurface({ tenantId: T, runId: 'run-1', actingUserId: 'u1' }) },
     };
-    const out = await nodes['feature.computer-use.nodes.task'](ctx);
+    const out = await nodes['feature.computer-use.nodes.task']!(ctx);
     expect(out.status).toBe('success');
-    expect(out.outputs.session.status).toBe('completed');
+    const session = out.outputs?.['session'] as { status?: string } | undefined;
+    expect(session?.status).toBe('completed');
   });
 });

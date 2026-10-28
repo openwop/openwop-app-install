@@ -1,6 +1,6 @@
 # ADR 0956 — Attribution and incrementality: multi-touch, lift tests, UTM governance, AdMap, ROAS reconciliation
 
-Status: Proposed
+Status: Accepted (P0–P2 implemented, P2's match score owed to ADR 0933; P3–P4 open)
 
 Date: 2026-10-19
 
@@ -87,6 +87,38 @@ Paths are under `backend/typescript/src/` unless they start with `packs/` or `do
   computed from paths, beside the unchanged converting-hit column, so the change is
   visible rather than silent.
 
+> **Correction (2026-10-20, P1 build, after `/architect`): no path cache.** Paths are
+> computed at READ time from the analytics events, and there is no
+> `campaign-intel:touch-path` store. The attribution report already does one
+> tenant-indexed scan of the event store; `listAttributionEvents` returns the
+> conversions and the touch events from that same scan, so paths cost no extra I/O. The
+> session→contact links are read once per report (`contactsBySession`, one bounded
+> prefix read) instead of once per session. A cache would hold confidential-pii rows
+> that need their own eraser, retention purger and rebuild sweep. Between sweeps it
+> could also serve a touch the analytics eraser had already removed. With no cache, the
+> analytics eraser and retention purger are the only copies to clean, so there is **no
+> path eraser to add to `EXPECTED_SUBJECT_ERASERS`**. The P1 exit criterion "manifest
+> test includes the path eraser" becomes an erasure witness instead: erasing a session's
+> events removes its touches from every path (`adr0956-attribution-models.test.ts`).
+> Revisit this only if the report's scan cost becomes the bottleneck, and then build the
+> cache together with its eraser.
+>
+> Other decisions in the P1 build:
+> - Consecutive identical touches from ONE session collapse to the first. Sites that
+>   re-send UTMs on every page would otherwise multiply one visit's credit under the
+>   linear and decay models.
+> - A touch whose `utm_campaign` maps to no campaign is credited to an `unmapped` row,
+>   never dropped, so every path's credit still adds up.
+> - The channel is `email` for an email-click token, `paid:<platform>` for an ad click
+>   id, else the `utm_medium`. Credit is per campaign in P1; channel is recorded for the
+>   P3 Markov model.
+> - Conversion value: `props.valueMinor` (integer minor units) or a commerce
+>   `props.total` (major units), each with a 3-letter `props.currency`. Otherwise only
+>   the conversion count is credited.
+> - Lookback, half-life and the default model are a per-org settings row
+>   (`campaign-intel:attribution-settings`, closed-world, CAS). Its editor is tombstoned
+>   by the campaign-intel eraser.
+
 ### D2 — Multi-touch models alongside last-click, never instead
 
 - Rule-based models in a pure module `features/campaign-intel/attributionModels.ts`:
@@ -102,6 +134,16 @@ Paths are under `backend/typescript/src/` unless they start with `packs/` or `do
   model at a time with a model selector, plus a comparison table. Platform-reported
   conversions are never added to modelled credit. No model is labelled "true". The
   default is chosen per client org, recorded and shown on every report (ADR 0957).
+
+> **Correction (2026-10-20, P1 build): integer weights, BigInt split.** Every model
+> produces integer weights. time_decay scales `2^(-age/halfLife)` to 1e6 and gives
+> every touch at least 1. `allocate` floors each share with BigInt and gives the
+> remainder to the last touch. Float weights cannot guarantee an exact sum: a share
+> computed a hair above an integer floors up, and the remainder goes negative.
+> Conversions are credited in micro-units (`CONVERSION_UNITS` = 1e6 per conversion), so
+> a three-touch path splits exactly. The model report runs behind the
+> `campaign-intel.multi-touch` sub-toggle, which is OFF by default. The session-last-click
+> column rides the base toggle, because it is the A-1 fix, not a model.
 
 ### D3 — Incrementality: holdout and geo tests are ADR 0949 experiments
 
@@ -155,6 +197,37 @@ Paths are under `backend/typescript/src/` unless they start with `packs/` or `do
   their counts. The Reporting Analyst (ADR 0943) can propose a mapping, which a human
   confirms (an alias table, never a rewrite of events).
 
+> **Correction (2026-10-20, P0 build, after `/architect`).** What P0 actually ships
+> differs from the text above in five places; the text is kept for the reasoning trail.
+>
+> 1. **Signature.** `buildTrackedUrl(url, utm, {fallbackCampaign, variantKey?, adRef?})`.
+>    The pack's `appendUtm` rules carry over unchanged (a parameter already on the URL
+>    wins, a relative URL stays relative, `utm_campaign` falls back to the brief id).
+>    The pack reaches it through `ctx.features['campaign-brief'].trackedUrl`, because
+>    campaign-brief owns `BriefUtm`. A host without that method makes
+>    `publish-ad-variants` fail with `host_capability_missing`; it never sends an
+>    untracked link. Only the ad path stamped links before P0. Email (0955) and social
+>    (0953) adopt the helper when they build their outbound links.
+> 2. **Where the linter bites in P0.** The ADR 0942 pre-publish chain does not exist on
+>    `main` yet. So `trackedUrl` lints inline, and `publish-ad-variants` refuses a
+>    violating link with `utm_policy_violation` BEFORE `ctx.ads.publishAd`. The
+>    `utm-lint` node ships now for that chain to use. Linting runs only while
+>    `campaign-intel` is ON for the tenant, which is OFF by default. That way existing
+>    publishes are not newly blocked by a feature the tenant never enabled. When it is
+>    ON, a policy that cannot be read is an error, never "no violations" (fail closed).
+> 3. **Naming template deferred.** The `{campaign.slug}` template is not in P0. The
+>    `case: 'lower'` rule and the required set cover the GA4 hygiene failures that
+>    matter. A template is additive on the policy row (closed-world parse, new field).
+> 4. **Default sources are open.** GA4's default channel grouping matches sources by
+>    pattern lists (e.g. its social-sites list), which a closed vocabulary cannot honour
+>    without false refusals. The default policy pins the GA4 mediums and leaves
+>    `sources` empty (any). An org can close it.
+> 5. **No agent writes an alias in P0.** Aliases are a route-only, human act
+>    (`workspace:write`), audited. An alias may not name a value that is already a
+>    campaign's join key (409 `utm_alias_conflicts_join_key`), because that would
+>    attribute one conversion twice. Its target must be one of the org's campaigns.
+>    The Reporting Analyst's propose-a-mapping tool lands with ADR 0943's agent work.
+
 ### D6 — AdMap (ad↔page mapping) and ROAS reconciliation
 
 - **Ledger extension (additive):** `AdDispatchRecord` gains `orgId`, `landingUrl`,
@@ -180,6 +253,56 @@ Paths are under `backend/typescript/src/` unless they start with `packs/` or `do
   is shown as an "overlap" figure against the measured total, which makes double
   counting visible. ADR 0952's reallocation suggestions must name which figure they
   use, and they default to measured.
+
+> **Correction (2026-10-20, P2 build).** What P2 ships differs from the bullets above in
+> five places.
+>
+> 1. **No ad grain yet.** ADR 0907's reader still reads campaign × ad set × day, so the
+>    AdMap reports per-ad spend and clicks as `null` (`metricsGrain: 'campaign'`), and
+>    the click-to-session loss rate as `null`. It never splits a campaign's spend across
+>    its ads. The ad grain is still ADR 0907 work.
+> 2. **The ad→visit join is `utm_id`.** P0's `buildTrackedUrl` stamps the ad reference as
+>    `utm_id`. Analytics ingest now keeps `utm.id` (additive), and the AdMap counts a
+>    landing session and credits a conversion through it. A site's beacon must send
+>    `utm.id`, as it already sends the other UTMs.
+> 3. **Landing resolution.** A link resolves to a CMS page by slug on the org's own site:
+>    a relative path, a custom host bound to the org (ADR 0906), the platform site org's
+>    `/p|/blog|/docs/<slug>`, or the vendor `…/public/<org>/pages/<slug>` path. A funnel
+>    step is found as the step whose `pageId` is that page, because funnel steps render
+>    CMS pages. A host bound to another client is `other_org`; anything else is
+>    `external`. A pre-P0 ledger row with no `orgId` is placed by its brief's org, else
+>    counted as `unplacedLegacyRows`.
+> 4. **Match score owed.** The message-match score needs ADR 0933 content rules (a0's
+>    0933 P0, not built). Each AdMap row carries `messageMatch: {status: 'owed'}` rather
+>    than a score computed ad hoc.
+> 5. **Ledger cap unchanged** (open question 4 is still open). The AdMap reports
+>    `ledgerCapped` when the tenant's ledger is at its cap, because an older ad may be
+>    missing.
+>
+> **Reconciliation decisions.**
+> - A touch's platform comes from its ad click id, else its `utm_source` (facebook,
+>   instagram → meta; google, youtube → google; and so on).
+> - "Above 1.5× for 7 days" is evaluated as the 7-day rolling window ending on each of
+>   the last 7 days. Every window must contain a claim and be above 1.5×. A window with
+>   claims and no measured conversions counts as above, and the row says `measuredZero`.
+> - Measured ROAS uses only credited value in the campaign's own currency. Other
+>   currencies are listed, never converted.
+> - The model is last click unless the multi-touch sub-toggle is on. A named model
+>   otherwise is a typed `validation_error`. The route and the surface share one helper
+>   (`resolveReadModel`).
+> - `calibration` is `null` with reason `no_valid_lift_test` until P3.
+
+> **Correction (2026-10-20, P0 build).** P0 adds `orgId`, `landingUrl` and `adRef` to
+> `AdDispatchRecord` and to the `DispatchLedgerRow` projection allowlist. `adRef` is
+> NOT part of the dispatch idempotency key: a retry with a different ad ref is the same
+> dispatch. Neither is `landingUrl` (true before P0 too; `/code-review` found the P0
+> comment claiming otherwise and corrected it). So a re-run that changes only the link
+> reuses the earlier dispatch and the ledger keeps the first link. Adding the link to
+> the key would mint a duplicate paused campaign for every pre-P0 record on its next
+> re-run. That call belongs to P2, when AdMap first reads the field. `landingUrl` is the tracked link actually sent. `experimentId` and the ledger
+> cap change wait for P2/P3, which consume them. Rows written before P0 have no `orgId`
+> and are not backfilled. A reader keyed on org must treat a missing `orgId` as
+> "unknown", never as a match.
 
 ## Feature evaluation matrix
 
@@ -212,11 +335,123 @@ Paths are under `backend/typescript/src/` unless they start with `packs/` or `do
 
 | Phase | Scope | Exit criteria |
 |---|---|---|
-| P0 | `host/trackedUrl.ts` + pack migration; UTM policy + `utm-lint` in pre-publish; unattributed triage; ledger gains `orgId`/`landingUrl`/`adRef` | A link violating the policy blocks publish with a typed failure; new dispatches record their landing URL |
+| P0 | `host/trackedUrl.ts` + pack migration; UTM policy + `utm-lint` in pre-publish; unattributed triage; ledger gains `orgId`/`landingUrl`/`adRef` | **Implemented (2026-10-20)** — see the P0 record below. A link violating the policy blocks publish with a typed failure; new dispatches record their landing URL |
 | P1 | Touch-path cache + eraser/retention + rule-based models + `sessionLastClick` column | Credits sum exactly to value (property test); manifest test includes the path eraser |
 | P2 | Reconciliation report + AdMap projection (ad grain where ADR 0907 provides it) + match score via 0933 | Fixture with three platforms claiming one conversion shows the overlap and the inflation flag |
 | P3 | Audience holdouts + geo tests through ADR 0949 (`geoLift`), enforcement through 0952, calibration factors; Markov model | Unverifiable geo exclusion gives `invalid_enforcement`; seeded bootstrap is stable on replay |
 | P4 | Offline conversion sources (deals, orders) with advertising consent; match-rate reporting | Replayed deal-won run relays once (dedup witness) |
+
+### P0 implementation record (2026-10-20)
+
+| Item | Where | Witness |
+|---|---|---|
+| One tracked-URL helper + linter (pure) | `backend/typescript/src/host/trackedUrl.ts` | `adr0956-utm-governance.test.ts` (pure block); the two ported AUDIT-9 cases in `campaign-channels-publish.test.ts` |
+| Pack migration (`appendUtm` removed) | `packs/feature.campaign-channels.nodes` 1.13.0 → 1.14.0; `campaign-brief/surface.ts` `trackedUrl` | "publish-ad-variants refuses a link that breaks the policy BEFORE dispatch" (sabotage: dropping the violation check → red) |
+| Per-org policy, CAS + closed-world | `features/campaign-intel/utmGovernance.ts`; routes `GET/PUT …/campaign-intel/orgs/:orgId/utm-policy` | policy case (sabotage: skipping the version check → 4 red; dropping the write scope check → 4 red) |
+| Lint route + `utm-lint` node | `POST …/orgs/:orgId/utm-lint`; `packs/feature.campaign-intel.nodes` 1.2.0 → 1.3.0; surface `utmLint` (floors the run's person on the org) | lint route + node cases |
+| Off-by-default lint | `trackedUrl` reads `resolveOne('campaign-intel')` | "unlinted while campaign-intel is off" (sabotage: always skipping → 2 red) |
+| Unattributed triage + aliases | `attribution.ts` `unattributedByCampaign`, `lineage.aliasedConversions`; routes `GET/PUT/DELETE …/utm-aliases` | alias case (sabotage: dropping aliased conversions → red; dropping the join-key guard → red) |
+| Ledger fields | `host/adsAdapter.ts` | `ads-adapter-meta.test.ts` "records its org, landing URL and ad reference" |
+| Subject erasure | `features/campaign-intel/erasure.ts`, `subjectEraserManifest.ts` | erasure case; `subject-eraser-manifest` |
+
+Ratchets moved: `feature-dependency-parity` 99 → 100 (`campaign-brief → campaign-intel`,
+undeclared, justified inline). `adr0832-org-scope-subject` reviewed readers gain
+`features/campaign-intel/surface.ts`. The `pack-surface-arg-parity` fixture was
+regenerated. The side-effect floor, served set, steward manifest and
+FEATURE-DEPENDENCIES were regenerated with their generators.
+
+Reviews (2026-10-20). `/code-review`: no banned patterns, no wire change, routes gated
+(toggle + org scope, writes `workspace:write`). Two fixes applied. A comment wrongly
+claimed `landingUrl` is in the dispatch idempotency key (see the D6 correction). The
+`utmLint` surface did not bound each URL's length the way the route does. Noted, not
+changed: the brief surface's `trackedUrl` does not floor the run's person on the
+brief's org, the same as its sibling methods (`getBrief`, `assembleContext`).
+`/grade-workflows` (scoped, no chain in P0): `publish-ad-variants` is role `action`
+(not on the replay floor, unchanged from `main`). A fork therefore re-executes it, and
+it now reads the CURRENT policy and toggle. Double dispatch is still prevented by the
+ads ledger's idempotency key. The policy that judged the link is now recorded
+(`outputs.utmCheck` / `error.policyVersion`), so a divergence between a source run and
+its fork is visible. `utm-lint` is role `read` and re-executes live by design. Its
+output carries `policyVersion`. Typed failures throughout: `host_capability_missing`,
+`tracked_url_failed`, `utm_policy_violation`. `/ux-review`: N/A, P0 has no UI. The
+policy and alias editors land with the reporting UI.
+
+Security correction (2026-10-20, after #5123). `trackedUrl` first shipped tenant-only, like
+the brief surface's other by-id methods. #5123 then org-scoped every by-id method on that
+surface. This PR is rebased onto #5123, and `trackedUrl` now resolves its brief through the
+same `scopedBrief` helper. A brief outside the run's org, or outside the orgs the run's
+person may read, is a uniform `not_found`. A run for client A therefore cannot mint client
+B's tracked link or read B's UTM policy verdict. Witness: "trackedUrl is org-scoped" in
+`adr0956-utm-governance.test.ts`, driven through the real seam. Sabotaging it back to a
+tenant-only read turns that case red.
+
+### P1 implementation record (2026-10-20)
+
+| Item | Where | Witness |
+|---|---|---|
+| Read-time touch paths | `features/campaign-intel/touchPaths.ts`; `analytics/analyticsService.ts` `listAttributionEvents`; `analytics/identityLinkService.ts` `contactsBySession` | pure path cases (sabotage: drop the contact join → 3 red; drop the collapse → 2 red; drop the lookback → 2 red) |
+| Rule-based models, exact credit | `features/campaign-intel/attributionModels.ts` | seeded property test, 1 000 random paths × 5 models, every sum exact (sabotage: drop the remainder → 3 red) |
+| `sessionLastClick` + `pathCoverage` | `attribution.ts` `buildAttribution` | "sessionLastClick credits the landing campaign" (sabotage: converting-hit-only last touch → 2 red) |
+| Model report + sub-toggle | `buildModelReport`; route `GET …/orgs/:orgId/attribution/models`; surface `attributionModels`; node `attribution-models` (`feature.campaign-intel.nodes` 1.3.0 → 1.4.0); toggle `campaign-intel.multi-touch` | refused while off on the route AND the surface (sabotage each → red); exact sum per model |
+| Per-org settings | `attributionSettings.ts`; routes `GET/PUT …/orgs/:orgId/attribution-settings` | CAS, closed-world, 403 for a non-member (sabotage: skip the version check → red) |
+| Erasure | no path store; `erasure.ts` covers the settings editor | erasing a session's events removes its touches from every path |
+| UI | `CampaignIntelPage.tsx` column + note; `MultiTouchSection.tsx` (model selector, comparison, make-default); 4 locales | `multiTouchSection.test.tsx` |
+
+Ratchets: the `pack-surface-arg-parity` fixture was regenerated. The side-effect floor
+(declared set) and the steward manifest were regenerated. No new cross-feature edge:
+campaign-intel already read analytics.
+
+Reviews (2026-10-20):
+- `/code-review`: no banned patterns, no wire change, and the new routes are gated
+  (toggle + sub-toggle + org scope; writes need `workspace:write`). Two fixes: an
+  unchecked cast on the model selector's value, and a doc on what `sessionPaths` counts.
+- `/ux-review`: three fixes.
+  - The selector shows the model being loaded at once and marks the card `aria-busy`.
+  - Failed loads and failed saves now show localized copy, never a raw server string.
+    The save failure names its two causes: a stale version or a missing permission.
+  - Failure and success notices are announced (`check-notice-announce`).
+- `/grade-workflows` (scoped, no chain): `attribution-models` is role `read`, off the
+  replay floor by design. A fork re-reads the live events, and its output carries
+  `settingsVersion`, `coverage` and `computedAt` for lineage. One fix: a misspelt
+  `model` was silently replaced by the org default. It is now a typed
+  `validation_error`, matching the route's 400. Open, not P1: no agent tool exposes the
+  model report yet; the Reporting Analyst (ADR 0943/0957) is the consumer.
+
+### P2 implementation record (2026-10-20)
+
+| Item | Where | Witness |
+|---|---|---|
+| Shared context (paths, settings, credit) | `attribution.ts` `loadAttributionContext`, `creditTouches` | the model report, reconciliation and AdMap tests all read through it |
+| Reconciliation | `features/campaign-intel/reconciliation.ts`; route `GET …/orgs/:orgId/reconciliation`; surface `reconciliation`; node `reconciliation` | **exit fixture:** three platforms claim one conversion: claims 3, measured 1, overlap 2, every platform flagged (sabotage: no subtraction → red; flag on any day → red; null revenue read as 0 → red) |
+| AdMap | `features/campaign-intel/adMap.ts`; route `GET …/orgs/:orgId/admap`; surface `adMap`; node `ad-map` | joins on `utm_id`, resolves page + funnel step, places a pre-P0 row, excludes another client's ad (sabotage: each → red) |
+| `utm.id` at ingest | `analytics/analyticsService.ts` | AdMap session count |
+| Model gate | `attributionSettings.ts` `resolveReadModel` | route 400 and surface `validation_error` while the sub-toggle is off (sabotage → red) |
+| UI | `ReconciliationSection.tsx`, `AdMapSection.tsx`, 4 locales | `measurementSections.test.tsx` |
+| Match score | owed to ADR 0933 | `messageMatch.status === 'owed'` |
+
+Pack: `feature.campaign-intel.nodes` 1.4.0 → 1.5.0. Ratchets: `feature-dependency-parity`
+100 → 101 (`campaign-intel → funnels`, undeclared, justified inline). The cms read
+counts as always-on. The parity fixture, side-effect floor, steward manifest and
+FEATURE-DEPENDENCIES were regenerated. Test seam: `__putDispatchRecordForTests` in
+`adsAdapter.ts`, read by the P2 test.
+
+Reviews (2026-10-20):
+- `/code-review`: no banned patterns, no wire change, and the new routes are org-scoped
+  (`workspace:read`; a non-member gets 403, witnessed).
+  - One fix: measured ROAS showed `0.00×` when the site recorded no conversion value. It
+    is now `null`, because a conversion without a value says nothing about return.
+  - Noted, not changed (pre-existing): `listTenantDispatchRecords` scans the whole
+    `ads:` prefix across tenants before filtering. The AdMap inherits that cost from the
+    sync reader; an indexed ledger read belongs with open question 4.
+  - `utm.id` comes from the public beacon like every other UTM, so AdMap session counts
+    are only as trustworthy as that beacon.
+- `/ux-review`: one fix. A missing ROAS now says why: the platform reports no revenue,
+  the site recorded no value, or there was no spend. Before, all three read "Not
+  available".
+- `/grade-workflows` (scoped, no chain): `reconciliation` and `ad-map` are role `read`
+  and re-execute live on a fork. Reconciliation reads the clock for `asOf`, and both
+  carry `computedAt`, so a fork's divergence is visible. A misspelt or unavailable model
+  is a typed `validation_error`. Missing surface methods fail `host_capability_missing`.
 
 ## Alternatives weighed
 
@@ -270,3 +505,50 @@ packs and broker. Nothing is advertised.
   maps each ad to its landing page with a message-match score. A reconciliation report
   shows platform-reported vs measured ROAS with an inflation flag. Rides `campaign-intel`
   (+ sub-toggle `campaign-intel.multi-touch`). Host-ext, no RFC.
+
+
+### Recovery corrections — 2026-10-25 (validation pending)
+
+The original P0/P1/P2 history is preserved. Recovery composes it with current
+main's launch approval CAS, account currency validation, spend caps, campaign
+ownership back-links and explicit requester narrowing. The combined channels
+pack is 1.15.0 and intel pack 1.6.0; generated metadata still needs regeneration
+in the serialized validation slot.
+
+AdMap landing sessions now use every org-scoped tracked event, including a visit
+that never converts. A tracking reference shared by multiple distinct ads (or
+missing entirely) cannot uniquely assign per-ad credit: its measurements are
+null and the UI states that limitation. Unknown tenant legacy rows are excluded
+rather than counted for a client. CMS/funnel source reads now check their live
+feature gates; retained rows do not mean the feature is enabled. Malformed URL
+escapes return unresolved rather than throwing. The shared tracked-URL helper
+preserves protocol-relative destinations and refuses executable or empty URLs
+before a publish, including when policy linting is off.
+
+These source corrections and regression tests are authored, not validated yet;
+the ADR0942 canonical gate owns the local heavy-work slot. P3 incrementality and
+calibration remain pending, and no production toggle or paid call changed.
+
+
+Recovery composition note — 2026-10-25: The composed AdMap now validates HTTP(S), protocol-relative host ownership and percent escapes before resolving a public page path. An unrelated host cannot impersonate this client’s CMS page by copying its URL path. The new regression cases are source-only pending the serialized checks.
+
+
+### Recovery focused qualification — 2026-10-25
+
+The validation-pending notes above describe the preparation stage. The composed
+branch now includes qualified main 2f4e6c0ce and all three original branch
+histories. Native backend typechecking, pack-surface parity (6 cases), and the
+20-file focused suite (270 passing cases, one expected failure) pass. Frontend
+lint, the canonical build including CSS/token and bundle gates, test
+typechecking, and nine focused suites (67 cases) pass. Entry gzip remains
+within the existing 129 kB ceiling (49 bytes headroom); no budget was raised.
+The generated floor is 375 / served 332 / unresolved 0, with the same 43
+deferred classifications. The measured toggleable dependency ceiling is 113.
+
+Brand, CMS and KB remain always-on substrate; regression fixtures disable
+actual toggleable sources, and deleted-collection and revoked-member cases
+exercise their live authority checks. A new real-KV fault test also proved
+that a proposal CAS with no confirmed winner must refuse, rather than return a
+phantom pending proposal; the corrected implementation passes. This does not
+complete the later phases listed above. Full canonical CI remains required
+before merge, and deployment remains separately queued.

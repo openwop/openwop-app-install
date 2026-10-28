@@ -158,6 +158,13 @@ interface Site {
   line: number;
 }
 
+/** Signal 1: a `tenantOf` resolver is the 4th constructor argument, present and
+ *  not the literal `undefined`. ONE helper, read by parseSites AND by the
+ *  self-sabotage case below, so the case tests the check the gate uses. */
+function hasTenantOfArg(args: readonly string[]): boolean {
+  return args.length >= 4 && args[3] !== '' && args[3] !== 'undefined';
+}
+
 function parseSites(): Site[] {
   const sites: Site[] = [];
   for (const file of walk(FEATURES_ROOT)) {
@@ -172,7 +179,7 @@ function parseSites(): Site[] {
       // (e.g. a stray regex-in-a-comment the strip missed) is not a real store.
       if (!/^[a-z][A-Za-z0-9:_-]*$/.test(ns)) continue;
       const line = src.slice(0, m.index).split('\n').length;
-      const hasTenantOf = args.length >= 4 && args[3] !== '' && args[3] !== 'undefined';
+      const hasTenantOf = hasTenantOfArg(args);
       sites.push({ ns, keyFn: args[1] ?? '', hasTenantOf, file, line });
     }
   }
@@ -257,6 +264,7 @@ const RESIDUAL_CLASSIFICATION: Record<string, { bucket: Bucket; reason: string }
   'entity:ref-idx': { bucket: 'REACHABLE_ROW_TENANTID', reason: 'row type RefIndexRow carries a top-level tenantId field → jsonTenantId reaches it on purgeTenantRows' },
   'entity:term-idx': { bucket: 'REACHABLE_ROW_TENANTID', reason: 'row type TermIndexRow carries a top-level tenantId field → jsonTenantId reaches it on purgeTenantRows' },
   'heartbeat-admin': { bucket: 'EXEMPT', reason: 'host-global singleton (HeartbeatAdminConfig id:\'default\'); operator fleet switch, no tenant/subject' },
+  'managed-tier': { bucket: 'EXEMPT', reason: 'host-global singleton (ManagedTierConfig id:\'default\', ADR 0990); the operator\'s free-tier provider choice, no tenant/subject' },
   'kb:docrev': { bucket: 'REACHABLE_ROW_TENANTID', reason: 'row type DocRevisionRow carries a top-level tenantId field → jsonTenantId reaches it on purgeTenantRows' },
   'kb:embedusage': { bucket: 'REACHABLE_ROW_TENANTID', reason: 'row type EmbedUsageRow carries a top-level tenantId field → jsonTenantId reaches it on purgeTenantRows' },
   'kb:reindex': { bucket: 'REACHABLE_ROW_TENANTID', reason: 'row type ReindexJob carries a top-level tenantId field → jsonTenantId reaches it on purgeTenantRows' },
@@ -294,7 +302,11 @@ describe('PROPC-ERASURE-RATCHET-BLINDSPOT — every feature DurableCollection is
 
   it('found a substantial denominator (the parser is not silently empty)', () => {
     // A vacuous parser (0 namespaces) would pass every coverage assertion below.
-    expect(namespaces.length).toBeGreaterThan(250);
+    // MEASURED 370 distinct namespaces (66 residual) on 0151a8bb2; the floor is
+    // measured − 1 (never a multiple of 10). The old `> 250` let a parser that
+    // silently lost a third of the stores pass. A change that deletes stores
+    // lowers this floor in the same commit, to its own measured − 1.
+    expect(namespaces.length).toBeGreaterThanOrEqual(369);
   });
 
   it('every namespace is auto-reachable (tenantOf / key.tenantId) OR classified with a cited reason', () => {
@@ -381,16 +393,18 @@ describe('PROPC-ERASURE-RATCHET-BLINDSPOT — the detection signals are not vacu
   it('the tenantOf (4th-arg) parser distinguishes an armed from an unarmed construction', () => {
     const src =
       "const a = new DurableCollection<T>('x:armed', (r) => r.id, undefined, (r) => r.tenantId);\n" +
-      "const b = new DurableCollection<T>('x:unarmed', (r) => r.id);\n";
+      "const b = new DurableCollection<T>('x:unarmed', (r) => r.id);\n" +
+      "const c = new DurableCollection<T>('x:explicit-undefined', (r) => r.id, undefined, undefined);\n";
     const re = /new\s+DurableCollection\s*(?:<[^>]*>)?\s*\(/g;
     const found: Record<string, boolean> = {};
     let m: RegExpExecArray | null;
     while ((m = re.exec(src))) {
       const args = extractArgs(src, m.index + m[0].length - 1);
       const ns = (args[0] ?? '').replace(/^['"`]|['"`]$/g, '');
-      found[ns] = args.length >= 4 && args[3] !== '' && args[3] !== 'undefined';
+      found[ns] = hasTenantOfArg(args);
     }
     expect(found['x:armed']).toBe(true);
     expect(found['x:unarmed']).toBe(false);
+    expect(found['x:explicit-undefined']).toBe(false);
   });
 });

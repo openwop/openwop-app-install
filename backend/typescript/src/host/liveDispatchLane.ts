@@ -20,9 +20,10 @@ import { readCompactionDecision } from '../executor/compaction.js';
 import { createAiProvidersAdapter } from '../aiProviders/aiProvidersHost.js';
 import { createScopedAgentToolProvider } from './agentToolProvider.js';
 import { buildLaneFirewall } from './laneFirewall.js';
-import { createAgentMemoryPort, agentMemoryScope } from './agentMemoryAdapter.js';
+import { createAgentMemoryPort } from './agentMemoryAdapter.js';
+import { CLIENT_MEMORY_UNAVAILABLE_LABEL } from './memoryScopeSentinel.js';
 import { resolveAgentIdentity } from './agentIdentity.js';
-import { resolveAgentKnowledgeRetrieve } from './agentKnowledgeComposition.js';
+import { resolveAgentKnowledgeRetrieve, resolveDispatchMemory } from './agentKnowledgeComposition.js';
 import { getBorrowedRecallResolver } from './twinRecallSurface.js';
 import { createLogger } from '../observability/logger.js';
 import type { ResolveModelOptions } from './modelClassResolver.js';
@@ -123,12 +124,17 @@ export async function buildLiveDispatchLane(input: LiveDispatchLaneInput): Promi
   // ADR 0889 D3 — an eval passes its own ephemeral port; production keeps the
   // durable agent memory.
   const memory = input.memory ?? createAgentMemoryPort(tenantId);
-  const memoryScope = agentMemoryScope(dispatchIdentity.profileId);
+  // ADR 0944 D3 — the ONE resolver, as on the run and chat lanes. This lane used
+  // to pass `agentMemoryScope(profileId)`, so a `per-user` agent read and wrote
+  // the SHARED scope here. It carries no client binding, so a `per-org` agent
+  // gets the fail-closed sentinel and the model is told.
+  const memoryCtx = { userId: input.userId };
+  const memoryBinding = await resolveDispatchMemory(tenantId, dispatchIdentity.profileId, memoryCtx);
   // ADR 0038 Phase 3 — compose the agent's BOUND knowledge (cited KB docs +
   // private memory) into the turn. ADR 0664 D6 — re-resolve the READER where a
-  // principal exists. `actor` stays undefined: per-user memory posture unchanged.
+  // principal exists.
   const knowledgeRetrieve = await resolveAgentKnowledgeRetrieve(
-    tenantId, dispatchIdentity.profileId, memory, undefined,
+    tenantId, dispatchIdentity.profileId, memory, memoryCtx,
     input.userId ? { subject: input.userId } : undefined,
   );
   // ADR 0044 Phase 2 — a granted twin composes its OWNER's corpus, fenced
@@ -176,7 +182,9 @@ export async function buildLiveDispatchLane(input: LiveDispatchLaneInput): Promi
     // A4 — cross-run agent memory (RFC 0004), gated inside dispatch on the
     // manifest's `memoryShape.longTerm`.
     memory,
-    memoryScope,
+    memoryScope: memoryBinding.scope,
+    ...(memoryBinding.writable ? {} : { memoryWrite: { skip: true } }),
+    ...(memoryBinding.unavailable ? { memoryUnavailable: CLIENT_MEMORY_UNAVAILABLE_LABEL } : {}),
     ...(knowledgeRetrieve ? { knowledgeRetrieve } : {}),
     ...(borrowedRetrieve ? { borrowedRetrieve } : {}),
     ...(borrowedSource?.ownerName ? { borrowedOwnerName: borrowedSource.ownerName } : {}),

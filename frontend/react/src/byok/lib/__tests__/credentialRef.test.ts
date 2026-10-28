@@ -53,8 +53,8 @@ describe('KEYS-REF-1 — which provider a credential ref names', () => {
     expect(parseCredentialRef('my-key', PROVIDERS)).toEqual({ ref: 'my-key', providerId: null, label: null });
   });
 
-  it('only the web-search, subscription and managed refs are card-owned', () => {
-    expect(['web-search', 'subscription:github.copilot', 'managed:openwop-free'].map(isCardOwnedRef)).toEqual([true, true, true]);
+  it('only the web-search, subscription, managed and Challenge Factory refs are card-owned', () => {
+    expect(['web-search', 'subscription:github.copilot', 'managed:openwop-free', 'kicktodo-factory:google'].map(isCardOwnedRef)).toEqual([true, true, true, true]);
     expect(['my-key', 'byok:minimax', 'byok:google', 'web-search-2'].map(isCardOwnedRef)).toEqual([false, false, false, false]);
   });
 });

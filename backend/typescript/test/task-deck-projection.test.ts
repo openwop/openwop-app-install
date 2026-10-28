@@ -10,7 +10,7 @@ function run(id: string, status: RunStatus, extra: Partial<RunRecord> = {}): Run
   return {
     runId: id, workflowId: `wf-${id}`, tenantId: 't', status, inputs: {}, metadata: {}, configurable: {},
     createdAt: '2026-06-24T00:00:00.000Z', updatedAt: `2026-06-24T00:00:0${id.length}.000Z`, ...extra,
-  } as RunRecord;
+  };
 }
 const NO_BLOCKS = new Map<string, BlockedInfo>();
 
@@ -24,6 +24,10 @@ describe('taskDeckProjection (ADR 0133 P2)', () => {
     expect(deck.buckets.running.map((c) => c.runId)).toEqual(['b']);
     expect(deck.buckets.completed.map((c) => c.runId)).toEqual(['c']);
     expect(deck.buckets.failed.map((c) => c.runId).sort()).toEqual(['d', 'e']); // failed + cancelled
+    // TD2UX-9: the cancelled card says so; the failed one does not.
+    const failed = new Map(deck.buckets.failed.map((c) => [c.runId, c]));
+    expect(failed.get('e')?.cancelled).toBe(true);
+    expect(failed.get('d')).not.toHaveProperty('cancelled');
     expect(deck.buckets.blocked.map((c) => c.runId)).toEqual(['f']);
   });
 
@@ -58,8 +62,11 @@ describe('taskDeckProjection (ADR 0133 P2)', () => {
     expect(deck.buckets.running[0].children.map((c) => c.runId)).toEqual(['ch']); // grouped under native-p
   });
 
-  it('title falls back workflowId → runId; metadata.title wins', () => {
-    const deck = taskDeckProjection([run('a', 'running', { metadata: { title: 'My Task' } })], NO_BLOCKS);
+  // The fallback chain (display name, then workflowId) is TD2UX-3's case below.
+  it('metadata.title wins over the workflow display name', () => {
+    const deck = taskDeckProjection(
+      [run('a', 'running', { metadata: { title: 'My Task' } })], NO_BLOCKS, new Map([['wf-a', 'Weekly report']]),
+    );
     expect(deck.buckets.running[0].title).toBe('My Task');
   });
 });

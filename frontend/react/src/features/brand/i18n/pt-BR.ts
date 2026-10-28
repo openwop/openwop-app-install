@@ -9,6 +9,7 @@ export const messages = {
   lede: 'Defina como o seu workspace soa — voz, formalidade, frases aprovadas e proibidas, posicionamento e regras por canal — e aplique isso em cada peça gerada.',
   newBrand: 'Nova marca',
   loading: 'Carregando marcas…',
+  refreshFailedStale: 'Não foi possível atualizar a lista de marcas. Mostrando a última lista carregada.',
   loadFailed: 'Não foi possível carregar as marcas.',
   emptyTitle: 'Nenhuma marca ainda',
   emptyBody: 'Defina uma marca uma vez — sua voz e diretrizes embasam cada peça do Campaign Studio, então a campanha nº 2 leva minutos.',

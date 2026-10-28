@@ -7,6 +7,11 @@
  * the node surface's `persistDraft` checked nothing, so a headless run could
  * create one. And the four chat tools ignored their default-OFF toggle
  * (`ARWF-9`). These call the REGISTERED tools and the surface the node pack calls.
+ *
+ * Tracker TST-BKW-5. Red when `assertAgentAuthorWrite` stops requiring
+ * `workspace:write` or a signed-in user, when the persist tool or the node
+ * surface stops calling it, or when the tools ignore the toggle — each
+ * sabotage-witnessed (w65).
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -32,7 +37,8 @@ const draft = (persona: string) => ({ persona, agentId: PACK_AGENT, autonomyLeve
 const run = async (toolId: string, input: unknown, scope: Partial<BundleScope>) => {
   const tool = builtinAgentTool(toolId);
   if (!tool) throw new Error(`tool ${toolId} not registered`);
-  const out = await tool.run(input as Record<string, unknown>, { tenantId: WS, ...scope } as BundleScope);
+  const full: BundleScope = { tenantId: WS, ...scope };
+  const out = await tool.run(input as Record<string, unknown>, full);
   return { ...out, parsed: JSON.parse(String(out.content)) as Record<string, unknown> };
 };
 const toggle = async (status: 'on' | 'off') => saveConfig({ ...agentAuthorFeature.toggleDefault!, status }, 'test');
@@ -65,9 +71,14 @@ describe('ADR 0775 D7 — the persist tool uses the route’s write authority', 
 
   it('the node surface refuses a headless persist and a viewer', async () => {
     await toggle('on');
-    await expect(buildAgentAuthorSurface({ tenantId: WS } as BundleScope).persistDraft!({ draft: draft('Headless Built') })).rejects.toThrow(/signed-in user/);
-    await expect(buildAgentAuthorSurface({ tenantId: WS, actingUserId: VIEWER } as BundleScope).persistDraft!({ draft: draft('Surface Viewer') })).rejects.toThrow(/workspace:write/);
-    expect((await listRoster(WS)).map((e) => e.persona)).not.toEqual(expect.arrayContaining(['Headless Built', 'Surface Viewer']));
+    const headless: BundleScope = { tenantId: WS };
+    const viewer: BundleScope = { tenantId: WS, actingUserId: VIEWER };
+    await expect(buildAgentAuthorSurface(headless).persistDraft!({ draft: draft('Headless Built') })).rejects.toThrow(/signed-in user/);
+    await expect(buildAgentAuthorSurface(viewer).persistDraft!({ draft: draft('Surface Viewer') })).rejects.toThrow(/workspace:write/);
+    // EACH must be absent (an arrayContaining of both passed with one present).
+    const personas = (await listRoster(WS)).map((e) => e.persona);
+    expect(personas).not.toContain('Headless Built');
+    expect(personas).not.toContain('Surface Viewer');
   });
 });
 

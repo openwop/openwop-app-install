@@ -65,6 +65,10 @@ const PACK_DIR = join(REPO, 'packs/feature.crm.nodes');
 
 /** The 14 write nodes ADR 0627 D1 classifies (13 + ADR 0837 D7's record-triage). */
 export const CRM_WRITE_NODES = [
+  'feature.crm.nodes.grade-lead', // ADR 0954 P1 — records a lead grade (pending-run CAS)
+  'feature.crm.nodes.route-lead', // ADR 0954 P2 — routes a lead (ledgered on contactId + epoch)
+  'feature.crm.nodes.sla-rung', // ADR 0954 P3 — one speed-to-lead rung (ledgered on round + rung)
+  'feature.crm.nodes.lead-evidence', // ADR0954 P4 — freezes erasable evidence once on the primary
   'feature.crm.nodes.create-contact',
   'feature.crm.nodes.update-contact-stage',
   'feature.crm.nodes.update-contact-owner',
@@ -91,8 +95,11 @@ const READ_NODES = [
   'feature.crm.nodes.booking-list',
   'feature.crm.nodes.sign-status',
   'feature.crm.nodes.get-contact', // ADR 0837 D7
+  'feature.crm.nodes.check-first-touch', // ADR 0954 P3
 ] as const;
-const PURE_NODES = ['feature.crm.nodes.triage', 'feature.crm.nodes.triage-enriched', 'feature.crm.nodes.segment-vocabulary', 'feature.crm.nodes.validate-segment'] as const;
+const PURE_NODES = ['feature.crm.nodes.triage', 'feature.crm.nodes.triage-enriched', 'feature.crm.nodes.segment-vocabulary', 'feature.crm.nodes.validate-segment', 'feature.crm.nodes.sla-deadline', 'feature.crm.nodes.routing-result'] as const;
+const AI_LOGGED_NODE = 'feature.crm.nodes.assess-lead'; // ADR0326 invocation log, not the ordinary fast path
+const ALL_WRITE_NODES = [...CRM_WRITE_NODES, AI_LOGGED_NODE] as const;
 const GMAIL_SYNC = 'feature.crm.nodes.gmail-sync'; // side-effect since 1.4.0, classified on its own (ADR 0252)
 
 interface Manifest {
@@ -103,17 +110,17 @@ interface Manifest {
 const manifest = JSON.parse(readFileSync(join(PACK_DIR, 'pack.json'), 'utf8')) as Manifest;
 const byId = new Map(manifest.nodes.map((n) => [n.typeId, n]));
 
-describe('ADR 0627 D1 — the 14 CRM write nodes are classified, on every leg', () => {
-  it('every manifest node is classified exactly once: 14 side-effect writes, 10 action reads, 4 pure (+ gmail-sync, side-effect since 1.4.0) — ADR 0837 D7 added record-triage + get-contact', () => {
+describe('ADR 0627 D1 — the 18 CRM write nodes are classified, on every leg', () => {
+  it('every manifest node is classified exactly once: 19 side-effect writes (one invocation-logged), 11 action reads, 6 pure (+ gmail-sync, side-effect since 1.4.0) — ADR 0837 D7 added record-triage + get-contact', () => {
     // A PARTITION: every manifest node is classified exactly once. (This was a
     // literal `29` + version `'1.11.0'` — numbers that churned on every pack
     // bump and could not catch an unclassified new node that replaced another.)
-    const lists: readonly (readonly string[])[] = [CRM_WRITE_NODES, READ_NODES, PURE_NODES, [GMAIL_SYNC]];
+    const lists: readonly (readonly string[])[] = [CRM_WRITE_NODES, READ_NODES, PURE_NODES, [AI_LOGGED_NODE, GMAIL_SYNC]];
     const classified = lists.flat();
     expect(new Set(classified).size, 'a node is listed in two classifications').toBe(classified.length);
     expect(manifest.nodes.map((n) => n.typeId).filter((id) => !classified.includes(id)), 'unclassified manifest nodes').toEqual([]);
     expect(classified.filter((id) => !byId.has(id)), 'classified ids missing from the manifest').toEqual([]);
-    for (const id of CRM_WRITE_NODES) {
+    for (const id of ALL_WRITE_NODES) {
       const node = byId.get(id);
       expect(node, `${id} not found in the manifest — this test would pass vacuously`).toBeTruthy();
       expect(node!.role, id).toBe('side-effect');
@@ -127,17 +134,21 @@ describe('ADR 0627 D1 — the 14 CRM write nodes are classified, on every leg', 
     expect(byId.get(GMAIL_SYNC)?.capabilities).toContain('side-effectful');
   });
 
-  it('the derived floor holds all 14 AND the fast path SERVES all 14 (membership alone is undischarged)', () => {
+  it('the derived floor holds all 18 AND the fast path SERVES all 18 (membership alone is undischarged)', () => {
     for (const id of CRM_WRITE_NODES) {
       expect(MANIFEST_SIDE_EFFECT_FLOOR.has(id), `${id} not in the derived floor`).toBe(true);
       expect(MANIFEST_FAST_PATH_SERVED.has(id), `${id} held but NOT served — undischarged`).toBe(true);
     }
+    expect(MANIFEST_SIDE_EFFECT_FLOOR.has(AI_LOGGED_NODE)).toBe(true);
+    expect(MANIFEST_FAST_PATH_SERVED.has(AI_LOGGED_NODE)).toBe(false);
+    // AI replay is discharged by the real starter/executor/invocation-log
+    // witness in adr0954-p4-lead-qualification, including the repair call.
     // …and the reads are NOT in the floor: a read served from a recording is
     // correct, but a read classified side-effecting would be over-classification.
     for (const id of READ_NODES) expect(MANIFEST_SIDE_EFFECT_FLOOR.has(id), `${id} is a read`).toBe(false);
   });
 
-  it('isSideEffectingNode — the exact predicate executor.ts branches on — returns true for all 14 and false for the reads', () => {
+  it('isSideEffectingNode — the exact predicate executor.ts branches on — returns true for all 18 and false for the reads', () => {
     for (const id of CRM_WRITE_NODES) expect(isSideEffectingNode(id, null), id).toBe(true);
     for (const id of READ_NODES) expect(isSideEffectingNode(id, null), id).toBe(false);
   });
@@ -145,7 +156,7 @@ describe('ADR 0627 D1 — the 14 CRM write nodes are classified, on every leg', 
 
 describe('ADR 0627 D1 — pack shape: ADR 0525 schemas on the 14 writes; the feature pin', () => {
   it('every write node declares input + output refs resolving to files with the <pack>/<version>/<file> $id', () => {
-    for (const id of CRM_WRITE_NODES) {
+    for (const id of ALL_WRITE_NODES) {
       const node = byId.get(id)!;
       for (const key of ['inputSchemaRef', 'outputSchemaRef'] as const) {
         const ref = node[key];
@@ -160,7 +171,7 @@ describe('ADR 0627 D1 — pack shape: ADR 0525 schemas on the 14 writes; the fea
   });
 
   it('inputs declare NO required keys (the node reads {...config, ...inputs}); outputs are closed and require `success`', () => {
-    for (const id of CRM_WRITE_NODES) {
+    for (const id of ALL_WRITE_NODES) {
       const node = byId.get(id)!;
       const input = JSON.parse(readFileSync(join(PACK_DIR, node.inputSchemaRef!), 'utf8')) as { required?: string[]; additionalProperties?: boolean; properties: Record<string, unknown> };
       expect(input.required ?? [], `${id} input.required — a required INPUT is a false claim when config may supply the key`).toEqual([]);

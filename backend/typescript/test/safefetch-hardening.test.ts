@@ -1,21 +1,29 @@
 /**
- * RFC 0076 §B / §host.http hardening + advertisement (task: advertise the
- * implemented-but-unadvertised httpClient/safeFetch + OIDC capabilities).
+ * RFC 0076 §B / §host.http hardening + advertisement.
  *
  * Proves, against the REAL app boot:
- *   1. `/.well-known/openwop` advertises `capabilities.httpClient` whose
- *      numbers ARE the enforced constants (advertise/enforce agreement), and
- *      `auth.oidc` + the `openwop-auth-oidc-user-bearer` profile appear ONLY
- *      when OPENWOP_OIDC_* is configured (honest-off).
+ *   1. The v2 `auth` family carries the `oidc` lane (with its issuer) ONLY when
+ *      OPENWOP_OIDC_* is configured (honest-off). (The v1 `httpClient` advert
+ *      leg this file used to carry was deleted with the v1 document, ADR 0812
+ *      P3c-0 — see the note inside the first describe.)
  *   2. `ctx.http.safeFetch` refuses `Connection: upgrade`, blocks SSRF
  *      targets, and emits the DURABLE content-free
  *      `agent.toolCalled`/`agent.toolReturned` pair (`transport: "http"`) on
- *      every invocation — ok, forbidden, and error paths.
- *   3. The guarded-agent response-body ceiling mechanism actually aborts a
- *      response larger than the cap (mechanism proven with a small cap; the
- *      production cap is the advertised constant by construction).
+ *      the ok and forbidden paths — neither half carries the destination.
+ *   3. The guarded-agent response-body ceiling aborts a response larger than
+ *      the cap with undici's own size error (mechanism proven with a 1 KiB cap
+ *      and a body under it as the positive control).
  *   4. The conformance seams (`/http/safe-fetch`, `/http/safe-fetch-run`)
- *      echo the guard decisions and back the durable event-log query.
+ *      echo the guard decisions and back the durable event-log query. The
+ *      DNS-rebind seam case exercises the SEAM's own re-application of
+ *      `isDeniedWebhookHost` to a simulated resolution — the conformance seam
+ *      contract, not the production pinned connector (which needs real DNS).
+ *
+ * Sabotage witnessed red (8f grade-tests wave 2): the upgrade refusal removed
+ * (`8fw2g3-sf-upgrade`), the SSRF string precheck removed
+ * (`-sf-ssrf-precheck`), the ok half of the pair dropped (`-sf-ok-pair`), the
+ * agent options dropped (`-sf-agent-opts`, `-sf-agent-opts-r2`), and the
+ * destination written into the audit payload (`-sf-content-free-r2`).
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -118,8 +126,10 @@ describe('ctx.http.safeFetch hardening + durable audit pair', () => {
     await expect(sf(runId)('http://169.254.169.254/latest/meta-data/')).rejects.toThrow(/destination blocked/);
     const { called, returned } = await durablePair(runId);
     expect(called).toHaveLength(1);
+    expect(returned).toHaveLength(1);
     expect(returned[0]!.status).toBe('forbidden');
     expect(returned[0]!.callId).toBe(called[0]!.callId);
+    for (const p of [...called, ...returned]) expect(JSON.stringify(p)).not.toContain('169.254');
   });
 
   it('emits the ok pair on a successful fetch (private egress enabled for loopback)', async () => {
@@ -138,24 +148,34 @@ describe('ctx.http.safeFetch hardening + durable audit pair', () => {
     }
     const { called, returned } = await durablePair(runId);
     expect(called).toHaveLength(1);
+    expect(returned).toHaveLength(1);
     expect(returned[0]!.status).toBe('ok');
     expect(returned[0]!.callId).toBe(called[0]!.callId);
+    for (const p of [...called, ...returned]) expect(JSON.stringify(p)).not.toContain('127.0.0.1');
   });
 
   it('guarded-agent response-body ceiling aborts an oversized body (mechanism)', async () => {
-    const big = http.createServer((_q, s) => {
+    // `/small` is under the cap (positive control); anything else is 64 KiB.
+    const big = http.createServer((q, s) => {
       s.writeHead(200, { 'content-type': 'application/octet-stream' });
-      s.end(Buffer.alloc(64 * 1024)); // 64 KiB body
+      s.end(Buffer.alloc(q.url === '/small' ? 512 : 64 * 1024));
     });
     await new Promise<void>((r) => big.listen(0, '127.0.0.1', r));
     const port = (big.address() as AddressInfo).port;
     process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE = 'true';
     const capped = makeGuardedAgent({ maxResponseSize: 1024 }); // 1 KiB cap
     try {
-      await expect((async () => {
+      const small = await undiciFetch(`http://127.0.0.1:${port}/small`, { dispatcher: capped });
+      expect((await small.arrayBuffer()).byteLength).toBe(512);
+      // Draining past the cap must reject with undici's SIZE error — not any
+      // error (a guard refusal or a refused connection would also "throw").
+      const err: unknown = await (async () => {
         const res = await undiciFetch(`http://127.0.0.1:${port}/`, { dispatcher: capped });
-        await res.arrayBuffer(); // draining past the cap must reject
-      })()).rejects.toThrow();
+        await res.arrayBuffer();
+      })().then(() => null, (e: unknown) => e);
+      const codeOf = (e: unknown): unknown => (typeof e === 'object' && e !== null ? (e as { code?: unknown }).code : undefined);
+      const causeOf = (e: unknown): unknown => (typeof e === 'object' && e !== null ? (e as { cause?: unknown }).cause : undefined);
+      expect([codeOf(err), codeOf(causeOf(err))]).toContain('UND_ERR_RES_EXCEEDED_MAX_SIZE');
     } finally {
       delete process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE;
       await capped.close();

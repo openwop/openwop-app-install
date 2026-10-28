@@ -15,6 +15,11 @@
  *  2. THE READER, with an injected fetch and a fake clock: the metadata-token
  *     path, the bounded deadline, the caches, single-flight, and — the #3056
  *     property — that a hung fetch cannot wedge the next refresh.
+ *  3. A tripwire over real source: every production caller AWAITS the refresh.
+ *
+ * Sabotages witnessed (/grade-tests 8f W5, probes 8fw5g6-whd18-*): the retired-key
+ * rule (before / NaN), the build-commit check, single-flight, the wedge bound, the
+ * deadline abort, stale-if-error, the 404 withdrawal and the positive TTL.
  */
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
@@ -39,9 +44,19 @@ const COMMIT = '27315b41c8f43e76e99f2e0f413acff14ba026fb';
 const KEY = { keyId: 'openwop-app-bundle-2', alg: 'ed25519', publicKey: 'WVhUJ8jHoQf9g9b8VPsfMS6kiOjUSbGdjbIAiemOVq4' };
 
 type Json = Record<string, unknown>;
-const fixture = (): Json => JSON.parse(FIXTURE_TEXT) as Json;
-const obj = (v: unknown): Json => v as Json;
-const rows = (b: Json): Json[] => obj(b['results'])['requirements'] as Json[];
+const isJson = (v: unknown): v is Json => v !== null && typeof v === 'object' && !Array.isArray(v);
+/** Narrow a fixture node to an object, failing loudly if the fixture is not shaped as claimed. */
+const obj = (v: unknown): Json => {
+  if (!isJson(v)) throw new Error(`fixture: expected an object, got ${JSON.stringify(v)?.slice(0, 40)}`);
+  return v;
+};
+const fixture = (): Json => obj(JSON.parse(FIXTURE_TEXT));
+const rows = (b: Json): Json[] => {
+  const r = obj(b['results'])['requirements'];
+  // The SAME array (tamper cases mutate it in place), narrowed by a guard, not copied.
+  if (!Array.isArray(r) || !r.every(isJson)) throw new Error('fixture: results.requirements is not an array of objects');
+  return r;
+};
 const expectFor = (over: Partial<{ commit: string; major: 1 | 2; signingKeys: Json[] }> = {}) => ({
   commit: over.commit ?? COMMIT,
   major: over.major ?? 2,
@@ -281,7 +296,7 @@ describe('WHD-18 reader — token path, caching, single-flight', () => {
     const gcs = fakeGcs({ object: async () => { await gate; return new Response(FIXTURE_TEXT, { status: 200 }); } });
     const reader = new CertificationEvidenceReader({ fetchImpl: gcs.fetchImpl, now: clock().now });
     const all = Promise.all([reader.ensure(REQ), reader.ensure(REQ), reader.ensure(REQ)]);
-    await new Promise((r) => setTimeout(r, 5));
+    // `ensure()` registers its in-flight entry synchronously, before its first await.
     expect(reader.inflightCount()).toBe(1);
     release();
     await all;
@@ -386,8 +401,12 @@ describe('WHD-18 — every production caller AWAITS the refresh', () => {
     const p = join(dir, n);
     return statSync(p).isDirectory() ? walk(p) : p.endsWith('.ts') ? [p] : [];
   });
+  // Read once, pre-filter on the raw text, and strip comments only for the hits
+  // (the W3 lesson: a whole-tree regex pass per file is slow under gate load).
   const sites = walk(SRC).flatMap((f) => {
-    const src = readFileSync(f, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+    const raw = readFileSync(f, 'utf8');
+    if (!raw.includes('ensureCertificationEvidence(')) return [];
+    const src = raw.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
     return [...src.matchAll(/(\S+\s+)?ensureCertificationEvidence\(/g)]
       .filter((m) => !/function\s+$/.test(m[1] ?? '') && !/^(import|\{|,)/.test((m[1] ?? '').trim()))
       .map((m) => ({ file: f.slice(SRC.length + 1), before: (m[1] ?? '').trim() }));

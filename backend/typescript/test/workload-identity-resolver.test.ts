@@ -36,6 +36,8 @@ import {
   readWorkloadIdentityConfigFromEnv,
   resolveWorkloadIdentity,
   verifyWorkloadCredential,
+  type DelegationContext,
+  type DelegationHop,
   type WorkloadIdentity,
 } from '../src/host/workloadIdentity.js';
 
@@ -233,11 +235,11 @@ describe('RFC 0154 §A — the closed shape refuses credential material', () => 
 describe('RFC 0154 §B — the delegated actor chain is bounded, acyclic and expiring', () => {
   const future = () => new Date(Date.now() + 60_000).toISOString();
 
-  function withChain(chain: { subject: string; issuer?: string; scopes?: readonly string[] }[], overrides: Record<string, unknown> = {}) {
+  function withChain(chain: DelegationHop[], overrides: Partial<DelegationContext> = {}): WorkloadIdentity {
     return {
       ...PEER_IDENTITY,
       delegation: { chain, audience: HOST_AUDIENCE, expiresAt: future(), ...overrides },
-    } as WorkloadIdentity;
+    };
   }
 
   it('a live, bounded, acyclic chain resolves and reports its DEPTH (never the chain)', async () => {
@@ -382,7 +384,11 @@ describe('RFC 0154 — host-minted worker credentials', () => {
       ttlSeconds: 86_400,
     });
     const claims = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8')) as { exp: number; iat: number };
-    expect(claims.exp - claims.iat).toBeLessThanOrEqual(MAX_CREDENTIAL_TTL_S);
+    // A LITERAL bound (300 s, measured at workloadIdentity.ts MAX_CREDENTIAL_TTL_S):
+    // comparing against the product constant alone would pass if the constant
+    // itself were raised (8fw5g5-wid-ttlconst-r2).
+    expect(claims.exp - claims.iat).toBeLessThanOrEqual(300);
+    expect(MAX_CREDENTIAL_TTL_S).toBe(300);
   });
 
   it('a tampered signature, a swapped `alg`, and an expired credential are all refused', async () => {
@@ -390,7 +396,7 @@ describe('RFC 0154 — host-minted worker credentials', () => {
     const [h, b, s] = token.split('.');
 
     const tampered = await verifyWorkloadCredential(`${h}.${b}.${'A'.repeat(s.length)}`);
-    expect(tampered.ok).toBe(false);
+    expect(tampered).toMatchObject({ ok: false, cause: 'credential_invalid' });
 
     // `alg` is PINNED, not read. Honouring the credential's own `alg` is the
     // classic JWS-confusion bug.
@@ -411,8 +417,7 @@ describe('RFC 0154 — host-minted worker credentials', () => {
     const claims = JSON.parse(Buffer.from(b, 'base64url').toString('utf8')) as Record<string, unknown>;
     const expired = await mintExpired({ ...claims, exp: Math.floor(Date.now() / 1000) - 10 });
     const r = await verifyWorkloadCredential(expired);
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.cause).toBe('credential_expired');
+    expect(r).toMatchObject({ ok: false, cause: 'credential_expired' });
   });
 
   it('a credential asking for MORE than the worker ceiling is refused, not trimmed', async () => {

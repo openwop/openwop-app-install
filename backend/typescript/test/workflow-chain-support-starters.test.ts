@@ -23,10 +23,11 @@ import {
   _resetChainRegistryForTest,
 } from '../src/host/workflowChainPackLoader.js';
 
+let loadErrors: unknown[] = [];
 beforeAll(() => {
   _resetChainRegistryForTest();
-  const { errors } = loadWorkflowChainPacks({ roots: defaultWorkflowChainPackRoots() });
-  expect(errors).toEqual([]);
+  // Asserted in a discovery CASE: a failing hook would skip every case.
+  loadErrors = loadWorkflowChainPacks({ roots: defaultWorkflowChainPackRoots() }).errors;
 });
 
 const PACKS: Record<string, string[]> = {
@@ -78,6 +79,10 @@ const GATED_SINKS = new Set([
 ]);
 
 describe('support + starters packs — discovery', () => {
+  it('every vendored chain pack loads with no error', () => {
+    expect(loadErrors).toEqual([]);
+  });
+
   it.each(Object.entries(PACKS))('%s loads all its chains', (pack, ids) => {
     for (const id of ids) {
       const entry = getChain(id);
@@ -87,7 +92,10 @@ describe('support + starters packs — discovery', () => {
     expect(listChains().filter((c) => c.packName === pack)).toHaveLength(ids.length);
   });
 
-  it('gallery categories derive from the pack keywords', () => {
+  // Both packs' first keyword EQUALS their prettified pack name, so this pins the
+  // category STRING, not which source it came from (keyword vs name fallback):
+  // the two agree here by construction (8fw5g5-ss-kwsource came back vacuous).
+  it('gallery categories are Support and Starters', () => {
     expect(getChain('support.kb-answer')!.category).toBe('Support');
     expect(getChain('starters.webhook-notify')!.category).toBe('Starters');
   });
@@ -101,11 +109,9 @@ describe('support + starters packs — every node uses a known shipped typeId', 
     }
   });
 
-  it.each(ALL_CHAINS)('%s derives zero missing typeIds against the known set', (id) => {
-    const chain = getChain(id)!.chain;
-    const req = chainRequirements(chain, KNOWN_TYPEIDS, () => true);
-    expect(req.missingNodeTypeIds).toEqual([]);
-  });
+  // (grade-tests wave 64) `'%s derives zero missing typeIds against the known set'`
+  // was cut: `chainRequirements(chain, KNOWN_TYPEIDS).missingNodeTypeIds` is the same
+  // membership test as the case above, and 8fw5g5-ss-typeid reds both.
 });
 
 /**
@@ -125,6 +131,18 @@ describe('support + starters packs — every node uses a known shipped typeId', 
  * capability), and do not read a green here as "the gate works".
  */
 describe('support + starters packs — external sends declare an approval gate', () => {
+  it('the external-send population is exactly the measured four chains (positive control)', () => {
+    // Without this, a GATED_SINKS typeId that stopped matching would make every
+    // row below assert nothing.
+    const sending = ALL_CHAINS.filter((id) => getChain(id)!.chain.dag.nodes.some((n) => GATED_SINKS.has(n.typeId)));
+    expect(sending.sort()).toEqual([
+      'starters.webhook-to-slack',
+      'support.csat-followup',
+      'support.kb-answer',
+      'support.sentiment-escalation',
+    ]);
+  });
+
   it.each(ALL_CHAINS)('%s declares a gate node + side-effectful for every external-send sink', (id) => {
     const chain = getChain(id)!.chain;
     const sendsExternally = chain.dag.nodes.some((n) => GATED_SINKS.has(n.typeId));

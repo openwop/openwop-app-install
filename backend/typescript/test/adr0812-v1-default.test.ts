@@ -9,6 +9,13 @@
  *   answers 410 with the variable set to `false`;
  * - nothing re-introduces the pin (setup file, scripts, conformance harness);
  * - decision 2: a major-1 webhook subscription gets nothing, whatever the env.
+ * Tracker: TST-BVC-10. The `.github/workflows/ci.yml` leg lives in
+ * `test/steward/adr0812-v1-pin-ci-workflow.test.ts` (the adopter bundle strips
+ * `.github/`).
+ *
+ * Red when (wave 60 probes w60g4-v1-*): a major-1 version is advertised; the
+ * negotiator reads the env again; a major-1 or legacy subscription is
+ * delivered to.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import express from 'express';
@@ -65,7 +72,9 @@ describe('ADR 0812 P3c — the former opt-in serves nothing', () => {
   it('the vitest pin is gone and no boot re-introduces it', () => {
     expect(existsSync(join(BE, 'test', 'setup', 'pinV1Served.ts'))).toBe(false);
     expect(read(join(BE, 'vitest.config.ts'))).not.toMatch(/pinV1Served/);
-    for (const f of ['scripts/e2e-routes.sh', 'scripts/ci.sh', '.github/workflows/ci.yml', 'backend/typescript/conformance/run.ts']) {
+    // `.github/workflows/ci.yml` is asserted in test/steward/adr0812-ci-workflow-no-v1-pin.test.ts:
+    // the white-label bundle strips `.github/`, so reading it here ENOENTs every adopter.
+    for (const f of ['scripts/e2e-routes.sh', 'scripts/ci.sh', 'backend/typescript/conformance/run.ts']) {
       expect(read(join(ROOT, f)), f).not.toMatch(/OPENWOP_V1_RETIRED/);
     }
   });
@@ -82,10 +91,11 @@ describe('ADR 0812 decision 2 — this host emits no v1 webhook body', () => {
 
   beforeAll(async () => {
     storage = await openStorage('memory://');
-    await storage.insertRun({
-      runId: RUN_ID, workflowId: 'wf-noop', status: 'completed', tenantId: TENANT,
+    const run: RunRecord = {
+      runId: RUN_ID, workflowId: 'wf-noop', status: 'completed', tenantId: TENANT, inputs: {}, metadata: {}, configurable: {},
       createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-    } as RunRecord);
+    };
+    await storage.insertRun(run);
     for (const [id, major] of [['sub-0812-v1', 1], ['sub-0812-legacy', undefined], ['sub-0812-v2', 2]] as const) {
       await storage.insertWebhook({
         subscriptionId: id, tenantId: TENANT, url: `https://example.test/${id}`, events: ['run.completed'],
@@ -95,7 +105,7 @@ describe('ADR 0812 decision 2 — this host emits no v1 webhook body', () => {
   });
 
   async function deliveredTo(seq: number): Promise<string[]> {
-    const event = { type: 'run.completed', runId: RUN_ID, eventId: `e${seq}`, sequence: seq } as unknown as EventRecord;
+    const event: EventRecord = { type: 'run.completed', runId: RUN_ID, eventId: `e${seq}`, sequence: seq, payload: {}, timestamp: new Date().toISOString() };
     await __deliverToSubscribersForTests(storage, event);
     const rows = await storage.claimDueWebhookDeliveries(`w${seq}`, Date.now(), 60_000, 50);
     return rows.filter((r) => r.subscriptionId.startsWith('sub-0812-')).map((r) => r.subscriptionId).sort();

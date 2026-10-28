@@ -5,6 +5,17 @@
  * stand-in. Verifies the EvalSummary, the persisted eval run + `eval.*` events,
  * the content-free guarantee (no scenario prose in the events), and that the
  * deterministic suite lands at the designed 0.8.
+ *
+ * Sabotage that turns it red (wave 64 probes, all witnessed): the per-task
+ * score (8fw5g2-wfe-pass-score), scenario prose in an event (-wfe-content-leak),
+ * the eval run not completed (-wfe-run-completed), a non-derived runId
+ * (-wfe-runid-determinism), the stamp dropped (-wfe-records-agent), and the
+ * two ARWF-8 refusals (-wfe-no-suite, -wfe-supervisor-mismatch).
+ *
+ * Double guard (honest, by design): "records the supervisor it resolved" can
+ * only fail on the stamp's presence. The mismatch refusal forces the resolved
+ * supervisor to equal the suite's subject agent, so swapping `evalAgentId` for
+ * that constant is a behavioural no-op on every path that reaches the stamp.
  */
 import { readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -37,15 +48,22 @@ describe('workforce live-shadow eval (RFC 0081 §C, host-ext)', () => {
   it('dispatches the supervisor over the suite, scores it, and returns a spec-shaped EvalSummary', async () => {
     const s = await runWorkforceLiveShadowEval(storage, 'demo', HERO, NOW);
     expect(s.suiteId).toBe(EVAL_SUITE_ID);
+    expect(s.suiteVersion).toBe('1.0.0');
+    expect(s.workforceId).toBe(HERO.workforceId);
     expect(s.mode).toBe('live-shadow');
     expect(s.evaluatedModelClass).toBe('reasoning');
     expect(s.taskCount).toBe(5);
-    expect(s.tasks).toHaveLength(5);
-    expect(s.aggregateScore).toBeGreaterThanOrEqual(0);
-    expect(s.aggregateScore).toBeLessThanOrEqual(1);
-    expect(s.passedCount).toBe(s.tasks.filter((t) => t.passed).length);
-    expect(s.passed).toBe(s.aggregateScore >= 0.8);
-    // designed: 4/5 agree with baseline → 0.8, a credible pass (not a trivial 1.0)
+    // designed: 4/5 agree with baseline → 0.8, a credible pass (not a trivial 1.0).
+    // Only `borderline-variance` (confidence 0.74 ≥ the 0.7 threshold, baseline
+    // `escalated`) disagrees.
+    expect(s.tasks).toEqual([
+      { taskId: 'clean-po-match', score: 1, passed: true },
+      { taskId: 'small-price-variance', score: 1, passed: true },
+      { taskId: 'missing-receipt', score: 1, passed: true },
+      { taskId: 'duplicate-suspect', score: 1, passed: true },
+      { taskId: 'borderline-variance', score: 0, passed: false },
+    ]);
+    expect(s.passedCount).toBe(4);
     expect(s.aggregateScore).toBe(0.8);
     expect(s.passed).toBe(true);
   });
@@ -60,7 +78,7 @@ describe('workforce live-shadow eval (RFC 0081 §C, host-ext)', () => {
 
     const run = (await storage.listRuns({ tenantId: 'demo', limit: 100 })).find((r) => r.runId === s.runId);
     expect(run?.status).toBe('completed');
-    expect((run?.metadata as { mode?: string }).mode).toBe('eval');
+    expect(run?.metadata).toMatchObject({ mode: 'eval' });
   });
 
   it('is content-free (eval-summary-no-content-leak): no scenario prose in the events', async () => {
@@ -73,10 +91,15 @@ describe('workforce live-shadow eval (RFC 0081 §C, host-ext)', () => {
 
   it('is deterministic — identical inputs reproduce the same scores', async () => {
     const a = await runWorkforceLiveShadowEval(storage, 'demo', HERO, NOW);
-    const b = await runWorkforceLiveShadowEval(openSqliteStorage(':memory:'), 'demo', HERO, NOW);
+    // The second run gets its OWN storage AND its own event log (round 1 left the
+    // event log on storage A, so b's events landed in a's store).
+    const storageB = openSqliteStorage(':memory:');
+    setEventLogBackend(storageB);
+    const b = await runWorkforceLiveShadowEval(storageB, 'demo', HERO, NOW);
     expect(b.aggregateScore).toBe(a.aggregateScore);
     expect(b.tasks).toEqual(a.tasks);
     expect(b.runId).toBe(a.runId); // id derived from (tenant, workforce, nowMs)
+    expect((await storageB.listEvents(b.runId)).map((e) => e.type)).toEqual((await storage.listEvents(a.runId)).map((e) => e.type));
   });
 
   // ADR 0775 P4 (ARWF-8) — before this, every workforce dispatched `host.priya`
@@ -99,6 +122,7 @@ describe('workforce live-shadow eval (RFC 0081 §C, host-ext)', () => {
       httpStatus: 409,
       details: { reason: 'supervisor_mismatch' },
     });
+    expect(await storage.listRuns({ tenantId: 'demo', limit: 100 })).toEqual([]);
   });
 
   it('records the supervisor it resolved from the workforce on the eval run', async () => {

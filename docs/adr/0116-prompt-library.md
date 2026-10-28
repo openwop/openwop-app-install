@@ -1,6 +1,20 @@
 # ADR 0116 — Prompt library (shareable, RBAC-gated, versioned)
 
 **Status:** implemented (all phases, 2026-06-24) — **Phase 1 implemented** (2026-06-24): the `prompts` catalog feature-package — `PromptLibraryEntry` (DurableCollection, tenant/org-prefixed) + CRUD routes under `/v1/host/openwop-app/prompts/orgs/:orgId/entries`, `authorizeOrgScope`-gated (read/write), dangling-`promptRef` rejection (the catalog references the existing prompt store, never copies it), tenant/org IDOR isolation, toggle `prompts` OFF/tenant. **Phase 2 (render) implemented** (2026-06-24): `POST /v1/host/openwop-app/prompts/orgs/:orgId/entries/:id/render` resolves the entry's `promptRef` against the SAME prompt store it validated against (`getTemplate`; a removed template 404s) and substitutes `{{var}}` from the request `variables` (missing binding stays literal). Read-gated. **Phase 2b (shareable prompts) implemented** (2026-06-24): a `prompt` resolver in the ADR 0013 sharing registry (composing ADR 0116 + 0122) — a public read-only projection of a library entry (name + description + the resolved `promptRef` template body), org-scoped, mint-validated. **Phase 3a (FE client) implemented** (2026-06-24): `promptLibraryClient.ts` — listPrompts + createPrompt + renderPrompt (server-side `{{var}}` substitution) for the library UI + the `/`-insertion menu. Phases 3b–4 SHIPPED: the library UI merged into the existing prompt-library surface + the `/`-insertion menu, and `ctx.features.prompts` (`promptSurface.ts`). **Date:** 2026-06-23
+> **CORRECTED 2026-10-27 (ADR 0993, feature loop row 61): "implemented (all phases)" was not true.**
+>
+> - **No library UI.** Phase 3's page had none. `/prompts` edited prompts in
+>   localStorage, `createPrompt` had no callers, and nothing could set visibility.
+> - **Sent, not inserted.** Phase 3's `/`-insertion did not use `setText`; it sent
+>   the prompt as the member's turn, unseen.
+> - **No composer.** Render never went through `composePromptTemplate`; it is a
+>   plain `{{var}}` substitution.
+> - **One global prompt store.** Phase 1's prompt store was process-global, so
+>   entries could bind another tenant's template.
+>
+> ADR 0993 D1–D9 ships those phases for real, with owner-only private lanes, a
+> revision CAS, and DSAR.
+
 **Toggle:** `prompts` (a.k.a. prompt-library) · default **OFF** · `bucketUnit: tenant` —
 a shared team asset, not a per-user surface.
 **Surface:** host-extension `/v1/host/openwop-app/prompts/*` (non-normative) — a

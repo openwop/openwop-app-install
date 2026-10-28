@@ -14,6 +14,16 @@
  *   - a presented-and-refused bearer → 401 `error="invalid_token"`, no session minted;
  *   - the anonymous-first product posture survives: a browser visitor still gets a
  *     session, and that session is honoured on the protocol surface.
+ *
+ * Tracker TST-BAB-4. TWIN FILE: `adr0750-v2-no-credential-401.test.ts` covers the
+ * same rule on the bare-root v2 lane (envelope body, browser-navigation
+ * exemption, the `/me` bootstrap). This file pins the PRODUCTION front door —
+ * the `/api` Hosting rewrite, whose challenge must name the `/api` sub-path PRM —
+ * plus the `/host/openwop-app/workflows` bootstrap and a GET major-1 refusal.
+ * Red when (sabotage-witnessed, wave 60): the no-credential refusal predicate is
+ * removed; the challenge always (or never) carries `invalid_token`; the `/api`
+ * prefix is not reflected in `resource_metadata`; a first visit is not handed a
+ * session cookie.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -64,11 +74,12 @@ describe('RFC 0200 §B.1 in cookie mode — a bare major-2 protocol client', () 
   // Owned by ADR 0750 (#4106). MEASURED before it merged: red on the prior main (404 +
   // a minted session — the defect), green against #4106's rule.
   it('no credential → 401, Bearer + resource_metadata, NO error code, no session minted (ADR 0750)', async () => {
-    const res = await fetch(`${BASE}/runs/run-that-does-not-exist`, { headers: V2 });
+    // Through the `/api` rewrite, as production is reached (the twin file covers the bare root).
+    const res = await fetch(`${BASE}/api/runs/run-that-does-not-exist`, { headers: V2 });
     expect(res.status).toBe(401);
     expect(sessionCookie(res), 'a refused bare caller must not be handed a tenant').toBeNull();
     const p = challengeParams(res);
-    expect(p['resource_metadata']).toBe(`${BASE}/.well-known/oauth-protected-resource`);
+    expect(p['resource_metadata']).toBe(`${BASE}/.well-known/oauth-protected-resource/api`);
     expect(p['error'], 'RFC 6750 §3.1 — no credential was presented').toBeUndefined();
   });
 
@@ -94,7 +105,8 @@ describe('major 1 refuses a credential-less protocol call too (ADR 0750 major-1 
     // floor `openwop.floor.auth` (auth.md §3) measured it as a defect on production.
     const res = await fetch(`${BASE}/runs/run-that-does-not-exist`);
     expect(res.status).toBe(401);
-    expect(sessionCookie(res)).toBeFalsy();
+    expect(sessionCookie(res)).toBeNull();
+    expect(((await res.json()) as { error?: string }).error, 'the auth envelope, not a route 404').toBe('unauthenticated');
   });
 });
 

@@ -66,6 +66,29 @@ export function resetRfc0245WireCache(force?: boolean): void {
   cached0245 = force;
 }
 
+let cached0251: boolean | undefined;
+
+/**
+ * ADR 0983 D5 — true iff the vendored v2 capabilities schema defines RFC 0251's
+ * `agents.evalSuite.baselineSelection`. The facet is closed, so it is advertised
+ * only once the pin that carries it is vendored (the RFC 0245 precedent above).
+ */
+export function rfc0251WireAvailable(): boolean {
+  if (cached0251 !== undefined) return cached0251;
+  try {
+    const dir = locateRepoSchemasDir(dirname(fileURLToPath(import.meta.url)), 'ai-envelope.schema.json');
+    cached0251 = /"baselineSelection"/.test(readFileSync(join(dir, 'v2', 'capabilities.schema.json'), 'utf8'));
+  } catch {
+    cached0251 = false;
+  }
+  return cached0251;
+}
+
+/** Test seam: re-read the vendored schemas (or force a value). */
+export function resetRfc0251WireCache(force?: boolean): void {
+  cached0251 = force;
+}
+
 let cachedGated: boolean | undefined;
 
 /**
@@ -90,6 +113,34 @@ export function resetRfc0246FieldsCache(force?: boolean): void {
   cachedGated = force;
 }
 
+let cached0252: boolean | undefined;
+
+/**
+ * True iff the vendored v2 schemas carry RFC 0252: `agents.evalSuite.recordedFixtures`
+ * in capabilities and `fixtureRuns` on `eval.started`. Both are closed, so the
+ * host accepts `fixtureRuns`, echoes it and advertises the member only once the
+ * pin that carries them is vendored (the ADR 0889 D7 rule; ADR 0984).
+ */
+export function rfc0252WireAvailable(): boolean {
+  if (cached0252 !== undefined) return cached0252;
+  try {
+    const dir = locateRepoSchemasDir(dirname(fileURLToPath(import.meta.url)), 'ai-envelope.schema.json');
+    const payloads = JSON.parse(readFileSync(join(dir, 'v2', 'run-event-payloads.schema.json'), 'utf8')) as {
+      $defs?: Record<string, { properties?: Record<string, unknown> }>;
+    };
+    const caps = readFileSync(join(dir, 'v2', 'capabilities.schema.json'), 'utf8');
+    cached0252 = !!payloads.$defs?.evalStarted?.properties?.fixtureRuns && /"recordedFixtures"/.test(caps);
+  } catch {
+    cached0252 = false;
+  }
+  return cached0252;
+}
+
+/** Test seam: re-read the vendored schemas (or force a value). */
+export function resetRfc0252WireCache(force?: boolean): void {
+  cached0252 = force;
+}
+
 export interface EvalSuiteCapability {
   modes: string[];
   maxTasksPerSuite: number;
@@ -99,6 +150,8 @@ export interface EvalSuiteCapability {
   fixtureMatching?: true;
   regressionVerdict?: true;
   fixtureErrors?: true;
+  baselineSelection?: true;
+  recordedFixtures?: true;
 }
 
 export function evalSuiteCapability(): EvalSuiteCapability {
@@ -112,5 +165,9 @@ export function evalSuiteCapability(): EvalSuiteCapability {
     ...base, trajectory: true, trials: { maxTrials: MAX_TRIALS }, fixtureMatching: true, regressionVerdict: true,
     // RFC 0245 §C (ADR 0929) — advertised only once the vendored schemas carry it.
     ...(rfc0245WireAvailable() ? { fixtureErrors: true as const } : {}),
+    // RFC 0251 (ADR 0983) — root `evalModes` / `baselineRunId` on an eval create.
+    ...(rfc0251WireAvailable() ? { baselineSelection: true as const } : {}),
+    // RFC 0252 §A (ADR 0984) — requires fixtureMatching, which this branch always carries.
+    ...(rfc0252WireAvailable() ? { recordedFixtures: true as const } : {}),
   };
 }

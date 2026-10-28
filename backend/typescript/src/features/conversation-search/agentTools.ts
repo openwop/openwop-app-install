@@ -24,8 +24,10 @@ export function registerConversationSearchAgentTools(storage: Storage): void {
     def: {
       name: CONVERSATIONS_SEARCH_TOOL_ID,
       description:
-        'Full-text search over the current user\'s OWN conversations and messages ("find where we discussed X"). '
-        + 'Returns matching conversations with snippets. Read-only; only conversations the user participates in are searchable.',
+        'Search the current user\'s OWN conversations and messages ("find where we discussed X"). '
+        + 'Every word must appear (as a substring) in one message or in the title. Returns matching conversations with snippets; '
+        + '`truncated: true` means only the newest matching messages were examined, so absence is not proof. '
+        + 'Read-only; only conversations the user can read are searchable.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -39,11 +41,11 @@ export function registerConversationSearchAgentTools(storage: Storage): void {
     },
     async run(input, scope) {
       if (!scope.actingUserId) {
-        return { content: JSON.stringify({ hits: [], note: 'no acting user on this run — nothing searchable' }) };
+        return { content: JSON.stringify({ hits: [], truncated: false, note: 'no acting user on this run — nothing searchable' }) };
       }
       const type = typeof input.type === 'string' && VALID_TYPES.has(input.type) ? (input.type as ConversationType) : undefined;
       const limit = typeof input.limit === 'number' && input.limit > 0 ? Math.min(input.limit, 50) : 10;
-      const hits = await searchVisibleConversations(storage, scope.tenantId, scope.actingUserId, String(input.query ?? ''), {
+      const { hits, truncated } = await searchVisibleConversations(storage, scope.tenantId, scope.actingUserId, String(input.query ?? ''), {
         ...(type ? { type } : {}),
         limit,
       });
@@ -69,6 +71,9 @@ export function registerConversationSearchAgentTools(storage: Storage): void {
             score: h.score,
             ...(h.role ? { role: h.role } : {}),
           })),
+          // ADR 0997 D4 — the one field this projection gained: without it a model
+          // reports a capped search as "never discussed".
+          truncated,
         }),
       };
     },

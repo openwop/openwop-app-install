@@ -18,12 +18,58 @@ import { OpenwopError } from '../types.js';
 import { createLogger } from '../observability/logger.js';
 import { isPersonalTenantId, personalTenantOf } from './requestSubject.js';
 import { wildcardApiKeyConfigured } from '../middleware/apiKeyTenants.js';
+import { recordSuperadminWithoutFactor } from './profileCensus.js';
 
 const log = createLogger('host.superadmin');
 
 let warnedDevSuperadmin = false;
 
+/**
+ * ADR 0969 — when `OPENWOP_SUPERADMIN_REQUIRE_MFA=true`, a PERSON acting as
+ * superadmin must hold a verified second factor on THIS session. Default off:
+ * a deployment whose identity provider has MFA disabled would otherwise lock
+ * out every superadmin it has.
+ *
+ * `req.mfaVerified` is the host's own decision, read from the verified ID
+ * token's `firebase.sign_in_second_factor` claim (bearer) or the session's
+ * `mfa` mark stamped from that claim (cookie) — never from a client header.
+ *
+ * Applies to person sessions only (`auth.kind === 'subject'`). Keys and the
+ * wildcard bearer are tooling, governed by their own scopes. Break-glass is
+ * exempt: it is the emergency door for when sign-in itself is unavailable, and
+ * it is already single-use, ten-minute, audited and allowlist-bound.
+ */
+export function superadminMfaRequired(): boolean {
+  return process.env.OPENWOP_SUPERADMIN_REQUIRE_MFA === 'true';
+}
+
+/** A person session (not a key, not break-glass) with no verified second factor. */
+function lacksSecondFactor(req: Request): boolean {
+  if (req.principal?.auth?.kind !== 'subject') return false;
+  if ((req.principal.principalId ?? '').startsWith('breakglass:')) return false;
+  return req.mfaVerified !== true;
+}
+
+function refusesForMissingMfa(req: Request): boolean {
+  return superadminMfaRequired() && lacksSecondFactor(req);
+}
+
+/** True when this caller WOULD be a superadmin but is refused only for want of
+ *  a second factor — so the refusal can say how to fix it, not just "no". */
+export function superadminNeedsMfa(req: Request): boolean {
+  return refusesForMissingMfa(req) && isSuperadminIgnoringMfa(req);
+}
+
 export function isSuperadmin(req: Request): boolean {
+  if (!isSuperadminIgnoringMfa(req)) return false;
+  if (refusesForMissingMfa(req)) return false;
+  // ADR 0981 P2 — with the requirement OFF, count the person sessions it WOULD
+  // refuse (the census records only under the strict profile).
+  if (!superadminMfaRequired() && lacksSecondFactor(req)) recordSuperadminWithoutFactor(req.principal?.principalId ?? '');
+  return true;
+}
+
+function isSuperadminIgnoringMfa(req: Request): boolean {
   // Wildcard bearer (conformance harness / admin tooling / curl).
   if (req.principal?.tenants?.includes('*')) return true;
   // ADR 0795 D1 — superadmin is keyed on the TENANT below, so a key minted in a
@@ -133,6 +179,13 @@ export function isSuperadminTenant(tenantId: string | undefined): boolean {
 }
 
 export function requireSuperadmin(req: Request, surface = 'This administration surface'): void {
+  if (superadminNeedsMfa(req)) {
+    throw new OpenwopError('forbidden', `${surface} requires two-factor authentication on this session.`, 403, {
+      code: 'mfa_required',
+      settingsUrl: '/settings#security',
+      hint: 'Turn on two-factor authentication in Settings → Security, then sign in again.',
+    });
+  }
   if (!isSuperadmin(req)) {
     throw new OpenwopError('forbidden', `${surface} requires a superadmin principal.`, 403, {
       hint: superadminHint(),

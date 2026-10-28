@@ -5,7 +5,14 @@
  * vocabulary, parses the SSE stream, and surfaces remote JSON-RPC errors.
  *
  * The mock peer is a raw node:http server so the test exercises the real fetch
- * transport (not a stub) — `spec/v1/a2a-integration.md` is the contract.
+ * transport (not a stub) — `spec/v1/a2a-integration.md` is the contract. The
+ * peer's card is 0.3-only, so the client negotiates the ADR 0552 P2 downgrade
+ * and speaks 0.3 method names.
+ *
+ * Tracker TST-BG1-11. Red when (probe-witnessed, wave 58): `normalizeResult`
+ * stops upper-casing state or stops mapping a `tasks` list; the extended-card
+ * follow-up is skipped; a remote error is mis-coded; SSE events are not
+ * forwarded; card discovery failure loses `a2a_transport_error`.
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
@@ -43,6 +50,8 @@ function sendRpcError(res: ServerResponse, id: unknown, message: string): void {
 
 let server: Server;
 let baseUrl: string;
+/** The params the peer received on its last push-config set (what the client SENT). */
+let lastPushParams: unknown;
 
 beforeAll(async () => {
   server = createServer((req, res) => {
@@ -72,6 +81,7 @@ beforeAll(async () => {
           case 'tasks/list':
             return sendJson(res, body.id, { tasks: [task('working'), task('completed')] });
           case 'tasks/pushNotificationConfig/set':
+            lastPushParams = body.params;
             return sendJson(res, body.id, { taskId: 'task-1', pushNotificationConfigId: 'cfg-1' });
           case 'message/stream': {
             // SSE: a non-terminal status update, then a terminal task.
@@ -142,8 +152,7 @@ describe('category: host.a2a task lifecycle (state normalization)', () => {
   it('listTasks returns the task list (each state normalized)', async () => {
     const a2a = createA2aSurface({ tenantId: 't1' });
     const result = (await a2a.listTasks({ baseUrl })) as { tasks: Array<{ status: { state: string } }> };
-    expect(result.tasks).toHaveLength(2);
-    expect(result.tasks[1]!.status.state).toBe('COMPLETED');
+    expect(result.tasks.map((t) => t.status.state)).toEqual(['WORKING', 'COMPLETED']);
   });
 });
 
@@ -163,9 +172,11 @@ describe('category: host.a2a streaming', () => {
 
 describe('category: host.a2a push-notification config', () => {
   it('pushConfig.create round-trips a config id', async () => {
+    lastPushParams = undefined;
     const a2a = createA2aSurface({ tenantId: 't1' });
     const result = (await a2a.pushConfig.create({ baseUrl, taskId: 'task-1', pushNotificationConfig: { url: 'https://cb.example/hook' } })) as { pushNotificationConfigId: string };
     expect(result.pushNotificationConfigId).toBe('cfg-1');
+    expect(lastPushParams).toEqual({ taskId: 'task-1', pushNotificationConfig: { url: 'https://cb.example/hook' } });
   });
 });
 

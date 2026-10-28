@@ -9,6 +9,14 @@
  * FIRST: without it the blanket `UPDATE tenant_id` fold would hit the
  * composite-PK conflict for a shared agent_id (pinned below, so nobody
  * "simplifies" the ordered pair at the one call site in routes/migrate.ts).
+ *
+ * TST-BQR-4. Red when the user-agent dedup is removed, when it compares
+ * personas by trim/lowercase instead of the SLUG domain, or when the sqlite
+ * fold tolerates the composite-PK conflict (`UPDATE OR IGNORE`). NOT pinned
+ * here: the call-site ORDER in routes/migrate.ts (this file calls the pair
+ * itself — see grade-code row G2-MIGRATE-ORDER-1), and the roster half of
+ * case 1, which `reassignTenant`'s KV move dedups on its own (keep-destination
+ * on a key collision), so it holds with or without the roster dedup.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -91,22 +99,13 @@ describe('ADR 0379 P4 — double-fold idempotency (new-scheme)', () => {
     expect((await storage.listUserAgents('u-t')).filter((a) => a.agentId === 'user.iris-chen')).toHaveLength(1);
   });
 
-  it('pins the ORDER: skipping the dedup makes the fold collide on the composite PK', async () => {
+  it('without the dedup the fold REFUSES on the composite PK, atomically (why the dedup must run first)', async () => {
     await storage.insertUserAgent(AGENT('u-t', 'iris', 'Iris'));
     await storage.insertUserAgent(AGENT('anon:s3', 'iris', 'Iris'));
-    // No dedup — the blanket tenant UPDATE must hit (u-t, user.iris) already
-    // existing. Either the storage layer throws, or (if an adapter ever makes
-    // this tolerant) the fold must NOT produce a duplicate. Both outcomes are
-    // acceptable; silently duplicating is the one failure mode.
-    let threw = false;
-    try {
-      await storage.reassignTenant('anon:s3', 'u-t');
-    } catch {
-      threw = true;
-    }
-    if (!threw) {
-      expect((await storage.listUserAgents('u-t')).filter((a) => a.persona === 'Iris')).toHaveLength(1);
-    }
-    expect(threw || (await storage.listUserAgents('anon:s3')).length === 0).toBe(true);
+    // No dedup — the blanket tenant UPDATE hits (u-t, user.iris) already existing.
+    await expect(storage.reassignTenant('anon:s3', 'u-t')).rejects.toThrow(/UNIQUE|PRIMARY KEY/);
+    // One transaction: nothing moved, nothing duplicated.
+    expect(await storage.listUserAgents('anon:s3')).toHaveLength(1);
+    expect((await storage.listUserAgents('u-t')).filter((a) => a.persona === 'Iris')).toHaveLength(1);
   });
 });

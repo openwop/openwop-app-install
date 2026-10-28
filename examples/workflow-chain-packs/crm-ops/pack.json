@@ -1,12 +1,16 @@
 {
   "name": "core.openwop.workflows.crm-ops",
-  "version": "1.4.0",
+  "version": "1.8.0",
   "kind": "workflow-chain",
   "description": "Governed CRM write-verb workflows (RFC 0013, ADR 0208 §2, ADR 0252). Where vendor.openwop-app.crm.agents.sales-ops is read-mostly (plus two assistive writes), these chains carry the riskier CRM mutations — owner assignment off a new-lead event, stale-deal follow-up, the scheduler-fired Gmail inbox sync, and contact triage (the CRM toggle variant's scoring, recorded on the contact — ADR 0837 D7) — with a human in the loop where the ADR calls for one. All tenant-specific values are run parameters (replay-deterministic). Resolves on hosts that ship the feature.crm feature + node pack (the OpenWOP reference app).",
   "author": "openwop",
   "license": "Apache-2.0",
-  "engines": { "openwop": ">=1.0.0 <3.0.0" },
-  "keywords": ["Sales"],
+  "engines": {
+    "openwop": ">=1.0.0 <3.0.0"
+  },
+  "keywords": [
+    "Sales"
+  ],
   "chains": [
     {
       "chainId": "crm-ops.route-new-lead",
@@ -16,28 +20,93 @@
       "parameters": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["ownerId", "orgId"],
+        "required": [
+          "ownerId",
+          "orgId"
+        ],
         "properties": {
-          "triggerEventName": { "type": "string", "default": "openwop-app.crm.contact-created", "description": "The host event this chain ignites on. The event belongs to the INSTALLING HOST, not the pack (openwop-1, crosstalk 1892) — defaulted so an existing install keeps working." },
-          "ownerId": { "type": "string", "description": "The opaque owning-subject id (RFC 0048) every new lead is assigned to." },
-          "orgId": { "type": "string", "description": "The org the follow-up task is created in." },
-          "taskTitle": { "type": "string", "default": "Follow up with new lead", "description": "Title of the follow-up task created for the newly-assigned owner." }
+          "triggerEventName": {
+            "type": "string",
+            "default": "openwop-app.crm.contact-created",
+            "description": "The host event this chain ignites on. The event belongs to the INSTALLING HOST, not the pack (openwop-1, crosstalk 1892) — defaulted so an existing install keeps working."
+          },
+          "ownerId": {
+            "type": "string",
+            "description": "The opaque owning-subject id (RFC 0048) every new lead is assigned to."
+          },
+          "orgId": {
+            "type": "string",
+            "description": "The org the follow-up task is created in."
+          },
+          "taskTitle": {
+            "type": "string",
+            "default": "Follow up with new lead",
+            "description": "Title of the follow-up task created for the newly-assigned owner."
+          }
         }
       },
-      "capabilities": ["side-effectful"],
+      "capabilities": [
+        "side-effectful"
+      ],
       "dag": {
         "nodes": [
-          { "id": "trigger", "typeId": "core.trigger.event@1.0.0", "name": "New contact created", "position": { "x": 0, "y": 0 }, "config": { "eventName": "{{params.triggerEventName}}" }, "inputs": {} },
-          { "id": "assign-owner", "typeId": "feature.crm.nodes.update-contact-owner@1.0.0", "name": "Assign owner", "position": { "x": 320, "y": 0 }, "config": { "owner": "{{params.ownerId}}" }, "inputs": {} },
-          { "id": "follow-up", "typeId": "feature.crm.nodes.create-task@1.0.0", "name": "Create follow-up task", "position": { "x": 640, "y": 0 }, "config": { "orgId": "{{params.orgId}}", "title": "{{params.taskTitle}}" }, "inputs": {} }
+          {
+            "id": "trigger",
+            "typeId": "core.trigger.event@1.0.0",
+            "name": "New contact created",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "config": {
+              "eventName": "{{params.triggerEventName}}"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "assign-owner",
+            "typeId": "feature.crm.nodes.update-contact-owner@1.0.0",
+            "name": "Assign owner",
+            "position": {
+              "x": 320,
+              "y": 0
+            },
+            "config": {
+              "owner": "{{params.ownerId}}"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "follow-up",
+            "typeId": "feature.crm.nodes.create-task@1.0.0",
+            "name": "Create follow-up task",
+            "position": {
+              "x": 640,
+              "y": 0
+            },
+            "config": {
+              "orgId": "{{params.orgId}}",
+              "title": "{{params.taskTitle}}"
+            },
+            "inputs": {}
+          }
         ],
         "edges": [
-          { "from": "trigger.payload", "to": "assign-owner" },
-          { "from": "assign-owner", "to": "follow-up" }
+          {
+            "from": "trigger.payload",
+            "to": "assign-owner"
+          },
+          {
+            "from": "assign-owner",
+            "to": "follow-up"
+          }
         ]
       },
       "outputs": {
-        "task": { "type": "object", "description": "The follow-up task created for the newly-assigned owner." }
+        "task": {
+          "type": "object",
+          "description": "The follow-up task created for the newly-assigned owner."
+        }
       }
     },
     {
@@ -48,28 +117,111 @@
       "parameters": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["orgId"],
+        "required": [
+          "orgId"
+        ],
         "properties": {
-          "orgId": { "type": "string", "description": "The org whose open deals to review." },
-          "staleDays": { "type": "number", "default": 14, "description": "Review-context hint shown on the approval card: deals with no activity in roughly this many days are candidates. Not enforced by a filtering node — the human reviewer applies it." }
+          "orgId": {
+            "type": "string",
+            "description": "The org whose open deals to review."
+          },
+          "staleDays": {
+            "type": "number",
+            "default": 14,
+            "description": "Review-context hint shown on the approval card: deals with no activity in roughly this many days are candidates. Not enforced by a filtering node — the human reviewer applies it."
+          }
         }
       },
-      "capabilities": ["side-effectful"],
+      "capabilities": [
+        "side-effectful"
+      ],
       "dag": {
         "nodes": [
-          { "id": "open-deals", "typeId": "feature.crm.nodes.list-deals@1.0.0", "name": "Open deals", "position": { "x": 0, "y": 0 }, "config": { "orgId": "{{params.orgId}}" }, "inputs": {} },
-          { "id": "review", "typeId": "core.chat.approvalGate@1.1.0", "name": "Review for stale deals", "position": { "x": 320, "y": 0 }, "config": { "title": "Review open deals — flag any with no activity in ~{{params.staleDays}} days for follow-up", "artifactType": "crm.deals", "actions": ["approve", "reject"] }, "inputs": {} },
-          { "id": "gate-reject", "typeId": "core.flow.noop@1.0.0", "name": "Rejected — no follow-up task created", "position": { "x": 640, "y": 160 }, "config": {}, "inputs": {} },
-          { "id": "follow-up", "typeId": "feature.crm.nodes.create-task@1.0.0", "name": "Create follow-up task", "position": { "x": 640, "y": 0 }, "config": { "orgId": "{{params.orgId}}", "title": "Follow up on stale open deal(s)" }, "inputs": {} }
+          {
+            "id": "open-deals",
+            "typeId": "feature.crm.nodes.list-deals@1.0.0",
+            "name": "Open deals",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "config": {
+              "orgId": "{{params.orgId}}"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "review",
+            "typeId": "core.chat.approvalGate@1.1.0",
+            "name": "Review for stale deals",
+            "position": {
+              "x": 320,
+              "y": 0
+            },
+            "config": {
+              "title": "Review open deals — flag any with no activity in ~{{params.staleDays}} days for follow-up",
+              "artifactType": "crm.deals",
+              "actions": [
+                "approve",
+                "reject"
+              ]
+            },
+            "inputs": {}
+          },
+          {
+            "id": "gate-reject",
+            "typeId": "core.flow.noop@1.0.0",
+            "name": "Rejected — no follow-up task created",
+            "position": {
+              "x": 640,
+              "y": 160
+            },
+            "config": {},
+            "inputs": {}
+          },
+          {
+            "id": "follow-up",
+            "typeId": "feature.crm.nodes.create-task@1.0.0",
+            "name": "Create follow-up task",
+            "position": {
+              "x": 640,
+              "y": 0
+            },
+            "config": {
+              "orgId": "{{params.orgId}}",
+              "title": "Follow up on stale open deal(s)"
+            },
+            "inputs": {}
+          }
         ],
         "edges": [
-          { "from": "open-deals.deals", "to": "review.artifact" },
-          { "from": "review", "to": "follow-up", "condition": { "type": "truthy", "left": "approved" } },
-          { "from": "review", "to": "gate-reject", "condition": { "type": "falsy", "left": "approved" } }
+          {
+            "from": "open-deals.deals",
+            "to": "review.artifact"
+          },
+          {
+            "from": "review",
+            "to": "follow-up",
+            "condition": {
+              "type": "truthy",
+              "left": "approved"
+            }
+          },
+          {
+            "from": "review",
+            "to": "gate-reject",
+            "condition": {
+              "type": "falsy",
+              "left": "approved"
+            }
+          }
         ]
       },
       "outputs": {
-        "task": { "type": "object", "description": "The follow-up task created after the reviewer's confirmation." }
+        "task": {
+          "type": "object",
+          "description": "The follow-up task created after the reviewer's confirmation."
+        }
       }
     },
     {
@@ -80,20 +232,45 @@
       "parameters": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["gmailSyncId"],
+        "required": [
+          "gmailSyncId"
+        ],
         "properties": {
-          "gmailSyncId": { "type": "string", "description": "The crm:gmailsync opt-in row this run syncs. Supplied by the per-user scheduler job (or \"sync now\") registered at opt-in — never set this by hand." }
+          "gmailSyncId": {
+            "type": "string",
+            "description": "The crm:gmailsync opt-in row this run syncs. Supplied by the per-user scheduler job (or \"sync now\") registered at opt-in — never set this by hand."
+          }
         }
       },
-      "capabilities": ["side-effectful"],
+      "capabilities": [
+        "side-effectful"
+      ],
       "dag": {
         "nodes": [
-          { "id": "sync", "typeId": "feature.crm.nodes.gmail-sync@1.1.0", "name": "Sync Gmail inbox", "position": { "x": 0, "y": 0 }, "config": { "gmailSyncId": "{{params.gmailSyncId}}" }, "inputs": {} }
+          {
+            "id": "sync",
+            "typeId": "feature.crm.nodes.gmail-sync@1.1.0",
+            "name": "Sync Gmail inbox",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "config": {
+              "gmailSyncId": "{{params.gmailSyncId}}"
+            },
+            "inputs": {}
+          }
         ]
       },
       "outputs": {
-        "scanned": { "type": "number", "description": "Gmail messages scanned in this pass." },
-        "matched": { "type": "number", "description": "Contacts matched and appended to in this pass." }
+        "scanned": {
+          "type": "number",
+          "description": "Gmail messages scanned in this pass."
+        },
+        "matched": {
+          "type": "number",
+          "description": "Contacts matched and appended to in this pass."
+        }
       }
     },
     {
@@ -104,26 +281,677 @@
       "parameters": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["contactId"],
+        "required": [
+          "contactId"
+        ],
         "properties": {
-          "contactId": { "type": "string", "description": "The contact to triage (the tenant-wide rolodex id)." },
-          "variant": { "type": "string", "enum": ["basic", "enriched"], "default": "basic", "description": "The scoring variant. The Triage action derives it from the run's stamped toggle assignment; default basic." }
+          "contactId": {
+            "type": "string",
+            "description": "The contact to triage (the tenant-wide rolodex id)."
+          },
+          "variant": {
+            "type": "string",
+            "enum": [
+              "basic",
+              "enriched"
+            ],
+            "default": "basic",
+            "description": "The scoring variant. The Triage action derives it from the run's stamped toggle assignment; default basic."
+          }
         }
       },
-      "capabilities": ["side-effectful"],
+      "capabilities": [
+        "side-effectful"
+      ],
       "dag": {
         "nodes": [
-          { "id": "load", "typeId": "feature.crm.nodes.get-contact@1.0.0", "name": "Read contact", "position": { "x": 0, "y": 0 }, "config": {}, "inputs": { "contactId": "{{params.contactId}}" } },
-          { "id": "score", "typeId": "feature.crm.nodes.triage@1.1.0", "name": "Score", "position": { "x": 320, "y": 0 }, "config": {}, "inputs": { "variant": "{{params.variant}}" } },
-          { "id": "record", "typeId": "feature.crm.nodes.record-triage@1.0.0", "name": "Record on contact", "position": { "x": 640, "y": 0 }, "config": {}, "inputs": { "contactId": "{{params.contactId}}" } }
+          {
+            "id": "load",
+            "typeId": "feature.crm.nodes.get-contact@1.0.0",
+            "name": "Read contact",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "contactId": "{{params.contactId}}"
+            }
+          },
+          {
+            "id": "score",
+            "typeId": "feature.crm.nodes.triage@1.1.0",
+            "name": "Score",
+            "position": {
+              "x": 320,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "variant": "{{params.variant}}"
+            }
+          },
+          {
+            "id": "record",
+            "typeId": "feature.crm.nodes.record-triage@1.0.0",
+            "name": "Record on contact",
+            "position": {
+              "x": 640,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "contactId": "{{params.contactId}}"
+            }
+          }
         ],
         "edges": [
-          { "from": "load.contact", "to": "score" },
-          { "from": "score.triage", "to": "record" }
+          {
+            "from": "load.contact",
+            "to": "score"
+          },
+          {
+            "from": "score.triage",
+            "to": "record"
+          }
         ]
       },
       "outputs": {
-        "recorded": { "type": "boolean", "description": "Whether the result was recorded on the contact (false when a newer triage superseded this run)." }
+        "recorded": {
+          "type": "boolean",
+          "description": "Whether the result was recorded on the contact (false when a newer triage superseded this run)."
+        }
+      }
+    },
+    {
+      "chainId": "crm-ops.grade-lead",
+      "version": "1.0.0",
+      "internal": true,
+      "label": "Grade Lead",
+      "description": "Grades one client lead A–F under the client's scoring model (ADR 0954 D2) and records the grade on the lead. The Leads tab's Grade action starts this chain with all four parameters, pinning the model version so a replay grades the same way; the grade is written only for the run the lead's pending stamp names, so a newer grading run or a fork never overwrites. Launched by hand from the gallery, a copy refuses: the run was not started for a client lead.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "orgId",
+          "contactId"
+        ],
+        "properties": {
+          "orgId": {
+            "type": "string",
+            "description": "The client org the lead belongs to."
+          },
+          "contactId": {
+            "type": "string",
+            "description": "The lead (a contact bound to that client)."
+          },
+          "modelId": {
+            "type": "string",
+            "default": "v0",
+            "description": "The scoring model the dispatch pinned."
+          },
+          "modelVersion": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 0,
+            "description": "The model version the dispatch pinned."
+          }
+        }
+      },
+      "capabilities": [
+        "side-effectful"
+      ],
+      "dag": {
+        "nodes": [
+          {
+            "id": "grade",
+            "typeId": "feature.crm.nodes.grade-lead@1.0.0",
+            "name": "Grade lead",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "orgId": "{{params.orgId}}",
+              "contactId": "{{params.contactId}}",
+              "modelId": "{{params.modelId}}",
+              "modelVersion": "{{params.modelVersion}}"
+            }
+          }
+        ],
+        "edges": []
+      },
+      "outputs": {
+        "recorded": {
+          "type": "boolean",
+          "description": "Whether the grade was recorded on the lead (false when a newer grading run superseded this one)."
+        },
+        "band": {
+          "type": "string",
+          "description": "The A–F band the lead scored."
+        }
+      }
+    },
+    {
+      "chainId": "crm-ops.route-lead",
+      "version": "1.1.0",
+      "internal": true,
+      "label": "Route Lead",
+      "description": "Grades one client lead under the client's scoring model, then routes it to an owner under the client's routing policy (ADR 0954 D5): territory, round robin, capacity or a named owner, with every candidate re-checked for write access on the client at assignment. Nobody eligible puts the lead in the client's unassigned queue. Then the speed-to-lead clock (ADR 0954 D6): the deadlines are computed once from the route decision's recorded inputs and the client's business hours, and three timed rungs follow (remind the owner, escalate or re-route, report to the agency lead; a re-route starts a new round as its own run, excluding the owner who missed the target). Any owner activity or booking stops the clock. Each rung fires once per routing round. Started by the Leads tab's Route action with the model version and routing round pinned; a param-less copy refuses (the run was not started for a client lead).",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "orgId",
+          "contactId",
+          "routingEpoch"
+        ],
+        "properties": {
+          "orgId": {
+            "type": "string",
+            "description": "The client org the lead belongs to."
+          },
+          "contactId": {
+            "type": "string",
+            "description": "The lead."
+          },
+          "modelId": {
+            "type": "string",
+            "default": "v0",
+            "description": "The scoring model the dispatch pinned."
+          },
+          "modelVersion": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 0,
+            "description": "The model version the dispatch pinned."
+          },
+          "routingEpoch": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "The routing round; the routing record is keyed on it."
+          }
+        }
+      },
+      "capabilities": [
+        "side-effectful"
+      ],
+      "dag": {
+        "nodes": [
+          {
+            "id": "grade",
+            "typeId": "feature.crm.nodes.grade-lead@1.0.0",
+            "name": "Grade lead",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "orgId": "{{params.orgId}}",
+              "contactId": "{{params.contactId}}",
+              "modelId": "{{params.modelId}}",
+              "modelVersion": "{{params.modelVersion}}"
+            }
+          },
+          {
+            "id": "route",
+            "typeId": "feature.crm.nodes.route-lead@1.0.0",
+            "name": "Route lead",
+            "position": {
+              "x": 320,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "orgId": "{{params.orgId}}",
+              "contactId": "{{params.contactId}}",
+              "routingEpoch": "{{params.routingEpoch}}"
+            }
+          },
+          {
+            "id": "deadline",
+            "typeId": "feature.crm.nodes.sla-deadline@1.0.0",
+            "name": "Speed-to-lead deadlines",
+            "position": {
+              "x": 640,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {}
+          },
+          {
+            "id": "wait1",
+            "typeId": "core.flow.wait@1.0.0",
+            "name": "Wait until the first-touch deadline",
+            "position": {
+              "x": 960,
+              "y": 0
+            },
+            "config": {
+              "mode": "until"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "check1",
+            "typeId": "feature.crm.nodes.check-first-touch@1.0.0",
+            "name": "Check first touch",
+            "position": {
+              "x": 1280,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "orgId": "{{params.orgId}}",
+              "contactId": "{{params.contactId}}",
+              "routingEpoch": "{{params.routingEpoch}}"
+            }
+          },
+          {
+            "id": "rung1",
+            "typeId": "feature.crm.nodes.sla-rung@1.0.0",
+            "name": "Remind the owner",
+            "position": {
+              "x": 1600,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "orgId": "{{params.orgId}}",
+              "contactId": "{{params.contactId}}",
+              "routingEpoch": "{{params.routingEpoch}}",
+              "rung": 1
+            }
+          },
+          {
+            "id": "deadline2",
+            "typeId": "feature.crm.nodes.sla-deadline@1.0.0",
+            "name": "Compute recorded deadline 2",
+            "position": {
+              "x": 1280,
+              "y": 200
+            },
+            "config": {},
+            "inputs": {}
+          },
+          {
+            "id": "wait2",
+            "typeId": "core.flow.wait@1.0.0",
+            "name": "Wait until the escalation time",
+            "position": {
+              "x": 1920,
+              "y": 0
+            },
+            "config": {
+              "mode": "until"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "check2",
+            "typeId": "feature.crm.nodes.check-first-touch@1.0.0",
+            "name": "Check first touch",
+            "position": {
+              "x": 2240,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "orgId": "{{params.orgId}}",
+              "contactId": "{{params.contactId}}",
+              "routingEpoch": "{{params.routingEpoch}}"
+            }
+          },
+          {
+            "id": "rung2",
+            "typeId": "feature.crm.nodes.sla-rung@1.0.0",
+            "name": "Escalate or re-route",
+            "position": {
+              "x": 2560,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "orgId": "{{params.orgId}}",
+              "contactId": "{{params.contactId}}",
+              "routingEpoch": "{{params.routingEpoch}}",
+              "rung": 2
+            }
+          },
+          {
+            "id": "deadline3",
+            "typeId": "feature.crm.nodes.sla-deadline@1.0.0",
+            "name": "Compute recorded deadline 3",
+            "position": {
+              "x": 1600,
+              "y": 200
+            },
+            "config": {},
+            "inputs": {}
+          },
+          {
+            "id": "wait3",
+            "typeId": "core.flow.wait@1.0.0",
+            "name": "Wait until the report time",
+            "position": {
+              "x": 2880,
+              "y": 0
+            },
+            "config": {
+              "mode": "until"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "check3",
+            "typeId": "feature.crm.nodes.check-first-touch@1.0.0",
+            "name": "Check first touch",
+            "position": {
+              "x": 3200,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "orgId": "{{params.orgId}}",
+              "contactId": "{{params.contactId}}",
+              "routingEpoch": "{{params.routingEpoch}}"
+            }
+          },
+          {
+            "id": "rung3",
+            "typeId": "feature.crm.nodes.sla-rung@1.0.0",
+            "name": "Report to the agency lead",
+            "position": {
+              "x": 3520,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "orgId": "{{params.orgId}}",
+              "contactId": "{{params.contactId}}",
+              "routingEpoch": "{{params.routingEpoch}}",
+              "rung": 3
+            }
+          },
+          {
+            "id": "done",
+            "typeId": "feature.crm.nodes.routing-result@1.0.0",
+            "name": "Routing result after the clock ends",
+            "position": {
+              "x": 2240,
+              "y": 240
+            },
+            "config": {},
+            "inputs": {}
+          }
+        ],
+        "edges": [
+          {
+            "from": "grade",
+            "to": "route"
+          },
+          {
+            "from": "route.sla",
+            "to": "deadline.sla"
+          },
+          {
+            "from": "deadline.slaDeadline",
+            "to": "wait1.timestamp",
+            "condition": {
+              "type": "truthy",
+              "left": "hasSla"
+            }
+          },
+          {
+            "from": "wait1",
+            "to": "check1"
+          },
+          {
+            "from": "check1",
+            "to": "rung1",
+            "condition": {
+              "type": "falsy",
+              "left": "touched"
+            }
+          },
+          {
+            "from": "rung1.sla",
+            "to": "deadline2.sla",
+            "condition": {
+              "type": "truthy",
+              "left": "continueClock"
+            }
+          },
+          {
+            "from": "wait2",
+            "to": "check2"
+          },
+          {
+            "from": "check2",
+            "to": "rung2",
+            "condition": {
+              "type": "falsy",
+              "left": "touched"
+            }
+          },
+          {
+            "from": "rung2.sla",
+            "to": "deadline3.sla",
+            "condition": {
+              "type": "truthy",
+              "left": "continueClock"
+            }
+          },
+          {
+            "from": "wait3",
+            "to": "check3"
+          },
+          {
+            "from": "check3",
+            "to": "rung3",
+            "condition": {
+              "type": "falsy",
+              "left": "touched"
+            }
+          },
+          {
+            "from": "deadline2.slaEscalateAt",
+            "to": "wait2.timestamp"
+          },
+          {
+            "from": "deadline3.slaReportAt",
+            "to": "wait3.timestamp"
+          },
+          {
+            "from": "grade",
+            "to": "done.lifecycle",
+            "triggerRule": "none_failed"
+          },
+          {
+            "from": "route",
+            "to": "done.route",
+            "triggerRule": "none_failed"
+          },
+          {
+            "from": "deadline",
+            "to": "done.lifecycle",
+            "triggerRule": "none_failed"
+          },
+          {
+            "from": "wait1",
+            "to": "done.lifecycle",
+            "triggerRule": "none_failed"
+          },
+          {
+            "from": "check1",
+            "to": "done.lifecycle",
+            "triggerRule": "none_failed"
+          },
+          {
+            "from": "rung1",
+            "to": "done.lifecycle",
+            "triggerRule": "none_failed"
+          },
+          {
+            "from": "deadline2",
+            "to": "done.lifecycle",
+            "triggerRule": "none_failed"
+          },
+          {
+            "from": "wait2",
+            "to": "done.lifecycle",
+            "triggerRule": "none_failed"
+          },
+          {
+            "from": "check2",
+            "to": "done.lifecycle",
+            "triggerRule": "none_failed"
+          },
+          {
+            "from": "rung2",
+            "to": "done.lifecycle",
+            "triggerRule": "none_failed"
+          },
+          {
+            "from": "deadline3",
+            "to": "done.lifecycle",
+            "triggerRule": "none_failed"
+          },
+          {
+            "from": "wait3",
+            "to": "done.lifecycle",
+            "triggerRule": "none_failed"
+          },
+          {
+            "from": "check3",
+            "to": "done.lifecycle",
+            "triggerRule": "none_failed"
+          },
+          {
+            "from": "rung3",
+            "to": "done.lifecycle",
+            "triggerRule": "none_failed"
+          }
+        ]
+      },
+      "outputs": {
+        "chosen": {
+          "type": "string",
+          "description": "The owner the lead was routed to (absent when it went to the unassigned queue)."
+        }
+      }
+    },
+    {
+      "chainId": "crm-ops.qualify-lead",
+      "version": "1.0.0",
+      "internal": true,
+      "label": "Qualify Lead",
+      "description": "Assesses one client lead against the client's qualification criteria, then grades it (ADR 0954 D4). lead-evidence reads what may be cited (contact fields, the client's activities for the lead, the visitor's own widget answers); assess-lead asks the model to answer the criteria from that evidence, and the CRM surface validates the answer closed-world and records it for this run only (one repair, then a typed assessment_ungrounded failure). grade-lead then scores the lead with the answers as qualifier signals. The model never sets the grade. Started through the client-scoped qualification endpoint with the model version pinned; a param-less copy refuses (the run was not started for a client lead).",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "orgId",
+          "contactId"
+        ],
+        "properties": {
+          "orgId": {
+            "type": "string",
+            "description": "The client org the lead belongs to."
+          },
+          "contactId": {
+            "type": "string",
+            "description": "The lead (a contact bound to that client)."
+          },
+          "modelId": {
+            "type": "string",
+            "default": "v0",
+            "description": "The scoring model the dispatch pinned."
+          },
+          "modelVersion": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 0,
+            "description": "The model version the dispatch pinned."
+          }
+        }
+      },
+      "capabilities": [
+        "side-effectful"
+      ],
+      "dag": {
+        "nodes": [
+          {
+            "id": "evidence",
+            "typeId": "feature.crm.nodes.lead-evidence@1.0.0",
+            "name": "Read lead evidence",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "orgId": "{{params.orgId}}",
+              "contactId": "{{params.contactId}}",
+              "modelId": "{{params.modelId}}",
+              "modelVersion": "{{params.modelVersion}}"
+            }
+          },
+          {
+            "id": "assess",
+            "typeId": "feature.crm.nodes.assess-lead@1.0.0",
+            "name": "Assess lead",
+            "position": {
+              "x": 320,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "orgId": "{{params.orgId}}",
+              "contactId": "{{params.contactId}}",
+              "modelId": "{{params.modelId}}",
+              "modelVersion": "{{params.modelVersion}}"
+            }
+          },
+          {
+            "id": "grade",
+            "typeId": "feature.crm.nodes.grade-lead@1.0.0",
+            "name": "Grade lead",
+            "position": {
+              "x": 640,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "orgId": "{{params.orgId}}",
+              "contactId": "{{params.contactId}}",
+              "modelId": "{{params.modelId}}",
+              "modelVersion": "{{params.modelVersion}}"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "evidence",
+            "to": "assess"
+          },
+          {
+            "from": "assess",
+            "to": "grade"
+          }
+        ]
+      },
+      "outputs": {
+        "recorded": {
+          "type": "boolean",
+          "description": "Whether the grade was recorded on the lead (false when a newer grading run superseded this one)."
+        },
+        "band": {
+          "type": "string",
+          "description": "The A–F band the lead scored."
+        }
       }
     }
   ]

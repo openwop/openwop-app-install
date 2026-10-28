@@ -21,10 +21,20 @@
  *      conversation id (a private channel the agent is not in, an archived one,
  *      another tenant's) — reachable from any workflow an Editor can author;
  *  S8  `ctx.chat.sendMessage` did the same with no actor check at all.
+ *
+ * Tracker TST-BHC-2. Red when (sabotage-witnessed, wave 62): `requireChannelWrite`
+ * lets a Viewer write (S1); a non-author may edit (S2); a non-member id is addable
+ * (S3); workspace removal leaves roster rows (S4); the stream watch stops re-checking
+ * channel access (S5) or workspace presence (D5); the post eraser matches nothing
+ * (S6); EITHER copy of the manager rule drops the admin leg (`channelService.
+ * isChannelManager` and `chatSessions.isChannelManagerOf`, D3); the generic chat doors
+ * accept a channel (H3); the posting policy is ignored (D8); or any leg of the
+ * run-lane gate in `runConversationWrite.ts` is removed (role, membership, policy,
+ * archived, needs-agent — S7/S8).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
@@ -63,7 +73,18 @@ afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
 });
 
-interface Res<T = any> { status: number; body: T }
+/** The wire shapes this file reads (parsed JSON; each call reads only its own). */
+interface ChannelView {
+  conversationId: string; roster: Array<{ subjectRef: string }>; participants: Array<{ subjectRef: string }>;
+  viewerCanManage: boolean; viewerCanPost: boolean; viewerIsOwner: boolean; ownerUserId?: string;
+  channel: { name: string; postingPolicy?: string };
+}
+interface Wire {
+  user: { userId: string }; workspaceId: string; memberId: string; messageId: string;
+  channel: ChannelView; messages: Array<{ messageId: string; content: string; authorSubject: string | null }>;
+  error?: string; code?: string; details?: { code?: string };
+}
+interface Res<T = Wire> { status: number; body: T }
 function client() {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
@@ -76,8 +97,8 @@ function client() {
     const single = res.headers.get('set-cookie');
     const setCookies: string[] = typeof h.getSetCookie === 'function' ? h.getSetCookie() : single ? [single] : [];
     for (const sc of setCookies) { const m = /(__session=[^;]+)/.exec(sc); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
+    const out: unknown = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    return { status: res.status, body: out as Wire }; // wire JSON, typed by the shapes above
   };
   return {
     cookie: () => cookie,
@@ -106,7 +127,7 @@ interface Member { client: Client; userId: string; memberId: string }
 async function workspace(...roles: Array<'viewer' | 'editor' | 'admin'>): Promise<{ owner: Client; ownerId: string; ws: string; members: Member[] }> {
   const owner = client();
   const o = await signup(owner);
-  const ws = (await owner.post(WS, { name: `Chan ${n++}` })).body.workspaceId as string;
+  const ws = (await owner.post(WS, { name: `Chan ${n++}` })).body.workspaceId;
   expect((await owner.post(`${WS}/${encodeURIComponent(ws)}/switch`)).status).toBe(200);
   const members: Member[] = [];
   for (const role of roles) {
@@ -115,7 +136,7 @@ async function workspace(...roles: Array<'viewer' | 'editor' | 'admin'>): Promis
     const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(ws)}/members`, { displayName: role, subject: u.userId, roles: [role] });
     expect(add.status, JSON.stringify(add.body)).toBe(201);
     expect((await c.post(`${WS}/${encodeURIComponent(ws)}/switch`)).status).toBe(200);
-    members.push({ client: c, userId: u.userId, memberId: add.body.memberId as string });
+    members.push({ client: c, userId: u.userId, memberId: add.body.memberId });
   }
   return { owner, ownerId: o.userId, ws, members };
 }
@@ -123,7 +144,7 @@ async function workspace(...roles: Array<'viewer' | 'editor' | 'admin'>): Promis
 async function newChannel(owner: Client, visibility: 'public' | 'private'): Promise<string> {
   const r = await owner.post(CH, { name: `room-${n++}`, visibility });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  return r.body.channel.conversationId as string;
+  return r.body.channel.conversationId;
 }
 
 async function messages(c: Client, id: string): Promise<Array<{ messageId: string; content: string; authorSubject: string | null }>> {
@@ -163,7 +184,7 @@ describe('ADR 0879 S2 — the owner moderates (delete) but never rewrites anothe
     const id = await newChannel(owner, 'public');
     const posted = await editor!.client.post(`${CH}/${id}/messages`, { content: 'my own words' });
     expect(posted.status).toBe(201);
-    const mid = posted.body.messageId as string;
+    const mid = posted.body.messageId;
 
     const edit = await owner.put(`${CHAT}/${id}/messages/${mid}`, { content: 'words put in your mouth' });
     expect(edit.status, JSON.stringify(edit.body)).toBe(403);
@@ -190,7 +211,7 @@ describe('ADR 0879 S3 — only a workspace member can be added to a channel', ()
 
     const ok = await owner.post(`${CH}/${id}/members`, { userId: editor!.userId });
     expect(ok.status, JSON.stringify(ok.body)).toBe(200);
-    const roster = (await owner.get(`${CH}/${id}`)).body.channel.roster as Array<{ subjectRef: string }>;
+    const roster = (await owner.get(`${CH}/${id}`)).body.channel.roster;
     expect(roster.map((r) => r.subjectRef)).not.toContain(`user:${s.userId}`);
     expect(roster.map((r) => r.subjectRef)).toContain(`user:${editor!.userId}`);
   });
@@ -205,10 +226,10 @@ describe('ADR 0879 S4 — leaving the workspace leaves its channels', () => {
     expect((await editor!.client.post(`${CH}/${pub}/join`)).status).toBe(200);
 
     const removed = await owner.del(`/host/openwop-app/orgs/${encodeURIComponent(ws)}/members/${encodeURIComponent(editor!.memberId)}`);
-    expect(removed.status, JSON.stringify(removed.body)).toBeLessThan(300);
+    expect(removed.status, JSON.stringify(removed.body)).toBe(204);
 
     for (const ch of [id, pub]) {
-      const roster = (await owner.get(`${CH}/${ch}`)).body.channel.roster as Array<{ subjectRef: string }>;
+      const roster = (await owner.get(`${CH}/${ch}`)).body.channel.roster;
       expect(roster.map((r) => r.subjectRef)).not.toContain(`user:${editor!.userId}`);
     }
   });
@@ -226,26 +247,29 @@ describe('ADR 0879 S5 — the live stream re-checks membership', () => {
     const reader = res.body!.getReader();
     const decoder = new TextDecoder();
     let seen = '';
+    let ended = false;
     const pump = (async () => {
       try {
         for (;;) {
           const { done, value } = await reader.read();
-          if (done) return;
+          if (done) { ended = true; return; }
           seen += decoder.decode(value);
         }
       } catch { /* aborted */ }
     })();
 
     expect((await owner.post(`${CH}/${id}/messages`, { content: 'before removal' })).status).toBe(201);
-    await new Promise((r) => setTimeout(r, 300));
-    expect(seen).toContain('channel.message');
+    await vi.waitFor(() => expect(seen).toContain('channel.message'), { timeout: 5_000, interval: 20 });
     const framesBefore = seen.split('event: channel.message').length;
 
     expect((await owner.del(`${CH}/${id}/members/${encodeURIComponent(editor!.userId)}`)).status).toBe(200);
-    expect((await owner.post(`${CH}/${id}/messages`, { content: 'after removal — private' })).status).toBe(201);
-    await new Promise((r) => setTimeout(r, 300));
+    const after = await owner.post(`${CH}/${id}/messages`, { content: 'after removal — private' });
+    expect(after.status).toBe(201);
+    // The watch re-checks before the next frame and CLOSES the stream, unwritten.
+    await vi.waitFor(() => expect(ended).toBe(true), { timeout: 5_000, interval: 20 });
     ac.abort();
     await pump;
+    expect(seen).not.toContain(after.body.messageId);
     expect(seen.split('event: channel.message').length).toBe(framesBefore);
   });
 });
@@ -268,7 +292,7 @@ describe('ADR 0879 S6 — DSAR erasure reaches the subject\'s channel posts', ()
     expect(after.find((m) => m.content === 'owner words')).toBeDefined();
     // ADR 0879 D0 — the participant row is stored as `user:<userId>` = `user:user:<hash>`;
     // the conversation eraser now matches that spelling too.
-    const roster = (await owner.get(`${CH}/${id}`)).body.channel.participants as Array<{ subjectRef: string }>;
+    const roster = (await owner.get(`${CH}/${id}`)).body.channel.participants;
     expect(roster.map((p) => p.subjectRef)).not.toContain(`user:${editor!.userId}`);
   });
 });
@@ -334,17 +358,19 @@ describe('ADR 0879 D8 — announcement channels', () => {
 
 // ── the run lanes (S7, S8) — in-process, after createApp initialised persistence ──
 
-const runCtx = (over: Record<string, unknown>): NodeContext =>
-  ({
-    runId: `run-${n++}`,
-    inputs: {},
-    config: { offerTools: [] },
-    configurable: {},
-    emit: async () => {},
-    callAI: async (_req: AiCallRequest): Promise<AiCallResult> => ({ content: 'AGENT SAYS HI' }),
-    callAIWithTools: async () => { throw new Error('no tools offered'); },
-    ...over,
-  } as unknown as NodeContext);
+const runCtx = (over: Partial<NodeContext> & { tenantId: string }): NodeContext => ({
+  runId: `run-${n++}`,
+  nodeId: 'agent',
+  inputs: {},
+  config: { offerTools: [] },
+  configurable: {},
+  attempt: 1,
+  secrets: {},
+  emit: async () => ({ eventId: `ev-${n++}`, sequence: n }),
+  callAI: async (_req: AiCallRequest): Promise<AiCallResult> => ({ content: 'AGENT SAYS HI' }),
+  callAIWithTools: async () => { throw new Error('no tools offered'); },
+  ...over,
+});
 
 async function threadOf(id: string): Promise<string[]> {
   return (await hostExtStorage().listChatSessionMessages(id)).map((m) => m.content);
@@ -390,9 +416,9 @@ describe('ADR 0879 S8 — ctx.chat.sendMessage writes only where its actor may p
     const room = await createChannel(T, 'u-owner', { name: `quiet-${n++}`, visibility: 'private' }, FULL_AUTHORITY);
 
     await expect(createChatSurface({ tenantId: T, actingUserId: 'u-stranger' })
-      .sendMessage({ sessionId: room.conversationId, content: 'forged', role: 'user', idempotencyKey: `k-${n++}` })).rejects.toThrow();
+      .sendMessage({ sessionId: room.conversationId, content: 'forged', role: 'user', idempotencyKey: `k-${n++}` })).rejects.toThrow(/\(channel_needs_agent\)/);
     await expect(createChatSurface({ tenantId: T })
-      .sendMessage({ sessionId: room.conversationId, content: 'forged', role: 'system', idempotencyKey: `k-${n++}` })).rejects.toThrow();
+      .sendMessage({ sessionId: room.conversationId, content: 'forged', role: 'system', idempotencyKey: `k-${n++}` })).rejects.toThrow(/\(channel_needs_agent\)/);
     expect(await threadOf(room.conversationId)).toEqual([]);
 
     // Not even the owner's own workflow: a sendMessage row has no author, so in a room
@@ -481,7 +507,7 @@ describe('ADR 0879 D4/D5 — leaving the workspace: ownership and the public-cha
     const { owner, ws, members: [editor, admin] } = await workspace('editor', 'admin');
     const id = await newChannel(editor!.client, 'public');
     expect((await editor!.client.get(`${CH}/${id}`)).body.channel.viewerIsOwner).toBe(true);
-    expect((await owner.del(`/host/openwop-app/orgs/${encodeURIComponent(ws)}/members/${encodeURIComponent(editor!.memberId)}`)).status).toBeLessThan(300);
+    expect((await owner.del(`/host/openwop-app/orgs/${encodeURIComponent(ws)}/members/${encodeURIComponent(editor!.memberId)}`)).status).toBe(204);
     const after = (await admin!.client.get(`${CH}/${id}`)).body.channel;
     expect(after.ownerUserId).toBeUndefined();
     expect(after.viewerCanManage).toBe(true);
@@ -507,12 +533,19 @@ describe('ADR 0879 D4/D5 — leaving the workspace: ownership and the public-cha
         }
       } catch { /* aborted */ }
     })();
-    expect((await owner.del(`/host/openwop-app/orgs/${encodeURIComponent(ws)}/members/${encodeURIComponent(editor!.memberId)}`)).status).toBeLessThan(300);
-    expect((await owner.post(`${CH}/${id}/messages`, { content: 'after they left' })).status).toBe(201);
-    await new Promise((r) => setTimeout(r, 400));
+    // Positive control: while they are a member, a post reaches the stream (frames
+    // carry only the messageId, so frames are counted and the id is matched).
+    const before = await owner.post(`${CH}/${id}/messages`, { content: 'while they were here' });
+    expect(before.status).toBe(201);
+    await vi.waitFor(() => expect(seen).toContain(before.body.messageId), { timeout: 5_000, interval: 20 });
+    const framesBefore = seen.split('event: channel.message').length;
+    expect((await owner.del(`/host/openwop-app/orgs/${encodeURIComponent(ws)}/members/${encodeURIComponent(editor!.memberId)}`)).status).toBe(204);
+    const after = await owner.post(`${CH}/${id}/messages`, { content: 'after they left' });
+    expect(after.status).toBe(201);
+    await vi.waitFor(() => expect(ended).toBe(true), { timeout: 5_000, interval: 20 });
     ac.abort();
     await pump;
-    expect(seen).not.toContain('channel.message');
-    expect(ended).toBe(true);
+    expect(seen).not.toContain(after.body.messageId);
+    expect(seen.split('event: channel.message').length).toBe(framesBefore);
   });
 });

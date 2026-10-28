@@ -15,6 +15,11 @@
  *
  * Runs through billing's REAL plan-limits resolver (`billingPlanLimitsResolver`),
  * so the toggle + entitlement path is the production one.
+ *
+ * Tracker TST-BUL-8. Sabotage-witnessed (w62): red when the limit admits one run
+ * too many, a refused or replayed launch reserves a run, the exemption is
+ * ignored, an absent limit counts as zero, or the exemption leaks into the
+ * paywall.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -90,14 +95,14 @@ describe('ADR 0821 architect #1 — the exemption covers limits, NEVER the paywa
     process.env.OPENWOP_BILLING_PLAN_FEATURES = JSON.stringify({ free: ['billing'] });
     for (let i = 0; i < 4; i += 1) expect(await startWorkflowRun(deps, { tenantId: 'conformance-prod', workflowId: 'wf-1' })).toBeTruthy();
     expect(await planRunsThisMonth('conformance-prod')).toBe(0);
-    await expect(requireEntitledFeatureForTenant('conformance-prod', 'webinars')).rejects.toMatchObject({ httpStatus: 403 });
+    await expect(requireEntitledFeatureForTenant('conformance-prod', 'webinars')).rejects.toMatchObject({ httpStatus: 403, code: 'forbidden', message: expect.stringContaining('does not include this feature') });
 
     // Positive controls: a non-exempt tenant IS run-limited, and the paywall
     // verdict is identical for it — the exemption changed only the limit.
     await startWorkflowRun(deps, { tenantId: 't-ctl', workflowId: 'wf-1' });
     await startWorkflowRun(deps, { tenantId: 't-ctl', workflowId: 'wf-1' });
     await expect(startWorkflowRun(deps, { tenantId: 't-ctl', workflowId: 'wf-1' })).rejects.toMatchObject({ httpStatus: 429 });
-    await expect(requireEntitledFeatureForTenant('t-ctl', 'webinars')).rejects.toMatchObject({ httpStatus: 403 });
+    await expect(requireEntitledFeatureForTenant('t-ctl', 'webinars')).rejects.toMatchObject({ httpStatus: 403, code: 'forbidden', message: expect.stringContaining('does not include this feature') });
     await expect(requireEntitledFeatureForTenant('conformance-prod', 'billing')).resolves.toBeUndefined();
   });
 });

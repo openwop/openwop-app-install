@@ -53,7 +53,7 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+interface Res<T = unknown> { status: number; body: T }
 interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res> }
 function client(): Client {
   let cookie = '';
@@ -77,7 +77,7 @@ async function ownerOrg(): Promise<{ owner: Client; orgId: string }> {
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
-  return { owner, orgId: org.body.orgId };
+  return { owner, orgId: (org.body as { orgId: string }).orgId };
 }
 
 interface RunSnapshot { status: string; error?: { code: string; message: string } }
@@ -87,17 +87,17 @@ async function pollRun(owner: Client, runId: string): Promise<RunSnapshot> {
     const r = await owner.get(`/runs/${runId}`);
     expect(r.status, JSON.stringify(r.body)).toBe(200);
     snap = r.body as RunSnapshot;
-    if (['completed', 'failed', 'cancelled'].includes(snap.status) || snap.status.startsWith('waiting')) break;
+    if (['completed', 'failed', 'cancelled'].includes(snap.status) || snap.status.startsWith('waiting')) return snap;
     await new Promise((res) => setTimeout(res, 25));
   }
-  return snap;
+  throw new Error(`run ${runId} did not settle after 120 polls (25 ms apart): ${JSON.stringify(snap)}`);
 }
 
 interface BundleEvent { type?: string; nodeId?: string; payload?: Record<string, unknown> }
 async function bundleEvents(owner: Client, runId: string): Promise<BundleEvent[]> {
   const b = await owner.get(`/runs/${runId}/debug-bundle`);
   expect(b.status, JSON.stringify(b.body)).toBe(200);
-  return (b.body.events as BundleEvent[]) ?? [];
+  return (b.body as { events?: BundleEvent[] }).events ?? [];
 }
 
 describe('campaign-journeys.segment-winback — expansion validity (server-free)', () => {
@@ -149,11 +149,11 @@ describe('campaign-journeys.segment-winback — live fan-out over a real segment
     for (const name of ['Quiet A', 'Quiet B', 'Quiet C']) {
       const c = await owner.post('/host/openwop-app/crm/contacts', { name, email: `${name.replace(/\s/g, '').toLowerCase()}@acme.test` });
       expect(c.status, JSON.stringify(c.body)).toBe(201);
-      contactIds.push(c.body.contactId as string);
+      contactIds.push((c.body as { contactId: string }).contactId);
     }
     const seg = await owner.post('/host/openwop-app/crm/segments', { name: 'All quiet', filters: [] });
     expect(seg.status, JSON.stringify(seg.body)).toBe(201);
-    const segmentId = seg.body.segmentId as string;
+    const segmentId = (seg.body as { segmentId: string }).segmentId;
 
     // 2) register the per-member child STUB (core.noop echoes its inputs → the
     //    per-contact contactId surfaces in the child's node output).
@@ -164,7 +164,7 @@ describe('campaign-journeys.segment-winback — live fan-out over a real segment
       variables: [],
       nodes: [{ nodeId: 'echo', typeId: 'core.noop', config: {} }],
       edges: [],
-    } as unknown as WorkflowDefinition;
+    };
     registerWorkflow(stub);
 
     // 3) install the segment-winback chain bound to the stub child + shared params.
@@ -175,11 +175,12 @@ describe('campaign-journeys.segment-winback — live fan-out over a real segment
     // 4) run it — segmentId rides the run inputs (the segment-members source node).
     const create = await owner.post('/runs', { workflowId: expanded.workflowId, inputs: { segmentId } });
     expect(create.status, JSON.stringify(create.body)).toBe(201);
-    const snap = await pollRun(owner, create.body.runId as string);
+    const parentRunId = (create.body as { runId: string }).runId;
+    const snap = await pollRun(owner, parentRunId);
     expect(snap.status, `parent should complete (stub children terminate immediately): ${JSON.stringify(snap)}`).toBe('completed');
 
     // 5) the parent dispatched exactly 3 children, all of the stub workflow.
-    const events = await bundleEvents(owner, create.body.runId as string);
+    const events = await bundleEvents(owner, parentRunId);
     const dispatched = events.filter((e) => e.type === 'node.dispatched');
     expect(dispatched, `expected 3 node.dispatched: ${JSON.stringify(dispatched.map((e) => e.payload))}`).toHaveLength(3);
     expect(dispatched.every((e) => e.payload?.childWorkflowId === childWorkflowId)).toBe(true);

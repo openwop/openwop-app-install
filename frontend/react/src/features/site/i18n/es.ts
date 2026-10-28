@@ -7,6 +7,8 @@ export const messages = {
   // Default hero — the thesis, beside the run ledger (visual: 'run')
   heroHeading: 'Crea flujos de trabajo multiagente que puedes observar, pausar y *rebobinar.*',
   heroSubheading: 'Dibuja un flujo de trabajo en un lienzo o descríbelo en el chat. Observa cada decisión en tiempo real, responde cuando la ejecución se detenga a preguntar y reproduce cualquier ejecución desde cualquier paso. Funciona sobre OpenWOP, el protocolo de código abierto para orquestar flujos de trabajo multiagente, así que tus agentes y flujos pueden trasladarse a cualquier host que lo implemente.',
+  /** Issue 5226 — the white-label fallback home's one call to action. */
+  neutralCtaLabel: 'Empezar',
   heroCtaLabel: 'Empieza a crear, sin registro',
   heroCtaLabel2: 'Leer el protocolo',
   heroEyebrow: 'La aplicación de referencia del protocolo OpenWOP',
@@ -239,4 +241,13 @@ export const messages = {
   consentFooterLink: "Opciones de privacidad",
   consentSavedOn: "Analítica activada.",
   consentSavedOff: "Analítica desactivada.",
+  consentBodyOptOut: "Contamos las páginas vistas, la velocidad de carga y qué versiones de página ves, para mejorar este sitio, salvo que lo desactives. La grabación de sesiones sigue desactivada salvo que la marques.",
+  consentReplayLabel: "Permitir también la grabación de sesiones.",
+  consentReplayHint: "Graba cómo te mueves por las páginas para encontrar lo que cuesta usar. Todo el texto y lo que escribes en formularios se oculta antes de salir de tu navegador, y nunca se graban campos de pago, contraseña ni salud.",
+  consentReplayStateOn: "La grabación de sesiones está activada para ti.",
+  consentReplayStateOff: "La grabación de sesiones está desactivada para ti.",
+  consentReplayTurnOn: "Permitir la grabación de sesiones",
+  consentReplayTurnOff: "Detener la grabación de sesiones",
+  consentReplaySavedOn: "Grabación de sesiones activada.",
+  consentReplaySavedOff: "Grabación de sesiones desactivada. Se eliminan las grabaciones de tus visitas.",
 } as const;

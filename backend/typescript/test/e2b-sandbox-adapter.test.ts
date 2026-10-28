@@ -15,7 +15,7 @@ vi.mock('undici', async (importOriginal) => {
 
 import { fetch, Response } from 'undici';
 import {
-  createSandboxRunner,
+  selectSandboxExecutor,
   codeExecProvider,
   e2bConfigured,
 } from '../src/host/sandboxAdapter.js';
@@ -47,31 +47,31 @@ describe('ADR 0114 Phase 8 — selector precedence', () => {
     process.env.OPENWOP_E2B_API_KEY = 'e2b_secret';
     expect(codeExecProvider()).toBe('e2b');
     expect(e2bConfigured()).toBe(true);
-    expect(createSandboxRunner()).toBe(runE2bSandboxedCode);
+    expect(selectSandboxExecutor()).toBe(runE2bSandboxedCode);
   });
 
   it('provider=e2b, NO key → falls through to the Code-API endpoint (honest-off, not a hard error)', () => {
     process.env.OPENWOP_CODE_EXEC_PROVIDER = 'e2b';
     process.env.OPENWOP_CODE_EXEC_ENDPOINT = 'https://sandbox.example.com/exec';
     expect(e2bConfigured()).toBe(false);
-    expect(createSandboxRunner()).toBe(runSandboxedCode);
+    expect(selectSandboxExecutor()).toBe(runSandboxedCode);
   });
 
   it('provider=e2b, NO key, nothing else configured → honest-off (undefined)', () => {
     process.env.OPENWOP_CODE_EXEC_PROVIDER = 'e2b';
-    expect(createSandboxRunner()).toBeUndefined();
+    expect(selectSandboxExecutor()).toBeUndefined();
   });
 
   it('provider unset + endpoint → the Code-API adapter', () => {
     process.env.OPENWOP_CODE_EXEC_ENDPOINT = 'https://sandbox.example.com/exec';
-    expect(createSandboxRunner()).toBe(runSandboxedCode);
+    expect(selectSandboxExecutor()).toBe(runSandboxedCode);
   });
 
   it('provider unset + WASI enabled → the WASI runtime', () => {
     // Force WASI on by pointing the asset path at an existing file (the wasm asset guard).
     process.env.OPENWOP_CODE_EXEC_RUNTIME = 'wasi';
     process.env.OPENWOP_CODE_EXEC_WASM_PATH = new URL(import.meta.url).pathname;
-    expect(createSandboxRunner()).toBe(runWasiSandboxedCode);
+    expect(selectSandboxExecutor()).toBe(runWasiSandboxedCode);
   });
 });
 

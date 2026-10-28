@@ -128,6 +128,17 @@ Per ADR 0006 + ADR 0043 Phase 6. The index is keyed by `tenantId` and the query 
 
 ---
 
+> **SUPERSEDED IN PART 2026-10-28 by ADR 0997.** The Phase 1 "ADR CORRECTION" chose
+> the host `db.search` surface for the index to avoid a parallel substrate. That
+> surface is durable in prod and shared with every workflow run in the tenant, and
+> the index's cleanup state lived in process memory. So deleted and DSAR-erased text
+> came back after a restart. `core.db.search-query` could read other members'
+> messages. Other members' matches crowded the caller's out. Run cards' thoughts and
+> resume tokens were searchable through a second text projection. ADR 0997 removed
+> the derived index: search reads the message rows at request time through
+> `Storage.searchChatMessages` and ADR 0992's `messageView`. The visibility decision
+> below still stands.
+
 ## Implementation (2026-06-24)
 
 **Correction (substrate).** The plan said "Postgres FTS first / a custom `tsvector`

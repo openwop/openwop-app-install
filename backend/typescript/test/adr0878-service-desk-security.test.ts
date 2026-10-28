@@ -24,6 +24,16 @@
  *            approve the reply onto org B's ticket.
  *  - SD2-S7  WhatsApp intake read no toggle: with Service desk OFF, inbound
  *            messages still filed tickets and armed SLA clocks.
+ *
+ * Tracker TST-BHB-3. Red when (sabotage-witnessed, wave 62): the surface skips the
+ * ticket-org read check (S1); the intake PUT skips `requireWorkspaceAdmin` (S2); the
+ * visitor key is derived from an EMPTY session secret (S3, re-aimed in wave 62: the
+ * earlier `sdv1` forgery was refused by the format check before any key was used);
+ * the DSAR eraser keeps a derived subject or misses a form requester (S4); assignment
+ * stops checking org membership (S5); `assistant-action` approvals lose their org
+ * scope (S6, SD2CD-3); WhatsApp intake ignores the toggle (S7); authors get a double
+ * `user:` prefix (SD2CD-2); the edit route accepts a ticket re-point (SD2CD-12); or a
+ * bare digit id matches a phone (SD2CD-15).
  */
 import http from 'node:http';
 import { createHmac } from 'node:crypto';
@@ -119,19 +129,31 @@ describe('ADR 0878 — service desk security floor', () => {
     const key = (set.body!.config as { publicIntakeKey: string }).publicIntakeKey;
     const hijack = await mallory.put(sd(orgB, '/intake-config'), {});
     expect(hijack.status, JSON.stringify(hijack.body)).toBe(403);
+    expect(hijack.body!.message).toMatch(/admin rights for the whole workspace/);
     const after = await owner.get(sd(orgA, '/intake-config'));
     expect((after.body!.config as { defaultOrgId: string; publicIntakeKey: string }).defaultOrgId).toBe(orgA);
     expect((after.body!.config as { publicIntakeKey: string }).publicIntakeKey).toBe(key);
   });
 
   it('SD2-S3: a visitor token signed with an empty key does not verify', async () => {
-    const { verifyVisitorToken } = await import('../src/features/service-desk/widgetRoutes.js');
+    const { verifyVisitorToken, mintVisitorToken } = await import('../src/features/service-desk/widgetRoutes.js');
     const saved = process.env.OPENWOP_SESSION_SECRET;
     delete process.env.OPENWOP_SESSION_SECRET;
     try {
       const id = 'abcdef0123456789abcd';
-      const forged = `sdv1.${id}.${createHmac('sha256', '').update(`sd-visitor|${id}`).digest('hex').slice(0, 32)}`;
+      // The CURRENT token format (sdv2, tenant-bound), signed the way the signer would
+      // sign it if the session secret resolved to the empty string. Built by hand from
+      // the documented derivation, never by calling the signer.
+      const emptyKey = createHmac('sha256', '').update('service-desk-visitor/v2').digest();
+      const forged = `sdv2.${id}.${createHmac('sha256', emptyKey).update(`sd-visitor|t-any|${id}`).digest('hex').slice(0, 32)}`;
       expect(verifyVisitorToken(forged, 't-any')).toBeNull();
+      // The retired, tenant-unbound sdv1 shape never verifies either.
+      const v1 = `sdv1.${id}.${createHmac('sha256', '').update(`sd-visitor|${id}`).digest('hex').slice(0, 32)}`;
+      expect(verifyVisitorToken(v1, 't-any')).toBeNull();
+      // Positive control: a token the host minted verifies, on its own tenant only.
+      const minted = mintVisitorToken('t-any');
+      expect(verifyVisitorToken(minted.token, 't-any')).toBe(minted.visitorId);
+      expect(verifyVisitorToken(minted.token, 't-other')).toBeNull();
     } finally {
       process.env.OPENWOP_SESSION_SECRET = saved;
     }
@@ -170,6 +192,10 @@ describe('ADR 0878 — service desk security floor', () => {
     const id = (c.body!.ticket as { ticketId: string }).ticketId;
     const r = await owner.post(sd(orgA, `/tickets/${encodeURIComponent(id)}/assign`), { assigneeMemberId: 'nobody-at-all' });
     expect(r.status, JSON.stringify(r.body)).toBe(422);
+    expect((r.body!.details as { reason?: string }).reason).toBe('invalid_assignee');
+    // Positive control: a member who can work the ticket (the owner, to themselves) is accepted.
+    const self = await owner.post(sd(orgA, `/tickets/${encodeURIComponent(id)}/assign`), { assignToSelf: true });
+    expect(self.status, JSON.stringify(self.body)).toBe(200);
   });
 
   it('SD2-S6: a drafted reply on an org-B ticket is neither visible to nor decidable by an org-A-only member', async () => {
@@ -246,6 +272,7 @@ describe('ADR 0878 — grade-code follow-ups (each proved or reasoned red before
     const action = await enqueueActionWithApproval(tenantId, { kind: 'servicedesk.reply', payload: { ticketId: ticket.ticketId }, draft: 'hi' });
     const r = await owner.call('PATCH', `/host/openwop-app/assistant/pending-actions/${encodeURIComponent(action.actionId)}`, { payload: { ticketId: 'tkt-other' }, expectedContentHash: contentHashOf(action) });
     expect(r.status, JSON.stringify(r.body)).toBe(422);
+    expect((r.body!.details as { field?: string }).field).toBe('payload');
   });
 
   it('SD2CD-15: a bare digit id in a DSAR does not erase a customer whose number has those digits', async () => {

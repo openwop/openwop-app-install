@@ -31,7 +31,9 @@ import { getJob, registerJob, listJobsForSubject, MAX_FUTURE_HORIZON_DAYS } from
 import { getChainBackedWorkflow } from '../src/host/chainBackedWorkflows.js';
 import { TOOL_GROUNDED_COMMITMENTS } from '../src/host/chatContext.js';
 
-const TENANT = 'default';
+// ADR 0985 D6 — arming a schedule from chat needs `workspace:write` where it runs;
+// a personal workspace grants it to its owner (the implicit-owner shortcut).
+const TENANT = 'user:sched-tool-tests';
 
 let server: http.Server;
 beforeAll(async () => {
@@ -43,7 +45,7 @@ beforeAll(async () => {
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 function runTool(input: Record<string, unknown>, scope: { actingUserId?: string; agentProfileId?: string; conversationId?: string; runId?: string }): Promise<{ content: string; isError?: boolean }> {
-  const provider = createAgentToolProvider({ tenantId: TENANT, runId: 'run-adr0309', ...scope });
+  const provider = createAgentToolProvider({ tenantId: TENANT, personalTenant: TENANT, runId: 'run-adr0309', ...scope });
   return provider.executeTool({ name: SCHEDULE_FOLLOWUP_TOOL_ID, input });
 }
 const FULL_SCOPE = { actingUserId: 'u-fut', agentProfileId: 'host:iris', conversationId: 'conv-fut' };

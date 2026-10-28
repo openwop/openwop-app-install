@@ -2,11 +2,15 @@
  * RFC 0106 §D/§F (ADR 0109 P4) — the barge-in / cancellation seam. Boots the real
  * app and drives the `voice.barge_in` → `voice.cancelled` lifecycle the
  * `realtimeVoice.bargeIn` capability promises. Asserts:
- *   - the host advertises realtimeVoice.turnDetection === "semantic" (callTranscriber
- *     emits endpoint_candidate distinct from turn_commit) + bargeIn === "supported";
+ *   - (the v1 advert leg — realtimeVoice.turnDetection/bargeIn — was deleted with
+ *     the v1 document, ADR 0812 P3c-0; nothing here asserts an advertisement);
+ *   - the seam answers identically at the vendor and the sample address;
  *   - a barge-in mid-playback emits voice.barge_in then a DISTINCT voice.cancelled;
  *   - §F `voice-bargein-no-partial-leak`: NO voice.synthesis_chunk is emitted after
  *     voice.cancelled — the in-flight synthesis is halted, not leaked.
+ *
+ * Witnessed (8f W4): vb-chunks-leak, vb-no-cancel, vb-sample-unmounted,
+ * vb-dropped-miscount-r2.
  */
 
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
@@ -37,10 +41,15 @@ describe('RFC 0106 §D/§F — barge-in lifecycle (ADR 0109 P4)', () => {
   // was deleted: v2's `realtimeVoice` seat is unfilled here (whd7-v2-projection-parity KNOWN_UNPROJECTED).
 
   it('is mounted under BOTH path prefixes', async () => {
+    // Same handler at both addresses: same status AND the same lifecycle.
+    const bodies: string[][] = [];
     for (const p of [APP_PATH, SAMPLE_PATH]) {
       const res = await post(p, { chunks: 4, bargeInAtSeq: 1 });
-      expect(res.status).toBe(200);
+      expect(res.status, p).toBe(200);
+      bodies.push(((await res.json()) as { events: Ev[] }).events.map((e) => e.type));
     }
+    expect(bodies[0]).toContain('voice.cancelled');
+    expect(bodies[1]).toEqual(bodies[0]);
   });
 
   it('emits voice.barge_in then a distinct voice.cancelled, with NO synthesis_chunk after cancel (§F)', async () => {
@@ -60,7 +69,9 @@ describe('RFC 0106 §D/§F — barge-in lifecycle (ADR 0109 P4)', () => {
     expect(lastChunkIdx).toBeLessThan(cancelIdx);
 
     // The in-flight synthesis was genuinely halted (chunks were dropped, not leaked).
-    expect(droppedChunks).toBeGreaterThan(0);
+    // Exactly the two chunks after seq 1 of 4 (seq 2 and 3): `> 0` could not tell
+    // a miscount from the truth (8f W4 probe vb-dropped-miscount, vacuous).
+    expect(droppedChunks).toBe(2);
     // Exactly the chunks up to the barge-in point played (seq 0 and 1).
     expect(types.filter((t) => t === 'voice.synthesis_chunk')).toHaveLength(2);
   });

@@ -1,8 +1,8 @@
 {
   "name": "feature.campaign-intel.nodes",
-  "version": "1.2.0",
+  "version": "1.7.0",
   "kind": "node",
-  "description": "Campaign Intelligence node pack \u2014 `budget-optimize` (heuristic marginal-ROAS reallocation over the performance store, plus an optional ctx.callAI scenario narrative) and `forecast` (creative-fatigue detection + outcome projection). Over ctx.features['campaign-intel']. The natural-language analysis the Campaign Intelligence Analyst calls.",
+  "description": "Campaign Intelligence node pack \u2014 `budget-optimize` (heuristic marginal-ROAS reallocation over the performance store, plus an optional ctx.callAI scenario narrative) and `forecast` (creative-fatigue detection + outcome projection). `enforce-caps` (ADR 0952 D2) is the spend-cap watchdog that pauses ad delivery on a breach. Over ctx.features['campaign-intel']. The natural-language analysis the Campaign Intelligence Analyst calls.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": [
@@ -35,18 +35,53 @@
       "capabilities": []
     },
     {
-      "typeId": "feature.campaign-intel.nodes.attribution", "category": "data",
+      "typeId": "feature.campaign-intel.nodes.attribution",
+      "category": "data",
       "version": "1.0.0",
       "role": "read",
       "label": "Attribution Report",
       "description": "Last-click attribution join (ADR 0219): performance-store spend/revenue x analytics conversions matched on the C8 utm_campaign key, plus per-email-campaign engagement \u2014 every number with lineage. Inputs: { orgId }."
     },
     {
-      "typeId": "feature.campaign-intel.nodes.pacing-check", "category": "data",
+      "typeId": "feature.campaign-intel.nodes.pacing-check",
+      "category": "data",
       "version": "1.0.0",
       "role": "action",
       "label": "Budget Pacing Check",
       "description": "Compares actual spend vs each campaign's budget plan (ADR 0220) and raises band-escalation notifications (80% warning / 100% over \u2014 once per escalation, durable memo dedup). Inputs: { orgId }. Output: { report, alerted[] }."
+    },
+    {
+      "typeId": "feature.campaign-intel.nodes.enforce-caps",
+      "version": "1.0.0",
+      "label": "Intel: Enforce spend caps",
+      "description": "The spend-cap watchdog (ADR 0952 D2). For each of the org's hard caps it reads spend through the run owner's ad connections (joined to the campaign by id only, never by name) and pauses every covered campaign when the cap is reached, or when spend has been unreadable for the cap's maxStaleMinutes; a failed read never counts as zero spend. Only the run that moves a cap into breached/stale pauses and notifies, so overlapping runs pause once. Runs as the run owner, who must hold workspace:write in the org. A replay fork serves the recorded outcome and pauses nothing. OFF with the `campaign-intel` toggle (then `outcome: 'disabled'`). Inputs: { orgId }. Output: { outcome: 'enforced'|'disabled', caps[] }.",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": [
+        "side-effectful"
+      ]
+    },
+    {
+      "typeId": "feature.campaign-intel.nodes.propose-reallocation",
+      "version": "1.0.0",
+      "label": "Intel: Propose budget reallocation",
+      "description": "Turns a budget recommendation (the upstream budget-optimize output, or recomputed over the performance store) into ONE reallocation plan (ADR 0952 D3): per-campaign daily-budget changes for the org's dispatched campaigns, each with its live current budget read from the platform (an unreadable budget is left out with a reason, never guessed), decreases first, and any increase a spend cap would not allow left out. Opens one campaign-spend approval over the whole plan, showing every before/after change. Idempotent per run. Runs as the run owner, who must hold workspace:write. Inputs: { orgId, campaignId?, recommendation? }. Output: { outcome: 'proposed'|'no_change'|'disabled', planId?, approvalId?, ops, dropped }.",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": [
+        "side-effectful"
+      ]
+    },
+    {
+      "typeId": "feature.campaign-intel.nodes.apply-reallocation",
+      "version": "1.0.0",
+      "label": "Intel: Apply approved reallocation",
+      "description": "Applies an APPROVED reallocation plan (ADR 0952 D3) through the ads adapter's budget write: decreases first; a failed decrease skips every increase, so a part-way failure under-spends and never over-spends; a budget changed since the proposal is not overwritten (stale_budget). Every op's outcome is recorded on the plan (applied | partial). An unapproved plan returns outcome 'awaiting_approval' and applies nothing; an expired (7-day) plan never applies. Runs as the run owner, who must hold workspace:write. A replay fork serves the recorded outcome. Inputs: { orgId, planId }. Output: { outcome, planId, status, results }.",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": [
+        "side-effectful"
+      ]
     },
     {
       "typeId": "feature.campaign-intel.nodes.plan-budget",
@@ -55,6 +90,42 @@
       "description": "Deterministic '$X budget \u2192 N conversions' feasibility + efficiency-weighted allocation + pacing over the performance store; optional AI narration of the computed numbers (ADR 0357 P1). Inputs: { orgId, totalBudgetMinor, targetConversions, horizonDays?, platforms?, narrate? }.",
       "category": "integration",
       "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.campaign-intel.nodes.utm-lint",
+      "version": "1.0.0",
+      "label": "Campaign intel: Check UTM links",
+      "description": "Checks outbound links against the client org's UTM policy (required parameters, allowed sources and mediums, lowercase). Any link that breaks it is a typed failure, utm_policy_violation, listing each problem per link; nothing is rewritten. Inputs: { orgId, urls[] }. Output: { policyVersion, results[] }.",
+      "category": "data",
+      "role": "read",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.campaign-intel.nodes.attribution-models",
+      "version": "1.0.0",
+      "label": "Campaign intel: Multi-touch attribution",
+      "description": "Credits the client org's web conversions across each conversion's touch path under one model (last_click, first_touch, linear, time_decay or position_based; the org's default when none is given) and compares every model per campaign. Credit sums exactly per conversion; it is modelled web credit and never includes platform-reported conversions. Needs the campaign-intel.multi-touch sub-toggle. Inputs: { orgId, model? }.",
+      "category": "data",
+      "role": "read",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.campaign-intel.nodes.reconciliation",
+      "version": "1.0.0",
+      "label": "Campaign intel: ROAS reconciliation",
+      "description": "For a client org, each ad platform's reported conversions, revenue and ROAS beside the conversions and value measured on the site (modelled web credit), per campaign and platform. Flags a platform whose claims stay above 1.5x the measured figure for 7 days, and shows the overlap when several platforms claim the same conversions. Reported and measured figures are never summed. Last click unless multi-touch attribution is on. Inputs: { orgId, model? }.",
+      "category": "data",
+      "role": "read",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.campaign-intel.nodes.ad-map",
+      "version": "1.0.0",
+      "label": "Campaign intel: AdMap",
+      "description": "For a client org, each dispatched ad with its landing URL, the CMS page or funnel step that URL resolves to, the variant it carries, and the landing sessions and conversions credited to it (joined on the ad reference stamped as utm_id). Per-ad spend and clicks are null until the performance store has an ad grain; the message-match score is owed to ADR 0933. Inputs: { orgId, model? }.",
+      "category": "data",
+      "role": "read",
       "capabilities": []
     }
   ],

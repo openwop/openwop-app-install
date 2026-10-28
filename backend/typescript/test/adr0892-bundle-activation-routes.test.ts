@@ -7,9 +7,17 @@
  * bearer, which every scope gate admits by construction. `OPENWOP_DEMO_MODE` is
  * unset so the de-facto-owner bypass cannot make a refusal pass vacuously.
  *
- * Sabotage witness (run by hand, 2026-10-14): replacing the scope check in
- * `canManageBundles` with `true` reds the viewer/editor case and the editor
- * `canManageBundles: false` read.
+ * (TST-BPC) Red when (each sabotage-witnessed, wave 65): `canManageBundles` answers
+ * `true` ⇒ the viewer/editor case and the editor `canManageBundles: false` read; the
+ * write takes its tenant from the body ⇒ "a workspace admin enables it for THAT…";
+ * the entitlement refusal is not a 402 ⇒ "402 bundle_not_entitled…".
+ *
+ * DOUBLE GUARD (recorded): a caller with no membership in WS is held twice — the
+ * ADR 0015 re-check in `middleware/auth.ts` bounces their session to their own
+ * personal tenant, and `canManageBundles` (`features/marketplace/routes.ts`) would
+ * refuse a non-member in WS anyway. Breaking either alone leaves WS untouched, so that
+ * case is not keyed to a single-guard probe; the `canManageBundles` half is witnessed
+ * by the viewer/editor case.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { Server } from 'node:http';
@@ -128,14 +136,15 @@ describe('authority (D1)', () => {
   it('a caller with no membership in a workspace cannot turn a bundle on there', async () => {
     // The ADR 0015 re-check bounces a non-member to their OWN personal tenant
     // (authTestSeam.ts note), so the request acts there or is refused. Either
-    // way the workspace they do not belong to is untouched, which is the claim.
+    // way the workspace they do not belong to is untouched, which is the claim
+    // (a recorded double guard: see the header).
     await call(stranger, 'POST', `${P}/crm/enable`);
     expect(await onIn('crm', WS)).toBe(false);
   });
 
   it('an anonymous caller is refused', async () => {
     const r = await call('', 'POST', `${P}/crm/enable`);
-    expect([401, 403]).toContain(r.status);
+    expect([r.status, r.body['error']]).toEqual([401, 'sign_in_required']);
   });
 });
 
@@ -176,7 +185,8 @@ describe('refusal shapes (D2/D3/D5, 404)', () => {
   });
 
   it('an unknown bundle is 404', async () => {
-    expect((await call(admin, 'POST', `${P}/no-such-bundle/enable`)).status).toBe(404);
+    const r = await call<{ error: string }>(admin, 'POST', `${P}/no-such-bundle/enable`);
+    expect([r.status, r.body.error]).toEqual([404, 'not_found']);
   });
 });
 

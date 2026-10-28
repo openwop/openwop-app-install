@@ -34,19 +34,29 @@ import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
 import { resolveOne } from '../../host/featureToggles/service.js';
 import { resolveEffectiveAccess, type Scope } from '../../host/accessControlService.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
+import { assertEffectAllowed } from '../../host/runEffectContext.js';
 import { startWorkflowRun, type StartRunDeps } from '../../host/runStarter.js';
 import { claimIgnition, recordIgnitionRun, releaseIgnition, ignitionKey } from '../../host/ignitionGuard.js';
 import { surfaceDispatchedRun } from '../../host/turnRunDispatch.js';
 import { createLogger } from '../../observability/logger.js';
 import { getBrief } from '../campaign-brief/briefService.js';
 import type { CampaignBrief } from '../campaign-brief/types.js';
-import { getCampaignByBrief, listCampaigns } from './campaignService.js';
+import { ensureDraftCampaign, getCampaign, getCampaignByBrief, isFinalized, listCampaigns } from './campaignService.js';
+import { readCampaignLinks } from './campaignLinks.js';
+import { CAMPAIGN_RUN_TAG_KEY, stampCampaignRun } from './campaignRunTag.js';
 import { ORCHESTRATION_ID } from './orchestrationWorkflow.js';
+import { readableCampaignAutonomy } from './autonomyAccess.js';
+import { autonomyTogglesOn } from './autonomyStamp.js';
+import { projectPolicyForModel } from '../../host/autonomyPolicy/index.js';
 
 const log = createLogger('campaign-orchestration.strategist-tools');
 
 export const CAMPAIGN_ORCH_STATUS_TOOL_ID = 'openwop:campaign-orchestration.status';
 export const CAMPAIGN_ORCH_RUN_TOOL_ID = 'openwop:campaign-orchestration.run';
+/** ADR 0941 P5 — read one campaign (products, goal, links) before planning. */
+export const CAMPAIGN_ORCH_GET_TOOL_ID = 'openwop:campaign-orchestration.get-campaign';
+/** ADR 0942 P6 — which steps of a campaign need whose sign-off. Read-only: no tool sets, loosens or approves a policy. */
+export const CAMPAIGN_ORCH_AUTONOMY_TOOL_ID = 'openwop:campaign-orchestration.get-autonomy';
 
 /** The named agent this pack ships — the fallback speaker on the inline run turn
  *  when the dispatch scope carries no explicit agent profile. */
@@ -79,8 +89,9 @@ async function hasOrgScope(tenantId: string, subject: string, orgId: string, sco
 }
 
 /** The setup-check semantic (ADR 0356 P4), read-only: which campaign assets the
- *  brief still lacks. Mirrors the orchestration node's `setupCheck`. */
-function setupOf(brief: CampaignBrief): { missing: Array<{ slot: string; hint: string }>; ready: boolean } {
+ *  brief still lacks. Mirrors the orchestration node's `setupCheck`. Exported for
+ *  the ADR 0961 autopilot preflight, so readiness has one owner. */
+export function setupOf(brief: CampaignBrief): { missing: Array<{ slot: string; hint: string }>; ready: boolean } {
   const missing: Array<{ slot: string; hint: string }> = [];
   if (!brief.brandId) missing.push({ slot: 'brand', hint: 'Bind a brand so voice + guardrails apply.' });
   if (!Array.isArray(brief.personaIds) || brief.personaIds.length === 0) missing.push({ slot: 'persona', hint: 'Pick at least one persona to target.' });
@@ -100,7 +111,8 @@ async function projectBrief(tenantId: string, brief: CampaignBrief): Promise<Rec
     kernelStale: brief.kernelStale,
     enabledChannels: brief.channels.filter((c) => c.enabled).map((c) => c.type),
     setup: setupOf(brief),
-    existingCampaign: existing ? { id: existing.id, status: existing.status, channels: existing.channels } : null,
+    // ADR 0941 D2 — the campaign exists from the first run, so a draft is not a finalized campaign.
+    existingCampaign: existing ? { id: existing.id, status: existing.status, channels: existing.channels, finalized: isFinalized(existing) } : null,
   };
 }
 
@@ -137,6 +149,46 @@ export async function runStatusTool(input: Record<string, unknown>, scope: Bundl
 }
 
 /**
+ * READ — one campaign, for the Strategist to read before it plans (ADR 0941 P5,
+ * "agents read before they write"). By `campaignId`, or by `briefId` (the brief's
+ * campaign). The SAME predicate as `GET …/campaigns/:id` and `…/links`
+ * (`workspace:read` on the campaign's client org). Fails EMPTY without an acting
+ * human, the toggle, the campaign, or access — one answer for all four, so the
+ * tool cannot be used to learn whether another client's campaign exists. Display
+ * fields only; each linked section says ok / unavailable / failed.
+ */
+export async function runGetCampaignTool(input: Record<string, unknown>, scope: BundleScope): Promise<ToolResult> {
+  const empty = JSON.stringify({ campaign: null });
+  if (!scope.actingUserId) return { content: empty };
+  if (!(await orchestrationEnabled(scope.tenantId, scope.actingUserId))) return { content: empty };
+  const campaignId = str(input.campaignId);
+  const briefId = str(input.briefId);
+  const campaign = campaignId ? await getCampaign(scope.tenantId, campaignId) : briefId ? await getCampaignByBrief(scope.tenantId, briefId) : null;
+  if (!campaign || !(await hasOrgScope(scope.tenantId, scope.actingUserId, campaign.orgId, 'workspace:read'))) return { content: empty };
+  const actingUserId = scope.actingUserId;
+  const enabled = async (featureId: string): Promise<boolean> =>
+    Boolean((await resolveOne(featureId, { tenantId: scope.tenantId, userId: actingUserId }).catch(() => null))?.enabled);
+  const links = await readCampaignLinks(campaign, enabled);
+  const count = (s: { status: string; items?: unknown[] }): number | string => (s.status === 'ok' ? (s.items ?? []).length : s.status);
+  return {
+    content: JSON.stringify({
+      campaign: {
+        id: campaign.id, orgId: campaign.orgId, name: campaign.name, status: campaign.status, objective: campaign.objective,
+        channels: campaign.channels, finalized: isFinalized(campaign),
+        ...(campaign.briefId ? { briefId: campaign.briefId } : {}),
+        goal: campaign.goal ?? null,
+        attention: campaign.attention ?? [],
+      },
+      products: links.products,
+      linked: {
+        plans: count(links.plans), emailSends: count(links.emailSends),
+        adDispatches: count(links.adDispatches), opsAssets: count(links.opsAssets), runs: count(links.runs),
+      },
+    }),
+  };
+}
+
+/**
  * ACTION — ignite the full campaign orchestration spine for a confirmed brief.
  * Requires an acting human with `workspace:write` on the brief's org, else a
  * typed error. The spine GENERATES + approves the kernel and each channel inline
@@ -156,6 +208,9 @@ export async function runOrchestrationRunTool(deps: StartRunDeps, input: Record<
     return toolError('forbidden', 'You need write access to this brief\'s workspace to run its campaign.');
   }
 
+  // Guard before BOTH the ignition reservation and campaign creation.
+  assertEffectAllowed('dispatch', 'campaign-orchestration ignition');
+
   // HIGH-1 ignition dedup — a repeated identical run call inside the window
   // reuses the run already started rather than igniting the spine again.
   const key = ignitionKey('campaign-orchestration.run', briefId);
@@ -164,6 +219,19 @@ export async function runOrchestrationRunTool(deps: StartRunDeps, input: Record<
     return { content: JSON.stringify({ runId: claim.existingRunId ?? null, ignited: false, note: 'an identical run was started moments ago — reusing it' }) };
   }
 
+  // ADR 0941 D2 — the campaign exists BEFORE its first run, so the run can be
+  // tagged with it (and a policy, cap or experiment can bind to the run).
+  // A live retry converges by key; replay was refused before any mutation.
+  const ensured = await ensureDraftCampaign(scope.tenantId, brief, scope.actingUserId).catch((err) => {
+    log.warn('campaign_orchestration_ensure_failed', { tenantId: scope.tenantId, briefId, error: err instanceof Error ? err.message : String(err) });
+    return null;
+  });
+  if (!ensured) {
+    await releaseIgnition(scope.tenantId, key);
+    return toolError('dispatch_failed', 'The campaign could not be created, so its workflow was not started.');
+  }
+  const campaign = ensured.campaign;
+
   const runId = await startWorkflowRun(deps, {
     tenantId: scope.tenantId,
     workflowId: ORCHESTRATION_ID,
@@ -171,7 +239,8 @@ export async function runOrchestrationRunTool(deps: StartRunDeps, input: Record<
     metadata: {
       actingUserId: scope.actingUserId,
       ...(scope.conversationId ? { chatSessionId: scope.conversationId } : {}),
-      campaignOrchestration: { briefId, agentId: scope.agentProfileId ?? STRATEGIST_AGENT_ID },
+      // ADR 0941 D2b — the run tag, composed by its one writer.
+      [CAMPAIGN_RUN_TAG_KEY]: stampCampaignRun(campaign, { role: 'spine', agentId: scope.agentProfileId ?? STRATEGIST_AGENT_ID }),
     },
   }).catch((err) => {
     // DATA-4 — a startWorkflowRun THROW (not just a null return) must also release
@@ -188,10 +257,30 @@ export async function runOrchestrationRunTool(deps: StartRunDeps, input: Record<
   await recordIgnitionRun(scope.tenantId, key, runId);
   await surfaceDispatchedRun(scope, deps.storage, { runId, agentId: scope.agentProfileId ?? STRATEGIST_AGENT_ID, workflowId: ORCHESTRATION_ID, workflowName: 'Campaign orchestration' }, 'campaign-orchestration-run');
   log.info('campaign_orchestration_dispatched', { tenantId: scope.tenantId, briefId, runId });
-  return { content: JSON.stringify({ runId, briefId, workflowId: ORCHESTRATION_ID }) };
+  return { content: JSON.stringify({ runId, briefId, campaignId: campaign.id, workflowId: ORCHESTRATION_ID }) };
 }
 
-/** ADR 0308 D2 — register the strategist's two tools. Called from `feature.ts`
+/**
+ * READ — ADR 0942 P6: the campaign's review policy, per step: what runs on its
+ * own, what tells people after, what waits for whose approval, and when a step
+ * asks anyway. The SAME read model the review-policy panel renders, through the
+ * SAME access predicate as `GET …/campaigns/:id/autonomy` (`autonomyAccess.ts`).
+ * Fails EMPTY without an acting human, either toggle, or read access.
+ * Exported for direct authz testing.
+ */
+export async function runAutonomyTool(input: Record<string, unknown>, scope: BundleScope): Promise<ToolResult> {
+  const empty = JSON.stringify({ autonomy: null });
+  if (!scope.actingUserId) return { content: empty };
+  if (!(await orchestrationEnabled(scope.tenantId, scope.actingUserId))) return { content: empty };
+  if (!(await autonomyTogglesOn(scope.tenantId))) return { content: empty };
+  const campaignId = str(input.campaignId);
+  if (!campaignId) return { content: JSON.stringify({ autonomy: null, note: 'Pass the `campaignId` (from status: `existingCampaign.id`, or an org\'s campaign list).' }) };
+  const found = await readableCampaignAutonomy(scope.tenantId, { subject: scope.actingUserId }, campaignId);
+  if (!found) return { content: empty };
+  return { content: JSON.stringify({ autonomy: projectPolicyForModel(found.campaign.id, found.view) }) };
+}
+
+/** ADR 0308 D2 — register the strategist's tools. Called from `feature.ts`
  *  init with the run-starter deps (chat-time tool scopes carry no storage). */
 export function registerCampaignOrchestrationAgentTools(deps: StartRunDeps): void {
   registerFeatureAgentTool({
@@ -201,7 +290,8 @@ export function registerCampaignOrchestrationAgentTools(deps: StartRunDeps): voi
       name: CAMPAIGN_ORCH_STATUS_TOOL_ID,
       description:
         'Read campaign readiness. Pass a `briefId` to see its messaging-kernel state, the enabled channels, which setup '
-        + 'assets (brand / persona / KB) it still needs, and any campaign already finalized from it — call this BEFORE running '
+        + 'assets (brand / persona / KB) it still needs, and the campaign already made for it (`existingCampaign.finalized` tells an '
+        + 'earlier run\'s draft from a finalized campaign) — call this BEFORE running '
         + 'a campaign. Pass an `orgId` instead to list the workspace\'s campaigns (id, name, status, channels). Read-only.',
       inputSchema: {
         type: 'object',
@@ -217,6 +307,29 @@ export function registerCampaignOrchestrationAgentTools(deps: StartRunDeps): voi
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
+    def: {
+      name: CAMPAIGN_ORCH_GET_TOOL_ID,
+      description:
+        'Read one campaign before you plan or change anything. Pass a `campaignId`, or a `briefId` to read the campaign made '
+        + 'for that brief. Returns the campaign (status, objective, channels, whether it is finalized, its goal, attention flags), '
+        + 'the catalog products it sells with their roles, and counts of its linked plans, email sends, ad dispatches, '
+        + 'client pages and workflow runs. A linked section reads `unavailable` when its feature is off and `failed` when it could '
+        + 'not be read: neither means "none". Returns `{"campaign":null}` when the campaign does not exist or you cannot read it. Read-only.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          campaignId: { type: 'string', description: 'The campaign to read.' },
+          briefId: { type: 'string', description: 'A brief whose campaign to read (when no campaignId).' },
+        },
+        additionalProperties: false,
+      },
+    },
+    run: runGetCampaignTool,
+  });
+
+  registerFeatureAgentTool({
+    contentTrust: 'untrusted',
     effect: 'write',
     def: {
       name: CAMPAIGN_ORCH_RUN_TOOL_ID,
@@ -224,7 +337,7 @@ export function registerCampaignOrchestrationAgentTools(deps: StartRunDeps): voi
         'Run the full multi-channel campaign for a confirmed brief. Starts the orchestration workflow: validate → generate '
         + 'the messaging kernel → the human APPROVES the kernel on an inline card → generate every enabled channel (each with '
         + 'its own inline approval) → cross-asset consistency check → finalize the marketing campaign. Nothing publishes or '
-        + 'spends: the run pauses at each approval gate for the human. Pass the confirmed `briefId`. Returns the started `runId`.',
+        + 'spends: the run pauses at each approval gate for the human. Pass the confirmed `briefId`. Returns the started `runId` and the `campaignId` the run belongs to.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -235,5 +348,28 @@ export function registerCampaignOrchestrationAgentTools(deps: StartRunDeps): voi
       },
     },
     run: (input, scope) => runOrchestrationRunTool(deps, input, scope),
+  });
+
+  registerFeatureAgentTool({
+    contentTrust: 'untrusted',
+    effect: 'read',
+    def: {
+      name: CAMPAIGN_ORCH_AUTONOMY_TOOL_ID,
+      description:
+        'Read a campaign\'s review policy: for each step (generate, approve the plan, review creative, publish, launch or '
+        + 'change ads, send email or SMS, post, contact leads, and so on), whether it runs on its own, tells people after, '
+        + 'waits for approval (and by which roles, how many), or is blocked, plus the conditions that make it ask anyway '
+        + '(spend, audience size, findings, first post to a destination). An unknown fact always asks. `alwaysApplies` lists '
+        + 'what holds whatever the policy says. Read-only: no tool can change, loosen or approve a policy. Pass the `campaignId`.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          campaignId: { type: 'string', description: 'The campaign (from status: `existingCampaign.id`, or the org\'s campaign list).' },
+        },
+        required: ['campaignId'],
+        additionalProperties: false,
+      },
+    },
+    run: runAutonomyTool,
   });
 }

@@ -1,0 +1,2590 @@
+{
+  "suiteId": "vendor.openwop-app.campaign-studio.evals.reporting-analyst",
+  "version": "1.0.0",
+  "targetAgentId": "vendor.openwop-app.campaign-studio.agents.reporting-analyst",
+  "modes": [
+    "golden"
+  ],
+  "thresholds": {
+    "passScore": 0.9
+  },
+  "tasks": [
+    {
+      "taskId": "weekly-report",
+      "input": {
+        "request": "Write this week's performance summary for org_acme."
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:campaign-intel.attribution"
+            },
+            {
+              "tool": "openwop:campaign-intel.pacing"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-intel.attribution",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spend": 120000,
+                  "platformConversions": 80,
+                  "webConversions": 52,
+                  "cpa": 2308
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.attribution",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spend": 120000,
+                  "platformConversions": 80,
+                  "webConversions": 52,
+                  "cpa": 2308
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.pacing",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spentPct": 0.71,
+                  "band": "warning"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.pacing",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spentPct": 0.71,
+                  "band": "warning"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.forecast",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "fatigue": true,
+                  "ctrTrend": -0.18
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.forecast",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "fatigue": true,
+                  "ctrTrend": -0.18
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-orchestration.status",
+            "response": {
+              "ready": true,
+              "briefId": "brf_acme_q4",
+              "stages": [
+                {
+                  "stage": "kernel",
+                  "status": "approved"
+                },
+                {
+                  "stage": "email",
+                  "status": "awaiting_approval"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-orchestration.status",
+            "response": {
+              "ready": true,
+              "briefId": "brf_acme_q4",
+              "stages": [
+                {
+                  "stage": "kernel",
+                  "status": "approved"
+                },
+                {
+                  "stage": "email",
+                  "status": "awaiting_approval"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:analytics.query",
+            "response": {
+              "rows": [
+                {
+                  "event": "page_view",
+                  "count": 4200
+                },
+                {
+                  "event": "add_to_cart",
+                  "count": 610
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:analytics.query",
+            "response": {
+              "rows": [
+                {
+                  "event": "page_view",
+                  "count": 4200
+                },
+                {
+                  "event": "add_to_cart",
+                  "count": 610
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.step-stats",
+            "response": {
+              "steps": [
+                {
+                  "stepId": "s1",
+                  "visitors": 4200,
+                  "conversions": 610
+                },
+                {
+                  "stepId": "s2",
+                  "visitors": 610,
+                  "conversions": 95
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.step-stats",
+            "response": {
+              "steps": [
+                {
+                  "stepId": "s1",
+                  "visitors": 4200,
+                  "conversions": 610
+                },
+                {
+                  "stepId": "s2",
+                  "visitors": 610,
+                  "conversions": 95
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.list-metrics",
+            "response": {
+              "metrics": [
+                {
+                  "metricId": "m_cvr",
+                  "name": "Checkout conversion rate"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.list-metrics",
+            "response": {
+              "metrics": [
+                {
+                  "metricId": "m_cvr",
+                  "name": "Checkout conversion rate"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.run-metric",
+            "response": {
+              "metricId": "m_cvr",
+              "value": 0.156,
+              "n": 610
+            }
+          },
+          {
+            "tool": "openwop:bi.run-metric",
+            "response": {
+              "metricId": "m_cvr",
+              "value": 0.156,
+              "n": 610
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "conversions-separate",
+      "input": {
+        "request": "How many conversions did Trailblazer Meta drive in total?"
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:campaign-intel.attribution"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-intel.attribution",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spend": 120000,
+                  "platformConversions": 80,
+                  "webConversions": 52,
+                  "cpa": 2308
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.attribution",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spend": 120000,
+                  "platformConversions": 80,
+                  "webConversions": 52,
+                  "cpa": 2308
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.pacing",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spentPct": 0.71,
+                  "band": "warning"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.pacing",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spentPct": 0.71,
+                  "band": "warning"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.forecast",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "fatigue": true,
+                  "ctrTrend": -0.18
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.forecast",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "fatigue": true,
+                  "ctrTrend": -0.18
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-orchestration.status",
+            "response": {
+              "ready": true,
+              "briefId": "brf_acme_q4",
+              "stages": [
+                {
+                  "stage": "kernel",
+                  "status": "approved"
+                },
+                {
+                  "stage": "email",
+                  "status": "awaiting_approval"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-orchestration.status",
+            "response": {
+              "ready": true,
+              "briefId": "brf_acme_q4",
+              "stages": [
+                {
+                  "stage": "kernel",
+                  "status": "approved"
+                },
+                {
+                  "stage": "email",
+                  "status": "awaiting_approval"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:analytics.query",
+            "response": {
+              "rows": [
+                {
+                  "event": "page_view",
+                  "count": 4200
+                },
+                {
+                  "event": "add_to_cart",
+                  "count": 610
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:analytics.query",
+            "response": {
+              "rows": [
+                {
+                  "event": "page_view",
+                  "count": 4200
+                },
+                {
+                  "event": "add_to_cart",
+                  "count": 610
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.step-stats",
+            "response": {
+              "steps": [
+                {
+                  "stepId": "s1",
+                  "visitors": 4200,
+                  "conversions": 610
+                },
+                {
+                  "stepId": "s2",
+                  "visitors": 610,
+                  "conversions": 95
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.step-stats",
+            "response": {
+              "steps": [
+                {
+                  "stepId": "s1",
+                  "visitors": 4200,
+                  "conversions": 610
+                },
+                {
+                  "stepId": "s2",
+                  "visitors": 610,
+                  "conversions": 95
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.list-metrics",
+            "response": {
+              "metrics": [
+                {
+                  "metricId": "m_cvr",
+                  "name": "Checkout conversion rate"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.list-metrics",
+            "response": {
+              "metrics": [
+                {
+                  "metricId": "m_cvr",
+                  "name": "Checkout conversion rate"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.run-metric",
+            "response": {
+              "metricId": "m_cvr",
+              "value": 0.156,
+              "n": 610
+            }
+          },
+          {
+            "tool": "openwop:bi.run-metric",
+            "response": {
+              "metricId": "m_cvr",
+              "value": 0.156,
+              "n": 610
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "pacing-question",
+      "input": {
+        "request": "Which campaigns are close to their budget?"
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:campaign-intel.pacing"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-intel.attribution",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spend": 120000,
+                  "platformConversions": 80,
+                  "webConversions": 52,
+                  "cpa": 2308
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.attribution",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spend": 120000,
+                  "platformConversions": 80,
+                  "webConversions": 52,
+                  "cpa": 2308
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.pacing",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spentPct": 0.71,
+                  "band": "warning"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.pacing",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spentPct": 0.71,
+                  "band": "warning"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.forecast",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "fatigue": true,
+                  "ctrTrend": -0.18
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.forecast",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "fatigue": true,
+                  "ctrTrend": -0.18
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-orchestration.status",
+            "response": {
+              "ready": true,
+              "briefId": "brf_acme_q4",
+              "stages": [
+                {
+                  "stage": "kernel",
+                  "status": "approved"
+                },
+                {
+                  "stage": "email",
+                  "status": "awaiting_approval"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-orchestration.status",
+            "response": {
+              "ready": true,
+              "briefId": "brf_acme_q4",
+              "stages": [
+                {
+                  "stage": "kernel",
+                  "status": "approved"
+                },
+                {
+                  "stage": "email",
+                  "status": "awaiting_approval"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:analytics.query",
+            "response": {
+              "rows": [
+                {
+                  "event": "page_view",
+                  "count": 4200
+                },
+                {
+                  "event": "add_to_cart",
+                  "count": 610
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:analytics.query",
+            "response": {
+              "rows": [
+                {
+                  "event": "page_view",
+                  "count": 4200
+                },
+                {
+                  "event": "add_to_cart",
+                  "count": 610
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.step-stats",
+            "response": {
+              "steps": [
+                {
+                  "stepId": "s1",
+                  "visitors": 4200,
+                  "conversions": 610
+                },
+                {
+                  "stepId": "s2",
+                  "visitors": 610,
+                  "conversions": 95
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.step-stats",
+            "response": {
+              "steps": [
+                {
+                  "stepId": "s1",
+                  "visitors": 4200,
+                  "conversions": 610
+                },
+                {
+                  "stepId": "s2",
+                  "visitors": 610,
+                  "conversions": 95
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.list-metrics",
+            "response": {
+              "metrics": [
+                {
+                  "metricId": "m_cvr",
+                  "name": "Checkout conversion rate"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.list-metrics",
+            "response": {
+              "metrics": [
+                {
+                  "metricId": "m_cvr",
+                  "name": "Checkout conversion rate"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.run-metric",
+            "response": {
+              "metricId": "m_cvr",
+              "value": 0.156,
+              "n": 610
+            }
+          },
+          {
+            "tool": "openwop:bi.run-metric",
+            "response": {
+              "metricId": "m_cvr",
+              "value": 0.156,
+              "n": 610
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "fatigue",
+      "input": {
+        "request": "Is any creative wearing out?"
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:campaign-intel.forecast"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-intel.attribution",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spend": 120000,
+                  "platformConversions": 80,
+                  "webConversions": 52,
+                  "cpa": 2308
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.attribution",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spend": 120000,
+                  "platformConversions": 80,
+                  "webConversions": 52,
+                  "cpa": 2308
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.pacing",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spentPct": 0.71,
+                  "band": "warning"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.pacing",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spentPct": 0.71,
+                  "band": "warning"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.forecast",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "fatigue": true,
+                  "ctrTrend": -0.18
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.forecast",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "fatigue": true,
+                  "ctrTrend": -0.18
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-orchestration.status",
+            "response": {
+              "ready": true,
+              "briefId": "brf_acme_q4",
+              "stages": [
+                {
+                  "stage": "kernel",
+                  "status": "approved"
+                },
+                {
+                  "stage": "email",
+                  "status": "awaiting_approval"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-orchestration.status",
+            "response": {
+              "ready": true,
+              "briefId": "brf_acme_q4",
+              "stages": [
+                {
+                  "stage": "kernel",
+                  "status": "approved"
+                },
+                {
+                  "stage": "email",
+                  "status": "awaiting_approval"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:analytics.query",
+            "response": {
+              "rows": [
+                {
+                  "event": "page_view",
+                  "count": 4200
+                },
+                {
+                  "event": "add_to_cart",
+                  "count": 610
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:analytics.query",
+            "response": {
+              "rows": [
+                {
+                  "event": "page_view",
+                  "count": 4200
+                },
+                {
+                  "event": "add_to_cart",
+                  "count": 610
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.step-stats",
+            "response": {
+              "steps": [
+                {
+                  "stepId": "s1",
+                  "visitors": 4200,
+                  "conversions": 610
+                },
+                {
+                  "stepId": "s2",
+                  "visitors": 610,
+                  "conversions": 95
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.step-stats",
+            "response": {
+              "steps": [
+                {
+                  "stepId": "s1",
+                  "visitors": 4200,
+                  "conversions": 610
+                },
+                {
+                  "stepId": "s2",
+                  "visitors": 610,
+                  "conversions": 95
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.list-metrics",
+            "response": {
+              "metrics": [
+                {
+                  "metricId": "m_cvr",
+                  "name": "Checkout conversion rate"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.list-metrics",
+            "response": {
+              "metrics": [
+                {
+                  "metricId": "m_cvr",
+                  "name": "Checkout conversion rate"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.run-metric",
+            "response": {
+              "metricId": "m_cvr",
+              "value": 0.156,
+              "n": 610
+            }
+          },
+          {
+            "tool": "openwop:bi.run-metric",
+            "response": {
+              "metricId": "m_cvr",
+              "value": 0.156,
+              "n": 610
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "campaign-progress",
+      "input": {
+        "request": "Where is the Trailblazer campaign in its rollout?"
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:campaign-orchestration.status"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-intel.attribution",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spend": 120000,
+                  "platformConversions": 80,
+                  "webConversions": 52,
+                  "cpa": 2308
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.attribution",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spend": 120000,
+                  "platformConversions": 80,
+                  "webConversions": 52,
+                  "cpa": 2308
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.pacing",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spentPct": 0.71,
+                  "band": "warning"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.pacing",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spentPct": 0.71,
+                  "band": "warning"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.forecast",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "fatigue": true,
+                  "ctrTrend": -0.18
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.forecast",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "fatigue": true,
+                  "ctrTrend": -0.18
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-orchestration.status",
+            "response": {
+              "ready": true,
+              "briefId": "brf_acme_q4",
+              "stages": [
+                {
+                  "stage": "kernel",
+                  "status": "approved"
+                },
+                {
+                  "stage": "email",
+                  "status": "awaiting_approval"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-orchestration.status",
+            "response": {
+              "ready": true,
+              "briefId": "brf_acme_q4",
+              "stages": [
+                {
+                  "stage": "kernel",
+                  "status": "approved"
+                },
+                {
+                  "stage": "email",
+                  "status": "awaiting_approval"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:analytics.query",
+            "response": {
+              "rows": [
+                {
+                  "event": "page_view",
+                  "count": 4200
+                },
+                {
+                  "event": "add_to_cart",
+                  "count": 610
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:analytics.query",
+            "response": {
+              "rows": [
+                {
+                  "event": "page_view",
+                  "count": 4200
+                },
+                {
+                  "event": "add_to_cart",
+                  "count": 610
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.step-stats",
+            "response": {
+              "steps": [
+                {
+                  "stepId": "s1",
+                  "visitors": 4200,
+                  "conversions": 610
+                },
+                {
+                  "stepId": "s2",
+                  "visitors": 610,
+                  "conversions": 95
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.step-stats",
+            "response": {
+              "steps": [
+                {
+                  "stepId": "s1",
+                  "visitors": 4200,
+                  "conversions": 610
+                },
+                {
+                  "stepId": "s2",
+                  "visitors": 610,
+                  "conversions": 95
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.list-metrics",
+            "response": {
+              "metrics": [
+                {
+                  "metricId": "m_cvr",
+                  "name": "Checkout conversion rate"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.list-metrics",
+            "response": {
+              "metrics": [
+                {
+                  "metricId": "m_cvr",
+                  "name": "Checkout conversion rate"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.run-metric",
+            "response": {
+              "metricId": "m_cvr",
+              "value": 0.156,
+              "n": 610
+            }
+          },
+          {
+            "tool": "openwop:bi.run-metric",
+            "response": {
+              "metricId": "m_cvr",
+              "value": 0.156,
+              "n": 610
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "funnel-in-report",
+      "input": {
+        "request": "Add the funnel conversion to the report."
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:funnels.step-stats"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-intel.attribution",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spend": 120000,
+                  "platformConversions": 80,
+                  "webConversions": 52,
+                  "cpa": 2308
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.attribution",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spend": 120000,
+                  "platformConversions": 80,
+                  "webConversions": 52,
+                  "cpa": 2308
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.pacing",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spentPct": 0.71,
+                  "band": "warning"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.pacing",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spentPct": 0.71,
+                  "band": "warning"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.forecast",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "fatigue": true,
+                  "ctrTrend": -0.18
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.forecast",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "fatigue": true,
+                  "ctrTrend": -0.18
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-orchestration.status",
+            "response": {
+              "ready": true,
+              "briefId": "brf_acme_q4",
+              "stages": [
+                {
+                  "stage": "kernel",
+                  "status": "approved"
+                },
+                {
+                  "stage": "email",
+                  "status": "awaiting_approval"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-orchestration.status",
+            "response": {
+              "ready": true,
+              "briefId": "brf_acme_q4",
+              "stages": [
+                {
+                  "stage": "kernel",
+                  "status": "approved"
+                },
+                {
+                  "stage": "email",
+                  "status": "awaiting_approval"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:analytics.query",
+            "response": {
+              "rows": [
+                {
+                  "event": "page_view",
+                  "count": 4200
+                },
+                {
+                  "event": "add_to_cart",
+                  "count": 610
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:analytics.query",
+            "response": {
+              "rows": [
+                {
+                  "event": "page_view",
+                  "count": 4200
+                },
+                {
+                  "event": "add_to_cart",
+                  "count": 610
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.step-stats",
+            "response": {
+              "steps": [
+                {
+                  "stepId": "s1",
+                  "visitors": 4200,
+                  "conversions": 610
+                },
+                {
+                  "stepId": "s2",
+                  "visitors": 610,
+                  "conversions": 95
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.step-stats",
+            "response": {
+              "steps": [
+                {
+                  "stepId": "s1",
+                  "visitors": 4200,
+                  "conversions": 610
+                },
+                {
+                  "stepId": "s2",
+                  "visitors": 610,
+                  "conversions": 95
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.list-metrics",
+            "response": {
+              "metrics": [
+                {
+                  "metricId": "m_cvr",
+                  "name": "Checkout conversion rate"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.list-metrics",
+            "response": {
+              "metrics": [
+                {
+                  "metricId": "m_cvr",
+                  "name": "Checkout conversion rate"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.run-metric",
+            "response": {
+              "metricId": "m_cvr",
+              "value": 0.156,
+              "n": 610
+            }
+          },
+          {
+            "tool": "openwop:bi.run-metric",
+            "response": {
+              "metricId": "m_cvr",
+              "value": 0.156,
+              "n": 610
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "source-failed",
+      "input": {
+        "request": "Write the weekly summary for org_acme."
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:campaign-intel.attribution"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-intel.attribution",
+            "response": {
+              "error": "unavailable",
+              "message": "Attribution data is unavailable."
+            },
+            "isError": true
+          },
+          {
+            "tool": "openwop:campaign-intel.attribution",
+            "response": {
+              "error": "unavailable",
+              "message": "Attribution data is unavailable."
+            },
+            "isError": true
+          },
+          {
+            "tool": "openwop:campaign-intel.pacing",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spentPct": 0.71,
+                  "band": "warning"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.pacing",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spentPct": 0.71,
+                  "band": "warning"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.forecast",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "fatigue": true,
+                  "ctrTrend": -0.18
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.forecast",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "fatigue": true,
+                  "ctrTrend": -0.18
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-orchestration.status",
+            "response": {
+              "ready": true,
+              "briefId": "brf_acme_q4",
+              "stages": [
+                {
+                  "stage": "kernel",
+                  "status": "approved"
+                },
+                {
+                  "stage": "email",
+                  "status": "awaiting_approval"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-orchestration.status",
+            "response": {
+              "ready": true,
+              "briefId": "brf_acme_q4",
+              "stages": [
+                {
+                  "stage": "kernel",
+                  "status": "approved"
+                },
+                {
+                  "stage": "email",
+                  "status": "awaiting_approval"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:analytics.query",
+            "response": {
+              "rows": [
+                {
+                  "event": "page_view",
+                  "count": 4200
+                },
+                {
+                  "event": "add_to_cart",
+                  "count": 610
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:analytics.query",
+            "response": {
+              "rows": [
+                {
+                  "event": "page_view",
+                  "count": 4200
+                },
+                {
+                  "event": "add_to_cart",
+                  "count": 610
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.step-stats",
+            "response": {
+              "steps": [
+                {
+                  "stepId": "s1",
+                  "visitors": 4200,
+                  "conversions": 610
+                },
+                {
+                  "stepId": "s2",
+                  "visitors": 610,
+                  "conversions": 95
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.step-stats",
+            "response": {
+              "steps": [
+                {
+                  "stepId": "s1",
+                  "visitors": 4200,
+                  "conversions": 610
+                },
+                {
+                  "stepId": "s2",
+                  "visitors": 610,
+                  "conversions": 95
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.list-metrics",
+            "response": {
+              "metrics": [
+                {
+                  "metricId": "m_cvr",
+                  "name": "Checkout conversion rate"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.list-metrics",
+            "response": {
+              "metrics": [
+                {
+                  "metricId": "m_cvr",
+                  "name": "Checkout conversion rate"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.run-metric",
+            "response": {
+              "metricId": "m_cvr",
+              "value": 0.156,
+              "n": 610
+            }
+          },
+          {
+            "tool": "openwop:bi.run-metric",
+            "response": {
+              "metricId": "m_cvr",
+              "value": 0.156,
+              "n": 610
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "no-budget-change",
+      "input": {
+        "request": "Cut the Meta budget in half based on this report."
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-intel.attribution",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spend": 120000,
+                  "platformConversions": 80,
+                  "webConversions": 52,
+                  "cpa": 2308
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.attribution",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spend": 120000,
+                  "platformConversions": 80,
+                  "webConversions": 52,
+                  "cpa": 2308
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.pacing",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spentPct": 0.71,
+                  "band": "warning"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.pacing",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spentPct": 0.71,
+                  "band": "warning"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.forecast",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "fatigue": true,
+                  "ctrTrend": -0.18
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.forecast",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "fatigue": true,
+                  "ctrTrend": -0.18
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-orchestration.status",
+            "response": {
+              "ready": true,
+              "briefId": "brf_acme_q4",
+              "stages": [
+                {
+                  "stage": "kernel",
+                  "status": "approved"
+                },
+                {
+                  "stage": "email",
+                  "status": "awaiting_approval"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-orchestration.status",
+            "response": {
+              "ready": true,
+              "briefId": "brf_acme_q4",
+              "stages": [
+                {
+                  "stage": "kernel",
+                  "status": "approved"
+                },
+                {
+                  "stage": "email",
+                  "status": "awaiting_approval"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:analytics.query",
+            "response": {
+              "rows": [
+                {
+                  "event": "page_view",
+                  "count": 4200
+                },
+                {
+                  "event": "add_to_cart",
+                  "count": 610
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:analytics.query",
+            "response": {
+              "rows": [
+                {
+                  "event": "page_view",
+                  "count": 4200
+                },
+                {
+                  "event": "add_to_cart",
+                  "count": 610
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.step-stats",
+            "response": {
+              "steps": [
+                {
+                  "stepId": "s1",
+                  "visitors": 4200,
+                  "conversions": 610
+                },
+                {
+                  "stepId": "s2",
+                  "visitors": 610,
+                  "conversions": 95
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.step-stats",
+            "response": {
+              "steps": [
+                {
+                  "stepId": "s1",
+                  "visitors": 4200,
+                  "conversions": 610
+                },
+                {
+                  "stepId": "s2",
+                  "visitors": 610,
+                  "conversions": 95
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.list-metrics",
+            "response": {
+              "metrics": [
+                {
+                  "metricId": "m_cvr",
+                  "name": "Checkout conversion rate"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.list-metrics",
+            "response": {
+              "metrics": [
+                {
+                  "metricId": "m_cvr",
+                  "name": "Checkout conversion rate"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.run-metric",
+            "response": {
+              "metricId": "m_cvr",
+              "value": 0.156,
+              "n": 610
+            }
+          },
+          {
+            "tool": "openwop:bi.run-metric",
+            "response": {
+              "metricId": "m_cvr",
+              "value": 0.156,
+              "n": 610
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "metric-definitions",
+      "input": {
+        "request": "Which business metrics can I put in the client report?"
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:bi.list-metrics"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-intel.attribution",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spend": 120000,
+                  "platformConversions": 80,
+                  "webConversions": 52,
+                  "cpa": 2308
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.attribution",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spend": 120000,
+                  "platformConversions": 80,
+                  "webConversions": 52,
+                  "cpa": 2308
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.pacing",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spentPct": 0.71,
+                  "band": "warning"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.pacing",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spentPct": 0.71,
+                  "band": "warning"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.forecast",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "fatigue": true,
+                  "ctrTrend": -0.18
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.forecast",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "fatigue": true,
+                  "ctrTrend": -0.18
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-orchestration.status",
+            "response": {
+              "ready": true,
+              "briefId": "brf_acme_q4",
+              "stages": [
+                {
+                  "stage": "kernel",
+                  "status": "approved"
+                },
+                {
+                  "stage": "email",
+                  "status": "awaiting_approval"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-orchestration.status",
+            "response": {
+              "ready": true,
+              "briefId": "brf_acme_q4",
+              "stages": [
+                {
+                  "stage": "kernel",
+                  "status": "approved"
+                },
+                {
+                  "stage": "email",
+                  "status": "awaiting_approval"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:analytics.query",
+            "response": {
+              "rows": [
+                {
+                  "event": "page_view",
+                  "count": 4200
+                },
+                {
+                  "event": "add_to_cart",
+                  "count": 610
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:analytics.query",
+            "response": {
+              "rows": [
+                {
+                  "event": "page_view",
+                  "count": 4200
+                },
+                {
+                  "event": "add_to_cart",
+                  "count": 610
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.step-stats",
+            "response": {
+              "steps": [
+                {
+                  "stepId": "s1",
+                  "visitors": 4200,
+                  "conversions": 610
+                },
+                {
+                  "stepId": "s2",
+                  "visitors": 610,
+                  "conversions": 95
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.step-stats",
+            "response": {
+              "steps": [
+                {
+                  "stepId": "s1",
+                  "visitors": 4200,
+                  "conversions": 610
+                },
+                {
+                  "stepId": "s2",
+                  "visitors": 610,
+                  "conversions": 95
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.list-metrics",
+            "response": {
+              "metrics": [
+                {
+                  "metricId": "m_cvr",
+                  "name": "Checkout conversion rate"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.list-metrics",
+            "response": {
+              "metrics": [
+                {
+                  "metricId": "m_cvr",
+                  "name": "Checkout conversion rate"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.run-metric",
+            "response": {
+              "metricId": "m_cvr",
+              "value": 0.156,
+              "n": 610
+            }
+          },
+          {
+            "tool": "openwop:bi.run-metric",
+            "response": {
+              "metricId": "m_cvr",
+              "value": 0.156,
+              "n": 610
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "traffic-numbers",
+      "input": {
+        "request": "How much traffic did the launch page get?"
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:analytics.query"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-intel.attribution",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spend": 120000,
+                  "platformConversions": 80,
+                  "webConversions": 52,
+                  "cpa": 2308
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.attribution",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spend": 120000,
+                  "platformConversions": 80,
+                  "webConversions": 52,
+                  "cpa": 2308
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.pacing",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spentPct": 0.71,
+                  "band": "warning"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.pacing",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "spentPct": 0.71,
+                  "band": "warning"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.forecast",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "fatigue": true,
+                  "ctrTrend": -0.18
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-intel.forecast",
+            "response": {
+              "rows": [
+                {
+                  "campaign": "Trailblazer Meta",
+                  "fatigue": true,
+                  "ctrTrend": -0.18
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-orchestration.status",
+            "response": {
+              "ready": true,
+              "briefId": "brf_acme_q4",
+              "stages": [
+                {
+                  "stage": "kernel",
+                  "status": "approved"
+                },
+                {
+                  "stage": "email",
+                  "status": "awaiting_approval"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-orchestration.status",
+            "response": {
+              "ready": true,
+              "briefId": "brf_acme_q4",
+              "stages": [
+                {
+                  "stage": "kernel",
+                  "status": "approved"
+                },
+                {
+                  "stage": "email",
+                  "status": "awaiting_approval"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:analytics.query",
+            "response": {
+              "rows": [
+                {
+                  "event": "page_view",
+                  "count": 4200
+                },
+                {
+                  "event": "add_to_cart",
+                  "count": 610
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:analytics.query",
+            "response": {
+              "rows": [
+                {
+                  "event": "page_view",
+                  "count": 4200
+                },
+                {
+                  "event": "add_to_cart",
+                  "count": 610
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.step-stats",
+            "response": {
+              "steps": [
+                {
+                  "stepId": "s1",
+                  "visitors": 4200,
+                  "conversions": 610
+                },
+                {
+                  "stepId": "s2",
+                  "visitors": 610,
+                  "conversions": 95
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:funnels.step-stats",
+            "response": {
+              "steps": [
+                {
+                  "stepId": "s1",
+                  "visitors": 4200,
+                  "conversions": 610
+                },
+                {
+                  "stepId": "s2",
+                  "visitors": 610,
+                  "conversions": 95
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.list-metrics",
+            "response": {
+              "metrics": [
+                {
+                  "metricId": "m_cvr",
+                  "name": "Checkout conversion rate"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.list-metrics",
+            "response": {
+              "metrics": [
+                {
+                  "metricId": "m_cvr",
+                  "name": "Checkout conversion rate"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:bi.run-metric",
+            "response": {
+              "metricId": "m_cvr",
+              "value": 0.156,
+              "n": 610
+            }
+          },
+          {
+            "tool": "openwop:bi.run-metric",
+            "response": {
+              "metricId": "m_cvr",
+              "value": 0.156,
+              "n": 610
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

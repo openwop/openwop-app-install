@@ -5,10 +5,14 @@
  * knowledge RAG surface, network-free), not just an injected mock: a live
  * dispatch whose model calls `openwop:knowledge.search` has the host actually
  * execute the retrieval and feed real results back.
+ *
+ * TST-BLT-3. Red when: `builtinToolNamespaces` stops returning first-segment
+ * tokens, or the provider's catch drops a thrown tool error's structured code
+ * (`errorCode`, WFAU-4).
  */
 
 import { afterEach, describe, expect, it } from 'vitest';
-import { getAgentRegistry, type ResolvedAgentManifest } from '../src/executor/agentRegistry.js';
+import { getAgentRegistry } from '../src/executor/agentRegistry.js';
 import { runAgentDispatchLive, compileAgentTools, type LiveDispatchDeps } from '../src/host/agentDispatch.js';
 import { builtinAgentToolIds, builtinToolNamespaces, createAgentToolProvider } from '../src/host/agentToolProvider.js';
 import { evaluateToolPermission } from '../src/host/agentToolPermissions.js';
@@ -102,14 +106,14 @@ describe('agent tool provider (A2)', () => {
     // fetch/research make live network calls; rag retrieval hits the surface.)
     const allow = ['openwop:ai.research.web', 'openwop:core.openwop.http.fetch', 'openwop:core.rag.retriever-basic', 'openwop:core.rag.retriever-contextual-compression'];
     const compiled = compileAgentTools(
-      { agentId: 'r', persona: 'Researcher', toolAllowlist: allow } as unknown as ResolvedAgentManifest,
+      { agentId: 'r', persona: 'Researcher', modelClass: 'research', systemPrompt: 'Research.', packName: 'test', packVersion: '0', toolAllowlist: allow },
       builtinAgentToolIds(),
       provider.resolveTool,
     );
     expect(compiled.map((c) => c.def.name).sort()).toEqual([...allow].sort());
   });
 
-  it('the rag retriever ids execute against the real lexical knowledge surface', async () => {
+  it('the rag retriever ids execute against the real knowledge surface', async () => {
     const provider = createAgentToolProvider({ tenantId: 'tenant-a' });
     const out = await provider.executeTool({ name: 'openwop:core.rag.retriever-basic', input: { query: 'workflow' } });
     expect(out.isError).toBeFalsy();

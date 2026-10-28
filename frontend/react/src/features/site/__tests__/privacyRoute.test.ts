@@ -11,7 +11,7 @@
  * entry at `/privacy` (chrome/features.tsx).
  */
 import { describe, it, expect } from 'vitest';
-import { matchPrivacyRoute } from '../privacyRoute.js';
+import { matchPrivacyRoute, privacyRedirect } from '../privacyRoute.js';
 import { privacyHref, PRIVACY_HREF } from '../../../brand/privacyHref.js';
 import { FEATURES } from '../../../chrome/features.js';
 
@@ -46,5 +46,30 @@ describe('VITE_BRAND_PRIVACY_URL — where the app links Privacy', () => {
     expect(privacyHref('https://example.com/privacy')).toBe('/privacy');
     expect(privacyHref('//evil.example/privacy')).toBe('/privacy');
     expect(privacyHref('javascript:alert(1)')).toBe('/privacy');
+  });
+});
+
+// bookai.openwop.dev served BOTH the generic /privacy page and the operator's
+// adopted /p/privacy (2026-10-27): typed URLs, old links and crawlers landed on a
+// policy the operator never adopted. App.tsx renders <Navigate replace> to this
+// target instead of PrivacyPage.
+describe('privacyRedirect — a brand with its own policy does not also serve the generic one', () => {
+  it('brand URL set: /privacy (with or without the slash) goes to the adopted policy', () => {
+    const href = privacyHref('/p/privacy');
+    expect(privacyRedirect('/privacy', href)).toBe('/p/privacy');
+    expect(privacyRedirect('/privacy/', href)).toBe('/p/privacy');
+  });
+
+  it('unset (or an invalid value that falls back): /privacy renders the built-in page', () => {
+    expect(privacyRedirect('/privacy', PRIVACY_HREF)).toBeNull();
+    expect(privacyRedirect('/privacy', privacyHref(undefined))).toBeNull();
+    expect(privacyRedirect('/privacy', privacyHref('https://example.com/privacy'))).toBeNull();
+  });
+
+  it('only /privacy redirects; the adopted page itself and other paths never do', () => {
+    const href = privacyHref('/p/privacy');
+    expect(privacyRedirect('/p/privacy', href)).toBeNull();
+    expect(privacyRedirect('/privacy/cookies', href)).toBeNull();
+    expect(privacyRedirect('/pricing', href)).toBeNull();
   });
 });

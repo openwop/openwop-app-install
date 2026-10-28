@@ -33,6 +33,9 @@ import {
   MAX_TIMEOUT_MS,
   e2bApiKey,
   err,
+  maxResponseBytes,
+  normalizeSandboxResult,
+  readJsonCapped,
   validateCodeRequest,
   withSandboxConcurrency,
 } from '../sandboxAdapter.js';
@@ -95,7 +98,8 @@ async function e2bRequest(
       dispatcher: webhookEgressDispatcher(),
       signal: ctrl.signal,
     });
-    const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    // ADR 0995 D5 — never buffer an unbounded body.
+    const body = await readJsonCapped(res, maxResponseBytes());
     return { ok: res.ok, status: res.status, body };
   } finally {
     clearTimeout(timer);
@@ -103,30 +107,13 @@ async function e2bRequest(
 }
 
 function asString(v: unknown): string { return typeof v === 'string' ? v : ''; }
-function asNumber(v: unknown, dflt: number): number { return typeof v === 'number' && Number.isFinite(v) ? v : dflt; }
-
-function isE2bFile(v: unknown): v is { name: string; mimeType?: string; base64: string } {
-  return typeof v === 'object' && v !== null
-    && typeof (v as { name?: unknown }).name === 'string'
-    && typeof (v as { base64?: unknown }).base64 === 'string';
-}
-
 /**
  * Centralized E2B-exec-response → `SandboxExecResult` mapping (the second operator-adjustable
- * surface). Tolerant of field-name drift: reads exitCode/stdout/stderr/timedOut/files defensively.
+ * surface). The field reads, type checks and caps are `normalizeSandboxResult`'s (ADR 0995 D5),
+ * shared with the Code-API adapter so both bound their output the same way.
  */
 function mapE2bExec(res: E2bResponse): SandboxExecResult {
-  const b = res.body;
-  const files = Array.isArray(b.files)
-    ? b.files.filter(isE2bFile).map((f) => ({ name: f.name, mimeType: f.mimeType ?? 'application/octet-stream', base64: f.base64 }))
-    : [];
-  return {
-    exitCode: asNumber(b.exitCode, res.ok ? 0 : 1),
-    stdout: asString(b.stdout),
-    stderr: asString(b.stderr),
-    timedOut: b.timedOut === true,
-    files,
-  };
+  return normalizeSandboxResult(res.body, res.ok ? 0 : 1);
 }
 
 /**
@@ -183,7 +170,8 @@ async function runE2bSandbox(req: SandboxExecRequest): Promise<SandboxExecResult
     } catch (e) {
       // §D — never echo the sandbox host or the key; a timeout reads as a transport error.
       const aborted = e instanceof Error && e.name === 'AbortError';
-      throw err('sandbox_transport_error', aborted ? 'sandbox_timeout' : 'sandbox_transport_error');
+      const tooLarge = e instanceof Error && e.message === 'sandbox_response_too_large';
+      throw err('sandbox_transport_error', aborted ? 'sandbox_timeout' : tooLarge ? 'sandbox_response_too_large' : 'sandbox_transport_error');
     } finally {
       // 3. Best-effort teardown (never surface a kill failure to the caller; never leak the host).
       if (sandboxId) {

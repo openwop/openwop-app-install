@@ -19,6 +19,7 @@ import { StateCard } from '../ui/StateCard.js';
 import { toast } from '../ui/toast.js';
 import { ScaleIcon, CheckIcon, XIcon, RotateCwIcon } from '../ui/icons/index.js';
 import { ContentReviewContext, ApprovalDecideBar, StrategyActivationSnapshot } from './ContentReviewContext.js';
+import { EmailSendReviewContext } from './EmailSendReviewContext.js';
 import {
   listApprovals,
   listApprovalsByKind,
@@ -36,9 +37,13 @@ import { loadOrgMembers } from '../orgs/orgMembers.js';
 
 // ADR 0862 D3 — the fields the approver must see (lazy: only assistant-action cards).
 const AssistantActionFields = lazy(() => import('../assistantAction/AssistantActionFields.js'));
+const CreativeReviewDecision = lazy(() => import('./CreativeReviewDecision.js'));
+const FunnelPublishDecision = lazy(() => import('./FunnelPublishDecision.js'));
 
 const isAssistantAction = (a: PendingApproval): boolean => a.kind === 'assistant-action' || !!a.actionId;
 const isContentPublish = (a: PendingApproval): boolean => a.kind === 'content-publish';
+/** ADR 0905 D3 — an email campaign send review (its own group: approving sends nothing). */
+const isEmailSend = (a: PendingApproval): boolean => a.kind === 'email-campaign-send';
 const isCampaignSpend = (a: PendingApproval): boolean => a.kind === 'campaign-spend';
 /** R2 UCP-P2-B1 — commerce-spend (an agent purchase) fell into the catch-all RUN
  *  table, which renders "run workflow «name»" from a `workflowId` these rows leave
@@ -63,6 +68,9 @@ const isStrategyActivation = (a: PendingApproval): boolean => a.kind === 'strate
 const isScenarioSelect = (a: PendingApproval): boolean => a.kind === 'pm-scenario-select';
 /** ADR 0785 P4 — the user's own Claude Code asking to use a tool (NOT a run: approving ALLOWS the tool). */
 const isClaudeCodePermission = (a: PendingApproval): boolean => a.kind === 'claude-code-permission';
+/** ADR 0945 × 0942 — approve publishing one AI asset at one brand-accuracy check. */
+const isCreativeReview = (a: PendingApproval): boolean => a.kind === 'creative-publish-review';
+const isFunnelPublish = (a: PendingApproval): boolean => a.kind === 'funnel-publish';
 
 /** SECURITY — source URLs come from provider-derived (explicitly untrusted)
  *  content; only http(s) schemes may bind to an href (a `javascript:` URL
@@ -298,16 +306,23 @@ export function ApprovalsInbox({ onResolved }: { onResolved?: () => void }): JSX
     setBusy(a.approvalId);
     try {
       // ADR 0862 D1 — an assistant action approves the exact version this card shows.
-      const { runId } = await claimApproval(a.approvalId, undefined, a.action?.contentHash);
+      const { runId } = await claimApproval(a.approvalId, undefined, isEmailSend(a) ? a.emailSend?.reviewHash : a.action?.contentHash);
       toast.success(
         isContentPublish(a)
           ? t('toastApprovedPublished')
+          : isEmailSend(a)
+            ? t('toastApprovedEmailSend')
+          : isFunnelPublish(a)
+            ? t('toastApprovedFunnelPublish')
           : isStrategyActivation(a)
             ? t('toastApprovedActivated')
             // PMXU-2 (ADR 0590) — a scenario approve runs nothing: it adopts
             // the plan of record. The catch-all "running it now" toast lied.
             : isScenarioSelect(a)
               ? t('toastApprovedScenario')
+            // ADR 0945 × 0942 — approving runs nothing: the asset may now be published.
+            : isCreativeReview(a)
+              ? t('toastApprovedCreativeReview')
             : isAssistantAction(a)
               ? t('toastApprovedCarry', { persona: a.persona })
               // R2 UCP-P2-B1 (review M-6) — commerce-spend fell to "Approved — {{persona}}
@@ -350,6 +365,7 @@ export function ApprovalsInbox({ onResolved }: { onResolved?: () => void }): JSX
       // kind-blind "Proposal dismissed." read as terminal.
       toast.info(
         isContentPublish(a) ? t('toastRejectedToDraft')
+          : isEmailSend(a) ? t('toastEmailRejectedToDraft')
           : isStrategyActivation(a) ? t('toastStrategyRejectedToDraft')
             : t('toastProposalDismissed'),
       );
@@ -450,12 +466,15 @@ export function ApprovalsInbox({ onResolved }: { onResolved?: () => void }): JSX
 
   const actions = items?.filter(isAssistantAction) ?? [];
   const contentPublish = items?.filter(isContentPublish) ?? [];
+  const emailSend = items?.filter(isEmailSend) ?? [];
   const campaignSpend = items?.filter(isCampaignSpend) ?? [];
   const strategyActivation = items?.filter(isStrategyActivation) ?? [];
   const scenarioSelect = items?.filter(isScenarioSelect) ?? [];
   const commerceSpend = items?.filter(isCommerceSpend) ?? [];
   const claudeCode = items?.filter(isClaudeCodePermission) ?? [];
-  const runs = items?.filter((a) => !isAssistantAction(a) && !isContentPublish(a) && !isCampaignSpend(a) && !isCommerceSpend(a) && !isStrategyActivation(a) && !isScenarioSelect(a) && !isClaudeCodePermission(a)) ?? [];
+  const creativeReview = items?.filter(isCreativeReview) ?? [];
+  const funnelPublish = items?.filter(isFunnelPublish) ?? [];
+  const runs = items?.filter((a) => !isAssistantAction(a) && !isContentPublish(a) && !isEmailSend(a) && !isCampaignSpend(a) && !isCommerceSpend(a) && !isStrategyActivation(a) && !isScenarioSelect(a) && !isClaudeCodePermission(a) && !isCreativeReview(a) && !isFunnelPublish(a)) ?? [];
 
   return (
     <div className="card">
@@ -512,6 +531,54 @@ export function ApprovalsInbox({ onResolved }: { onResolved?: () => void }): JSX
                     onApprove={() => void claim(a)}
                     onReject={(note) => reject(a, note)}
                   />
+                </article>
+              ))}
+            </div>
+          )}
+          {emailSend.length > 0 && (
+            <div className="u-grid u-gap-2">
+              <h3 className="u-m-0 u-fs-12 muted">{t('approvalsEmailSendGroup')}</h3>
+              {emailSend.map((a) => (
+                <article key={a.approvalId} className="surface-card u-grid u-gap-2">
+                  <div className="u-flex u-items-center u-gap-2">
+                    <span className="u-flex-1">{a.proposal}</span>
+                    <span className="muted u-fs-12">{relativeTime(a.createdAt)}</span>
+                  </div>
+                  <EmailSendReviewContext a={a} />
+                  <ApprovalDecideBar
+                    busy={busy === a.approvalId}
+                    onApprove={() => void claim(a)}
+                    onReject={(note) => reject(a, note)}
+                  />
+                </article>
+              ))}
+            </div>
+          )}
+          {funnelPublish.length > 0 && (
+            <div className="u-grid u-gap-2">
+              <h3 className="u-m-0 u-fs-12 muted">{t('approvalsFunnelPublishGroup')}</h3>
+              {funnelPublish.map((a) => (
+                <article key={a.approvalId} className="surface-card u-grid u-gap-2">
+                  <p className="u-m-0">{a.proposal}</p>
+                  <Suspense fallback={<p role="status">{t('common:loading')}</p>}>
+                    <FunnelPublishDecision approval={a} busy={busy === a.approvalId} onApprove={() => void claim(a)} onReject={(note) => reject(a, note)} />
+                  </Suspense>
+                </article>
+              ))}
+            </div>
+          )}
+          {creativeReview.length > 0 && (
+            <div className="u-grid u-gap-2">
+              <h3 className="u-m-0 u-fs-12 muted">{t('approvalsCreativeReviewGroup')}</h3>
+              {creativeReview.map((a) => (
+                <article key={a.approvalId} className="surface-card u-grid u-gap-2">
+                  <div className="u-flex u-items-center u-gap-2">
+                    <span className="u-flex-1">{a.proposal}</span>
+                    <span className="muted u-fs-12">{relativeTime(a.createdAt)}</span>
+                  </div>
+                  <Suspense fallback={<p role="status">{t('common:loading')}</p>}>
+                    <CreativeReviewDecision approval={a} busy={busy === a.approvalId} onApprove={() => void claim(a)} onReject={(note) => reject(a, note)} />
+                  </Suspense>
                 </article>
               ))}
             </div>

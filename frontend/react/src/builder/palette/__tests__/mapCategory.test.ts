@@ -6,8 +6,10 @@ import { describe, expect, it } from 'vitest';
 import { mapCategory } from '../catalogRegistry.js';
 
 describe('mapCategory', () => {
-  it('passes the five palette groups through', () => {
-    for (const g of ['data', 'ai', 'flow', 'control', 'integration'] as const) expect(mapCategory(g)).toBe(g);
+  // ADR 0955 P5 — `journey` is the sixth group (the journey nodes declare it). Without its
+  // case it fell to the Control default, so the palette had no Journey section.
+  it('passes the six palette groups through', () => {
+    for (const g of ['data', 'ai', 'flow', 'control', 'integration', 'journey'] as const) expect(mapCategory(g)).toBe(g);
   });
 
   // CEILING: `chat` and `coordination` map to Control, which is ALSO the default,

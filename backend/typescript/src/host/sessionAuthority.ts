@@ -33,6 +33,10 @@ export interface SessionSubjectState {
    *  inside their bound. Carried on the row the request already reads, so the
    *  refusal costs no extra read. */
   revokedFamilies?: readonly string[];
+  /** The user's HOME tenant (the tenant their row belongs to). Lets a
+   *  cross-tenant eraser act only when the erasure runs in that tenant
+   *  (ADR 0958 D2 /architect H1). Absent when the registrar does not know it. */
+  homeTenantId?: string;
 }
 
 /** `null` ⇒ no durable row exists for `userId` (erased) — `account_erased`. */

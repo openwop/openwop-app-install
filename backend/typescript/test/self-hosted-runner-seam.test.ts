@@ -7,6 +7,10 @@
  * Asserts: subject-first isolation (no cross-subject routing → runner_unavailable,
  * retriable), at-most-once dedup from a real persisted store, model-dispatch
  * validation, and the honest-off `selfHostedRunner:{supported:false}` advert.
+ * Refusals are asserted by exact status + code + message (src/routes/runnerSeam.ts),
+ * so an earlier validator's 400 cannot stand in for the one under test.
+ * PROTECTED (conformance seam). Sabotage witnesses (grade-tests 8f w2):
+ * rn-isolation, rn-retriable, rn-dedup, rn-model-val, rn-seq-val, rn-register.
  */
 
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
@@ -55,7 +59,8 @@ describe('RFC 0122 §19 — runner seam is wired (non-vacuous, not 404)', () => 
     expect(res.status).toBe(200);
     const body = await res.json() as { deduped: boolean; result: unknown };
     expect(body.deduped).toBe(false);
-    expect(body.result).toBeDefined();
+    // Routed to the OWNING subject's runner, for this step.
+    expect(body.result).toEqual({ delivered: true, runnerId: 'r_a', stepId: 'step_0' });
   });
 });
 
@@ -63,7 +68,7 @@ describe('RFC 0122 §Behavior#1/#5 — subject-first isolation', () => {
   it('a subject-A dispatch MUST NOT route to a subject-B runner → runner_unavailable (retriable)', async () => {
     await post(REGISTER, { runnerId: 'r_b', subject: 'subj_B_only', capabilities: { providers: ['anthropic'] } });
     const res = await post(DISPATCH, modelFrame('subj_A_none', 'run_iso', 'step_0'));
-    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(res.status).toBe(409);
     const json = await res.json();
     assertFlatErrorEnvelope(json, 'runner dispatch refusal');
     expect(errCode(json)).toBe('runner_unavailable');
@@ -92,11 +97,17 @@ describe('RFC 0122 — dispatch validation', () => {
     await post(REGISTER, { runnerId: 'r_a', subject: 'subj_val', capabilities: {} });
     const res = await post(DISPATCH, { subject: 'subj_val', runId: 'r', stepId: 's', seq: 0, kind: 'model', inputs: {} });
     expect(res.status).toBe(400);
+    const env = assertFlatErrorEnvelope(await res.json(), 'model-dispatch refusal');
+    expect(errCode(env)).toBe('validation_error');
+    expect(env.message).toBe('a `model` dispatch requires `provider` and `model`.');
   });
 
   it('a non-integer seq → 400', async () => {
     const res = await post(DISPATCH, { subject: 'subj_val', runId: 'r', stepId: 's2', seq: 'x', kind: 'model', provider: 'anthropic', model: 'm', inputs: {} });
     expect(res.status).toBe(400);
+    const env = assertFlatErrorEnvelope(await res.json(), 'seq refusal');
+    expect(errCode(env)).toBe('validation_error');
+    expect(env.message).toBe('`seq` (integer dispatch cursor) is required.');
   });
 });
 

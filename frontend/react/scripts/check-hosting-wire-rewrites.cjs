@@ -20,7 +20,9 @@
  * file whose correctness the deploy depends on, defended by prose. Hence a
  * check that fails instead.
  *
- * THREE assertions, each for a distinct way this regresses:
+ * FOUR assertions, each for a distinct way this regresses (the fourth, ONE
+ * BACKEND — every Cloud Run rewrite names the same serviceId and region — is
+ * explained where it runs):
  *
  *  1. ORDER. Firebase Hosting takes the FIRST matching rewrite. The wire rules
  *     must precede the SPA catch-all; moving the catch-all up silently restores
@@ -95,6 +97,36 @@ for (const [i, rw] of rewrites.entries()) {
       `  Rationale belongs in an ADR or this check, not in the JSON.`,
     );
   }
+}
+
+// (4) ONE BACKEND. Every Cloud Run rewrite must name the same serviceId AND
+// region. This app has one backend service, so a second target is never a
+// design; it is a merge. MEASURED 2026-10-25 on a white-label sync (KickTodo):
+// the adopter's overlay firebase.json renames every serviceId to its own
+// service, the sync auto-merged two NEW upstream rewrites (`/proposals`,
+// `/proposals/**`) still naming `openwop-app-backend`, and every other check
+// here passed. Firebase refused the release at finalize (HTTP 400: service
+// does not exist in this project), AFTER the backend half had already shipped.
+// Nothing above can see this: each rewrite is individually well-formed.
+const targets = new Map();
+for (const rw of rewrites) {
+  if (!rw.run) continue;
+  const key = `${rw.run.serviceId ?? '(no serviceId)'} @ ${rw.run.region ?? '(default region)'}`;
+  if (!targets.has(key)) targets.set(key, []);
+  targets.get(key).push(rw.source ?? rw.glob ?? rw.regex ?? '(no matcher)');
+}
+if (targets.size > 1) {
+  // The majority target is the intended one; list the sources that disagree.
+  const [main] = [...targets.entries()].sort((a, b) => b[1].length - a[1].length)[0];
+  const odd = [...targets.entries()].filter(([k]) => k !== main);
+  fail(
+    `Cloud Run rewrites name ${targets.size} different targets; this app has one backend.\n` +
+    `  ${targets.get(main).length} rewrite(s) → ${main}\n` +
+    odd.map(([k, srcs]) => `  ${srcs.length} rewrite(s) → ${k}:\n` + srcs.map((s) => `      ${s}`).join('\n')).join('\n') +
+    `\n  Usually a sync merged upstream rewrites into an adopter's firebase.json without\n` +
+    `  renaming their serviceId. Firebase rejects an unknown service at release time,\n` +
+    `  after the backend has already deployed.`,
+  );
 }
 
 // (1) The wire paths must route to Cloud Run, ahead of the SPA catch-all.

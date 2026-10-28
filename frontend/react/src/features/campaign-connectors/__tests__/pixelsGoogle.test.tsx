@@ -42,6 +42,7 @@ vi.mock('../campaignConnectorsClient.js', async (orig) => {
     getSyncStatus: vi.fn<Client['getSyncStatus']>(async () => []),
     listConversions: vi.fn<Client['listConversions']>(async () => [{ eventId: 'e1', eventName: 'purchase', at: '2026-10-01T00:00:00Z', status: 'queued' }]),
     dispatchConversions: vi.fn<Client['dispatchConversions']>(async () => ({ sent: 0 })),
+    getCatalogFeed: vi.fn<Client['getCatalogFeed']>(async () => ({ enabled: false, version: 1, contentLanguage: 'en', feedLabel: 'US', items: 0, excluded: [] })),
     getConnectorSettings: vi.fn<Client['getConnectorSettings']>(async () => ({ orgId: 'org-1', platform: 'meta', syncScope: 'dispatched', adAccountIds: [], updatedAt: '' })),
     getPlatformStatus,
     getConversionHealth,

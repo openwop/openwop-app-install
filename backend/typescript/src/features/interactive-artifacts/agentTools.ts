@@ -20,6 +20,7 @@ import { createHash } from 'node:crypto';
 import { getNodeRegistry } from '../../executor/nodeRegistry.js';
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
 import { persistRunArtifact, getRunArtifact, runArtifactKey } from '../../host/runArtifactStore.js';
+import { chatArtifactRunId, canReadChatArtifact } from '../../host/chatArtifactScope.js';
 import type { NodeContext } from '../../executor/types.js';
 
 export const INTERACTIVE_ARTIFACTS_RENDER_TOOL_ID = 'openwop:interactive-artifacts.render';
@@ -68,7 +69,8 @@ export function registerInteractiveArtifactAgentTools(): void {
       // `chat-viz:undefined`) would collide onto one artifact row (tenant B gets
       // A's). The get tool below still re-checks `record.tenantId`, but the KEY
       // itself must not collapse across tenants in the first place.
-      const runId = `chat-viz:${scope.tenantId}:${scope.conversationId ?? scope.actingUserId ?? 'adhoc'}`;
+      // ADR 0996 — the ONE builder; readers gate on its bucket.
+      const runId = chatArtifactRunId('chat-viz', scope);
       const nodeId = `render:${contentHash({ k: input.kind, s: input.source, c: input.chart, t: input.title })}`;
       const ctx: NodeContext = {
         runId,
@@ -140,7 +142,9 @@ export function registerInteractiveArtifactAgentTools(): void {
       if (!scope.actingUserId) return { content: JSON.stringify({ artifact: null }) };
       const key = typeof input.artifactKey === 'string' ? input.artifactKey : '';
       const record = key ? await getRunArtifact(key) : null;
-      if (!record || record.tenantId !== scope.tenantId) {
+      // ADR 0996 — a chat-tool artifact is as private as its conversation;
+      // hidden reads exactly like missing.
+      if (!record || record.tenantId !== scope.tenantId || !(await canReadChatArtifact(record, scope.actingUserId))) {
         return { content: JSON.stringify({ artifact: null }) };
       }
       return {

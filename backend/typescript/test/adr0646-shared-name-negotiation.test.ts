@@ -26,6 +26,17 @@ import { createApp } from '../src/index.js';
  * that ruling, exercised through the real listener — the negotiator and the
  * publishing shell route are separate modules, and only the wire shows whether
  * they agree.
+ *
+ * Tracker TST-BG3-17. Red when: `isProtocolClient` ignores the OpenWOP-Version header,
+ * breaks the `*`/`*` tie toward html, or decides by presence instead of q-values; the
+ * negotiator stamps the version on the shell; or the negotiator stops adding
+ * `Vary: Accept` on a shared name (witnessed on the JSON operation, where the
+ * negotiator is the only setter). DOUBLE GUARD on the SHELL: the publishing shell
+ * route (`features/publishing/routes.ts`, `res.vary('Accept')`) also sets it, so the
+ * browser case's Vary is red only when both are removed.
+ *
+ * Vary is compared as a TOKEN list: `Accept-Encoding` (added by the gzip layer)
+ * contains the substring "accept", so a substring check could never fail.
  */
 let server: Server;
 let base = '';
@@ -57,7 +68,8 @@ afterAll(async () => {
 });
 
 const get = (path: string, headers: Record<string, string>) => fetch(`${base}${path}`, { headers, redirect: 'manual' });
-const vary = (res: Response) => (res.headers.get('vary') ?? '').toLowerCase();
+const vary = (res: Response): string[] =>
+  (res.headers.get('vary') ?? '').toLowerCase().split(',').map((t) => t.trim()).filter((t) => t.length > 0);
 
 describe('ADR 0646 — a shared name is decided by content negotiation, never by the v1 default', () => {
   it('a browser (prefers text/html, no header) gets the SHELL, with NO OpenWOP-Version and Vary on both signals', async () => {
@@ -81,6 +93,9 @@ describe('ADR 0646 — a shared name is decided by content negotiation, never by
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toMatch(/^application\/json/);
     expect(res.headers.get('openwop-version')).toBe('2.0');
+    // The operation on a shared name varies on BOTH signals too.
+    expect(vary(res)).toContain('accept');
+    expect(vary(res)).toContain('openwop-version');
     // The SAME operation an explicit OpenWOP-Version: 2 request gets.
     const explicit = await get('/agents', { ...AUTH, Accept: 'application/json', 'OpenWOP-Version': '2' });
     expect(explicit.status).toBe(200);
@@ -103,12 +118,14 @@ describe('ADR 0646 — a shared name is decided by content negotiation, never by
 
   it('an Accept that admits JSON but PREFERS html is the page\'s (q-values, not presence)', async () => {
     const res = await get('/agents', { ...AUTH, Accept: 'text/html, application/json;q=0.9' });
+    expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toMatch(/^text\/html/);
     expect(res.headers.get('openwop-version')).toBeNull();
   });
 
   it('an Accept that admits html but PREFERS JSON is the protocol\'s', async () => {
     const res = await get('/agents', { ...AUTH, Accept: 'application/json, text/html;q=0.9' });
+    expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toMatch(/^application\/json/);
     expect(res.headers.get('openwop-version')).toBe('2.0');
   });

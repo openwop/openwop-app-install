@@ -22,7 +22,7 @@ describe('actionLabelKeyFor', () => {
     // missing key would ship an untranslated placeholder in the inbox. The
     // entity types the map labels beyond KNOWN_TYPES are listed literally.
     const entityTypes = [
-      'commerce.order.paid', 'commerce.ucp-buyer.placed', 'commerce.ucp-buyer.status', 'campaign.pacing',
+      'commerce.order.paid', 'commerce.ucp-buyer.placed', 'commerce.ucp-buyer.status', 'campaign.pacing', 'campaign.spend-cap',
       'comment.added', 'comment.reply', 'comment.mention', 'comment.resolved', 'task.assigned',
       'agent.deliverable', 'agent.escalation', 'assistant.briefing',
     ];
@@ -45,6 +45,7 @@ describe('actionLabelKeyFor', () => {
     expect(actionLabelKeyFor('commerce.ucp-buyer.placed')).toBe('actionViewPurchase');
     expect(actionLabelKeyFor('commerce.ucp-buyer.status')).toBe('actionViewPurchase');
     expect(actionLabelKeyFor('campaign.pacing')).toBe('actionViewCampaign');
+    expect(actionLabelKeyFor('campaign.spend-cap')).toBe('actionViewCampaign');
     expect(actionLabelKeyFor('comment.added')).toBe('actionViewComment');
     expect(actionLabelKeyFor('task.assigned')).toBe('actionViewCard');
     expect(actionLabelKeyFor('chat.channel_post')).toBe('actionOpenChannel');

@@ -127,11 +127,43 @@ describe('Email adapter — Postmark + idempotency ledger (ADR 0193 Phase 1)', (
   const adapter = () => makeEmailAdapter({ storage, tenantId: 'tpm', runId: 'run-pm', actingUserId: 'u1', orgId: 'tpm' });
 
   it('sends via Postmark using the custom token header + Postmark body shape', async () => {
-    const out = await adapter().send({ from: 'a@x.com', to: 'b@y.com', subject: 'hi', text: 'body', html: '<b>b</b>', provider: 'postmark', idempotencyKey: 'k-postmark-1' });
+    const out = await adapter().send({ from: 'a@x.com', to: 'b@y.com', subject: 'hi', text: 'body', html: '<b>b</b>', provider: 'postmark', purpose: 'transactional', idempotencyKey: 'k-postmark-1' });
     expect(out).toEqual({ sent: true, provider: 'postmark', messageId: 'pm-msg-1' });
     expect(calls).toHaveLength(1);
     expect(calls[0]?.token).toBe('PM-TOKEN-1'); // raw header, no Bearer prefix
     expect(calls[0]?.body).toMatchObject({ From: 'a@x.com', To: 'b@y.com', Subject: 'hi', TextBody: 'body', HtmlBody: '<b>b</b>', MessageStream: 'outbound' });
+  });
+
+  it('an unlabelled send is marketing, so Postmark puts it on the Broadcast stream (ADR 0994 D2)', async () => {
+    await adapter().send({ from: 'a@x.com', to: 'b@y.com', subject: 'news', text: 'body', provider: 'postmark', idempotencyKey: 'k-postmark-bcast' });
+    expect(calls.at(-1)?.body).toMatchObject({ MessageStream: 'broadcast' });
+  });
+
+  it('a server with no Broadcast stream gets a named, actionable error, not the raw provider text (ADR 0994 D2)', async () => {
+    const strict = http.createServer((req, res) => {
+      let raw = '';
+      req.on('data', (c) => (raw += c));
+      req.on('end', () => {
+        const stream = (JSON.parse(raw || '{}') as { MessageStream?: string }).MessageStream;
+        if (stream === 'outbound') { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ MessageID: 'ok-1', ErrorCode: 0, Message: 'OK' })); return; }
+        res.writeHead(422, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ ErrorCode: 1235, Message: `The message stream '${stream}' was not found.` }));
+      });
+    });
+    await new Promise<void>((r) => strict.listen(0, '127.0.0.1', r));
+    const saved = process.env.OPENWOP_POSTMARK_API_BASE;
+    process.env.OPENWOP_POSTMARK_API_BASE = `http://127.0.0.1:${(strict.address() as AddressInfo).port}`;
+    try {
+      const bad = await adapter().send({ from: 'a@x.com', to: 'b@y.com', subject: 'news', text: 'b', provider: 'postmark', idempotencyKey: 'k-stream-missing' });
+      expect(bad.sent).toBe(false);
+      expect(bad.error).toMatch(/^email_stream_missing: .*"broadcast".*OPENWOP_POSTMARK_BROADCAST_STREAM/);
+      // Transactional mail on the same server is unaffected.
+      const ok = await adapter().send({ from: 'a@x.com', to: 'b@y.com', subject: 'receipt', text: 'b', provider: 'postmark', purpose: 'transactional', idempotencyKey: 'k-stream-ok' });
+      expect(ok).toEqual({ sent: true, provider: 'postmark', messageId: 'ok-1' });
+    } finally {
+      process.env.OPENWOP_POSTMARK_API_BASE = saved;
+      await new Promise<void>((r) => strict.close(() => r()));
+    }
   });
 
   it('dedups on the idempotencyKey — a replay/retry does NOT call the provider twice', async () => {

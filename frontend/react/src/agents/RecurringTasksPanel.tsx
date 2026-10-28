@@ -56,6 +56,9 @@ const SKIP_REASON_KEY: Record<Exclude<NonNullable<AssistantLoop['lastSkipReason'
   'policy-denied': 'recurringSkipPolicyDenied',
   'awaiting-approval': 'recurringSkipAwaitingApproval',
   'goal-closed': 'recurringSkipGoalClosed',
+  'client-inactive': 'recurringSkipClientInactive',
+  'target-refused': 'recurringSkipTargetRefused',
+  'cadence-too-frequent': 'recurringSkipTooFrequent',
 };
 
 /**

@@ -124,8 +124,11 @@ export function ApprovalDecideBar({
   onReject,
   approveLabel,
   rejectLabel,
+  approveDisabled = false,
 }: {
   busy: boolean;
+  /** A review without its exact evidence may still be rejected. */
+  approveDisabled?: boolean;
   onApprove: () => void;
   /** Kind-true verbs (ADR 0785 P4: approving a Claude Code prompt ALLOWS a tool). */
   approveLabel?: string;
@@ -191,7 +194,7 @@ export function ApprovalDecideBar({
 
   return (
     <span className="action-bar">
-      <Button variant="primary" size="sm" disabled={busy} aria-busy={busy} onClick={onApprove}>
+      <Button variant="primary" size="sm" disabled={busy || approveDisabled} aria-busy={busy} onClick={onApprove}>
         <CheckIcon size={13} /> {approveLabel ?? t('approveLabel')}
       </Button>
       <Button ref={rejectRef} variant="secondary" size="sm" disabled={busy} aria-busy={busy} onClick={() => setAsking(true)}>

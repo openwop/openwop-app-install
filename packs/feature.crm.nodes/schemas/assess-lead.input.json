@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.crm.nodes/1.15.0/assess-lead.input.json",
+  "title": "CrmAssessLeadInput",
+  "description": "`criteria`, `readRefs` and `evidenceBlock` arrive over edges from lead-evidence.",
+  "type": "object",
+  "properties": {
+    "orgId": {
+      "type": "string"
+    },
+    "contactId": {
+      "type": "string"
+    },
+    "modelId": {
+      "type": "string"
+    },
+    "modelVersion": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "provider": {
+      "type": "string"
+    },
+    "model": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": true,
+  "required": []
+}

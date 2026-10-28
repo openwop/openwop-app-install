@@ -37,7 +37,7 @@ import { resolveRequestTimeoutMs } from '../middleware/requestTimeout.js';
  * here, which makes registration a compile-time obligation rather than a
  * convention someone can forget.
  */
-export type IdempotentEndpoint = 'POST:/v1/runs' | 'POST:/v1/host/openwop-app/agents' | 'POST:/host/events/test';  // ADR 0812 KEEP: a PERSISTED idempotency-key namespace (primary key + request digest), not a URL
+export type IdempotentEndpoint = 'POST:/v1/runs' | 'POST:/v1/host/openwop-app/agents' | 'POST:/host/events/test' | 'POST:/host/openwop-app/crm/clients/:orgId/leads/:contactId/grade' | 'POST:/host/openwop-app/crm/clients/:orgId/leads/:contactId/route' | 'POST:/host/openwop-app/crm/clients/:orgId/leads/:contactId/qualify';  // ADR 0812 KEEP: a PERSISTED idempotency-key namespace (primary key + request digest), not a URL
 
 /** Every endpoint in the union, for tests and the lane tripwire. */
 /** The `POST /runs` ledger namespace, named once so other lanes claiming the SAME
@@ -48,6 +48,9 @@ export const IDEMPOTENT_ENDPOINTS: readonly IdempotentEndpoint[] = [
   RUNS_IDEMPOTENT_ENDPOINT,
   'POST:/v1/host/openwop-app/agents',  // ADR 0812 KEEP: a PERSISTED idempotency-key namespace (primary key + request digest), not a URL
   'POST:/host/events/test',  // RFC 0241 §B.5 (ADR 0825): `emitTestHostEvent`
+  'POST:/host/openwop-app/crm/clients/:orgId/leads/:contactId/grade',
+  'POST:/host/openwop-app/crm/clients/:orgId/leads/:contactId/route',
+  'POST:/host/openwop-app/crm/clients/:orgId/leads/:contactId/qualify',
 ];
 
 /**
@@ -61,6 +64,9 @@ const REQUEST_VERSION: Record<IdempotentEndpoint, string> = {
   'POST:/v1/runs': 'v1',  // ADR 0812 KEEP: a PERSISTED idempotency-key namespace (primary key + request digest), not a URL
   'POST:/v1/host/openwop-app/agents': 'v1',  // ADR 0812 KEEP: a PERSISTED idempotency-key namespace (primary key + request digest), not a URL
   'POST:/host/events/test': 'v1',
+  'POST:/host/openwop-app/crm/clients/:orgId/leads/:contactId/grade': 'v1',
+  'POST:/host/openwop-app/crm/clients/:orgId/leads/:contactId/route': 'v1',
+  'POST:/host/openwop-app/crm/clients/:orgId/leads/:contactId/qualify': 'v1',
 };
 
 /**

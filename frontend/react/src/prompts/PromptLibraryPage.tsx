@@ -1,11 +1,16 @@
 /**
- * `/prompts` route. Lists prompt templates with kind/tag filters and a
- * CRUD surface for user-authored prompts (localStorage; merged with
- * bundled samples + any future BE store via listPrompts).
+ * `/prompts` route. Two tabs:
+ * - **My prompts** — prompt templates with kind/tag filters and a CRUD surface for
+ *   prompts kept in THIS BROWSER (localStorage), merged with the workspace's
+ *   prompt-store templates (`GET /prompts`) and, on the demo host, samples.
+ * - **Team library** (ADR 0993 D8, `TeamLibrary.tsx`) — the org prompt library the
+ *   chat's `/p-<slug>` commands read. Any prompt on My prompts can be shared there.
  */
 
 import { Button } from '../ui/Button.js';
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { TabPanel, Tabs, useUrlTab } from '../ui/Tabs.js';
+import { TeamLibrary, type PublishDraft } from './TeamLibrary.js';
 import { useStorageSubject } from '../platform/useStorageSubject.js';
 import { useTranslation } from 'react-i18next';
 import { listPrompts, renderLocal } from './promptsClient.js';
@@ -74,6 +79,22 @@ export function PromptLibraryPage() {
   // chip; when `warn`, the lint runs but the banner copy is softer;
   // when `off` or absent, the lint stays silent.
   const [tierOneCompliance, setTierOneCompliance] = useState<TierOneCompliance>(undefined);
+  // ADR 0993 D8 — which tab, and a prompt handed from My prompts to the Team library.
+  const [tab, setTab] = useUrlTab<'mine' | 'team'>('tab', ['mine', 'team'], 'mine');
+  const [publishDraft, setPublishDraft] = useState<PublishDraft | null>(null);
+  const takeDraft = useCallback(() => setPublishDraft(null), []);
+  const shareWithTeam = useCallback((p: PromptTemplate) => {
+    // Shared as the library's OWN text, whatever its source (grade-ux P61UX-7):
+    // My prompts also lists demo-host samples that exist only in this bundle, which
+    // the server cannot bind, and binding by id here would fail with a generic
+    // error. Binding a prompt-store template by reference stays an API path.
+    setPublishDraft({
+      name: p.name ?? p.templateId,
+      ...(p.description ? { description: p.description } : {}),
+      template: { kind: p.kind, text: p.text },
+    });
+    setTab('team');
+  }, [setTab]);
 
   // refreshNonce bumps after every CRUD mutation so the listPrompts()
   // effect below re-runs and surfaces the just-edited entries.
@@ -174,9 +195,24 @@ export function PromptLibraryPage() {
         eyebrow={t('pageEyebrow')}
         title={t('pageTitle')}
         lede={t('pageLede')}
-        actions={<Button variant="primary" onClick={() => setEditing('new')}>{t('newPrompt')}</Button>}
+        actions={tab === 'mine' ? <Button variant="primary" onClick={() => setEditing('new')}>{t('newPrompt')}</Button> : null}
       />
 
+      <Tabs
+        idBase="prompts"
+        label={t('tabsLabel')}
+        value={tab}
+        onChange={setTab}
+        className="u-mb-4"
+        items={[{ id: 'mine', label: t('tabMine') }, { id: 'team', label: t('tabTeam') }]}
+      />
+
+      {tab === 'team' ? (
+        <TabPanel idBase="prompts" tabId="team">
+          <TeamLibrary draft={publishDraft} onDraftTaken={takeDraft} />
+        </TabPanel>
+      ) : (
+      <TabPanel idBase="prompts" tabId="mine">
       <div className="page-stack">
         {error && <Notice variant="error">{error}</Notice>}
 
@@ -265,6 +301,7 @@ export function PromptLibraryPage() {
                 onSelect={setSelected}
                 onEdit={setEditing}
                 onDelete={setPendingDelete}
+                onPublish={shareWithTeam}
               />
             ))}
           </div>
@@ -278,11 +315,14 @@ export function PromptLibraryPage() {
                 onSelect={setSelected}
                 onEdit={setEditing}
                 onDelete={setPendingDelete}
+                onPublish={shareWithTeam}
               />
             ))}
           </div>
         )}
       </div>
+      </TabPanel>
+      )}
 
       {selected && <PromptDetailModal prompt={selected} onClose={() => setSelected(null)} />}
       {editing && (

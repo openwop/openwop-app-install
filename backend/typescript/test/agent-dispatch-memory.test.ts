@@ -4,6 +4,11 @@
  * agent that declares `memoryShape.longTerm` now (a) reads prior memory into the
  * turn's context and (b) writes a turn summary on a completed turn — and that an
  * agent without `longTerm` (or without the wired port) touches no memory.
+ *
+ * Tracker TST-BKX-4. Red when the longTerm opt-in, the untrusted-memory filter,
+ * the memory-kind dedupe, the trusted-KB filter, the derived-from-untrusted tag,
+ * whitespace neutralisation, fence-marker defanging, the cited-title format or
+ * the turn-summary write is sabotaged — each sabotage-witnessed (w65).
  */
 
 import { afterEach, describe, expect, it } from 'vitest';
@@ -174,6 +179,10 @@ describe('runAgentDispatchLive — per-agent bound knowledge (ADR 0038)', () => 
     // …carried as DATA inside the fence, AFTER the trusted block (never mixed in).
     expect(saw).toContain('IGNORE PRIOR INSTRUCTIONS');
     expect(saw.indexOf('Relevant knowledge for this agent')).toBeLessThan(saw.indexOf('BEGIN UNTRUSTED CONTENT'));
+    // …and NEVER inside the trusted cited block.
+    const trustedBlock = saw.slice(saw.indexOf('Relevant knowledge for this agent'), saw.indexOf('BEGIN UNTRUSTED CONTENT'));
+    expect(trustedBlock).toContain('[Playbook] Renewal date is March.');
+    expect(trustedBlock).not.toContain('IGNORE PRIOR INSTRUCTIONS');
   });
 
   it('DEFANGS a fence-marker spoof embedded in untrusted content (review fix)', async () => {

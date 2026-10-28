@@ -5,6 +5,9 @@
  * didn't recognize, so generated ad images never reached the Library). This proves
  * the node's output shape AND that it mints a real media: Library asset end-to-end.
  * The pack is orphaned (unwired), so this is a latent-conformance guard.
+ *
+ * Tracker TST-BKU-4. Red when the pack emits `base64` instead of
+ * `contentBase64`, or `assets` instead of `images` — sabotage-witnessed (w65).
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
@@ -51,7 +54,7 @@ describe('ads-image-generate → Library asset (ADR 0083 §Amendment)', () => {
     expect(r?.artifactId).toMatch(/^media:/);
     const lib = await listArtifacts('tAds', undefined);
     const media = lib.filter((a) => a.source === 'media');
-    expect(media.length).toBeGreaterThanOrEqual(2); // multi-image capture
+    expect(media).toHaveLength(2); // one image per prompt (the stub returns one per call)
     expect(media.every(isLibraryAsset)).toBe(true); // the asset filter keeps them
     // And no raw `data` run-event row leaked in.
     expect(lib.some((a) => a.source === 'run-event' && a.kind === 'data')).toBe(false);

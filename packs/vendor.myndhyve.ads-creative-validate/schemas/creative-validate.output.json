@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.ads-creative-validate/1.0.2/creative-validate.output.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.ads-creative-validate/1.1.0/creative-validate.output.json",
   "title": "AdsCreativeValidateOutput",
   "type": "object",
   "required": ["report", "isValid", "violations", "success"],

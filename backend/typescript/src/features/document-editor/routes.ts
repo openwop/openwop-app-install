@@ -12,10 +12,9 @@ import { OpenwopError } from '../../types.js';
 import { registerCanvasEditorRoutes } from '../canvasEditorRoutes.js';
 import { deriveDocumentState } from './pmFromY.js';
 import { renderMarkdownToPdf } from '../documents/render.js';
+import { pmToDocx } from './pmToDocx.js';
 import { validateDocumentDoc } from './validateDocumentDoc.js';
 import { pmToMarkdown, type PMNode } from './pmToMarkdown.js';
-import { pmToDocx } from './pmToDocx.js';
-import mammoth from 'mammoth';
 
 /** Cap the base64 DOCX upload (~7.5 MB decoded) — the import-DoS guard. */
 const MAX_IMPORT_B64 = 10 * 1024 * 1024;
@@ -103,6 +102,8 @@ export function registerDocumentEditorRoutes(deps: RouteDeps): void {
           const b64 = String((req.body ?? {}).docxBase64 ?? '');
           if (!b64) throw new OpenwopError('validation_error', '`docxBase64` is required.', 400, { field: 'docxBase64' });
           if (b64.length > MAX_IMPORT_B64) throw new OpenwopError('validation_error', 'The document is too large to import.', 413, { field: 'docxBase64' });
+          // Loaded on first import, not at module load (ADR 0863 D7).
+          const mammoth = (await import('mammoth')).default;
           const result = await mammoth.convertToHtml({ buffer: Buffer.from(b64, 'base64') });
           res.json({ html: result.value, warnings: result.messages.map((m) => m.message) });
         } catch (err) { next(err); }

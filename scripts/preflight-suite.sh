@@ -177,6 +177,8 @@ done
 # The identity of "this repo" is the common git dir, so every worktree of the
 # same clone resolves to one value and an unrelated checkout does not.
 repo_id() { git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null; }
+# shellcheck source=lib/ci-claims.sh
+if [ -f "$ROOT/scripts/lib/ci-claims.sh" ]; then . "$ROOT/scripts/lib/ci-claims.sh"; else ci_claims_live() { :; }; fi
 MY_REPO="$(repo_id "$ROOT")"
 MY_ROOT="$(cd "$ROOT" && pwd -P)"
 
@@ -353,6 +355,21 @@ lane_of() {
 # running suite between syscalls and still competes.
 #   $1 = live    → worktrees with at least one matched process NOT stopped
 #   $1 = stopped → worktrees whose matched processes are ALL stopped
+# TEST SEAM (2026-10-26, user decision): with OPENWOP_PREFLIGHT_TEST_ANCESTOR=<pid>
+# a scan sees ONLY processes descended from that pid. scripts/test-preflight-suite.sh
+# sets it to itself, so its arms see their own fakes and never a REAL suite on the
+# machine: kicktodo #124's gate hung in that self-test beside train 224r's backend
+# lane, waiting on a suite no arm had started, while a lone run passed. Unset (every
+# real caller), every process is in scope.
+in_scope() {
+  [ -z "${OPENWOP_PREFLIGHT_TEST_ANCESTOR:-}" ] && return 0
+  local p="$1" i=0
+  while [ -n "$p" ] && [ "$p" -gt 1 ] 2>/dev/null && [ "$i" -lt 64 ]; do
+    [ "$p" = "$OPENWOP_PREFLIGHT_TEST_ANCESTOR" ] && return 0
+    p="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')"; i=$((i + 1))
+  done
+  return 1
+}
 scan_same_repo() {
   local pid cwd wt_root
   # shellcheck disable=SC2009  # pgrep -f would match this script's own argv
@@ -367,6 +384,7 @@ scan_same_repo() {
     | grep -vE '^ *[0-9]+ +(/[^ ]*/)?grep( |$)' \
     | awk '{print $1}' \
     | while read -r pid; do
+        in_scope "$pid" || continue
         cwd=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | tail -1)
         [ -n "$cwd" ] || continue
         wt_root=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null) || continue
@@ -420,6 +438,7 @@ find_foreign() {
     | grep -vE '^ *[0-9]+ +(/[^ ]*/)?grep( |$)' \
     | awk '{print $1}' \
     | while read -r pid; do
+        in_scope "$pid" || continue
         cwd=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | tail -1)
         [ -n "$cwd" ] || continue
         [ -n "$MY_REPO" ] && [ "$(repo_id "$cwd")" = "$MY_REPO" ] && continue   # this repo: find_competitors' job
@@ -457,6 +476,10 @@ report_once() {
     printf '              A SIGCONT resumes it beside this run. Ask its owner to finish or end it first.\n'
   fi
   FOREIGN_FOUND="$(find_foreign)"
+  # A train in ANOTHER repo is foreign work too, from its claim through its
+  # installs, which no suite detector matches (scripts/lib/ci-claims.sh, 2026-10-26).
+  local marks; marks="$(ci_claims_live "$MY_REPO")"
+  [ -n "$marks" ] && FOREIGN_FOUND="$(printf '%s\n%s' "$FOREIGN_FOUND" "$marks" | grep .)"
   if [ -n "$FOREIGN_FOUND" ]; then
     printf '  elsewhere : %d suite(s) from OUTSIDE this repo%s\n' "$(printf '%s\n' "$FOREIGN_FOUND" | grep -c .)" \
       "$([ -n "$WAIT_FOREIGN" ] && printf ' — waiting on them (never claiming for them)')"

@@ -483,6 +483,62 @@ describe('openwop:kicktodo.factory.run — ADR 0706 provider binding + pre-fligh
 // KTF-LB-1 / XCH-CA-5 / XCH-LB-6 — lesson images are opt-in on the run tool,
 // run on their own image binding (never the chat provider), and are
 // pre-flighted with the same "nothing was created" contract as the AI leg.
+// ADR 0975 D2 — a stored Factory key (ADR 0910 D8) is the Factory's binding when
+// the creator names no provider, ahead of the workspace's general headless default.
+// MEASURED on kicktodo.com (2026-10-25): default `anthropic` with no key + a
+// `kicktodo-factory:google` key ⇒ every run refused `ai_credential_missing` while
+// readiness said ready. Sabotage: removing the `dedicatedFactoryProvider` branch
+// reds the first case (the default's keyless anthropic is chosen); keeping the
+// ignition binding's ref reds the second (the default's `google:two` is sent).
+describe('openwop:kicktodo.factory.run — ADR 0975 D2 the Factory key is the Factory\'s binding', () => {
+  const T = 'user:kt-manager-0975';
+  const scope: ToolScope = { tenantId: T, actingUserId: T };
+  const run = async (input: Record<string, unknown>) => {
+    const r = await runFactoryRunTool(deps, input, scope);
+    const body = contentOf(r);
+    if (typeof body.runId === 'string') started.push(body.runId);
+    return { r, body };
+  };
+  beforeAll(async () => {
+    await setSecret('kicktodo-factory:google', 'gemini-factory-key', { tenantId: T });
+    await setSecret('google:two', 'gemini-chat-key', { tenantId: T });
+  });
+  afterEach(async () => { await clearHeadlessAiDefault(T); });
+
+  it('a keyless workspace default (the prod shape) does not block the Factory key: the run uses google + kicktodo-factory:google', async () => {
+    // The default was bound to an anthropic key that is no longer in the vault.
+    await setSecret('anthropic', 'old-key', { tenantId: T });
+    await setHeadlessAiDefault({ tenantId: T }, { provider: 'anthropic', model: 'claude-x', credentialRef: 'anthropic' }, new Date().toISOString());
+    await removeSecret('anthropic', { tenantId: T });
+    const { r, body } = await run({ topic: 'Daily walking habit for beginners' });
+    expect(r.isError, r.content).toBeUndefined();
+    const rec = await storage.getRun(String(body.runId));
+    expect(rec?.inputs).toMatchObject({ provider: 'google', model: getDefaultModel('google'), credentialRef: 'kicktodo-factory:google' });
+    expect(rec?.configurable).toEqual({ credentialRefs: ['kicktodo-factory:google'] });
+  });
+
+  it('when the default is the Factory key\'s own provider, the default\'s MODEL is kept but the key is the Factory\'s, never the default\'s chat key', async () => {
+    await setHeadlessAiDefault({ tenantId: T }, { provider: 'google', model: 'gemini-3.1-flash-lite', credentialRef: 'google:two' }, new Date().toISOString());
+    const { r, body } = await run({ topic: 'Sourdough from scratch' });
+    expect(r.isError, r.content).toBeUndefined();
+    const rec = await storage.getRun(String(body.runId));
+    expect(rec?.inputs).toMatchObject({ provider: 'google', model: 'gemini-3.1-flash-lite', credentialRef: 'kicktodo-factory:google' });
+  });
+
+  it('a creator-named provider still wins over the Factory key (and refuses honestly without its key)', async () => {
+    const { r, body } = await run({ topic: 'Sourdough from scratch', provider: 'openai' });
+    expect(r.isError).toBe(true);
+    expect(body).toMatchObject({ error: 'ai_credential_missing', provider: 'openai' });
+  });
+
+  it('the transformation rides the run inputs (it feeds the research search query, ADR 0975 D3)', async () => {
+    const { r, body } = await run({ topic: 'The Daily Walk', transformation: 'from rarely walking to a daily walk' });
+    expect(r.isError, r.content).toBeUndefined();
+    const rec = await storage.getRun(String(body.runId));
+    expect(rec?.inputs).toMatchObject({ transformation: 'from rarely walking to a daily walk' });
+  });
+});
+
 // Sabotage: dropping `...image.inputs` from the run inputs reds the stamping
 // case; dropping the pre-flight starts a run in the no-key case.
 describe('openwop:kicktodo.factory.run — lesson images (KTF-LB-1 / XCH-LB-6)', () => {

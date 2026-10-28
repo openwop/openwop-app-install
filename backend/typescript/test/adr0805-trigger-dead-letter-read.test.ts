@@ -11,19 +11,29 @@
  * validated and paged with a `nextCursor`; a cursor from another subscription
  * is refused 400; another tenant's id and an unknown id are the same 404; and
  * the canary body, the signature, the secret and the raw `webhook-id` appear
- * nowhere in the read.
+ * nowhere in the read. Tracker: TST-BTR-2.
+ *
+ * Red when (wave 60 probes w60g4-dl-*): the advert drops `maxPageSize`; a
+ * refused post names a `stateChange`, keeps the raw webhook-id as its dedupKey,
+ * or a retention other than 7 days; retry exhaustion loses its state change;
+ * the page is not newest-first; `limit=0` is accepted; a cursor carries across
+ * subscriptions; another tenant's record is served.
+ * The cursor check is a DOUBLE guard: the cursor names its subscription (`s`)
+ * AND its row key must start with that subscription's prefix; only breaking
+ * both carries a cursor across. The clamp to `maxPageSize` is NOT witnessed
+ * here (3 rows < 100): this file pins only that an over-large limit is not
+ * refused.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { createHmac, randomBytes } from 'node:crypto';
+import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import { createApp } from '../src/index.js';
-import { makeDedupKey } from '../src/host/triggerBridgeService.js';
 import { bareRunId } from './support/bareRunId.js';
 
 const OP = 'k-op-0805-operator';   // wildcard operator key (the conformance harness posture)
@@ -36,7 +46,7 @@ const saved: Record<string, string | undefined> = {};
 // `$ref`s — so a record that is not the RFC 0232 §C shape fails here first.
 const SCHEMAS = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'schemas');
 const ajv = new Ajv2020({ strict: false, allErrors: true });
-(addFormats as unknown as (a: unknown) => void)(ajv);
+addFormats(ajv);
 for (const f of ['run-event-payloads.schema.json', 'trigger-dead-letter-page.schema.json']) {
   ajv.addSchema(JSON.parse(readFileSync(join(SCHEMAS, f), 'utf8')) as Record<string, unknown>);
 }
@@ -53,13 +63,26 @@ function sign(secret: string, id: string, ts: string, body: string): string {
   return `v1,${createHmac('sha256', key).update(`${id}.${ts}.${body}`).digest('base64')}`;
 }
 
-async function call(method: string, path: string, opts: { key?: string; body?: unknown } = {}) {
+/** The response shapes this file reads. */
+interface Attempt { subscriptionId: string; dedupKey: string; attempt: number; outcome: string }
+interface DeadLetter { subscriptionId: string; attemptEventId: string; attempt: Attempt; stateChange?: Record<string, unknown>; reason: string; deadLetteredAt: string; expiresAt: string }
+interface Body {
+  error?: string;
+  deliveries?: DeadLetter[];
+  nextCursor?: string;
+  subscription?: { subscriptionId: string; state?: string };
+  binding?: { ingestUrl: string; signingSecret: string };
+  subscriptionId?: string;
+}
+/** RFC 0232 §C.1's opaque dedup key, derived here independently of the host's helper. */
+const dedupKeyOf = (...parts: string[]): string => createHash('sha256').update(parts.join('')).digest('hex').slice(0, 32);
+async function call(method: string, path: string, opts: { key?: string; body?: unknown } = {}): Promise<{ status: number; body: Body }> {
   const r = await fetch(`${base}${path}`, {
     method,
     headers: { 'content-type': 'application/json', authorization: `Bearer ${opts.key ?? OP}` },
     ...(opts.body !== undefined ? { body: JSON.stringify(opts.body) } : {}),
   });
-  return { status: r.status, body: (await r.json().catch(() => ({}))) as Record<string, any> };
+  return { status: r.status, body: (await r.json().catch(() => ({}))) as Body };
 }
 async function ingest(url: string, body: string, headers: Record<string, string>) {
   const r = await fetch(`${base}${url}`, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body });
@@ -68,7 +91,8 @@ async function ingest(url: string, body: string, headers: Record<string, string>
 async function register(mode: 'none' | 'required') {
   const r = await call('POST', '/trigger-subscriptions', { body: { source: 'webhook', workflowId: 'openwop-app.uppercase', verification: { mode } } });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  return r.body as { subscription: { subscriptionId: string }; binding: { ingestUrl: string; signingSecret: string } };
+  if (!r.body.subscription || !r.body.binding) throw new Error('registration answered no subscription/binding');
+  return { subscription: r.body.subscription, binding: r.body.binding };
 }
 /** A badly signed post under `required` — refused 401, dead-lettered. */
 async function refuse(ingestUrl: string, body: string, webhookId = freshId()) {
@@ -102,7 +126,7 @@ describe('ADR 0805 / RFC 0232 — listTriggerDeadLetters', () => {
   // ADR 0812 P3c-0 — read off the v2 document (the v1 one is retired); ADR 0810
   // carries the same `triggerBridge.deadLetter` facets on the v2 record.
   it('v2 discovery advertises triggerBridge.deadLetter with the values the read honours', async () => {
-    const disco = (await (await fetch(`${base}/.well-known/openwop`, { headers: { 'OpenWOP-Version': '2' } })).json()) as Record<string, any>;
+    const disco = (await (await fetch(`${base}/.well-known/openwop`, { headers: { 'OpenWOP-Version': '2' } })).json()) as { triggerBridge?: { deadLetter?: unknown } };
     expect(disco.triggerBridge?.deadLetter).toEqual({ retentionDays: 7, maxPageSize: 100 });
   });
 
@@ -116,12 +140,12 @@ describe('ADR 0805 / RFC 0232 — listTriggerDeadLetters', () => {
     const page = await deadLetters(id);
     expect(page.status, JSON.stringify(page.body)).toBe(200);
     expect(page.body.deliveries).toHaveLength(1);
-    const rec = page.body.deliveries[0];
+    const rec = page.body.deliveries![0]!;
     expect(Object.keys(rec).sort()).toEqual(['attempt', 'attemptEventId', 'deadLetteredAt', 'expiresAt', 'reason', 'subscriptionId']);
     expect(rec.subscriptionId).toBe(id);
     expect(rec.reason).toBe('verification_failed');
     expect(rec.stateChange, 'a refused post changes no state, so it names none').toBeUndefined();
-    expect(rec.attempt).toEqual({ subscriptionId: id, dedupKey: makeDedupKey(bareRunId(id), webhookId), attempt: 1, outcome: 'dead-lettered' });
+    expect(rec.attempt).toEqual({ subscriptionId: id, dedupKey: dedupKeyOf(bareRunId(id), webhookId), attempt: 1, outcome: 'dead-lettered' });
     expect(Date.parse(rec.expiresAt) - Date.parse(rec.deadLetteredAt)).toBe(7 * DAY_MS);
     expect(page.body.nextCursor).toBeUndefined();
 
@@ -130,7 +154,7 @@ describe('ADR 0805 / RFC 0232 — listTriggerDeadLetters', () => {
       expect(wire, `the read must not carry ${leak.slice(0, 12)}…`).not.toContain(leak);
     }
     // §C.1 of RFC 0230 still holds: the refusal left the subscription active.
-    expect((await call('GET', `/trigger-subscriptions/${id}`)).body.subscription.state).toBe('active');
+    expect((await call('GET', `/trigger-subscriptions/${id}`)).body.subscription?.state).toBe('active');
   });
 
   it('a delivered post is not a dead letter', async () => {
@@ -146,11 +170,11 @@ describe('ADR 0805 / RFC 0232 — listTriggerDeadLetters', () => {
     expect(seam.status, JSON.stringify(seam.body)).toBe(200);
     // The host seam answers the BARE id; the major-2 surface reads and answers it
     // tenant-bound (`identity.md` §5), so bind it to the dev key's tenant.
-    const id = `default/${seam.body.subscriptionId as string}`;
+    const id = `default/${seam.body.subscriptionId ?? ''}`;
     const page = await deadLetters(id);
     expect(page.status).toBe(200);
     expect(page.body.deliveries).toHaveLength(1);
-    const rec = page.body.deliveries[0];
+    const rec = page.body.deliveries![0]!;
     expect(rec.reason).toBe('retries_exhausted');
     expect(rec.attempt).toMatchObject({ subscriptionId: id, attempt: 2, outcome: 'dead-lettered' });
     expect(rec.stateChange).toEqual({ subscriptionId: id, source: 'queue', fromState: 'active', toState: 'dead-lettered', reason: 'retry-exhausted' });
@@ -159,23 +183,32 @@ describe('ADR 0805 / RFC 0232 — listTriggerDeadLetters', () => {
   it('pages newest first; `limit` pages with a nextCursor, and an invalid limit is 400', async () => {
     const { subscription, binding } = await register('required');
     const id = subscription.subscriptionId;
-    for (let i = 0; i < 3; i++) {
-      await refuse(binding.ingestUrl, `{"n":${i}}`);
-      await new Promise((r) => setTimeout(r, 5)); // distinct instants
+    // Distinct, ordered instants without a sleep: only `Date` is faked, one
+    // second apart, so "newest first" cannot pass on a tie.
+    const t0 = Date.now();
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      for (let i = 0; i < 3; i++) {
+        vi.setSystemTime(t0 + i * 1000);
+        await refuse(binding.ingestUrl, `{"n":${i}}`);
+      }
+    } finally {
+      vi.useRealTimers();
     }
-    const all = (await deadLetters(id)).body.deliveries as Array<{ deadLetteredAt: string; attemptEventId: string }>;
+    const all = (await deadLetters(id)).body.deliveries ?? [];
     expect(all).toHaveLength(3);
     const instants = all.map((r) => Date.parse(r.deadLetteredAt));
     expect([...instants].sort((a, b) => b - a), 'newest first').toEqual(instants);
 
     const p1 = await deadLetters(id, '?limit=2');
-    expect(p1.body.deliveries.map((r: any) => r.attemptEventId)).toEqual(all.slice(0, 2).map((r) => r.attemptEventId));
+    expect(p1.body.deliveries?.map((r) => r.attemptEventId)).toEqual(all.slice(0, 2).map((r) => r.attemptEventId));
     expect(typeof p1.body.nextCursor).toBe('string');
-    const p2 = await deadLetters(id, `?limit=2&cursor=${encodeURIComponent(p1.body.nextCursor)}`);
-    expect(p2.body.deliveries.map((r: any) => r.attemptEventId)).toEqual([all[2]!.attemptEventId]);
+    const p2 = await deadLetters(id, `?limit=2&cursor=${encodeURIComponent(p1.body.nextCursor ?? '')}`);
+    expect(p2.body.deliveries?.map((r) => r.attemptEventId)).toEqual([all[2]!.attemptEventId]);
     expect(p2.body.nextCursor, 'the last page carries no cursor').toBeUndefined();
 
-    expect((await deadLetters(id, '?limit=100000')).body.deliveries, 'an over-large limit is clamped, not refused').toHaveLength(3);
+    // Not refused (the clamp itself needs > maxPageSize rows to show; see header).
+    expect((await deadLetters(id, '?limit=100000')).body.deliveries, 'an over-large limit is accepted, not refused').toHaveLength(3);
     for (const bad of ['0', '-1', 'abc', '1.5']) {
       const r = await deadLetters(id, `?limit=${bad}`);
       expect(r.status, `limit=${bad}`).toBe(400);
@@ -187,7 +220,7 @@ describe('ADR 0805 / RFC 0232 — listTriggerDeadLetters', () => {
     const a = await register('required');
     const b = await register('required');
     for (let i = 0; i < 2; i++) { await refuse(a.binding.ingestUrl, '{}'); await refuse(b.binding.ingestUrl, '{}'); }
-    const cursor = (await deadLetters(a.subscription.subscriptionId, '?limit=1')).body.nextCursor as string;
+    const cursor = (await deadLetters(a.subscription.subscriptionId, '?limit=1')).body.nextCursor ?? '';
     expect(typeof cursor).toBe('string');
     const carried = await deadLetters(b.subscription.subscriptionId, `?cursor=${encodeURIComponent(cursor)}`);
     expect(carried.status).toBe(400);

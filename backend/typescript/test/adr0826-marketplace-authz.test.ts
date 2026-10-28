@@ -11,6 +11,12 @@
  * accept), so the personal tenant is genuinely distinct from the active one and
  * the implicit-owner short-circuit cannot make a refusal vacuous. Every refusal
  * row has a success CONTROL beside it.
+ *
+ * Tracker TST-BMK-2. Sabotage-witnessed (w62): red when curation drops the
+ * workspace-write check, `canCurate` stops reading the caller's scope, the
+ * agent-pack list admits an anonymous caller, revocation drops the superadmin
+ * check or the SemVer check or the audit row, or revocation is put behind the
+ * marketplace toggle.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -26,7 +32,20 @@ let server: http.Server;
 let n = 0;
 let storage: Storage;
 
-interface Res { status: number; body: any }
+/** The response fields this file reads, across the routes it calls. */
+interface Body {
+  error?: string;
+  message?: string;
+  workspaceId?: string;
+  token?: string;
+  listings?: Array<{ packName: string; trust?: { tier?: string }; integrity?: string }>;
+  disabled?: string[];
+  viewer?: { canCurate: boolean; canAdminister: boolean };
+  canInstall?: boolean;
+  requiredBy?: string[];
+  revocations?: Array<{ key: string }>;
+}
+interface Res { status: number; body: Body }
 function client(bearer?: string) {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
@@ -37,7 +56,9 @@ function client(bearer?: string) {
     });
     const h = res.headers as Headers & { getSetCookie?: () => string[] };
     for (const sc of h.getSetCookie?.() ?? []) { const m = /(__session=[^;]+)/.exec(sc); if (m) cookie = m[1]!; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    // Narrowed to the fields this file reads (a non-JSON or 204 body reads as `{}`).
+    const parsed = (res.status === 204 ? {} : await res.json().catch(() => ({}))) as Body;
+    return { status: res.status, body: parsed };
   };
   return {
     get: (p: string) => call('GET', p),
@@ -62,7 +83,7 @@ async function sharedWorkspace(): Promise<{ owner: Client; viewer: Client; edito
   await signIn(owner, `own-0826-${id}@x.test`);
   const ws = await owner.post('/host/openwop-app/workspaces', { name: `ADR 0826 ${id}` });
   expect(ws.status, JSON.stringify(ws.body)).toBe(201);
-  const wsId = ws.body.workspaceId as string;
+  const wsId = ws.body.workspaceId ?? '';
   expect(wsId).toMatch(/^ws:/);
   expect((await owner.post(`/host/openwop-app/workspaces/${encodeURIComponent(wsId)}/switch`)).status).toBe(200);
   for (const [c, role, email] of [[viewer, 'viewer', `view-0826-${id}@x.test`], [editor, 'editor', `edit-0826-${id}@x.test`]] as const) {
@@ -78,7 +99,7 @@ async function sharedWorkspace(): Promise<{ owner: Client; viewer: Client; edito
 async function somePack(c: Client): Promise<string> {
   const r = await c.get(`${MKT}/listings`);
   expect(r.status, JSON.stringify(r.body)).toBe(200);
-  const name = (r.body.listings as Array<{ packName: string }>).find((l) => l.packName.startsWith('feature.'))?.packName;
+  const name = (r.body.listings ?? []).find((l) => l.packName.startsWith('feature.'))?.packName;
   expect(name, 'the fixture needs at least one listed pack').toBeTruthy();
   return name!;
 }
@@ -111,7 +132,11 @@ describe('ADR 0826 D1 — pack curation is a workspace WRITE', () => {
     const pack = await somePack(owner);
     const r = await viewer.put(`${MKT}/pack-enablement/${encodeURIComponent(pack)}`, { enabled: false });
     expect(r.status, JSON.stringify(r.body)).toBe(403);
+    // The workspace-write refusal itself (features/featureRoute.ts requireTenantWrite).
+    expect(r.body.error).toBe('forbidden_scope');
+    expect(r.body.message).toBe('Missing required scope: workspace:write');
     const seen = await owner.get(`${MKT}/pack-enablement`);
+    expect(seen.body.disabled, 'positive read: the owner sees the list').toBeDefined();
     expect(seen.body.disabled).not.toContain(pack);
   });
 
@@ -129,14 +154,14 @@ describe('ADR 0826 D1 — pack curation is a workspace WRITE', () => {
     for (const [c, canCurate] of [[viewer, false], [editor, true], [owner, true]] as const) {
       const l = await c.get(`${MKT}/listings`);
       expect(l.body.viewer, JSON.stringify(l.body.viewer)).toEqual({ canCurate, canAdminister: false });
-      expect((await c.get(`${MKT}/pack-enablement`)).body.viewer.canCurate).toBe(canCurate);
+      expect((await c.get(`${MKT}/pack-enablement`)).body.viewer?.canCurate).toBe(canCurate);
     }
   });
 
   it('every listing carries its trust tier from the ONE trust authority (D6)', async () => {
     const { owner } = await sharedWorkspace();
     const l = await owner.get(`${MKT}/listings`);
-    const listings = l.body.listings as Array<{ trust?: { tier?: string }; integrity?: string }>;
+    const listings = l.body.listings ?? [];
     expect(listings.length).toBeGreaterThan(0);
     for (const x of listings) expect(['steward', 'operator-trusted', 'untrusted', 'revoked']).toContain(x.trust?.tier);
     // integrity is shown ONLY for a verified registry install.
@@ -147,7 +172,8 @@ describe('ADR 0826 D1 — pack curation is a workspace WRITE', () => {
 describe('ADR 0826 D8 — the agent-pack list needs a caller', () => {
   it('anonymous is refused (born RED: 200)', async () => {
     const r = await fetch(`${BASE}/host/openwop-app/registry/agent-packs`);
-    expect([401, 403]).toContain(r.status);
+    expect(r.status).toBe(401);
+    expect(((await r.json()) as Body).error).toBe('sign_in_required');
   });
 
   it('CONTROL: a signed-in member reads it', async () => {
@@ -161,9 +187,15 @@ describe('ADR 0826 D8 — the agent-pack list needs a caller', () => {
 describe('ADR 0826 D5 — revocation routes are superadmin, validated, and take effect', () => {
   it('a workspace OWNER (not superadmin) is 403 on every revocation route', async () => {
     const { owner } = await sharedWorkspace();
-    expect((await owner.get(`${MKT}/revocations`)).status).toBe(403);
-    expect((await owner.post(`${MKT}/packs/acme.x/revocations`, { version: '1.0.0', reason: 'r' })).status).toBe(403);
-    expect((await owner.del(`${MKT}/packs/acme.x/revocations/1.0.0`)).status).toBe(403);
+    // Each refusal is the superadmin one (host/superadmin.ts), not another 403.
+    for (const r of [
+      await owner.get(`${MKT}/revocations`),
+      await owner.post(`${MKT}/packs/acme.x/revocations`, { version: '1.0.0', reason: 'r' }),
+      await owner.del(`${MKT}/packs/acme.x/revocations/1.0.0`),
+    ]) {
+      expect(r.status, JSON.stringify(r.body)).toBe(403);
+      expect(r.body.message).toContain('requires a superadmin principal');
+    }
     expect(isPackRevoked('acme.x', '1.0.0')).toBe(false);
   });
 
@@ -176,11 +208,11 @@ describe('ADR 0826 D5 — revocation routes are superadmin, validated, and take 
     expect(r.body.requiredBy, '/architect A6 — the features this takes down are named').toContain('marketplace');
     expect(isPackRevoked('feature.marketplace.nodes', '1.1.1')).toBe(true);
     const list = await su.get(`${MKT}/revocations`);
-    expect(list.body.revocations.map((x: { key: string }) => x.key)).toContain('feature.marketplace.nodes@1.1.1');
+    expect((list.body.revocations ?? []).map((x) => x.key)).toContain('feature.marketplace.nodes@1.1.1');
     // The listing reflects it as `revoked` — the trust tier, not a marker read.
     const { owner } = await sharedWorkspace();
     const l = await owner.get(`${MKT}/listings`);
-    expect(l.body.listings.find((x: { packName: string }) => x.packName === 'feature.marketplace.nodes')?.trust?.tier).toBe('revoked');
+    expect((l.body.listings ?? []).find((x) => x.packName === 'feature.marketplace.nodes')?.trust?.tier).toBe('revoked');
     expect((await su.del(`${MKT}/packs/feature.marketplace.nodes/revocations/1.1.1`)).status).toBe(204);
     expect(isPackRevoked('feature.marketplace.nodes', '1.1.1')).toBe(false);
     // Both decisions are in the durable audit log, with the operator's reason.

@@ -40,6 +40,8 @@ export type PublicPageKey =
   | 'preferencesRefusedNextStep'
   | 'savePreferences'
   | 'marketingTypesLegend'
+  | 'topicsLegend'
+  | 'topicsLede'
   | 'channel_email'
   | 'channel_sms'
   | 'channel_push';
@@ -176,6 +178,16 @@ const STRINGS: Record<PublicPageKey, Record<string, string>> = {
   },
   savePreferences: {
     en: 'Save preferences', es: 'Guardar preferencias', fr: 'Enregistrer les préférences', 'pt-BR': 'Salvar preferências',
+  },
+  // ADR 0905 D7 — subscription topics (opt-out only; they narrow, never widen)
+  topicsLegend: {
+    en: 'Topics', es: 'Temas', fr: 'Sujets', 'pt-BR': 'Tópicos',
+  },
+  topicsLede: {
+    en: 'Untick a topic to stop email about it. Email you have turned off above stays off.',
+    es: 'Desmarca un tema para dejar de recibir correos sobre él. El correo que desactivaste arriba sigue desactivado.',
+    fr: 'Décochez un sujet pour ne plus recevoir d’e-mails à son propos. Les e-mails désactivés ci-dessus restent désactivés.',
+    'pt-BR': 'Desmarque um tópico para parar de receber e-mails sobre ele. O e-mail que você desativou acima continua desativado.',
   },
   marketingTypesLegend: {
     en: 'Marketing message types', es: 'Tipos de mensajes de marketing', fr: 'Types de messages marketing', 'pt-BR': 'Tipos de mensagens de marketing',

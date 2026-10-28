@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.crm.nodes/1.15.0/lead-evidence.output.json",
+  "title": "CrmLeadEvidenceOutput",
+  "type": "object",
+  "required": [
+    "evidence",
+    "refs",
+    "criteria",
+    "success"
+  ],
+  "properties": {
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "kind",
+          "ref",
+          "fingerprint"
+        ],
+        "properties": {
+          "kind": {
+            "enum": [
+              "transcript-turn",
+              "form-field",
+              "contact-field",
+              "activity"
+            ]
+          },
+          "ref": {
+            "type": "string"
+          },
+          "fingerprint": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "refs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "criteria": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "modelId": {
+      "type": "string"
+    },
+    "modelVersion": {
+      "type": "integer"
+    },
+    "success": {
+      "type": "boolean"
+    }
+  },
+  "additionalProperties": false
+}

@@ -24,6 +24,10 @@
  * "to be safe" makes those two collide while every other vector still passes —
  * so a suite checking only individual digests would go green on an
  * implementation that had silently broken cross-host agreement.
+ *
+ * PROTECTED (wire / replay cache keys). Sabotage witnesses (grade-tests 8f w2):
+ * dg-tool-sort, dg-locale-sort, dg-nfc, dg-stop, dg-transport, and
+ * dg-options-value (re-aimed in round 2 after it reddened only the vector case).
  */
 
 import { describe, it, expect } from 'vitest';
@@ -59,7 +63,10 @@ const doc = JSON.parse(readFileSync(VECTORS_PATH, 'utf8')) as {
 };
 const byId = new Map(doc.vectors.map((v) => [v.id, v]));
 
-/** The vector `input` is untyped JSON; the recipe input is a closed shape. */
+/** The vector `input` is untyped JSON; the recipe input is a closed shape.
+ *  Honest ceiling on fixture typing: this is the file's ONE documented cast. The
+ *  vectors come from the pinned package as JSON, and the per-vector canonical
+ *  preimage assertion is what proves each one is a well-formed recipe input. */
 function asInput(raw: Record<string, unknown>): SemanticRequestV2Input {
   return raw as unknown as SemanticRequestV2Input;
 }
@@ -70,7 +77,8 @@ describe('RFC 0150 §C — semantic request digest v2 golden vectors', () => {
     // `for (const v of [])` passes, loudly reporting nothing.
     // 11 → 13 at suite 2.38.0: `tools-code-unit-order` + `-reversed` (RFC 0212
     // UTF-16 code-unit ordering applied to the tool sort). Both passed on this
-    // host unchanged — only this count was stale.
+    // host unchanged — only this count was stale. Re-measured 13 on the suite
+    // installed at 2404797bf (2026-10-22).
     expect(doc.vectors.length, 'the pinned conformance package MUST ship the vectors').toBe(13);
     expect(doc.recipe).toBe(SEMANTIC_REQUEST_RECIPE_V2);
   });
@@ -128,14 +136,17 @@ describe('RFC 0150 §C — semantic request digest v2 golden vectors', () => {
   it('an unknown provider option is carried into the digest, never dropped', () => {
     const base = byId.get('minimal')!;
     const carried = byId.get('provider-options-carried')!;
-    expect(semanticRequestDigestV2(asInput(carried.input))).not.toBe(base.digest);
+    const carriedDigest = semanticRequestDigestV2(asInput(carried.input));
+    expect(carriedDigest).not.toBe(semanticRequestDigestV2(asInput(base.input)));
     // And the option's VALUE participates — carrying the key while ignoring the
-    // value would still be a wrong hit.
+    // value would still be a wrong hit. Both sides are computed by THIS host, so a
+    // key-only projection collides here (comparing against the vector's literal
+    // digest instead let a key-only projection pass: probe dg-options-value).
     const other = semanticRequestDigestV2({
       ...asInput(carried.input),
       providerOptions: { 'vendor.anthropic.reasoningEffort': 'low' },
     });
-    expect(other).not.toBe(carried.digest);
+    expect(other).not.toBe(carriedDigest);
   });
 
   it('transport-only fields do not reach the digest', () => {

@@ -391,7 +391,7 @@ const ROUTE_MODULES: RouteModule[] = [
   // Governed Workforce (EP0) — the seeded entity + telemetry over the caller's
   // runs, plus the tenant's own cutover status / migration journey (ADR 0775 D2).
   // Vendor-neutral host extension; no spec/wire change.
-  { name: 'workforces', register: ({ app, storage }) => registerWorkforceRoutes(app, { storage }) },
+  { name: 'workforces', register: ({ app, storage, hostSuite }) => registerWorkforceRoutes(app, { storage, workflowCatalog: hostSuite.workflowCatalog }) },
   // Organizations / teams / members + role-based access — sample host-extension
   // (non-normative). Roles map to RFC 0049 scopes; a SEPARATE layer from the
   // descriptive org-chart above (org position still confers no authority).

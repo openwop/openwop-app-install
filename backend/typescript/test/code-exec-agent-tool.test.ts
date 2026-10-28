@@ -8,7 +8,7 @@
  * `builtinAgentToolIds()` membership is covered by `agent-allowlist-resolution.test.ts`
  * ("every allowlisted id is offerable…" — the Code Interpreter allowlists this id; probe
  * w24g2-at-builtin-covering). CEILING: the WASI arm is asset-gated — it runs only where
- * `vendor/python-3.12.0.wasm` is synced (CI/Docker); on a plain checkout the asset's absence
+ * `vendor/python-3.12.0.wasm` is synced (`npm run ci`, the Tracegate daemon and Docker, WASI-GATE-1); on a plain checkout the asset's absence
  * ALSO makes honest-off hold, so `RUNTIME=off` is a second guard there, not the only one.
  */
 import { describe, it, expect, beforeEach, beforeAll } from 'vitest';
@@ -55,6 +55,10 @@ describe('code-exec as a builtin agent tool', () => {
 
   // Asset-gated: skip loudly on plain local checkouts (CI/Docker sync the wasm;
   // the hard throw was a permanent local-baseline red — see wasi-sandbox.test.ts).
+  // Under the gate (OPENWOP_REQUIRE_WASI=1, WASI-GATE-1) a missing asset fails instead of skipping.
+  if (!existsSync(wasmPath()) && process.env.OPENWOP_REQUIRE_WASI === '1') {
+    throw new Error(`OPENWOP_REQUIRE_WASI=1 but the CPython-WASI asset is missing at ${wasmPath()}`);
+  }
   (existsSync(wasmPath()) ? describe : describe.skip)('with the WASI runtime', () => {
     it('EXECUTES the code via the sandbox and returns real stdout', async () => {
       process.env.OPENWOP_CODE_EXEC_RUNTIME = 'wasi';

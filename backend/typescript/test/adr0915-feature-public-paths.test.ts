@@ -4,6 +4,10 @@
  * accepting the feature root itself (that would open the whole feature), a
  * prefix match that leaks to a sibling (`/reader-admin`), or not merging the
  * declaration into `isPublicPath`.
+ *
+ * Tracker TST-BJU. Red when (probe-witnessed, w65): the canonical-path check (dot
+ * segment / percent-escape) is dropped; the prefix match leaks to a sibling; the
+ * registration confinement or the feature-id check is skipped.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { isPublicPath, registerFeaturePublicPaths, featurePublicPaths, resetFeaturePublicPathsForTests } from '../src/middleware/auth.js';

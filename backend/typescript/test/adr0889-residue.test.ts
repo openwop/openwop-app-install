@@ -9,6 +9,14 @@
  *   - D2: a suite shipped in an agent pack (`evalSuiteRef`) loads from `evals/`,
  *     survives the closed-world install shape, lists read-only, runs, and shows
  *     in the run history.
+ * (TST-BPA)
+ *
+ * Red when (sabotage-witnessed, wave 65): the capture list goes back to a tenant-wide
+ * prefix read, erasure stops re-deriving the index, or the 4-char floor on erasure
+ * forms is dropped ⇒ M4; the mock node id loses its run id ⇒ L1; promote stops
+ * refusing a foreign agent's capture ⇒ L5; the installed-subdir predicate accepts any
+ * two-segment ref ⇒ NP-EVAL-4. L1's `lastReceivedMessages` line pins the run-scoped
+ * key; the pass/fail pair is the behaviour.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -21,6 +29,7 @@ import { getAgentRegistry } from '../src/executor/agentRegistry.js';
 import { DurableCollection } from '../src/host/hostExtPersistence.js';
 import { eraseSubjectToolBoundary, listCapturedRuns, maybeCaptureExecuteTool, setCaptureSetting } from '../src/host/evals/toolBoundary.js';
 import { evalSuiteRefSurvivesInstall, loadAgentsFromManifest } from '../src/packs/agentLoader.js';
+import type { ExecuteAgentTool } from '../src/host/agentDispatch.js';
 import { INSTALLED_PACK_SUBDIRS } from '../src/packs/packContentDigest.js';
 import { attestPackDir } from './setup/attestPackFixture.js';
 import { lastReceivedMessages } from '../src/providers/dispatchMock.js';
@@ -79,9 +88,10 @@ const goldenSuite = (suiteId: string, extra: Record<string, unknown> = {}) => ({
 describe('review M4 — the capture list is an index read, not a tenant scan', () => {
   it('lists captured runs without a tenant-wide prefix read, and erasure re-derives the index', async () => {
     await setCaptureSetting(TENANT, AGENT, true);
-    const exec = await maybeCaptureExecuteTool(async () => ({ content: '{"ok":true}' }), { tenantId: TENANT, runId: 'r-m4', agentId: AGENT });
-    await exec({ name: 'crm:lookup', input: { email: 'bob@example.com' } } as never);
-    await exec({ name: 'crm:lookup', input: { id: 'ACCT-42' } } as never);
+    const ok: ExecuteAgentTool = async () => ({ content: '{"ok":true}' });
+    const exec = await maybeCaptureExecuteTool(ok, { tenantId: TENANT, runId: 'r-m4', agentId: AGENT });
+    await exec({ name: 'crm:lookup', input: { email: 'bob@example.com' } });
+    await exec({ name: 'crm:lookup', input: { id: 'ACCT-42' } });
 
     const spy = vi.spyOn(DurableCollection.prototype, 'listByPrefix');
     try {
@@ -137,8 +147,9 @@ describe('review L5 — promote checks the captured agent against the suite targ
     const runId = String(created.json['runId']);
     const storedId = runId.includes('/') ? runId.slice(runId.indexOf('/') + 1) : runId;
     await setCaptureSetting(TENANT, OTHER, true);
-    const exec = await maybeCaptureExecuteTool(async () => ({ content: '{"ok":true}' }), { tenantId: TENANT, runId: storedId, agentId: OTHER });
-    await exec({ name: TOOL, input: {} } as never);
+    const ok: ExecuteAgentTool = async () => ({ content: '{"ok":true}' });
+    const exec = await maybeCaptureExecuteTool(ok, { tenantId: TENANT, runId: storedId, agentId: OTHER });
+    await exec({ name: TOOL, input: {} });
 
     const refused = await send('POST', '/host/openwop-app/agent-evals/suites/test.acme.evals.l5@1.0.0/tasks', { fromRunId: runId });
     expect(refused.status, refused.text.slice(0, 300)).toBe(400);
@@ -152,9 +163,9 @@ describe('ADR 0889 D2 — pack-shipped suites (RFC 0081 §A evalSuiteRef)', () =
   const PACK = 'local.evalpack.agents';
   const PACK_AGENT = `${PACK}.subject`;
   let dir = '';
+  let loadedIds: string[] = [];
 
   beforeAll(() => {
-    expect(INSTALLED_PACK_SUBDIRS.has('evals')).toBe(true);
     dir = mkdtempSync(join(tmpdir(), 'evalpack-'));
     mkdirSync(join(dir, 'evals'), { recursive: true });
     writeFileSync(join(dir, 'evals', 'subject.json'), JSON.stringify(goldenSuite(`${PACK}.evals.subject`)));
@@ -171,13 +182,16 @@ describe('ADR 0889 D2 — pack-shipped suites (RFC 0081 §A evalSuiteRef)', () =
       ],
     }));
     attestPackDir(dir);
-    const loaded = loadAgentsFromManifest(dir);
-    // A bad suite file costs the suite, never the agent.
-    expect(loaded.map((a) => a.agentId).sort()).toEqual([`${PACK}.broken`, `${PACK}.escape`, `${PACK}.shipper`, PACK_AGENT].sort());
+    loadedIds = loadAgentsFromManifest(dir).map((a) => a.agentId).sort();
+  });
+  afterAll(() => { if (dir) rmSync(dir, { recursive: true, force: true }); });
+
+  it('loads: a bad suite file costs the suite, never the agent; an escaping ref loads no suite', () => {
+    expect(INSTALLED_PACK_SUBDIRS.has('evals')).toBe(true);
+    expect(loadedIds).toEqual([`${PACK}.broken`, `${PACK}.escape`, `${PACK}.shipper`, PACK_AGENT].sort());
     expect(getAgentRegistry().get(`${PACK}.escape`)?.evalSuite).toBeUndefined();
     expect(getAgentRegistry().get(`${PACK}.shipper`)?.evalSuite).toBeDefined();
   });
-  afterAll(() => { if (dir) rmSync(dir, { recursive: true, force: true }); });
 
   it('lists the pack suite read-only (locked, source pack), and not the invalid one', async () => {
     const r = await send('GET', `/host/openwop-app/agent-evals/suites?agentId=${PACK_AGENT}`);
@@ -224,5 +238,7 @@ describe('ADR 0889 D2 — pack-shipped suites (RFC 0081 §A evalSuiteRef)', () =
   it('another agent cannot reach the pack suite by its ref', async () => {
     const c = await send('POST', '/runs', { mode: 'eval', evalSuiteRef: `${PACK}.evals.subject@1.0.0`, agentId: AGENT });
     expect(c.status, c.text.slice(0, 300)).toBe(404);
+    expect(c.json['error']).toBe('not_found');
+    expect(c.json['message']).toBe(`Eval suite ${PACK}.evals.subject@1.0.0 was not found.`);
   });
 });

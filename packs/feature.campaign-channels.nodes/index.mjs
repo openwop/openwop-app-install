@@ -31,7 +31,8 @@ function ensureBrief(ctx) {
 function str(v) { return typeof v === 'string' ? v : ''; }
 
 import {
-  PLATFORM_LIMITS, AD_FIELD_SCHEMA_MAX, validateAdVariants, validateSocialPosts, truncateAt,
+  PLATFORM_LIMITS, PLATFORM_RECOMMENDED, AD_FIELD_SCHEMA_MAX, validateAdVariants, validateSocialPosts, truncateAt,
+  adVariantRecommendations, socialPostRecommendations,
   findNearDuplicates, readabilityBand, findUnsupportedClaims, verifyClaims, ITERATION_OPS,
 } from './platformLimits.mjs';
 
@@ -59,7 +60,7 @@ export const CHANNEL_SPEC = {
   ad_variants: {
     // QA-CODE-6: every platform in PLATFORM_LIMITS is solicited (TikTok was
     // validated but never asked for).
-    system: `You write ad variants from the kernel, one platform set per requested platform (Google, Meta, LinkedIn, TikTok). HARD character limits (chars): ${Object.entries(PLATFORM_LIMITS).map(([p, l]) => `${p}: headline ${l.headline}, description ${l.description}`).join('; ')}. Produce variants as A/B PAIRS: even index = A, odd = B; each pair tests ONE hypothesis you state in the set's hypothesis field. ${CITATION} Reply with strict JSON only.`,
+    system: `You write ad variants from the kernel, one platform set per requested platform (Google, Meta, LinkedIn, TikTok). HARD character limits, which the platform enforces (chars): ${Object.entries(PLATFORM_LIMITS).map(([p, l]) => `${p}: ${Object.entries(l).map(([f, n]) => `${f} ${n}`).join(', ')}`).join('; ')}. RECOMMENDED lengths, which display without truncation (aim for them; they are not limits): ${Object.entries(PLATFORM_RECOMMENDED).map(([p, l]) => `${p}: ${Object.entries(l).map(([f, n]) => `${f} ${n}`).join(', ')}`).join('; ')}. Produce variants as A/B PAIRS: even index = A, odd = B; each pair tests ONE hypothesis you state in the set's hypothesis field. ${CITATION} Reply with strict JSON only.`,
     // QA-CODE-5: schema maxLengths derive from AD_FIELD_SCHEMA_MAX — one table.
     schema: { type: 'object', additionalProperties: false, required: ['platformSets'], properties: {
       platformSets: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['platform', 'variants'], properties: { platform: { type: 'string' }, hypothesis: { type: 'string', maxLength: 200 }, variants: { type: 'array', items: { type: 'object', additionalProperties: false, properties: { headline: { type: 'string', maxLength: AD_FIELD_SCHEMA_MAX.headline }, description: { type: 'string', maxLength: AD_FIELD_SCHEMA_MAX.description }, cta: { type: 'string', maxLength: AD_FIELD_SCHEMA_MAX.cta }, abLabel: { type: 'string', enum: ['A', 'B'] } } } } } } },
@@ -348,6 +349,13 @@ function scoreQuality(draft, channel, maxLength, contexts) {
     issues.push({ dimension: 'charLimit', severity: 'error', description: `${f.platform} ${f.field}[${f.index}] is ${f.length} chars (limit ${f.limit}).` });
     score -= 15;
   }
+  // ADR 0946 P1 — over a RECOMMENDED length is a warning only: the copy is
+  // legal on the platform and may just be cut off in some placements.
+  const recFindings = channel === 'ad_variants' ? adVariantRecommendations(draft) : channel === 'social_posts' ? socialPostRecommendations(draft) : [];
+  for (const f of recFindings.slice(0, 5)) {
+    issues.push({ dimension: 'charLimit', severity: 'warning', description: `${f.platform} ${f.field}[${f.index}] is ${f.length} chars; ${f.limit} or fewer is recommended so it is not cut off.` });
+    score -= 2;
+  }
   // Claim-level fact check: %/multiplier/superlative claims need [src_N].
   // QA-CODE-2: run PER extracted text field (the variantTexts pattern below) —
   // scanning the whole JSON blob let one [src_N] anywhere suppress every
@@ -624,30 +632,6 @@ function firstAdCopy(draft, platform) {
   return { headline: str(v.headline).trim(), ...(str(v.description).trim() ? { description: str(v.description).trim() } : {}), ...(str(v.cta).trim() ? { ctaText: str(v.cta).trim() } : {}) };
 }
 
-/** Append a brief's UTM schema to an outbound URL (campaign gap plan C8 —
- *  utm_campaign is the C5 attribution join key). Existing query params and
- *  explicit utm_* on the URL win; falls back to utm_campaign=<briefId>. */
-export function appendUtm(url, utm, briefId) {
-  const params = {
-    utm_source: utm && utm.source, utm_medium: utm && utm.medium,
-    utm_campaign: (utm && utm.campaign) || briefId,
-    utm_term: utm && utm.term, utm_content: utm && utm.content,
-  };
-  try {
-    // Resolve against a dummy base so a RELATIVE landingUrl (e.g. `/pricing`)
-    // still gets stamped (grade-code AUDIT-9): a bare `new URL(relative)` throws,
-    // and the old catch dropped ALL utm params — silently breaking the C5
-    // attribution join (utm_campaign is its key) for every relative URL.
-    const isAbsolute = /^[a-z][a-z0-9+.-]*:\/\//i.test(url);
-    const base = 'https://x.invalid';
-    const u = new URL(url, base);
-    for (const [k, v] of Object.entries(params)) {
-      if (v && !u.searchParams.has(k)) u.searchParams.set(k, v);
-    }
-    return isAbsolute ? u.toString() : u.pathname + u.search + u.hash;
-  } catch { return url; }
-}
-
 export async function publishAdVariants(ctx) {
   const i = ctx.inputs ?? {};
   // Real outbound dispatch (ADR 0167) is requested ONLY when the caller targets a
@@ -684,26 +668,52 @@ export async function publishAdVariants(ctx) {
       }
       targeting = i.targeting;
     }
-    // C8: stamp the brief's UTM schema onto the landing URL (best-effort read
-    // through the campaign-brief surface; the URL still works without it).
-    let landingUrl = str(i.landingUrl);
-    if (landingUrl) {
-      let utm;
-      try {
-        const cb = ctx.features && ctx.features['campaign-brief'];
-        if (cb && typeof cb.getBrief === 'function') {
-          const res = await cb.getBrief({ briefId });
-          utm = res && res.brief && res.brief.utm;
-        }
-      } catch { /* best-effort */ }
-      landingUrl = appendUtm(landingUrl, utm, briefId);
+    // ADR 0907 P0 — Google refuses a campaign create without the EU political-
+    // advertising declaration. It is the operator's ATTESTATION, so it is passed
+    // through only as given and never defaulted (there is no campaign or org
+    // field to read it from). A value outside the two accepted words fails here;
+    // an absent one reaches the adapter, which fails a LIVE Google dispatch
+    // closed before any spend gate or platform call.
+    const eu = i.euPoliticalAdvertising;
+    if (eu !== undefined && eu !== null && eu !== '' && eu !== 'contains' && eu !== 'does_not_contain') {
+      return { status: 'failed', error: { code: 'validation_error', message: "euPoliticalAdvertising must be 'contains' or 'does_not_contain'." } };
     }
+    // ADR 0956 D5 — the landing URL goes through the ONE host tracked-URL
+    // helper (the brief's UTM schema + the variant key + our ad reference), and
+    // a link that breaks the client's UTM policy blocks the publish. A host
+    // without the helper fails typed rather than sending an untracked link.
+    let landingUrl = str(i.landingUrl);
+    // Which policy judged the link (a fork re-executes this node against the
+    // CURRENT policy; the recorded version makes a divergence visible).
+    let utmCheck;
+    if (landingUrl) {
+      const cb = ctx.features && ctx.features['campaign-brief'];
+      if (!cb || typeof cb.trackedUrl !== 'function') {
+        return { status: 'failed', error: { code: 'host_capability_missing', message: "ctx.features['campaign-brief'].trackedUrl is required to stamp the landing URL (ADR 0956)." } };
+      }
+      let tracked;
+      try {
+        tracked = await cb.trackedUrl({ briefId, url: landingUrl, ...(str(i.variantKey) ? { variantKey: str(i.variantKey) } : {}), ...(str(i.adRef) ? { adRef: str(i.adRef) } : {}) });
+      } catch (e) {
+        return { status: 'failed', error: { code: 'tracked_url_failed', message: e instanceof Error ? e.message : 'the landing URL could not be stamped' } };
+      }
+      if (Array.isArray(tracked.violations) && tracked.violations.length > 0) {
+        return { status: 'failed', error: { code: 'utm_policy_violation', message: `The landing URL breaks the client's UTM policy: ${tracked.violations.map((v) => v.message).join(' ')}`, violations: tracked.violations, ...(Number.isInteger(tracked.policyVersion) ? { policyVersion: tracked.policyVersion } : {}) } };
+      }
+      landingUrl = tracked.url;
+      utmCheck = { linted: tracked.linted === true, ...(Number.isInteger(tracked.policyVersion) ? { policyVersion: tracked.policyVersion } : {}) };
+    }
+    // ADR 0942 D5 — set when a campaign run's autonomy policy asked for this spend.
+    // The suspend happens OUTSIDE the try below: a catch-all would swallow the
+    // executor's suspend signal and turn the wait into a failure.
+    let awaitApprovalId = null;
     try {
       const r = await ctx.ads.publishAd({
         platform, briefId, adAccountId,
         campaignName: str(i.campaignName) || str(draft && draft.title) || `Campaign ${briefId}`,
         ...(str(i.objective) ? { objective: str(i.objective) } : {}),
         ...(landingUrl ? { landingUrl } : {}),
+        ...(str(i.adRef) ? { adRef: str(i.adRef) } : {}), // ADR 0956 D6 — ledgered, not in the idempotency key
         copy,
         ...(Number.isInteger(i.dailyBudgetMinor) ? { dailyBudgetMinor: i.dailyBudgetMinor } : {}),
         // ADR 0223 creative-affecting inputs (each changes the idempotency key):
@@ -718,26 +728,38 @@ export async function publishAdVariants(ctx) {
         // the plan; live fails closed video_dispatch_live_pending (live-smoke-pending).
         ...(str(i.mediaKind) === 'video' ? { mediaKind: 'video' } : {}),
         ...(targeting ? { targeting } : {}), // ADR 0245 — operator targeting, spend-shaping → in the idem key
+        ...(eu === 'contains' || eu === 'does_not_contain' ? { euPoliticalAdvertising: eu } : {}), // ADR 0907 P0 — Google attestation, never defaulted
         ...(dryRun ? { dryRun: true } : {}),
       });
       // Preview: the exact PAUSED create payloads, nothing dispatched. Return the plan as
       // a success output — do NOT fall through to the document handoff (that would publish).
-      if (r.outcome === 'preview') return { status: 'success', outputs: { preview: r } };
-      if (r.outcome === 'published') return { status: 'success', outputs: { dispatched: r } };
+      if (r.outcome === 'preview') return { status: 'success', outputs: { preview: r, ...(utmCheck ? { utmCheck } : {}) } };
+      if (r.outcome === 'published') return { status: 'success', outputs: { dispatched: r, ...(utmCheck ? { utmCheck } : {}) } };
       // Spend governance (campaign gap plan B3): the tenant's ad-spend threshold
       // requires a human sign-off. NOT a document-handoff case — surface the
       // pending approval so the operator approves it in the Approvals inbox and
       // re-runs; the same fork-stable key then proceeds.
-      if (r.outcome === 'requires_approval') {
+      if (r.outcome === 'requires_approval' && r.autonomy && typeof ctx.suspend === 'function') {
+        awaitApprovalId = r.approvalId;
+      } else if (r.outcome === 'requires_approval') {
         return { status: 'failed', error: { code: 'spend_approval_pending', message: `Ad spend requires approval (${r.approvalId}). Approve it in the Approvals inbox, then re-run — the dispatch resumes under the same idempotency key.` } };
       }
       // A real platform rejection surfaces; but a host CONFIG-not-ready (no connection,
       // or the operator hasn't set the Google developer-token) is honest degradation —
       // fall through to the ADR 0166 document handoff rather than fail the user.
+      if (r.outcome === 'failed' && r.error === 'missing_eu_political_declaration') {
+        return { status: 'failed', error: { code: 'eu_political_declaration_required', message: "Google needs the campaign's EU political-advertising declaration before it will create it. Re-run with euPoliticalAdvertising set to 'does_not_contain' or 'contains'. It is your attestation, so it is never filled in for you." } };
+      }
       if (r.outcome === 'failed' && r.error !== 'no_developer_token') return { status: 'failed', error: { code: 'ad_dispatch_failed', message: r.error } };
       // no_connection / no_developer_token → document handoff.
     } catch (e) {
       return { status: 'failed', error: { code: 'ad_dispatch_failed', message: e instanceof Error ? e.message : 'ad dispatch failed' } };
+    }
+    if (awaitApprovalId) {
+      // The run waits on the spend approval; its decision resumes this node, which
+      // re-runs the dispatch under the same key (approved ⇒ published, rejected ⇒ failed).
+      await ctx.suspend({ kind: 'external-event', key: `approval:${awaitApprovalId}`, approvalId: awaitApprovalId });
+      return { status: 'failed', error: { code: 'spend_approval_pending', message: `Ad spend approval ${awaitApprovalId} was not decided when this step resumed.` } };
     }
   }
   return publishToDocument(ctx, { itemsKey: 'platformSets', toMarkdown: adVariantsToMarkdown, kind: 'campaign-ad-copy', title: 'Ad Copy', nodeFallback: 'publish-ad' });

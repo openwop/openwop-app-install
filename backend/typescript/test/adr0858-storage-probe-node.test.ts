@@ -8,6 +8,12 @@
  * the memory backend: each family's write → read round-trip and the other
  * tenant's empty read at node level, the postgres placeholder spelling, the
  * pgvector-sized embedding, and refusal pass-through.
+ *
+ * Tracker TST-BFA-11. Red when: the sql placeholder ignores the postgres
+ * backend; the pgvector dimension is ignored; a surface's error code is
+ * replaced; the kv delete does not delete; the family allowlist is removed
+ * (the nosql case asserts the allowlist's own message, because the surface
+ * lookup behind it refuses with the same code).
  */
 import { beforeAll, afterEach, describe, expect, it } from 'vitest';
 import { mkdtempSync } from 'node:fs';
@@ -23,14 +29,17 @@ const ENV = ['OPENWOP_SURFACE_SQL', 'OPENWOP_SURFACE_VECTOR', 'OPENWOP_VECTOR_PG
 const saved = new Map(ENV.map((k) => [k, process.env[k]]));
 afterEach(() => { for (const [k, v] of saved) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } });
 
-function ctxFor(tenantId: string, vars: Record<string, string>, override?: Partial<NodeContext>): NodeContext {
+type Surfaces = Pick<NodeContext, 'storage' | 'db'>;
+function ctxFor(tenantId: string, vars: Record<string, string>, override?: Surfaces): NodeContext {
   const variables = { get: (n: string) => vars[n], set: () => undefined };
-  if (override) return { variables, ...override } as unknown as NodeContext; // stubbed surfaces: no real bundle
+  const emit = async () => ({ eventId: 'ev-probe', sequence: 1 });
+  const base = { runId: 'run-probe', nodeId: 'probe', tenantId, attempt: 1, secrets: {}, configurable: {}, inputs: {}, variables, emit };
+  if (override) return { ...base, ...override }; // stubbed surfaces: no real bundle
   const b = buildHostSurfaceBundle({ tenantId });
-  return { storage: b.storage, db: b.db, variables } as unknown as NodeContext;
+  return { ...base, storage: b.storage, db: b.db };
 }
 
-async function run(tenant: string, vars: Record<string, string>, override?: Partial<NodeContext>) {
+async function run(tenant: string, vars: Record<string, string>, override?: Surfaces) {
   return storageProbeNode.execute(ctxFor(tenant, vars, override));
 }
 const result = (o: Awaited<ReturnType<typeof run>>): Record<string, unknown> => {
@@ -63,10 +72,10 @@ describe('storage probe — backend-dependent spelling', () => {
     const seen: string[] = [];
     const sql = { execute: async (a: Record<string, unknown>) => { seen.push(String(a['sql'])); return {}; }, query: async () => ({ rows: [] }) };
     process.env.OPENWOP_SURFACE_SQL = 'postgres';
-    await run('t', { family: 'sql', action: 'write', key: 'k', value: 'v' }, { db: { sql } } as never);
+    await run('t', { family: 'sql', action: 'write', key: 'k', value: 'v' }, { db: { sql } });
     expect(seen.at(-1)).toContain('VALUES ($1, $2)');
     delete process.env.OPENWOP_SURFACE_SQL;
-    await run('t', { family: 'sql', action: 'write', key: 'k', value: 'v' }, { db: { sql } } as never);
+    await run('t', { family: 'sql', action: 'write', key: 'k', value: 'v' }, { db: { sql } });
     expect(seen.at(-1)).toContain('VALUES (?, ?)');
   });
 
@@ -74,10 +83,17 @@ describe('storage probe — backend-dependent spelling', () => {
     expect(probeEmbedding('x', 16)).toEqual(probeEmbedding('x', 16));
     expect(Math.hypot(...probeEmbedding('x', 40))).toBeCloseTo(1, 9);
     let dim = 0;
-    const vector = { upsert: async (a: { items: Array<{ vector: number[] }> }) => { dim = a.items[0]!.vector.length; return {}; } };
+    const vector = {
+      upsert: async (a: Record<string, unknown>) => {
+        const items = a['items'];
+        if (!Array.isArray(items) || !Array.isArray(items[0]?.vector)) throw new Error('upsert carried no vector');
+        dim = items[0].vector.length;
+        return {};
+      },
+    };
     process.env.OPENWOP_SURFACE_VECTOR = 'pgvector';
     process.env.OPENWOP_VECTOR_PG_DIM = '1536';
-    await run('t', { family: 'vectorStore', action: 'write', key: 'k', value: 'v' }, { db: { vector } } as never);
+    await run('t', { family: 'vectorStore', action: 'write', key: 'k', value: 'v' }, { db: { vector } });
     expect(dim).toBe(1536);
   });
 });
@@ -85,12 +101,12 @@ describe('storage probe — backend-dependent spelling', () => {
 describe('storage probe — refusals pass through, nothing is invented', () => {
   it('a surface rejection fails the node with its code unchanged', async () => {
     const kv = { set: async () => { throw Object.assign(new Error('nope'), { code: 'storage_limit_exceeded' }); } };
-    const o = await run('t', { family: 'kvStorage', action: 'write', key: 'k', value: 'v' }, { storage: { kv } } as never);
+    const o = await run('t', { family: 'kvStorage', action: 'write', key: 'k', value: 'v' }, { storage: { kv } });
     expect(o).toMatchObject({ status: 'failure', error: { code: 'storage_limit_exceeded' } });
   });
 
   it('an unprobed family (nosql) is a typed failure, never a vacuous success', async () => {
     const o = await run('t', { family: 'nosql', action: 'read', key: 'k' });
-    expect(o).toMatchObject({ status: 'failure', error: { code: 'host_capability_missing' } });
+    expect(o).toMatchObject({ status: 'failure', error: { code: 'host_capability_missing', message: "storage-probe does not implement family 'nosql'" } });
   });
 });

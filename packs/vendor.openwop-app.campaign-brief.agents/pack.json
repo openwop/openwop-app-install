@@ -1,6 +1,6 @@
 {
   "name": "vendor.openwop-app.campaign-brief.agents",
-  "version": "1.3.2",
+  "version": "1.3.3",
   "kind": "node",
   "description": "Personas & Campaign Brief agent pack \u2014 the Campaign Brief Strategist, a manifest agent whose tools are the registered openwop:campaign-brief.* chat tools (get-brief, validate, generate-kernel, research.run) sharing the campaign-brief routes' workspace access. It reads and validates a brief, ignites the grounded messaging-kernel workflow, and runs the market-intel research pipeline from the AI chat \u2014 each stopping at a human approval gate. Tool-allowlisted to the Campaign Brief surface only.",
   "author": "OpenWOP App",
@@ -23,6 +23,7 @@
   "agents": [
     {
       "agentId": "vendor.openwop-app.campaign-brief.agents.brief-strategist",
+      "a2aExposed": false,
       "persona": "RESEARCH",
       "label": "Campaign Brief Strategist",
       "description": "Reads and validates a campaign brief and ignites its messaging kernel \u2014 the shared strategic foundation every channel echoes \u2014 grounded in the knowledge base and brand voice, plus the market-intel research pipeline, via the openwop:campaign-brief.* chat tools. Recommends; the human approves the kernel.",

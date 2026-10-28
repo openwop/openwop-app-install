@@ -157,7 +157,7 @@ export interface DispatchResult {
   /** ADR 0912 — how a `jsonSchema` request was honoured: `schema` (Google
    *  native responseSchema), `mime` (Google JSON mode only), `json_schema` /
    *  `json_object` (OpenAI), or `prompt` (no native mode; the prompt hint). */
-  structuredMode?: 'schema' | 'mime' | 'json_schema' | 'json_object' | 'prompt';
+  structuredMode?: 'schema' | 'mime' | 'json_schema' | 'json_object' | 'tool' | 'prompt';
 }
 
 /**
@@ -337,6 +337,13 @@ async function dispatchAnthropic(req: DispatchRequest): Promise<DispatchResult> 
     req.cachePrefixScope,
   );
 
+  // ADR 0912 follow-up (Book AI P22, Anthropic arm) — native structured output
+  // as ONE forced tool call whose `input_schema` IS the response schema; the
+  // tool's input is the reply. Anthropic refuses a forced `tool_choice` while
+  // thinking is on, and adaptive-only models always think, so those keep the
+  // prompt hint; a 400 naming tool_choice/tools also falls back to it.
+  let forceTool = req.jsonSchema !== undefined && isObjectSchema(req.jsonSchema) && !thinkingEnabled && !adaptiveOnly && !req.webSearch;
+  const RESPOND_TOOL = 'respond';
   const sendMessages = (withManualThinking: boolean) => fetchWith429Retry(() => fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -353,10 +360,24 @@ async function dispatchAnthropic(req: DispatchRequest): Promise<DispatchResult> 
       ...(cachedSystem !== undefined ? { system: cachedSystem } : {}),
       messages: conversation.map((m) => ({ role: m.role, content: contentToAnthropicBlocks(m.content) })),
       ...(withManualThinking ? { thinking: { type: 'enabled', budget_tokens: thinkingBudget } } : {}),
+      ...(forceTool ? {
+        tools: [{ name: RESPOND_TOOL, description: 'Return your complete answer as this tool\'s input.', input_schema: req.jsonSchema }],
+        tool_choice: { type: 'tool', name: RESPOND_TOOL, disable_parallel_tool_use: true },
+      } : {}),
     }),
     ...(req.signal ? { signal: req.signal } : {}),
   }), req.signal);
   let res = await sendMessages(thinkingEnabled);
+  if (!res.ok && forceTool && res.status === 400) {
+    const body = await res.text().catch(() => '');
+    if (/tool_choice|tools|input_schema/i.test(body)) {
+      log.warn('anthropic_forced_tool_refused_retrying_prompt', { model: req.model });
+      forceTool = false;
+      res = await sendMessages(thinkingEnabled);
+    } else {
+      throw await providerHttpError('anthropic', { status: res.status, text: async () => body });
+    }
+  }
   if (!res.ok && thinkingEnabled && res.status === 400) {
     // A model the catalog does not flag (a user-typed custom id, or a newer
     // adaptive-only release) refuses the manual shape with a documented 400.
@@ -387,7 +408,12 @@ async function dispatchAnthropic(req: DispatchRequest): Promise<DispatchResult> 
   // a `type: 'thinking'` block (followed by `thinking_delta` events)
   // BEFORE the `type: 'text'` block. Track the active block's index +
   // type so we route each delta correctly.
-  const blockTypeByIndex = new Map<number, 'thinking' | 'text'>();
+  const blockTypeByIndex = new Map<number, 'thinking' | 'text' | 'tool_use'>();
+  // ADR 0912 — the forced `respond` tool's input, streamed as partial JSON.
+  let toolJson = '';
+  let respondIndex: number | undefined;
+  let toolBlocks = 0;
+  let invalidToolStream = false;
   const thinkingByIndex = new Map<number, string>();
 
   for await (const event of parseSseStream(res.body)) {
@@ -395,24 +421,34 @@ async function dispatchAnthropic(req: DispatchRequest): Promise<DispatchResult> 
       try {
         const data = JSON.parse(event.data) as {
           index?: number;
-          content_block?: { type?: string };
+          content_block?: { type?: string; name?: string };
         };
         const idx = data.index;
         const ty = data.content_block?.type;
-        if (typeof idx === 'number' && (ty === 'thinking' || ty === 'text')) {
+        if (typeof idx === 'number' && (ty === 'thinking' || ty === 'text' || ty === 'tool_use')) {
           blockTypeByIndex.set(idx, ty);
           if (ty === 'thinking') thinkingByIndex.set(idx, '');
+          if (forceTool && ty === 'tool_use') {
+            toolBlocks++;
+            if (toolBlocks !== 1 || data.content_block?.name !== RESPOND_TOOL) invalidToolStream = true;
+            else respondIndex = idx;
+          }
         }
       } catch { /* */ }
     } else if (event.event === 'content_block_delta') {
       try {
         const data = JSON.parse(event.data) as {
           index?: number;
-          delta?: { type?: string; text?: string; thinking?: string };
+          delta?: { type?: string; text?: string; thinking?: string; partial_json?: string };
         };
         const idx = data.index;
         const dty = data.delta?.type;
-        if (dty === 'text_delta' && data.delta?.text) {
+        if (dty === 'input_json_delta' && typeof data.delta?.partial_json === 'string') {
+          if (forceTool) {
+            if (idx !== respondIndex || typeof idx !== 'number' || blockTypeByIndex.get(idx) !== 'tool_use') invalidToolStream = true;
+            else toolJson += data.delta.partial_json;
+          }
+        } else if (dty === 'text_delta' && data.delta?.text) {
           completion += data.delta.text;
           await req.onDelta?.(data.delta.text);
         } else if (dty === 'thinking_delta' && typeof data.delta?.thinking === 'string') {
@@ -465,6 +501,20 @@ async function dispatchAnthropic(req: DispatchRequest): Promise<DispatchResult> 
     content: completion.length > 0 ? [{ type: 'text', text: completion }] : [],
   }) ?? undefined;
 
+  // Treat a provider contract violation as a failed response. Concatenating
+  // inputs from two calls would manufacture malformed JSON from two valid ones.
+  if (forceTool && (invalidToolStream || (toolBlocks !== 1 && !refusal && finishReason !== 'max_tokens'))) {
+    throw new Error('anthropic_invalid_structured_tool_response');
+  }
+
+  // ADR 0912 — in forced-tool mode the reply IS the tool input. A stop on
+  // `tool_use` is the expected end here, so report it as a clean stop; a
+  // `max_tokens` stop stays as-is (the caller's truncation path owns it).
+  if (forceTool && toolJson.length > 0) {
+    completion = toolJson;
+    if (finishReason === 'tool_use') finishReason = 'end_turn';
+  }
+
   return {
     provider: 'anthropic',
     model: req.model,
@@ -477,6 +527,7 @@ async function dispatchAnthropic(req: DispatchRequest): Promise<DispatchResult> 
     },
     ...(finishReason ? { finishReason } : {}),
     ...(refusal ? { refusal } : {}),
+    ...(req.jsonSchema !== undefined ? { structuredMode: forceTool ? 'tool' as const : 'prompt' as const } : {}),
   };
 }
 

@@ -1,8 +1,8 @@
 {
   "name": "core.openwop.workflows.kicktodo-challenge-factory",
-  "version": "1.8.0",
+  "version": "1.9.0",
   "kind": "workflow-chain",
-  "description": "The Challenge Factory (ADR 0458) + its lesson-batch child — migrated from the deprecated builtins (ADR 0472 P4, the terminal quarantine step). chainIds keep the original ids; build-0..3 reference lesson-batch via RFC 0133 config.subChainRef (host-default binds it to the shared same-id child); truthy/falsy reject-safe barriers ride RFC 0134; produced vars (plan/evidenceSummary/evidenceClaims/planBrief/planEvidenceBrief) declared per RFC 0133 §2.2; 1.4.0 (ADR 0458 §2.2 correction) grounds the plan, the lessons and the skeptic on the STRUCTURED evidence. 1.5.4 declares `actions: [approve, reject]` on all five approval gates (they set maxRequestChangesIterations 0, so those are the only real decisions — a defer/escalate/request-changes resume is now refused instead of being recorded as a decline that fails the run) and types the lesson-batch params honestly. 1.6.0: generateMedia param + image binding. 1.7.0: gate-N shows the lessons; a failed batch stops the run.",
+  "description": "The Challenge Factory (ADR 0458) + its lesson-batch child — migrated from the deprecated builtins (ADR 0472 P4, the terminal quarantine step). chainIds keep the original ids; build-0..3 reference lesson-batch via RFC 0133 config.subChainRef (host-default binds it to the shared same-id child); truthy/falsy reject-safe barriers ride RFC 0134; produced vars (plan/evidenceSummary/evidenceClaims/planBrief/planEvidenceBrief) declared per RFC 0133 §2.2; 1.4.0 (ADR 0458 §2.2 correction) grounds the plan, the lessons and the skeptic on the STRUCTURED evidence. 1.5.4 declares `actions: [approve, reject]` on all five approval gates (they set maxRequestChangesIterations 0, so those are the only real decisions — a defer/escalate/request-changes resume is now refused instead of being recorded as a decline that fails the run) and types the lesson-batch params honestly. 1.6.0: generateMedia param + image binding. 1.7.0: gate-N shows the lessons; a failed batch stops the run. 1.9.0: search uses searchQuery (ADR 0975 D3).",
   "keywords": [
     "KickTodo"
   ],
@@ -12,7 +12,7 @@
   "chains": [
     {
       "chainId": "openwop-app.kicktodo.challenge-factory",
-      "version": "1.8.0",
+      "version": "1.9.0",
       "label": "Challenge Factory",
       "description": "Research a topic → draft an outline → approve → build lesson batches (each checkpoint approved) → simulate with three personas → submit for publication.",
       "parameters": {
@@ -60,6 +60,10 @@
           "imageCredentialRef": {
             "type": "string",
             "description": "XCH-LB-6 — the Secrets Vault ref NAME for the image provider (a name, never a value), pre-flighted by the run tool."
+          },
+          "transformation": {
+            "type": "string",
+            "description": "ADR 0975 D3 — what the participant changes (the candidate's transformation). Disambiguates the research search query; optional (the audience is the fallback)."
           }
         },
         "required": [
@@ -73,21 +77,21 @@
         "nodes": [
           {
             "id": "research-frame",
-            "typeId": "feature.kicktodo.nodes.research-frame@1.0.0",
+            "typeId": "feature.kicktodo.nodes.research-frame@1.1.0",
             "inputs": {
               "topic": "{{params.topic}}",
-              "audience": "{{params.audience}}"
+              "audience": "{{params.audience}}",
+              "transformation": "{{params.transformation}}"
             }
           },
           {
             "id": "search",
             "typeId": "core.web.search@1.0.0",
             "config": {
-              "suitability": "durable"
+              "suitability": "durable",
+              "maxResults": 8
             },
             "inputs": {
-              "query": "{{params.topic}}",
-              "maxResults": 8,
               "suitability": "durable"
             }
           },
@@ -554,8 +558,8 @@
         ],
         "edges": [
           {
-            "from": "research-frame",
-            "to": "search"
+            "from": "research-frame.searchQuery",
+            "to": "search.query"
           },
           {
             "from": "search",

@@ -13,6 +13,20 @@
  * canonical voice.* taxonomy on the durable log (the C1 single-taxonomy path),
  * with voice.transcript carrying contentTrust:"untrusted" (RFC 0106 §F), and
  * resolves the Promise at voice.turn_commit with the settled finalText.
+ *
+ * Wave 61:
+ *   - the 400 case asserts the ROUTE's own message. Without it, the adapter's
+ *     exactly-one refusal answered the same 400 + code, so deleting the route
+ *     guard stayed green (probe tsm-route-validate, vacuous).
+ *   - HONEST CEILING (probe tsm-sample, vacuous, unpredicted): this file runs
+ *     with `OPENWOP_TEST_SEAM_ENABLED` (the mock STT path needs it), and with the
+ *     seam on, testSeam.ts's LEGACY rewrite (~:311) maps `/host/sample/*` onto
+ *     `/host/openwop-app/*` BEFORE agents.ts's own `STT_SAMPLE` registration is
+ *     reached. So "both prefixes" here proves the sample path is served (through
+ *     the rewrite), not that line. The `STT_SAMPLE` registration itself is
+ *     reached only with the seam OFF, and is witnessed by
+ *     transcriber-tenant-isolation.test.ts (probe tsm-sample-r2 is aimed there).
+ *   - the taxonomy is asserted as the exact ordered sequence, not first/last.
  */
 
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
@@ -36,6 +50,7 @@ beforeAll(async () => {
 afterAll(async () => {
   delete process.env.OPENWOP_TEST_SEAM_ENABLED;
   delete process.env.OPENWOP_VOICE_MOCK;
+  delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   await new Promise<void>((res) => server.close(() => res()));
 });
 
@@ -55,13 +70,18 @@ describe('RFC 0106 §B — real-time voice transcriber seam (ADR 0109 P1)', () =
   it('400s (invalid_request) when neither audio.streamRef nor audio.url is supplied', async () => {
     const res = await post(APP_PATH, { audio: {} });
     expect(res.status).toBe(400);
-    expect(errorCodeOf(await res.json())).toBe('invalid_request');
+    const body = await res.json() as { message?: unknown };
+    expect(errorCodeOf(body)).toBe('invalid_request');
+    // The ROUTE's guard answered — not the adapter's later exactly-one refusal,
+    // which carries the same status and code.
+    expect(body.message).toBe('audio.streamRef OR audio.url (non-empty string) required');
   });
 
   it('is wired under BOTH path prefixes (not 404)', async () => {
     for (const path of [APP_PATH, SAMPLE_PATH]) {
       const res = await post(path, { audio: { streamRef: 'stream:test/mic' } });
-      expect(res.status).toBe(200);
+      expect(res.status, path).toBe(200);
+      expect((await res.json() as SeamOk).finalText, path).toBe('book a table for two');
     }
   });
 
@@ -77,11 +97,14 @@ describe('RFC 0106 §B — real-time voice transcriber seam (ADR 0109 P1)', () =
     expect(body.language).toBe('en-US');
 
     // The single canonical taxonomy, in order, on the durable log.
-    const types = events.map((e) => e.type);
-    expect(types[0]).toBe('voice.speech_start');
-    expect(types).toContain('voice.transcript');
-    expect(types).toContain('voice.endpoint_candidate');
-    expect(types[types.length - 1]).toBe('voice.turn_commit');
+    expect(events.map((e) => e.type)).toEqual([
+      'voice.speech_start',
+      'voice.transcript',
+      'voice.transcript',
+      'voice.endpoint_candidate',
+      'voice.transcript',
+      'voice.turn_commit',
+    ]);
 
     // §F voice-transcript-untrusted: EVERY voice.transcript carries contentTrust:"untrusted".
     const transcripts = events.filter((e) => e.type === 'voice.transcript');

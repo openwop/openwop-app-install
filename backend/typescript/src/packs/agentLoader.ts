@@ -61,6 +61,8 @@ interface RawAgentManifest {
   systemPrompt?: unknown;
   systemPromptRef?: unknown;
   evalSuiteRef?: unknown;
+  /** ADR 0962 D8 — `false` keeps the agent off the A2A surface. */
+  a2aExposed?: unknown;
   toolAllowlist?: unknown;
   memoryShape?: unknown;
   confidence?: unknown;
@@ -322,6 +324,7 @@ export function loadAgentsFromManifest(packDir: string, opts: LoadAgentsOptions 
         handoff,
         label: typeof raw.label === 'string' ? raw.label : undefined,
         description: typeof raw.description === 'string' ? raw.description : undefined,
+        ...(raw.a2aExposed === false ? { a2aExposed: false as const } : {}),
         packName,
         packVersion,
         degraded: degradedCaps.length > 0 ? [...degradedCaps] : undefined,

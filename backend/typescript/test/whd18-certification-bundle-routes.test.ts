@@ -19,6 +19,14 @@
  *   - SET + a verified bundle per major: pointer at the right root only,
  *     following the ADVERTISED url returns the exact uploaded bytes.
  *   - SET + tampered / wrong-commit / misconfigured: all three surfaces absent.
+ *
+ * Sabotage-witnessed (wave 64, probes 8fw5g1-wh18-*): the build binding, the
+ * target-major check (wh18-target-major-r2: a signed MAJOR-1 bundle at the major-2 key),
+ * the withdrawn-key lookup, the misconfigured-origin parse and the one pointer predicate.
+ * DOUBLE GUARD (named): a tampered row is refused by the `witness-digest` check AND by
+ * the ed25519 check, which is computed over the RECOMPUTED digest — so dropping either
+ * alone stays green (8fw5g1-wh18-witness-only, vacuous by design). The shared piece both
+ * read, the recomputed digest, is probed by 8fw5g1-wh18-witness-shared.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -42,6 +50,8 @@ const OTHER_COMMIT = '1111111111111111111111111111111111111111';
 const BUCKET = 'openwop-dev-certification-bundles';
 const PREFIX = 'evidence';
 const ORIGIN_ENV = `gs://${BUCKET}/${PREFIX}`;
+/** The advertised major-2 path, as a literal (never the product constant it is checked against). */
+const MAJOR2_PATH = '/host/openwop-app/conformance/certification-bundle/major-2';
 /** The two routes ADR 0812 P4 slice 3 deleted — probed so they stay deleted. */
 const RETIRED_BUNDLE_PATH = '/host/openwop-app/conformance/certification-bundle';
 const RETIRED_CLAIMS_PATH = '/host/openwop-app/conformance/claims';
@@ -49,8 +59,9 @@ const FIXTURE_KEY = { keyId: 'openwop-app-bundle-2', alg: 'ed25519', publicKey: 
 
 /**
  * A MAJOR-1 bundle, produced by the SUITE's own `signBundleV3` + `witnessDigest`
- * (not this host's mirror), so the major-1 leg is still an independent producer
- * checked by our verifier. Only the real fixture is major 2.
+ * (not this host's mirror): validly signed by a published key and bound to this
+ * build, so the ONLY thing wrong with it at the major-2 key is `suite.targetMajor`.
+ * Only the real fixture is major 2.
  */
 function signedMajor1(commit: string): { text: string; publicKey: string; keyId: string } {
   const { privateKey, publicKey } = generateKeyPairSync('ed25519');
@@ -187,7 +198,8 @@ describe('WHD-18 — origin SET', () => {
     objects.set(keyFor(COMMIT, 2), FIXTURE_TEXT);
 
     const url = v2Pointer(await v2Doc());
-    expect(url).toBe(`${base}${CERTIFICATION_BUNDLE_MAJOR2_VENDOR_PATH}`);
+    expect(CERTIFICATION_BUNDLE_MAJOR2_VENDOR_PATH).toBe(MAJOR2_PATH);
+    expect(url).toBe(`${base}${MAJOR2_PATH}`);
     // Follow the ADVERTISED url (the version-agnostic vendor path, rewritten
     // onto the /v1 twin before auth) with NO credentials: a public claim.
     const res = await fetch(String(url));
@@ -205,9 +217,18 @@ describe('WHD-18 — origin SET', () => {
 
   // ADR 0812 P3c-0 — the "verified MAJOR-1 bundle → pointer at the major-1 root" leg was deleted with the major-1 root.
 
-  it('the major-2 bundle uploaded to the MAJOR-1 key is refused (target-major) — no cross-major leak', async () => {
+  it('a MAJOR-1 bundle at the major-2 key is refused (target-major), and the major-1 key is never read — no cross-major leak', async () => {
+    // Everything but `suite.targetMajor` verifies: signed by a published key, this build's commit.
+    objects.set(keyFor(COMMIT, 2), MAJOR1.text);
+    await expectNothingServed('major-1 bundle at the major-2 key');
+    expect(objectReads, 'the major-2 key WAS read, so the refusal is the verifier\'s').toContain(keyFor(COMMIT, 2));
+    // …and the major-2 bundle placed at the major-1 key is never even looked at.
+    __resetCertificationEvidenceForTests({ fetchImpl: fakeFetch });
+    objects.clear();
+    objectReads.length = 0;
     objects.set(keyFor(COMMIT, 1), FIXTURE_TEXT);
     await expectNothingServed('major-2 bundle at the major-1 key');
+    expect(objectReads).not.toContain(keyFor(COMMIT, 1));
   });
 
   it('a TAMPERED bundle → all surfaces absent', async () => {

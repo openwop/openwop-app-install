@@ -7,6 +7,8 @@
 #     scripts/custom-domain-edge.sh apply              # create what is missing (idempotent)
 #   scripts/custom-domain-edge.sh verify               # assert every resource exists and is wired
 #   scripts/custom-domain-edge.sh host <hostname>      # print the per-host commands (manual provider)
+#   scripts/custom-domain-edge.sh repoint --service <cloud-run-service> --project <edge-project> \
+#       [--region R] [--account A] [--apply]           # hand the edge to a deployment's own backend (ADR 0940)
 #
 # What the edge is: a global external Application Load Balancer in front of the
 # existing Cloud Run service. One reserved global IP, a serverless NEG on the
@@ -51,13 +53,14 @@ MODE="${1:-plan}"
 case "$MODE" in
   plan|apply|verify) ;;
   host) [ -n "${2:-}" ] || { echo "usage: $0 host <hostname>" >&2; exit 2; } ;;
-  -h|--help) sed -n '2,37p' "$0" | sed 's/^#[[:space:]]\{0,1\}//'; exit 0 ;;
-  *) echo "usage: $0 {plan|apply|verify|host <hostname>}" >&2; exit 2 ;;
+  repoint) ;;
+  -h|--help) sed -n '2,39p' "$0" | sed 's/^#[[:space:]]\{0,1\}//'; exit 0 ;;
+  *) echo "usage: $0 {plan|apply|verify|host <hostname>|repoint --service S --project P [--apply]}" >&2; exit 2 ;;
 esac
 
 # The same strict parser deploy.sh uses: KEY=VALUE lines only, never sourced.
-[ -f "$ENV_FILE" ] || die "$ENV_FILE not found (cp scripts/deploy.env.example scripts/deploy.env)"
-while IFS= read -r line || [ -n "$line" ]; do
+if [ ! -f "$ENV_FILE" ] && [ "$MODE" != repoint ]; then die "$ENV_FILE not found (cp scripts/deploy.env.example scripts/deploy.env)"; fi
+[ -f "$ENV_FILE" ] && while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in ''|'#'*) continue ;; esac
   case "$line" in *=*) : ;; *) continue ;; esac
   key="${line%%=*}"; val="${line#*=}"
@@ -67,6 +70,19 @@ while IFS= read -r line || [ -n "$line" ]; do
   # The process environment wins over the file, so a test or a one-off can override.
   [ -n "${!key:-}" ] || export "$key=$val"
 done < "$ENV_FILE"
+
+# ── repoint: hand the edge's URL-map default to a deployment's own backend (ADR 0940) ──
+# Each deployment owns its edge. This creates a serverless NEG + backend service
+# for <service> in the EDGE's own project and makes it the URL map's default.
+# Dry-run by default: it reads (describe/export) and prints, and mutates nothing.
+# The URL-map mutation is a fingerprint-conditional PATCH after exact target
+# wiring validation. The previous backend remains. An owned conditional rollback
+# receipt is issued only after operation completion and full configuration read-back.
+if [ "$MODE" = repoint ]; then
+  shift
+  exec python3 "$ROOT/scripts/lib/custom-domain-repoint.py" "$@"
+fi
+
 for v in OPENWOP_DEPLOY_SERVICE OPENWOP_DEPLOY_PROJECT OPENWOP_DEPLOY_ACCOUNT; do
   [ -n "${!v:-}" ] || die "$v is not set in $ENV_FILE"
 done

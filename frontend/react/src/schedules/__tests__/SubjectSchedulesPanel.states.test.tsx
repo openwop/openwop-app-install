@@ -187,6 +187,13 @@ describe('SubjectSchedulesPanel — ADR 0787 contract', () => {
     expect(screen.queryByText(/does not recognize it/i)).toBeNull();
   });
 
+  it('ADR 0957 D2 — client-inactive is a known reason that names the client and when it resumes', async () => {
+    renderWith([{ ...base, lastSkippedAt: new Date().toISOString(), lastSkipReason: 'client-inactive' }], {});
+    await waitFor(() => expect(screen.getByText(/its client is paused or archived/i)).toBeTruthy());
+    expect(screen.getByText(/resumes when the client is active again/i)).toBeTruthy();
+    expect(screen.queryByText(/does not recognize it/i)).toBeNull();
+  });
+
   it('ADR 0820 §7 — a plan-lapsed job reads "Paused — plan lapsed" with a store link and no next-run promise', async () => {
     renderWith([{ ...base, lastSkippedAt: new Date().toISOString(), lastSkipReason: 'plan-lapsed', planLapsed: { featureId: 'crm' } }], {});
     await waitFor(() => expect(screen.getByText(/paused — plan lapsed/i)).toBeTruthy());

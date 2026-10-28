@@ -4,6 +4,9 @@
  * rightly mints a NEW child beside the old one. It must not ALSO mint a second
  * workflow with the same name in the tenant's list; and repeating an
  * instantiation at one version (the convergent case) must keep the child's name.
+ * The bumped child's name is pinned to the literal `uniqueOwnedName` mints
+ * (`<base>-<n>`, host/workflowOwnership.ts), so a renamer that keeps names
+ * distinct but wrong (or a second plain 'D7 child') reds.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';
@@ -18,6 +21,7 @@ import { reloadWorkflowChainPacks } from '../src/host/workflowChainPackLoader.js
 let server: http.Server;
 let PORT: number;
 let root = '';
+const priorDisableCookies = process.env.OPENWOP_AUTH_DISABLE_COOKIES;
 let pins: { sub: string; noop: string };
 const PARENT = 'vendor.test.d7.parent';
 const CHILD = 'vendor.test.d7.child';
@@ -56,6 +60,8 @@ beforeAll(async () => {
 }, 120_000);
 afterAll(async () => {
   delete process.env.OPENWOP_WORKFLOW_CHAIN_PACKS_DIR;
+  if (priorDisableCookies === undefined) delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
+  else process.env.OPENWOP_AUTH_DISABLE_COOKIES = priorDisableCookies;
   reloadWorkflowChainPacks();
   await new Promise<void>((res) => server.close(() => res()));
 });
@@ -91,7 +97,6 @@ describe('sub-chain child names across a chain-version bump (grade-data D-7)', (
     const [b] = await instantiate();
     expect(b).not.toBe(a); // RFC 0133: a new version is a new child
     const names = await childNames();
-    expect(names).toHaveLength(2);
-    expect(new Set(names).size, `duplicate child names: ${names.join(', ')}`).toBe(2);
+    expect(names, `child names after the bump: ${names.join(', ')}`).toEqual(['D7 child', 'D7 child-2']);
   });
 });

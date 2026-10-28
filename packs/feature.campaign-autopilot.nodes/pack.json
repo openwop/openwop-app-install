@@ -1,0 +1,43 @@
+{
+  "name": "feature.campaign-autopilot.nodes",
+  "version": "1.1.0",
+  "kind": "node",
+  "description": "Campaign autopilot node pack (ADR 0961). `preflight` reads the typed checklist of what the run's campaign still needs; `start-stage` starts a stage (v0.1: the drafting stage) as its own campaign run. Both go through ctx.features['campaign-autopilot'], which takes the campaign only from the run's own tag, never an input. While a blocking preflight item is missing the run waits on a checklist card (a clarification interrupt) until \"Check again\" finds it ready (1.1.0, ADR 0961 P1).",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": [
+    "feature",
+    "campaign-studio",
+    "campaign-autopilot",
+    "preflight"
+  ],
+  "engines": {
+    "openwop": ">=1.0.0 <3.0.0"
+  },
+  "nodes": [
+    {
+      "typeId": "feature.campaign-autopilot.nodes.preflight",
+      "version": "1.1.0",
+      "label": "Campaign autopilot: Preflight",
+      "description": "Checks what the run's campaign still needs before the autopilot drafts it: the brief exists and is complete, the brief's setup (brand, persona, knowledge), the client's ad account when the brief runs ads, and a goal. Read-only. Output: { ready, items[] } where each item is { id, status: ok|missing|warn, blocking, missing? }. Suspends on a checklist card while a blocking item is not ok; \"Check again\" re-reads it.",
+      "category": "data",
+      "role": "read",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.campaign-autopilot.nodes.start-stage",
+      "version": "1.0.0",
+      "label": "Campaign autopilot: Start stage",
+      "description": "Starts one autopilot stage as its own campaign run, tagged with the same campaign (role `stage`), and completes with that run's id. config.stage names the stage (`drafts`: the campaign spine, which drafts the messaging kernel and every channel behind their review gates). Inputs: { provider?, model? }. Output: { stage, runId, workflowId }. A retry resolves the same run; a replay starts nothing.",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": []
+    }
+  ],
+  "runtime": {
+    "language": "javascript",
+    "format": "esm",
+    "entry": "./index.mjs",
+    "minRuntimeVersion": "node>=20"
+  }
+}

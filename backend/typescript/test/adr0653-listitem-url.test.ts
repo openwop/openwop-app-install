@@ -13,56 +13,62 @@
  * routes yet (the deferral ADR 0407 records "with cause"). A guessed URL puts a
  * 404 into structured data a crawler trusts. So `url` must be absent — not
  * empty-string, not null — when no resolver supplied one.
+ *
+ * Driven through the REAL emitter (`prerenderPage`), with a resolver registered for
+ * the page's `entityList` section. (/grade-tests w58: this file used to assert a local
+ * copy of the expression, which no product change could turn red.)
+ *
+ * Tracker TST-BG3-21. Red when the emitter drops the `url`, emits `url` for a missing
+ * or empty href, or numbers positions from anything but 1.
  */
 
-import { describe, it, expect } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
+import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
+import { openStorage } from '../src/storage/index.js';
+import { registerContentSectionResolver } from '../src/host/contentDataSources.js';
+import { createOrg } from '../src/host/accessControlService.js';
+import { createPage, transitionPage } from '../src/features/cms/cmsService.js';
+import { prerenderPage } from '../src/features/publishing/prerenderService.js';
 
-/** The emitter's shape, extracted so the assertion is about the RULE rather
- *  than about booting a prerender. Mirrors prerenderService's expression
- *  exactly; the source-pin below is what keeps them honest. */
-const listItem = (it: { title: string; href?: string }, i: number) => ({
-  '@type': 'ListItem',
-  position: i + 1,
-  name: it.title,
-  ...(it.href === undefined || it.href === '' ? {} : { url: it.href }),
+const T = 'tenant-adr0653c';
+
+beforeAll(async () => {
+  initHostExtPersistence(await openStorage('memory://'));
+  // Three items: one with a page, one with an EMPTY href, one with none — so the
+  // position order and both absence rules are visible in one ItemList.
+  registerContentSectionResolver('entityList', async () => ({
+    items: [
+      { title: 'Sleep', href: '/discover/sleep' },
+      { title: 'Focus', href: '' },
+      { title: 'Calm' },
+    ],
+  }));
 });
 
-describe('ADR 0653 pC — ListItem.url', () => {
-  it('carries url when the resolver supplied an href', () => {
-    expect(listItem({ title: 'Sleep', href: '/discover/sleep' }, 0)).toEqual({
-      '@type': 'ListItem', position: 1, name: 'Sleep', url: '/discover/sleep',
+/** Every JSON-LD block in the document, parsed. */
+function jsonLdBlocks(html: string): Array<Record<string, unknown>> {
+  return [...html.matchAll(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/g)]
+    .map((m) => JSON.parse(m[1] ?? 'null') as Record<string, unknown>);
+}
+
+describe('ADR 0653 pC — ListItem.url through the real prerender', () => {
+  it('carries url only for a supplied href; omits it for a missing or empty one; positions are 1-based', async () => {
+    const org = await createOrg({ tenantId: T, createdBy: 'u1', name: 'Listco' });
+    const page = await createPage({
+      tenantId: T, orgId: org.orgId, title: 'Programs', slug: 'programs', createdBy: 'u1',
+      // A structurally valid entityList; the resolver registered above answers it.
+      sections: [{ type: 'entityList', data: { heading: 'Programs', tenantId: T, typeName: 'program', titleField: 'name' } }],
     });
-  });
+    await transitionPage(T, org.orgId, page.pageId, 'publish', 'u1');
 
-  it('OMITS url entirely when there is no href — not null, not empty', () => {
-    const out = listItem({ title: 'Sleep' }, 0) as Record<string, unknown>;
-    expect('url' in out).toBe(false);
-  });
-
-  it('treats an empty-string href as absent', () => {
-    // A resolver returning '' has not supplied a page; emitting `url: ''` would
-    // be a claim backed by nothing, and `in`-checks downstream would see a field.
-    const out = listItem({ title: 'Sleep', href: '' }, 0) as Record<string, unknown>;
-    expect('url' in out).toBe(false);
-  });
-
-  it('positions are 1-based and preserved', () => {
-    expect(listItem({ title: 'x' }, 4).position).toBe(5);
-  });
-});
-
-describe('ADR 0653 pC — the emitter actually does this', () => {
-  it('prerenderService consumes it.href into url, conditionally', async () => {
-    // The helper above is a mirror. This is the oracle: without it, a future
-    // edit could drop the conditional and every case above would still pass.
-    const { readFileSync } = await import('node:fs');
-    const { fileURLToPath } = await import('node:url');
-    const { dirname, join } = await import('node:path');
-    const src = readFileSync(
-      join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'features', 'publishing', 'prerenderService.ts'),
-      'utf8',
-    );
-    expect(src).toMatch(/it\.href === undefined \|\| it\.href === ''/);
-    expect(src).toContain('{ url: it.href }');
+    const result = await prerenderPage(org.orgId, 'programs', 'https://app.test', null);
+    expect(result).not.toBeNull();
+    const lists = jsonLdBlocks(result!.html).filter((b) => b['@type'] === 'ItemList');
+    expect(lists).toHaveLength(1);
+    expect(lists[0]!['itemListElement']).toEqual([
+      { '@type': 'ListItem', position: 1, name: 'Sleep', url: '/discover/sleep' },
+      { '@type': 'ListItem', position: 2, name: 'Focus' },
+      { '@type': 'ListItem', position: 3, name: 'Calm' },
+    ]);
   });
 });

@@ -10,7 +10,8 @@
  *
  * This subscribes to the ADR 0535 P1 global run-terminal seam and RESTORES the
  * card — the fourth disposition beside ADR 0288's PRUNE / DISABLE /
- * TOLERATE-ON-READ.
+ * TOLERATE-ON-READ. ADR 0963 D3: a restored card comes back HELD (a machine
+ * note the loop will not pick past); a person releases it by clearing the note.
  *
  * Two design points carry the whole module:
  *
@@ -40,8 +41,11 @@
 import type { Storage } from '../storage/storage.js';
 import { onAnyRunTerminal, type RunTerminalStatus } from '../executor/runLifecycle.js';
 import {
+  applyBoardCommand,
+  RESTORE_NOTE_MARK,
   getBoard,
   getCard,
+  isPreconditionFailure,
   notifyBoardChanged,
   recordCardRunStatus,
   releaseCardClaim,
@@ -113,19 +117,24 @@ const workingColumn = workingColumnOf;
  *  the agent never looks. */
 const todoColumn = todoColumnOf;
 
-/** A STABLE marker, not the prose. Matching on the sentence would break the
- *  moment the copy is reworded or localized — prior machine notes would stop
- *  being recognised and would silently stack up in a one-line field. */
-const RESTORE_NOTE_MARK = '[auto:run-restore]';
+/** The instruction every hold note ends with — the release is the existing
+ *  card edit, so the note itself tells a person how (ADR 0963 D3). */
+const RELEASE_HINT = 'Clear this note to let the agent pick it up again.';
 
 /**
- * Why a restore happened, rendered onto the card. `cancelled` carries NO note:
- * the run was stopped deliberately by a human, and a failure note would
- * misreport that as a fault (ADR 0535 D4 correction).
+ * Why a restore happened, rendered onto the card. Every restore HOLDS the card
+ * (ADR 0963 D3): the loop does not retry what stopped, a person decides.
+ *
+ * `cancelled` is worded neutrally (ADR 0963 A2): a run is cancelled by a person,
+ * by a workflow deletion, by an eval or by a contract cut, and the note must not
+ * blame any of them. ADR 0535 D4 objected to blaming, not to recording the stop.
  */
 function restoreNote(status: RunTerminalStatus, runId: string): string | null {
   if (status === 'failed') {
-    return `${RESTORE_NOTE_MARK} Returned to To Do — its run failed (${runId}).`;
+    return `${RESTORE_NOTE_MARK} Held — its run failed (${runId}). ${RELEASE_HINT}`;
+  }
+  if (status === 'cancelled') {
+    return `${RESTORE_NOTE_MARK} Held — its run was cancelled (${runId}). ${RELEASE_HINT}`;
   }
   return null;
 }
@@ -134,12 +143,29 @@ function restoreNote(status: RunTerminalStatus, runId: string): string | null {
  * The note for a card whose run row is GONE (ADR 0535 RI-WL-2).
  *
  * Unlike a failure we observed, here the outcome is genuinely unknown — so the
- * note says so. It also earns the card the `blocked` COST criterion in ADR 0534's
- * ranking, which is the point: the work returns to the queue but yields to
- * healthy work instead of jumping the line, and a human sees why.
+ * note says so, and the card is held like any other restore (ADR 0963 D3).
  */
 function unknownOutcomeNote(runId: string): string {
-  return `${RESTORE_NOTE_MARK} Returned to To Do — its run (${runId}) is no longer on record, so the outcome is unknown. Check before re-running.`;
+  return `${RESTORE_NOTE_MARK} Held — its run (${runId}) is no longer on record, so the outcome is unknown. ${RELEASE_HINT}`;
+}
+
+/**
+ * ADR 0963 D3 — the ONE "held" predicate. A To Do card carrying the machine
+ * restore mark is not picked by the work loop (daemon or manual Check now) and
+ * is not ranked by the preview. A person releases it by clearing the note; the
+ * human-authored part of a note never holds a card.
+ */
+export function isHeldForReview(card: Pick<KanbanCard, 'blockerNote'>): boolean {
+  return typeof card.blockerNote === 'string' && card.blockerNote.includes(RESTORE_NOTE_MARK);
+}
+
+/** The human-authored lines of a blocker note, with every machine line removed. */
+function humanPartOf(existing: string | undefined): string {
+  return (existing ?? '')
+    .split('\n')
+    .filter((line) => line.trim() && !line.includes(RESTORE_NOTE_MARK))
+    .join('\n')
+    .trim();
 }
 
 /**
@@ -152,11 +178,7 @@ function unknownOutcomeNote(runId: string): string {
  * does not grow an unbounded log in a one-line field.
  */
 export function composeBlockerNote(existing: string | undefined, added: string): string {
-  const human = (existing ?? '')
-    .split('\n')
-    .filter((line) => line.trim() && !line.includes(RESTORE_NOTE_MARK))
-    .join('\n')
-    .trim();
+  const human = humanPartOf(existing);
   return human ? `${human}\n${added}` : added;
 }
 
@@ -205,6 +227,10 @@ async function restoreCardForRun(
     // stamps a fresh one.
     lastRunStatus: status,
     ...(note ? { blockerNote: composeBlockerNote(card.blockerNote, note) } : {}),
+    // ADR 0963 A1 — the note above was composed from a snapshot; a person's edit
+    // that landed since must not be overwritten. A lost race leaves the card in
+    // Working and the next reconcile retries from a fresh read.
+    expectedBlockerNote: card.blockerNote,
   });
   if (!moved) return false;
 
@@ -233,6 +259,7 @@ async function restoreStrandedUnknown(card: KanbanCard, board: KanbanBoard): Pro
     toColumnId: todo.id,
     lastRunStatus: null,
     blockerNote: composeBlockerNote(card.blockerNote, unknownOutcomeNote(card.lastRunId)),
+    expectedBlockerNote: card.blockerNote, // ADR 0963 A1
   });
   if (!moved) return false;
   notifyBoardChanged(board.id);
@@ -240,6 +267,39 @@ async function restoreStrandedUnknown(card: KanbanCard, board: KanbanBoard): Pro
     cardId: card.id, boardId: board.id, runId: card.lastRunId,
   });
   return true;
+}
+
+/**
+ * ADR 0963 D4 — strip the machine restore lines from a card whose run `runId`
+ * completed, keeping any human text.
+ *
+ * Its own write (A1): conditioned on the card still pointing at the run AND on
+ * the note being the one read, so a person's concurrent edit is never
+ * overwritten. One retry from a fresh read covers an unrelated edit racing it.
+ * Returns whether it wrote.
+ */
+export async function clearRestoreNote(cardId: string, runId: string): Promise<boolean> {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const card = await getCard(cardId);
+    if (!card || card.lastRunId !== runId || !isHeldForReview(card)) return false;
+    const board = await getBoard(card.boardId);
+    if (!board) return false;
+    const seen = card.blockerNote;
+    try {
+      await applyBoardCommand({
+        type: 'card.patch',
+        tenantId: board.tenantId,
+        boardId: board.id,
+        cardId,
+        patch: { blockerNote: humanPartOf(seen) },
+        precondition: (fresh) => fresh.lastRunId === runId && fresh.blockerNote === seen,
+      });
+      return true;
+    } catch (err) {
+      if (!isPreconditionFailure(err)) throw err;
+    }
+  }
+  return false;
 }
 
 /** Stamp a run's terminal status onto the card its metadata points at, if that
@@ -260,7 +320,12 @@ async function stampRunStatus(
     if (!board || board.tenantId !== runTenantId) return;
     const card = await getCard(pointer.cardId);
     if (!card || card.boardId !== board.id) return;
-    if (await recordCardRunStatus(card.id, runId, status)) notifyBoardChanged(board.id);
+    const stamped = await recordCardRunStatus(card.id, runId, status);
+    // ADR 0963 D4 — a completed run makes a restore note false ("outcome
+    // unknown", "its run failed"). Cleared independently of the status stamp,
+    // which no-ops when reconcile already wrote `completed` (A1).
+    const cleared = status === 'completed' && (await clearRestoreNote(card.id, runId));
+    if (stamped || cleared) notifyBoardChanged(board.id);
   } catch (err) {
     log.warn('card run-status stamp failed', { runId, error: err instanceof Error ? err.message : String(err) });
   }
@@ -306,7 +371,13 @@ export async function recoverCardForTerminalRun(
   // The card must belong to the board we just authorised, not merely exist.
   if (card.boardId !== board.id) return false;
 
-  return restoreCardForRun(card, board, runId, status);
+  if (await restoreCardForRun(card, board, runId, status)) return true;
+  // ADR 0963 A1 — the restore lost a race with a person's note edit (or another
+  // writer). Only an agent board is ever reconciled again (the heartbeat pass),
+  // so a card on any other board would strand in Working: retry ONCE from a
+  // fresh read. Every guard in `restoreCardForRun` re-applies to the new card.
+  const fresh = await getCard(pointer.cardId);
+  return fresh ? restoreCardForRun(fresh, board, runId, status) : false;
 }
 
 /**
@@ -368,7 +439,9 @@ export async function reconcileStrandedCards(
     if (run.status === 'completed') {
       // The terminal fan-out may have been missed (process died mid-emit).
       // Stamp it now so the outcome outlives the row.
-      if (await recordCardRunStatus(card.id, card.lastRunId!, 'completed')) notifyBoardChanged(board.id);
+      const stamped = await recordCardRunStatus(card.id, card.lastRunId!, 'completed');
+      const cleared = await clearRestoreNote(card.id, card.lastRunId!); // ADR 0963 D4
+      if (stamped || cleared) notifyBoardChanged(board.id);
       continue;
     }
     if (run.status !== 'failed' && run.status !== 'cancelled') continue;

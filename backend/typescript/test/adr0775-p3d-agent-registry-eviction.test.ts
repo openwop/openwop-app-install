@@ -6,6 +6,15 @@
  * One process stands in for the fleet: storage pub/sub is the same channel
  * either way (an in-process emitter here, LISTEN/NOTIFY on Postgres), and a
  * message with a different `origin` is exactly what a peer instance sends.
+ *
+ * Red when (wave 60 probes, tracker TST-BRC-4): `applyAgentEviction` drops its own
+ * origin filter or stops removing; the booted listener stops applying; PATCH, DELETE
+ * or the roster cascade stops broadcasting; the TTL never expires a copy; a storage
+ * fault during the TTL refresh unregisters the copy.
+ *
+ * Double guard, recorded: a tenant-less message is refused by the shape check AND
+ * by `remove(agentId, undefined)`, which finds no user agent without its tenant, so
+ * dropping the shape check alone stays green (w60g2-p3d-tenant-required).
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -47,7 +56,7 @@ async function call(method: string, path: string, body?: unknown): Promise<{ sta
 const stale = (agentId: string, tenant: string): ResolvedAgentManifest => ({
   agentId, persona: 'stale copy', modelClass: 'chat', systemPrompt: 'OLD PROMPT', packName: `user:${tenant}`, packVersion: '0',
   toolAllowlist: [], ownerTenant: tenant,
-} as ResolvedAgentManifest);
+});
 
 const until = async (check: () => boolean): Promise<void> => {
   for (let i = 0; i < 50 && !check(); i += 1) await new Promise((r) => setTimeout(r, 10));

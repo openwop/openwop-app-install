@@ -8,6 +8,23 @@
  * The token is minted SAME-ORIGIN (where the anon cookie authenticates) and
  * presented on the cross-origin SSE.
  *
+ * The rejected-token 401 is a DOUBLE guard, and each copy is driven on its own:
+ *  - `middleware/v2Identity.ts` answers it for a bound id whose tenant is NOT the
+ *    anon caller's (the cross-origin case the SPA hits) — before the route runs;
+ *  - `host/runAccess.loadReadableRun` answers it for an id bound to the caller's
+ *    OWN tenant, which passes the identity layer and is then refused by the
+ *    tenant gate (the "returning anon cookie, own-tenant id" legs below).
+ * Round 1's `8fw2g3-tok-401` (runAccess's copy) was vacuous because every leg
+ * used a cross-tenant id, which the identity layer refuses first.
+ *
+ * Sabotage witnessed red (8f grade-tests wave 2): an unbound HMAC
+ * (`8fw2g3-tok-runbound`), no expiry check (`-tok-expiry`), no signature
+ * compare (`-tok-sigcheck`), the token path skipped (`-tok-access-path`),
+ * runAccess's 401 removed (`-tok-401-r2`), the identity layer's 401 removed
+ * (`-tok-401-v2id-r2`), the 401 for ANY presented token (`-tok-401-anononly`),
+ * the mint route's tenant gate removed (`-tok-mint-gate`), and every mint made
+ * a redacted grant (`-tok-grant-r2`).
+ *
  * @see src/host/runStreamToken.ts
  */
 
@@ -71,6 +88,7 @@ describe('runStreamToken (unit)', () => {
 
 let server: http.Server;
 let BASE: string;
+let storageRef: Storage;
 
 // ADR 0812 P3c-0 — ported off the v1 wire. Ids are 16+ characters so they can be
 // tenant-bound, protocol paths carry the bound id the CALLER would send, and the
@@ -79,7 +97,7 @@ const A = 'run-tok-A-0123456789';
 const ANON_RUN = 'run-tok-anon-0123456789';
 const RUN_A: RunRecord = {
   runId: A, workflowId: 'wf', tenantId: 'tenant-A', status: 'completed',
-  inputs: {}, metadata: {}, configurable: {}, createdAt: 'now', updatedAt: 'now',
+  inputs: {}, metadata: {}, configurable: {}, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
 };
 
 const ANON_OWNER = mintAnonSession();
@@ -89,7 +107,8 @@ beforeAll(async () => {
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
   delete process.env.OPENWOP_AUTHORIZATION_ENFORCEMENT;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await (app.locals.storage as Storage).insertRun({ ...RUN_A });
+  storageRef = app.locals.storage as Storage;
+  await storageRef.insertRun({ ...RUN_A });
   await (app.locals.storage as Storage).insertRun({ ...RUN_A, runId: ANON_RUN, tenantId: ANON_OWNER.tenantId });
   await new Promise<void>((res) => {
     server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
@@ -112,13 +131,20 @@ describe('stream-token capability (HTTP)', () => {
     expect(r.status).toBe(200);
     const body = (await r.json()) as { streamToken?: string };
     expect(typeof body.streamToken).toBe('string');
+    // The owner may read the payload, so the grant is FULL (`v1.`), not the
+    // redacted `v1r.` grant (#4543) — which would also verify.
+    expect(body.streamToken).toMatch(/^v1\.\d+\.[A-Za-z0-9_-]+$/);
     expect(verifyRunStreamToken(A, body.streamToken!)).toBe(true);
   });
 
   it('a NON-owner (anon, different tenant) cannot mint — 404', async () => {
     // A real anon SESSION (ADR 0750 major-1 extension: a request with no
     // credential at all is refused 401 before the ownership check).
-    expect(await code(mint(A), { cookie: `__session=${signSession(mintAnonSession())}` })).toBe(404);
+    const r = await fetch(`${BASE}${mint(A)}`, { headers: { cookie: `__session=${signSession(mintAnonSession())}` } });
+    expect(r.status).toBe(404);
+    const body = (await r.json()) as { error?: string; streamToken?: string };
+    expect(body.error).toBe('run_not_found');
+    expect(body.streamToken).toBeUndefined();
   });
 
   it('a streamToken IS a credential: the cookie-less cross-origin SSE on the bound id is served (v2)', async () => {
@@ -141,6 +167,18 @@ describe('stream-token capability (HTTP)', () => {
     expect(await code(`${runEvents}?streamToken=${encodeURIComponent(other)}`, sse)).toBe(401);
   });
 
+  it('ADR 0975 D9: ids on a token-authorized stream are bound to the RUN\'s tenant, never the caller\'s', async () => {
+    await storageRef.appendEvent({ runId: A, eventId: 'ev-d9-1', type: 'run.started', payload: {}, timestamp: '2026-01-01T00:00:01.000Z' });
+    // The kicktodo.com shape: an anon (other-tenant) cookie beside a valid token for a tenant-A run.
+    const res = await fetch(`${BASE}${runEvents}?streamToken=${encodeURIComponent(mintRunStreamToken(A))}`, {
+      headers: { accept: 'text/event-stream', ...V2, cookie: `__session=${signSession(ANON_OWNER)}` },
+    });
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain(`"runId":"${toWireRunId(A, 'tenant-A')}"`);
+    expect(body).not.toContain(toWireRunId(A, ANON_OWNER.tenantId));
+  });
+
   it('a rejected token answers 401 invalid_token, for a fresh visitor and a returning anon cookie, absent run or not', async () => {
     const bogus = 'streamToken=v1.99999999999.bogus';
     const sse = { accept: 'text/event-stream', ...V2 };
@@ -151,6 +189,18 @@ describe('stream-token capability (HTTP)', () => {
     expect(await code(`${runEvents}?${bogus}`, { ...sse, cookie: `__session=${signSession(mintAnonSession())}` })).toBe(401);
     // An absent run answers the same as an unowned one — nothing about existence leaks.
     expect(await code(`${events('no-such-run-0123456789', 'tenant-A')}?${bogus}`, sse)).toBe(401);
+
+    // The same three answers from runAccess's copy: a returning anon cookie
+    // naming an id bound to its OWN tenant passes the identity layer, so the
+    // route's tenant gate refuses — and that refusal is the 401, not a 404.
+    const anon = mintAnonSession();
+    const cookie = `__session=${signSession(anon)}`;
+    const own = await fetch(`${BASE}${events(A, anon.tenantId)}?${bogus}`, { headers: { ...sse, cookie } });
+    expect(own.status).toBe(401);
+    expect(own.headers.get('www-authenticate')).toContain('error="invalid_token"');
+    expect(await code(`${events('no-such-run-0123456789', anon.tenantId)}?${bogus}`, { ...sse, cookie })).toBe(401);
+    // Positive control: the same own-tenant id with NO token is the tenant gate's 404.
+    expect(await code(events(A, anon.tenantId), { ...sse, cookie })).toBe(404);
   });
 
   it('a stale token never costs a caller the access their OTHER credential grants', async () => {

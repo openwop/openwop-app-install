@@ -6,7 +6,7 @@
  * Read-only reporting over the authed surface; ingest is the public beacon.
  */
 import { ChatPocket } from '../../chat/ChatPocket.js';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Button } from '../../ui/Button.js';
 import { useTranslation } from 'react-i18next';
 import { formatNumber } from '../../i18n/format.js';
@@ -25,7 +25,7 @@ import { AnalyticsEventCard, EventTypeBadge, EventDetail, TYPE_LABEL } from './A
 // StatusBadge/TYPE_STATUS now live in AnalyticsViews (shared by the card + column).
 import { useFeatureAccess } from '../../featureToggles/FeatureAccessContext.js';
 import { ActivityIcon, GlobeIcon, LockIcon } from '../../ui/icons/index.js';
-import { getEvents, getSummary, listOrgs, type AnalyticsComparison, type AnalyticsEvent, type AnalyticsSummary, type AnalyticsWindow, type Org , getNavReport, type NavReport , getTrend, type TrendPoint } from './analyticsClient.js';
+import { getEvents, getSummary, listOrgs, type AnalyticsComparison, type AnalyticsEvent, type AnalyticsSummary, type AnalyticsWindow, type Org , getNavReport, type NavReport , getTrend, type TrendPoint, getBehaviorSettings, type BehaviorSettings } from './analyticsClient.js';
 
 /** Figure key → event-type filter. 'events'/'sessions' are non-filtering totals. */
 const FIGURE_FILTER: Record<string, AnalyticsEvent['type'] | undefined> = {
@@ -419,6 +419,8 @@ export function AnalyticsPage(): JSX.Element {
       )}
       </OrgSelectionState>
       <NavTelemetrySection />
+      {orgId ? <BehaviorCaptureSection orgId={orgId} /> : null}
+      {orgId ? <HeatmapSection orgId={orgId} /> : null}
       {/* ADR 0768 D5 — the feature's assistant in a Pocket. Honest scope: the agent's
           tools read every org the caller can read, not only the one on screen. */}
       <ChatPocket
@@ -428,6 +430,80 @@ export function AnalyticsPage(): JSX.Element {
         renderEmptyState={() => <p className="chat-pocket__hint">{t('pocketHint')}</p>}
       />
     </div>
+  );
+}
+
+// ADR 0951 P1 — lazy: the heat-map view loads only for a workspace that has it on.
+const HeatmapPanel = lazy(() => import('./HeatmapPanel.js').then((m) => ({ default: m.HeatmapPanel })));
+
+function HeatmapSection({ orgId }: { orgId: string }): JSX.Element | null {
+  const { t } = useTranslation('analytics');
+  const { enabled } = useFeatureAccess('analytics.heatmaps');
+  if (!enabled) return null;
+  return (
+    <section className="surface-card u-flex u-flex-col u-gap-2 u-p-4" aria-labelledby="heatmap-heading">
+      <h2 id="heatmap-heading" className="u-label-sm">{t('heatHeading')}</h2>
+      <p className="u-m-0 u-fs-12 muted">{t('heatHint')}</p>
+      <Suspense fallback={<InlineState kind="loading" message={t('heatLoading')} />}>
+        <HeatmapPanel orgId={orgId} />
+      </Suspense>
+    </section>
+  );
+}
+
+/** ADR 0951 P0 — behavior-capture status. Renders only when heat maps or session
+ *  replay is switched on for the workspace. Session replay fails closed: without
+ *  durable blob storage it says "Not configured" and nothing is ever recorded;
+ *  without consent management no visitor can opt in. Status is a labelled chip,
+ *  never colour alone. */
+function BehaviorCaptureSection({ orgId }: { orgId: string }): JSX.Element | null {
+  const { t } = useTranslation('analytics');
+  const heatOn = useFeatureAccess('analytics.heatmaps').enabled;
+  const replayOn = useFeatureAccess('analytics.session-replay').enabled;
+  const [settings, setSettings] = useState<BehaviorSettings | null>(null);
+  const [failed, setFailed] = useState(false);
+  const shown = heatOn || replayOn;
+  useEffect(() => {
+    if (!shown) return;
+    let live = true;
+    setSettings(null);
+    setFailed(false);
+    getBehaviorSettings(orgId).then((s) => { if (live) setSettings(s); }).catch(() => { if (live) setFailed(true); });
+    return () => { live = false; };
+  }, [orgId, shown]);
+  if (!shown) return null;
+  const replay = settings?.replay;
+  const replayState = !replay ? null
+    : !replay.enabled ? { chip: 'chip--muted', label: t('behaviorOff'), hint: null }
+    : !replay.storageConfigured ? { chip: 'chip--warning', label: t('behaviorNotConfigured'), hint: t('behaviorReplayNoStorage') }
+    : !replay.consentEnabled ? { chip: 'chip--warning', label: t('behaviorNeedsConsent'), hint: t('behaviorReplayNoConsent') }
+    : !replay.available ? { chip: 'chip--muted', label: t('behaviorNotAvailable'), hint: t('behaviorReplayNotAvailable') }
+    : { chip: 'chip--success', label: t('behaviorOn'), hint: t('behaviorReplayReady', { days: replay.retentionDays }) };
+  return (
+    <section className="surface-card u-flex u-flex-col u-gap-2 u-p-4" aria-labelledby="behavior-capture-heading">
+      <h2 id="behavior-capture-heading" className="u-label-sm">{t('behaviorHeading')}</h2>
+      {failed ? (
+        <InlineState kind="failed" message={t('behaviorUnavailable')} announce={t('behaviorUnavailable')} announcePolite />
+      ) : settings === null ? (
+        <InlineState kind="loading" message={t('behaviorLoading')} />
+      ) : (
+        <dl className="u-m-0 u-flex u-flex-col u-gap-2">
+          <div>
+            <dt className="u-fs-12 muted">{t('behaviorHeatmaps')}</dt>
+            <dd className="u-m-0">
+              <span className={`chip ${settings.heatmaps.enabled ? 'chip--success' : 'chip--muted'}`}>{t(settings.heatmaps.enabled ? 'behaviorOn' : 'behaviorOff')}</span>
+            </dd>
+          </div>
+          <div>
+            <dt className="u-fs-12 muted">{t('behaviorReplay')}</dt>
+            <dd className="u-m-0 u-flex u-flex-col u-gap-1">
+              {replayState ? <span><span className={`chip ${replayState.chip}`}>{replayState.label}</span></span> : null}
+              {replayState?.hint ? <span className="u-fs-12 muted">{replayState.hint}</span> : null}
+            </dd>
+          </div>
+        </dl>
+      )}
+    </section>
   );
 }
 

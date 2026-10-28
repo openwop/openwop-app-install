@@ -18,13 +18,18 @@ async function parse<T>(res: Response): Promise<T> {
   return (await res.json()) as T;
 }
 
-export const FUNNEL_STEP_KINDS = ['landing', 'optin', 'sales', 'checkout', 'upsell', 'downsell', 'thankyou'] as const;
+// Mirrors the backend `FUNNEL_STEP_KINDS` (ADR 0948 D4 adds webinar + application); pinned by test.
+export const FUNNEL_STEP_KINDS = ['landing', 'optin', 'sales', 'checkout', 'upsell', 'downsell', 'thankyou', 'webinar', 'application'] as const;
 export type FunnelStepKind = (typeof FUNNEL_STEP_KINDS)[number];
 
 export interface StepRule { when?: { outcome?: 'accepted' | 'declined'; utm?: { key: string; value: string } }; goto: string }
 export interface StepExperimentVariant { key: string; pageId: string | null; weight: number }
 export interface StepExperiment { experimentId: string; status: 'running' | 'stopped'; variants: StepExperimentVariant[]; createdAt: string }
-export interface FunnelStep { stepId: string; kind: FunnelStepKind; pageId: string; name?: string; routing?: StepRule[]; experiment?: StepExperiment }
+export interface FunnelStep {
+  stepId: string; kind: FunnelStepKind; pageId: string; name?: string; routing?: StepRule[]; experiment?: StepExperiment;
+  /** ADR 0948 D4 — webinar steps bind a same-org webinar; application steps a same-org form. */
+  webinar?: { marketingEventId: string } | null; application?: { formId: string } | null;
+}
 export interface Funnel {
   funnelId: string; orgId: string; name: string; slug: string;
   status: 'draft' | 'published' | 'archived';
@@ -32,6 +37,8 @@ export interface Funnel {
   createdAt: string; updatedAt: string; publishedAt?: string;
   /** VP-R2-3 — the operator-authored complete-state CTA. */
   completionCta?: { label: string; url: string };
+  /** ADR 0948 P6a — a live custom domain of this org (links use it once funnels are served there). */
+  primaryHostname?: string;
 }
 export interface Org { orgId: string; name: string }
 
@@ -39,7 +46,22 @@ export interface StepStatRow { stepId: string; kind: string; name?: string; view
 export interface FunnelStats { funnelId: string; steps: StepStatRow[]; days: Array<{ day: string; steps: Record<string, { views: number; completions: number; revenue: number; orders: number }> }>; eventWindow: number; rebuiltAt: string | null }
 
 export interface VariantResult { key: string; pageId: string | null; weight: number; sessions: number; conversions: number; conversionRate: number; zScore: number | null; significant: boolean | null; insufficientSample: boolean }
-export interface ExperimentResults { experimentId: string; status: 'running' | 'stopped'; baselineKey: string; minSessionsPerVariant: number; variants: VariantResult[] }
+export interface ExperimentResults {
+  experimentId: string; status: 'running' | 'stopped'; baselineKey: string; minSessionsPerVariant: number; variants: VariantResult[];
+  /** ADR 0949 P0 — optional so a response from an older backend still renders. */
+  health?: LegacyResultHealth;
+  /** ADR 0949 P0/P1b — every `significant` was withheld: the split is broken (`srm`),
+   *  or retention deleted events from the test's life (`coverage`). */
+  significanceWithheld?: 'srm' | 'coverage';
+  /** ADR 0949 P1b — optional so a response from an older backend still renders. */
+  coverage?: { status: 'complete' | 'partial'; retainedSince: string | null; rebuiltAt: string | null };
+}
+/** ADR 0949 P0 — the split check and the fixed-horizon notice on a legacy result. */
+export interface LegacyResultHealth {
+  srm: { chiSquare: number; pValue: number; mismatch: boolean; alpha: number } | null;
+  stopEarly: 'fixed_horizon_do_not_stop_early';
+}
+
 
 export async function listOrgs(): Promise<Org[]> {
   const res = await fetch(`${config.baseUrl}/host/openwop-app/orgs`, { headers: authedHeaders(), ...fetchOpts });
@@ -54,7 +76,7 @@ export async function listFunnels(orgId: string): Promise<Funnel[]> {
   return (await parse<{ funnels: Funnel[] }>(res)).funnels;
 }
 
-export interface FunnelDraft { name: string; slug?: string; steps?: Array<Pick<FunnelStep, 'kind' | 'pageId'> & { stepId?: string; name?: string; routing?: StepRule[] }>; completionCta?: { label: string; url: string } | null }
+export interface FunnelDraft { name: string; slug?: string; steps?: Array<Pick<FunnelStep, 'kind' | 'pageId'> & { stepId?: string; name?: string; routing?: StepRule[]; webinar?: { marketingEventId: string } | null; application?: { formId: string } | null }>; completionCta?: { label: string; url: string } | null; primaryHostname?: string | null }
 
 /** ONE funnel by id — what `/funnels/:funnelId` loads (ADR 0522). The editor is
  *  reachable by URL alone (bookmark, shared link, reload), so it must not depend

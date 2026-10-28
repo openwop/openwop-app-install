@@ -1,78 +1,63 @@
 /**
- * ADR 0123 Phase 1 — model win-rate leaderboard math (`features/evals/leaderboard.ts`,
- * pure): per-model counts, win-rate = up / (up + down) (neutral excluded; 0 with no
- * decisive vote), ranked win-rate → decisive volume → model id, and the combined board
- * ranked by Elo FIRST — exercised with data where Elo and win-rate DISAGREE.
+ * ADR 0986 D3 — the chat-ratings leaderboard math (`features/evals/leaderboard.ts`,
+ * pure): per-`provider/model` counts, the Wilson 95% lower bound as the ranking
+ * score, the per-rater weight, and the deterministic tie order.
  *
- * Witnessed (wave 25 probes): neutral in the denominator, an unguarded 0/0, neutral not
- * counted, an inverted win-rate sort, a reversed volume/id tiebreak, no Elo sort, and a
- * dropped Elo attach each red a case. (The empty-input case was cut: no sabotage reds it,
- * and `evals-leaderboard-service.test.ts` › "a tenant with no feedback…" asserts `[]`
- * through the same `computeLeaderboard([])`.)
+ * Replaces the ADR 0123 Elo cases: the anchored Elo played votes in storage-key
+ * order, so the same votes could rank differently (EV2-3). Sabotage witnesses:
+ * dropping the per-rater scale, ranking by raw win rate, a missing `up` tiebreak,
+ * and keying rows by model alone each red a case below.
  */
 import { describe, it, expect } from 'vitest';
-import { computeLeaderboard, combineLeaderboard, type RatedTurn } from '../src/features/evals/leaderboard.js';
+import { combineLeaderboard, wilsonLowerBound, MAX_RATER_WEIGHT, type RatedTurn } from '../src/features/evals/leaderboard.js';
 
-describe('computeLeaderboard', () => {
-  it('computes per-model up/down/neutral + win-rate', () => {
-    const rows = [
-      { model: 'a', rating: 'up' as const },
-      { model: 'a', rating: 'up' as const },
-      { model: 'a', rating: 'down' as const },
-      { model: 'a', rating: 'neutral' as const },
-      { model: 'b', rating: 'up' as const },
-      { model: 'b', rating: 'down' as const },
-    ];
-    const lb = computeLeaderboard(rows);
-    const a = lb.find((m) => m.model === 'a')!;
-    expect(a).toMatchObject({ up: 2, down: 1, neutral: 1, total: 4 });
-    expect(a.winRate).toBeCloseTo(2 / 3);
-    const b = lb.find((m) => m.model === 'b')!;
-    expect(b.winRate).toBeCloseTo(0.5);
-  });
+const v = (model: string, rating: RatedTurn['rating'], rater = 'user:1', provider = 'openai'): RatedTurn => ({ provider, model, rating, rater });
 
-  it('ranks by win-rate, then decisive volume, then model id (deterministic)', () => {
-    const rows: RatedTurn[] = [
-      { model: 'low', rating: 'down' },
-      { model: 'high', rating: 'up' },
-      { model: 'high', rating: 'up' },
-      // three models tied at winRate 0.5: tie-big has MORE decisive votes (4 vs 2) …
-      { model: 'tie-small', rating: 'up' }, { model: 'tie-small', rating: 'down' },
-      { model: 'tie-big', rating: 'up' }, { model: 'tie-big', rating: 'down' },
-      { model: 'tie-big', rating: 'up' }, { model: 'tie-big', rating: 'down' },
-      // … and ab / aa tie tie-small on BOTH, so only the model id orders them.
-      { model: 'ab', rating: 'up' }, { model: 'ab', rating: 'down' },
-      { model: 'aa', rating: 'up' }, { model: 'aa', rating: 'down' },
-    ];
-    const lb = computeLeaderboard(rows);
-    expect(lb.map((m) => m.model)).toEqual(['high', 'tie-big', 'aa', 'ab', 'tie-small', 'low']);
-    // determinism: the ranking does not depend on input order
-    expect(computeLeaderboard([...rows].reverse())).toEqual(lb);
-  });
-
-  it('neutral-only model has winRate 0 (no decisive votes)', () => {
-    const lb = computeLeaderboard([{ model: 'x', rating: 'neutral' }]);
-    expect(lb[0]).toMatchObject({ model: 'x', winRate: 0, neutral: 1, total: 1 });
+describe('wilsonLowerBound', () => {
+  it('is 0 with no decisive votes and below the raw rate otherwise', () => {
+    expect(wilsonLowerBound(0, 0)).toBe(0);
+    expect(wilsonLowerBound(0, 5)).toBe(0);
+    expect(wilsonLowerBound(1, 1)).toBeLessThan(0.3); // one lucky up is weak evidence
+    expect(wilsonLowerBound(95, 100)).toBeGreaterThan(0.88);
+    expect(wilsonLowerBound(95, 100)).toBeLessThan(0.95);
   });
 });
 
-describe('combineLeaderboard (win-rate + Elo)', () => {
-  it('carries both metrics and ranks by Elo', () => {
-    const lb = combineLeaderboard([
-      { model: 'good', rating: 'up' }, { model: 'good', rating: 'up' },
-      { model: 'bad', rating: 'down' },
-    ]);
-    expect(lb[0]!.model).toBe('good');
-    expect(lb[0]!.elo).toBeGreaterThan(1500);
-    expect(lb[0]!.winRate).toBe(1);
-    expect(lb.find((m) => m.model === 'bad')!.elo).toBeLessThan(1500);
+describe('combineLeaderboard', () => {
+  it('counts per provider/model, with win rate, raters and the confidence score', () => {
+    const lb = combineLeaderboard([v('a', 'up'), v('a', 'up', 'user:2'), v('a', 'down'), v('a', 'neutral'), v('b', 'up'), v('b', 'down')]);
+    const a = lb.find((m) => m.model === 'a')!;
+    expect(a).toMatchObject({ key: 'openai/a', provider: 'openai', up: 2, down: 1, neutral: 1, total: 4, raters: 2 });
+    expect(a.winRate).toBeCloseTo(2 / 3);
+    expect(a.score).toBeCloseTo(wilsonLowerBound(2, 3));
   });
 
-  it('Elo outranks win-rate when they disagree (a long strong record beats one lucky up)', () => {
-    const steady: RatedTurn[] = [...Array.from({ length: 10 }, () => ({ model: 'steady', rating: 'up' as const })), { model: 'steady', rating: 'down' }];
-    const lb = combineLeaderboard([...steady, { model: 'lucky', rating: 'up' }]);
-    expect(lb.map((m) => m.model)).toEqual(['steady', 'lucky']);
-    expect(lb[0]!.winRate, 'precondition: win-rate alone would rank lucky first').toBeLessThan(lb[1]!.winRate);
-    expect(lb[0]!.elo).toBeGreaterThan(lb[1]!.elo);
+  it('the same model through two providers is two rows', () => {
+    const lb = combineLeaderboard([v('m', 'up', 'user:1', 'openai'), v('m', 'up', 'user:1', 'openrouter')]);
+    expect(lb.map((r) => r.key).sort()).toEqual(['openai/m', 'openrouter/m']);
+  });
+
+  it('a long strong record outranks one lucky up; 0 of 5 ranks below an unrated model', () => {
+    const steady = [...Array.from({ length: 9 }, (_, i) => v('steady', 'up', `user:${i}`)), v('steady', 'down', 'user:x')];
+    const lb = combineLeaderboard([...steady, v('lucky', 'up'), ...Array.from({ length: 5 }, () => v('bad', 'down')), v('quiet', 'neutral')]);
+    expect(lb.map((m) => m.model)).toEqual(['steady', 'lucky', 'quiet', 'bad']);
+  });
+
+  it('is a function of the votes, not of their order (EV2-3)', () => {
+    const votes = [v('a', 'up'), v('a', 'down'), v('a', 'up', 'user:2'), v('b', 'down'), v('b', 'up')];
+    expect(combineLeaderboard([...votes].reverse())).toEqual(combineLeaderboard(votes));
+  });
+
+  it('one rater weighs at most MAX_RATER_WEIGHT decisive votes in the score; the counts stay raw', () => {
+    const stuffer = Array.from({ length: 50 }, () => v('stuffed', 'up', 'user:stuffer'));
+    const [row] = combineLeaderboard(stuffer);
+    expect(row).toMatchObject({ up: 50, raters: 1 });
+    expect(row!.score).toBeCloseTo(wilsonLowerBound(MAX_RATER_WEIGHT, MAX_RATER_WEIGHT));
+  });
+
+  it('marks managed tiers and the scripted mock', () => {
+    const lb = combineLeaderboard([{ provider: 'openwop-free', model: 'openwop-free', managed: true, rating: 'up', rater: 'u' }, v('mock-1', 'up', 'u', 'mock')]);
+    expect(lb.find((r) => r.provider === 'openwop-free')).toMatchObject({ managed: true });
+    expect(lb.find((r) => r.provider === 'mock')).toMatchObject({ simulated: true });
   });
 });

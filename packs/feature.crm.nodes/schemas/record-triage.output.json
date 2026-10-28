@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/feature.crm.nodes/1.11.0/record-triage.output.json",
+  "$id": "https://packs.openwop.dev/feature.crm.nodes/1.15.0/record-triage.output.json",
   "title": "CrmRecordTriageOutput",
   "type": "object",
   "required": [

@@ -22,6 +22,10 @@ import type { SubjectRef } from './conversationStore.js';
 export interface SubjectDisplay {
   kind: 'user' | 'agent' | 'other';
   displayName: string;
+  /** Set when no resolver knew the subject and `displayName` is the humanized
+   *  id tail. In-app rosters show it; a public surface (the blog byline)
+   *  omits it, because a hash means nothing to an anonymous reader. */
+  fallback?: true;
 }
 
 type UserDisplayResolver = (tenantId: string, userIds: readonly string[]) => Promise<Map<string, string>>;
@@ -30,12 +34,33 @@ type UserDisplayResolver = (tenantId: string, userIds: readonly string[]) => Pro
  *  without the tenant would silently miss them. */
 type AgentLabelResolver = (tenantId: string, agentIds: readonly string[]) => Promise<Map<string, string>>;
 
+/** Display names for the HOST OPERATOR's own accounts, looked up without a
+ *  tenant: only users whose personal tenant is on the
+ *  `OPENWOP_SUPERADMIN_TENANTS` allowlist resolve, everyone else is absent. */
+type OperatorDisplayResolver = (userIds: readonly string[]) => Promise<Map<string, string>>;
+
 let userResolver: UserDisplayResolver | null = null;
+let operatorResolver: OperatorDisplayResolver | null = null;
 let agentResolver: AgentLabelResolver | null = null;
 
 /** The users feature registers this at init (ADR 0192 D2). */
 export function setUserDisplayResolver(fn: UserDisplayResolver): void {
   userResolver = fn;
+}
+
+/** The users feature registers this at init. Used ONLY by the system site's
+ *  public byline (the operator's own marketing site, where only superadmins
+ *  author): a tenant-scoped lookup cannot see the operator, whose user record
+ *  lives in their personal tenant, not in `host:site`. */
+export function setOperatorDisplayResolver(fn: OperatorDisplayResolver): void {
+  operatorResolver = fn;
+}
+
+/** Resolve user ids to display names for allowlisted operators only. Absent
+ *  resolver or any failure → an empty map (the caller shows no name). */
+export async function resolveOperatorDisplayNames(userIds: readonly string[]): Promise<Map<string, string>> {
+  if (!userIds.length || !operatorResolver) return new Map();
+  return operatorResolver(userIds).catch(() => new Map<string, string>());
 }
 
 /** Optional — a registry-backed agent-label lookup for agent members whose
@@ -92,7 +117,7 @@ export async function resolveSubjectDisplays(
       if (known) out.set(ref, { kind: 'agent', displayName: known });
       else agentIdsToResolve.push(agentId);
     } else {
-      out.set(ref, { kind: 'other', displayName: fallbackName(ref) });
+      out.set(ref, { kind: 'other', displayName: fallbackName(ref), fallback: true });
     }
   }
 
@@ -103,11 +128,13 @@ export async function resolveSubjectDisplays(
 
   for (const id of userIds) {
     const ref = `user:${id}`;
-    out.set(ref, { kind: 'user', displayName: userNames.get(id) ?? fallbackName(ref) });
+    const name = userNames.get(id);
+    out.set(ref, name ? { kind: 'user', displayName: name } : { kind: 'user', displayName: fallbackName(ref), fallback: true });
   }
   for (const id of agentIdsToResolve) {
     const ref = `agent:${id}`;
-    out.set(ref, { kind: 'agent', displayName: agentNames.get(id) ?? fallbackName(ref) });
+    const name = agentNames.get(id);
+    out.set(ref, name ? { kind: 'agent', displayName: name } : { kind: 'agent', displayName: fallbackName(ref), fallback: true });
   }
   return out;
 }

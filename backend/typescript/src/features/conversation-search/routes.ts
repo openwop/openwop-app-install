@@ -1,15 +1,17 @@
 /**
  * Conversation-search routes (ADR 0112 Phase 2) — host-extension, read-only.
  *
- * `GET|POST /v1/host/openwop-app/chat/search?q&type&role&limit` — full-text search
- * over the CALLER's conversations + messages. Gated by the `conversation-search`
- * toggle (404 when off, so the rail self-hides). The caller's owned-or-participant
- * conversations are resolved through the shared ADR 0043 visibility predicate
- * (`isVisibleToAsync`) BEFORE the query, and only those ids enter the search scope
- * — a co-tenant non-participant's conversation can never surface (no existence
- * leak). No mutation surface: indexing is internal (lazy backfill in the engine).
+ * `GET|POST /v1/host/openwop-app/chat/search?q&type&role&limit` — search over the
+ * CALLER's conversations + messages; every word must match (ADR 0997 D3). Always
+ * on (no toggle since ADR 0134). The caller's readable conversations are resolved
+ * through the shared ADR 0043 visibility predicate (`isVisibleToAsync`) BEFORE the
+ * query, and only those ids reach storage, so a co-tenant non-participant's
+ * conversation can never surface. Read-only: nothing is indexed or written.
+ * Response: `{ hits, truncated }` (`truncated` = only the newest candidate
+ * messages were examined).
  *
  * @see docs/adr/0112-conversation-full-text-search.md
+ * @see docs/adr/0997-conversation-search-source-of-truth.md
  */
 import type { Request, Response, NextFunction } from 'express';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
@@ -50,12 +52,12 @@ export function registerConversationSearchRoutes(deps: RouteDeps): void {
 
       // XCH-HOLE-5 (Wave 4): visibility resolution + scope + query live in the
       // ONE shared helper so this route and the agent tool cannot drift.
-      const hits = await searchVisibleConversations(storage, tenantId, actingUserId, q, {
+      const { hits, truncated } = await searchVisibleConversations(storage, tenantId, actingUserId, q, {
         ...(type ? { type } : {}),
         ...(role ? { role } : {}),
         limit,
       });
-      res.json({ hits });
+      res.json({ hits, truncated });
     } catch (err) {
       next(err);
     }

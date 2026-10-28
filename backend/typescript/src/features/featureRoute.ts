@@ -324,6 +324,16 @@ export async function requireTenantScope(req: Request, scope: Scope): Promise<vo
 }
 
 /**
+ * ADR 0779 D1 — the ONE write authority for the tenant-wide BYOK key store.
+ * Shared, not copied: the BYOK routes (`routes/byok.ts`) and every route that
+ * lets a caller point work at a stored key (ADR 0943 D6, campaign-ops agent
+ * bindings) call this same predicate.
+ */
+export function requireByokManage(req: Request): Promise<void> {
+  return requireTenantScope(req, 'host:byok:manage');
+}
+
+/**
  * Every spelling of the caller an authority check must try (ADR 0774 D5, moved
  * here by ADR 0775 D1 so kanban and the agent routes share ONE copy). This app
  * has two spellings of one human in play: an unbound OIDC bearer presents the

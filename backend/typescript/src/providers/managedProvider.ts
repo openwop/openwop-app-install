@@ -66,9 +66,10 @@ import { isSinglePrincipalTenant } from '../host/accessControlService.js';
 import { createHash } from 'node:crypto';
 import { listManagedProviderIds } from './catalog.js';
 import { dispatchChat, type ChatMessage, type ContentPart, type ProviderId } from './dispatch.js';
-import { dispatchMiniMaxToolsRound } from './dispatchProviderTools.js';
-import type { ToolDef, ToolUseBlock } from './dispatchAnthropicTools.js';
+import { dispatchGoogleToolsRound, dispatchMiniMaxToolsRound, dispatchOpenAIToolsRound } from './dispatchProviderTools.js';
+import { dispatchAnthropicToolsRound, type ToolDef, type ToolUseBlock } from './dispatchAnthropicTools.js';
 import { OWNED_REF_PREFIXES } from '../byok/refNamespaces.js';
+import { resolveSecret } from '../byok/secretResolver.js';
 
 const log = createLogger('providers.managed');
 
@@ -119,8 +120,11 @@ interface ManagedTarget {
   provider: ProviderId;
   /** Underlying model id. */
   model: string;
-  /** Storage ref under which the encrypted server-held key lives. */
+  /** Storage ref under which the env-seeded, encrypted server-held key lives. */
   storageRef: string;
+  /** ADR 0990 D2 — the host-global Secrets Vault ref the operator types the key
+   *  into. Read before the env row, and never another provider's. */
+  vaultRef: string;
   /** Env var read at bootstrap to seed the storage row. */
   envKeyName: string;
   /** Per-tenant per-day cap (input + output tokens combined). */
@@ -186,19 +190,160 @@ export function prepaidDrawTokens(
  */
 export const DEFAULT_MANAGED_DAILY_TOKEN_CAP = 150_000;
 
-function getTargets(): Record<string, ManagedTarget> {
+/** ADR 0990 D1 — the underlying providers a managed tier can run on: the four
+ *  with both a chat adapter and a tools-round adapter. Chosen by the stored
+ *  superadmin setting, else `OPENWOP_MANAGED_PROVIDER` (default `minimax`). */
+export const MANAGED_UNDERLYING_PROVIDERS = ['minimax', 'anthropic', 'openai', 'google'] as const;
+export type ManagedUnderlying = typeof MANAGED_UNDERLYING_PROVIDERS[number];
+
+export function isManagedUnderlying(p: unknown): p is ManagedUnderlying {
+  return typeof p === 'string' && (MANAGED_UNDERLYING_PROVIDERS as readonly string[]).includes(p);
+}
+
+interface ManagedProviderSpec {
+  envKeyName: string;
+  envModelName: string;
+  defaultModel: string;
+  /** The env-seeded storage row. Each provider has its OWN row: with a shared
+   *  row, a switch before the new provider's key is set would send the old
+   *  provider's key to the new provider's API. A missing key must read as
+   *  "unavailable", never as another provider's key. */
+  envStorageRef: string;
+  /** Cache-read price ÷ input price, the ADR 0786 D6 prepaid-draw weight. */
+  cachedReadWeight: number;
+}
+
+const PROVIDER_SPECS: Record<ManagedUnderlying, ManagedProviderSpec> = {
+  // MiniMax-M3: $0.06 cache read ÷ $0.30 input per 1M = 0.2 (re-measured
+  // 2026-09-29, ADR 0786 D6). The row keeps its pre-0990 name.
+  minimax: { envKeyName: 'MINIMAX_API_KEY', envModelName: 'MINIMAX_MODEL', defaultModel: 'MiniMax-M3', envStorageRef: `${MANAGED_REF_PREFIX}openwop-free`, cachedReadWeight: 0.2 },
+  // Anthropic cache reads are billed at 0.1x the base input price.
+  anthropic: { envKeyName: 'ANTHROPIC_API_KEY', envModelName: 'ANTHROPIC_MODEL', defaultModel: 'claude-sonnet-5-5', envStorageRef: `${MANAGED_REF_PREFIX}openwop-free@anthropic`, cachedReadWeight: 0.1 },
+  // OpenAI cached input is billed at 0.1x on the GPT-5 family.
+  openai: { envKeyName: 'OPENAI_API_KEY', envModelName: 'OPENAI_MODEL', defaultModel: 'gpt-5.6-terra', envStorageRef: `${MANAGED_REF_PREFIX}openwop-free@openai`, cachedReadWeight: 0.1 },
+  // Gemini implicit-cache reads: 0.25x is the conservative published rate.
+  google: { envKeyName: 'GOOGLE_API_KEY', envModelName: 'GOOGLE_MODEL', defaultModel: 'gemini-3.8-flash', envStorageRef: `${MANAGED_REF_PREFIX}openwop-free@google`, cachedReadWeight: 0.25 },
+};
+
+/** ADR 0990 D2 — the host-global Secrets Vault ref for a provider's free-tier
+ *  key. Not under `managed:`: that prefix is owned by this module (ADR 0779), so
+ *  the Secrets Vault refuses to write it. */
+export function managedTierVaultRef(provider: ManagedUnderlying): string {
+  return `free-tier:${provider}`;
+}
+
+/** The model a provider runs when the operator names none. */
+export function managedTierDefaultModel(provider: ManagedUnderlying): string {
+  return PROVIDER_SPECS[provider].defaultModel;
+}
+
+/** `OPENWOP_MANAGED_PROVIDER`, or `minimax` when unset. An unknown value makes
+ *  the managed tier UNAVAILABLE (logged as an error at boot) rather than
+ *  falling back to MiniMax, because the operator chose the provider for its
+ *  data terms and a silent fallback would break the promise they made. */
+export function managedUnderlyingFromEnv(): ManagedUnderlying | null {
+  const raw = (process.env.OPENWOP_MANAGED_PROVIDER ?? '').trim().toLowerCase();
+  if (raw === '') return 'minimax';
+  return isManagedUnderlying(raw) ? raw : null;
+}
+
+/** ADR 0990 D1 — the superadmin's stored selection, as the feature reports it.
+ *  `provider` is not narrowed: a stored value that no longer validates must
+ *  reach the resolver so it can make the tier unavailable (D4). */
+export interface ManagedTierSelection {
+  provider: string;
+  model: string;
+  /** D5 — optional per-subject daily cap for this provider; null/absent = env. */
+  dailyTokenCap?: number | null;
+}
+type ManagedTierConfigProvider = () => Promise<ManagedTierSelection | null>;
+let tierConfigProvider: ManagedTierConfigProvider | null = null;
+let tierMemo: { at: number; value: ManagedTierSelection | null } | null = null;
+let tierRefresh: Promise<void> | null = null;
+let tierRefreshStartedAt = 0;
+/** A refresh older than this is treated as hung and replaced. */
+const TIER_REFRESH_MAX_MS = 10_000;
+/** How long one instance trusts its read of the setting. A save invalidates the
+ *  saving instance at once; every other instance follows within this window. */
+const TIER_MEMO_TTL_MS = 15_000;
+
+/** ADR 0990 D1 fill-a-seam (the ADR 0318 shape) — the managed-tier-admin
+ *  feature registers its reader here at boot. Core never imports the feature;
+ *  unregistered ⇒ env-only, exactly as before. */
+export function registerManagedTierConfigProvider(fn: ManagedTierConfigProvider | null): void {
+  tierConfigProvider = fn;
+  tierMemo = null;
+  if (fn) void refreshManagedTierSelection(true);
+}
+
+/** Drop this instance's memo so the next dispatch re-reads the setting. */
+export function invalidateManagedTierSelection(): void {
+  tierMemo = null;
+}
+
+/** Re-read the stored selection when the memo is stale. A failed read keeps the
+ *  last good selection (an operator's data-terms choice must not flip back to
+ *  env on a store hiccup); with none, the env default serves (D1). */
+export async function refreshManagedTierSelection(force = false): Promise<void> {
+  if (!tierConfigProvider) return;
+  if (!force && tierMemo && Date.now() - tierMemo.at < TIER_MEMO_TTL_MS) return;
+  // A read that never settles must not wedge every later refresh: past the bound,
+  // start a new one (the stale one's late settle cannot clear it, see below).
+  if (tierRefresh && Date.now() - tierRefreshStartedAt < TIER_REFRESH_MAX_MS) return tierRefresh;
+  const read = tierConfigProvider;
+  tierRefreshStartedAt = Date.now();
+  const attempt: Promise<void> = (async () => {
+    try {
+      tierMemo = { at: Date.now(), value: await read() };
+    } catch (err) {
+      log.warn('managed tier setting read failed — keeping the last good selection, else env', {
+        error: err instanceof Error ? err.message : String(err),
+        hasLastGood: tierMemo != null,
+      });
+      if (tierMemo) tierMemo = { ...tierMemo, at: Date.now() };
+    }
+  })().finally(() => { if (tierRefresh === attempt) tierRefresh = null; });
+  tierRefresh = attempt;
+  return attempt;
+}
+
+export type ManagedTierSource = 'setting' | 'env' | 'default';
+
+/** ADR 0990 D1 — the ONE place the effective selection is decided: the stored
+ *  setting, else env, else MiniMax. Null when env names an unknown provider. */
+export function effectiveManagedTierSelection(): (ManagedTierSelection & { source: ManagedTierSource }) | null {
+  const stored = tierMemo?.value;
+  if (stored) return { ...stored, source: 'setting' };
+  const env = managedUnderlyingFromEnv();
+  if (env === null) return null;
+  const spec = PROVIDER_SPECS[env];
+  const envModel = process.env[spec.envModelName];
+  const fromEnv = (process.env.OPENWOP_MANAGED_PROVIDER ?? '').trim() !== '' || envModel != null;
+  return { provider: env, model: envModel ?? spec.defaultModel, source: fromEnv ? 'env' : 'default' };
+}
+
+function envDailyTokenCap(): number {
   const capRaw = Number(process.env.OPENWOP_MANAGED_DAILY_TOKEN_CAP);
-  const cap = Number.isFinite(capRaw) && capRaw > 0 ? capRaw : DEFAULT_MANAGED_DAILY_TOKEN_CAP;
+  return Number.isFinite(capRaw) && capRaw > 0 ? capRaw : DEFAULT_MANAGED_DAILY_TOKEN_CAP;
+}
+
+function getTargets(): Record<string, ManagedTarget> {
+  const selection = effectiveManagedTierSelection();
+  // D4 — a stored provider that no longer validates is unavailable, never a
+  // silent fallback to another provider.
+  if (selection === null || !isManagedUnderlying(selection.provider)) return {};
+  const provider = selection.provider;
+  const spec = PROVIDER_SPECS[provider];
+  const cap = selection.dailyTokenCap != null && selection.dailyTokenCap > 0 ? selection.dailyTokenCap : envDailyTokenCap();
   return {
     'openwop-free': {
-      provider: 'minimax',
-      model: process.env.MINIMAX_MODEL ?? 'MiniMax-M3',
-      storageRef: `${MANAGED_REF_PREFIX}openwop-free`,
-      envKeyName: 'MINIMAX_API_KEY',
+      provider,
+      model: selection.model,
+      storageRef: spec.envStorageRef,
+      vaultRef: managedTierVaultRef(provider),
+      envKeyName: spec.envKeyName,
       dailyTokenCap: cap,
-      // MiniMax-M3: $0.06 cache read ÷ $0.30 input per 1M = 0.2 (re-measured
-      // 2026-09-29, ADR 0786 D6). Operator-overridable when the model or price moves.
-      cachedReadWeight: cachedReadWeightFromEnv(0.2),
+      cachedReadWeight: cachedReadWeightFromEnv(spec.cachedReadWeight),
       defaultSystemPrompt: process.env.OPENWOP_MANAGED_SYSTEM_PROMPT ?? FALLBACK_SYSTEM_PROMPT,
     },
   };
@@ -217,6 +362,7 @@ export function managedProviderIdFromRef(ref: string): string {
  *  → `'minimax'`), or null if the ref maps to no configured managed target. Lets callers
  *  reason about the managed model's capabilities (ADR 0110 media-modality check). */
 export function managedUnderlyingProvider(ref: string): string | null {
+  void refreshManagedTierSelection();
   const target = getTargets()[managedProviderIdFromRef(ref)];
   return target ? target.provider : null;
 }
@@ -386,7 +532,17 @@ export async function bootstrapManagedProvider(): Promise<void> {
   if (!storageRef || !masterKeyPathRef) {
     throw new Error('managedProvider not configured — call configureManagedProvider() first.');
   }
-  for (const [providerId, t] of Object.entries(getTargets())) {
+  if (managedUnderlyingFromEnv() === null) {
+    log.error('OPENWOP_MANAGED_PROVIDER is not a supported managed provider — the managed tier is unavailable', {
+      value: process.env.OPENWOP_MANAGED_PROVIDER,
+      supported: MANAGED_UNDERLYING_PROVIDERS,
+    });
+  }
+  // ADR 0990 — seed EVERY provider's env key, not only the selected one, so a
+  // runtime switch in the admin setting finds its env fallback already stored.
+  for (const providerId of MANAGED_UNDERLYING_PROVIDERS) {
+    const spec = PROVIDER_SPECS[providerId];
+    const t = { envKeyName: spec.envKeyName, storageRef: spec.envStorageRef };
     const envKey = process.env[t.envKeyName];
     if (!envKey) {
       log.info('managed provider env key absent — provider unavailable until set', {
@@ -438,6 +594,22 @@ async function resolveManagedKey(storageRefName: string): Promise<string | null>
     });
     return null;
   }
+}
+
+/** ADR 0990 D2 — a provider's free-tier key: the host-global Secrets Vault ref
+ *  first, then the env-seeded row. Each provider reads only its own two refs. */
+async function resolveProviderKey(provider: ManagedUnderlying): Promise<{ key: string; source: 'vault' | 'env' } | null> {
+  try {
+    // Scopeless on purpose: the Vault's host scope. Null under ephemeral mode.
+    const vaulted = await resolveSecret(managedTierVaultRef(provider));
+    if (vaulted) return { key: vaulted, source: 'vault' };
+  } catch (err) {
+    log.warn('managed tier vault read failed — trying the env key', {
+      provider, error: err instanceof Error ? err.message : String(err),
+    });
+  }
+  const env = await resolveManagedKey(PROVIDER_SPECS[provider].envStorageRef);
+  return env ? { key: env, source: 'env' } : null;
 }
 
 function todayUtc(): string {
@@ -515,6 +687,7 @@ async function prepareManagedDispatch(
   reqMessages: readonly ChatMessage[],
   actingSubject?: string,
 ): Promise<{ target: ManagedTarget; apiKey: string; messages: readonly ChatMessage[]; date: string; meter: ManagedMeter }> {
+  await refreshManagedTierSelection();
   const target = getTargets()[userFacingProvider];
   if (!target) throw new ManagedProviderError('managed_unknown', `No managed target configured for provider "${userFacingProvider}".`);
   if (managedAnonSignInRequired() && tenantId.startsWith('anon:')) throw new ManagedProviderError('sign_in_required', 'Sign in to use the free tier.');
@@ -570,7 +743,7 @@ async function prepareManagedDispatch(
       throw new ManagedProviderError('daily_limit_reached', 'The free tier is at capacity for today. Resets at 00:00 UTC — or bring your own key.');
     }
   }
-  const apiKey = await resolveManagedKey(target.storageRef);
+  const apiKey = (await resolveProviderKey(target.provider as ManagedUnderlying))?.key;
   if (!apiKey) throw new ManagedProviderError('managed_unavailable', 'Free tier is temporarily unavailable. Try again later or bring your own key.');
 
   // Inject the default system prompt when the caller didn't supply one (grounds
@@ -652,11 +825,15 @@ async function recordManagedUsage(
   meter: ManagedMeter,
 ): Promise<number> {
   if (!storageRef || (inTok <= 0 && outTok <= 0)) return 0;
+  // ADR 0990 D5 — Anthropic reports cache reads DISJOINT from input tokens, so
+  // the cap rows would never see them. Count them at full weight, as the
+  // subset-reporting providers already are.
+  const capInTok = draw.provider === 'anthropic' ? inTok + Math.max(0, draw.cachedReadTokens ?? 0) : inTok;
   try {
     // ADR 0693 — charge the same bucket the cap was read from, or the two
     // disagree and a participant is capped on a total they never accrued.
-    await storageRef.incrementManagedUsage(managedUsageBucket(tenantId, actingSubject), userFacingProvider, date, inTok, outTok);
-    await storageRef.incrementManagedUsage(GLOBAL_USAGE_TENANT, userFacingProvider, date, inTok, outTok);
+    await storageRef.incrementManagedUsage(managedUsageBucket(tenantId, actingSubject), userFacingProvider, date, capInTok, outTok);
+    await storageRef.incrementManagedUsage(GLOBAL_USAGE_TENANT, userFacingProvider, date, capInTok, outTok);
     if (meter.exempt) return 0;
     // ADR 0821 D2 (fixes G1) — only the part of the call PAST the free daily
     // allowance is charged, to the plan's monthly allowance and then the
@@ -723,7 +900,7 @@ export interface ManagedToolsRoundResult {
 /** ONE managed (free-tier) tool-calling round — the same caps + server key +
  *  provider hiding as `dispatchManagedChat`, but a single tool round (the
  *  observe→act loop is the caller's). The underlying provider is never exposed.
- *  Only the MiniMax-backed managed tier supports tools here. */
+ *  MiniMax- and Anthropic-backed managed tiers support tools here. */
 /** ADR 0148 A2 (OQ#3) — emit the prefix-cache split for a managed MiniMax call so
  *  the free-tier caching win is observable in prod (grep `managed_prompt_cache`).
  *  Only when the provider reported a cache read (rounds 2..N of a tool turn, and
@@ -741,10 +918,15 @@ function logManagedCache(kind: 'tools-round' | 'chat', tenantId: string, provide
 
 export async function dispatchManagedToolsRound(req: ManagedToolsRoundRequest): Promise<ManagedToolsRoundResult> {
   const { target, apiKey, messages, date, meter } = await prepareManagedDispatch(req.userFacingProvider, req.tenantId, req.messages, req.actingSubject);
-  if (target.provider !== 'minimax') {
+  const toolsRound = target.provider === 'minimax' ? dispatchMiniMaxToolsRound
+    : target.provider === 'anthropic' ? dispatchAnthropicToolsRound
+    : target.provider === 'openai' ? dispatchOpenAIToolsRound
+    : target.provider === 'google' ? dispatchGoogleToolsRound
+    : null;
+  if (!toolsRound) {
     throw new ManagedProviderError('managed_unavailable', 'Tool calling is not available on this managed tier.');
   }
-  const round = await dispatchMiniMaxToolsRound({
+  const round = await toolsRound({
     model: target.model,
     apiKey,
     messages,
@@ -827,7 +1009,9 @@ export interface ManagedProviderStatus {
  * managed call already does.
  */
 export async function getManagedProviderStatuses(): Promise<ManagedProviderStatus[]> {
+  await refreshManagedTierSelection();
   const targets = getTargets();
+  const selection = effectiveManagedTierSelection();
   const statuses: ManagedProviderStatus[] = [];
   for (const providerId of listManagedProviderIds()) {
     const target = targets[providerId];
@@ -835,8 +1019,10 @@ export async function getManagedProviderStatuses(): Promise<ManagedProviderStatu
       statuses.push({
         providerId,
         ready: false,
-        detail:
-          'advertised as managed in providers.json but no server-side dispatch target is configured',
+        // D4 — say WHY: a saved or env provider this host does not support.
+        detail: selection && !isManagedUnderlying(selection.provider)
+          ? `the free-tier provider "${selection.provider}" (${selection.source}) is not supported; choose one of ${MANAGED_UNDERLYING_PROVIDERS.join(', ')}`
+          : 'advertised as managed in providers.json but no server-side dispatch target is configured',
       });
       continue;
     }
@@ -848,14 +1034,14 @@ export async function getManagedProviderStatuses(): Promise<ManagedProviderStatu
       });
       continue;
     }
-    const key = await resolveManagedKey(target.storageRef);
+    const key = await resolveProviderKey(target.provider as ManagedUnderlying);
     statuses.push(
       key
         ? { providerId, ready: true, detail: '' }
         : {
             providerId,
             ready: false,
-            detail: `no server-held key seeded — set ${target.envKeyName} and restart`,
+            detail: `no server-held key for ${target.provider} — add the ${target.vaultRef} key in Access → Connections (Host-global), or set ${target.envKeyName} and restart`,
           },
     );
   }
@@ -865,23 +1051,103 @@ export async function getManagedProviderStatuses(): Promise<ManagedProviderStatu
 /**
  * Resolve the cleartext managed key for the speech path (RFC 0105).
  *
- * The managed MiniMax credential that backs the free chat tier
- * (`managed:openwop-free`, seeded from `MINIMAX_API_KEY`) is the same
- * key the T2A speech endpoint authenticates with. Reuse the EXACT
- * resolution the chat path uses (`getTargets()` → `resolveManagedKey()`)
- * rather than re-reading the raw env var — so the speech path inherits
- * the same encrypt-at-rest / decrypt-in-process discipline and never
- * bypasses BYOK with a raw key. Returns null when no managed key is
- * seeded/decryptable (caller falls back to the deterministic stub).
+ * Managed speech is MiniMax-only (`MANAGED_SPEECH_PROVIDERS`, ADR 0990 D7), so
+ * this is ALWAYS the MiniMax key, whichever provider the chat tier runs on.
+ * Resolving it through the selected chat target would send an Anthropic,
+ * OpenAI or Google key to MiniMax's T2A endpoint the moment the operator
+ * switched. Same ladder as chat (Secrets Vault, then the env-seeded row), so
+ * the speech path never reads a raw env var. Returns null when no MiniMax key
+ * is configured (caller falls back to the deterministic stub).
  */
 export async function resolveManagedSpeechKey(): Promise<string | null> {
-  const target = getTargets()['openwop-free'];
-  if (!target) return null;
   if (!storageRef || !masterKeyPathRef) return null;
-  return resolveManagedKey(target.storageRef);
+  return (await resolveProviderKey('minimax'))?.key ?? null;
+}
+
+/** ADR 0990 D3 — one row of the admin dropdown: can this provider serve the free
+ *  tier right now? Reports WHERE its key resolves from, never the key. */
+export interface ManagedTierProviderOption {
+  provider: ManagedUnderlying;
+  ready: boolean;
+  keySource: 'vault' | 'env' | null;
+  vaultRef: string;
+  envKeyName: string;
+  defaultModel: string;
+}
+
+export async function describeManagedTierProviders(): Promise<ManagedTierProviderOption[]> {
+  const out: ManagedTierProviderOption[] = [];
+  for (const provider of MANAGED_UNDERLYING_PROVIDERS) {
+    const spec = PROVIDER_SPECS[provider];
+    const key = storageRef && masterKeyPathRef ? await resolveProviderKey(provider) : null;
+    out.push({
+      provider,
+      ready: key != null,
+      keySource: key?.source ?? null,
+      vaultRef: managedTierVaultRef(provider),
+      envKeyName: spec.envKeyName,
+      defaultModel: spec.defaultModel,
+    });
+  }
+  return out;
+}
+
+export type ManagedTierTestResult =
+  | { ok: true; provider: ManagedUnderlying; model: string; latencyMs: number; reply: string }
+  | { ok: false; provider: string; model: string; code: string; message: string };
+
+/**
+ * ADR 0990 D3 — "Send a test message": one bounded call to a CANDIDATE provider
+ * and model, through the real dispatch and the real key ladder, before the
+ * owner saves it. This is how a wrong model id is caught before visitors hit
+ * it. Charged to the operator's own usage bucket and the global ceiling, never
+ * to credits. The result names the provider; the key never leaves this module.
+ */
+export async function testManagedTierCandidate(input: {
+  provider: string; model: string; tenantId: string; actingSubject?: string; signal?: AbortSignal;
+}): Promise<ManagedTierTestResult> {
+  const { provider, model } = input;
+  if (!isManagedUnderlying(provider)) {
+    return { ok: false, provider, model, code: 'managed_unknown', message: `"${provider}" is not a supported free-tier provider.` };
+  }
+  const key = storageRef && masterKeyPathRef ? await resolveProviderKey(provider) : null;
+  if (!key) {
+    return { ok: false, provider, model, code: 'managed_key_missing', message: `No key for ${provider}. Add ${managedTierVaultRef(provider)} in the Secrets Vault (Host-global).` };
+  }
+  const started = Date.now();
+  try {
+    const result = await dispatchChat({
+      provider,
+      model,
+      apiKey: key.key,
+      messages: [
+        { role: 'system', content: 'You are checking that this connection works.' },
+        { role: 'user', content: 'Reply with the single word: ready' },
+      ],
+      maxTokens: 32,
+      ...(input.signal ? { signal: input.signal } : {}),
+    });
+    await recordManagedUsage(input.tenantId, 'openwop-free', todayUtc(), result.usage?.inputTokens ?? 0, result.usage?.outputTokens ?? 0, input.actingSubject,
+      { provider, ...(result.usage?.cachedReadTokens != null ? { cachedReadTokens: result.usage.cachedReadTokens } : {}), cachedReadWeight: PROVIDER_SPECS[provider].cachedReadWeight },
+      { freeRemaining: 0, exempt: true });
+    return { ok: true, provider, model, latencyMs: Date.now() - started, reply: result.completion.slice(0, 200) };
+  } catch (err) {
+    const code = (err as { code?: unknown }).code;
+    const raw = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false, provider, model,
+      code: typeof code === 'string' ? code : 'provider_error',
+      // A provider error never echoes the key, but scrub it anyway: this text
+      // reaches a browser.
+      message: raw.split(key.key).join('***').slice(0, 300),
+    };
+  }
 }
 
 /** Test affordance — drop in-process caches without touching storage. */
 export function _clearManagedCacheForTests(): void {
   decryptCache.clear();
+  tierMemo = null;
+  tierRefresh = null;
+  tierRefreshStartedAt = 0;
 }

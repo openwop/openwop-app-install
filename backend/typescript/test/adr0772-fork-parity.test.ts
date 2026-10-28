@@ -5,7 +5,16 @@
  *  - `RRWF-7`: a prefix copy that fails part-way leaves a FAILED fork (never a
  *    `pending` one the orphan sweeper would run on a partial log), and the 500
  *    names it.
- *  - `RRWF-9`: cancelling a source cancels its child runs, never its forks.
+ *  - `RRWF-9`: cancelling a source never cancels its forks.
+ *
+ * Red when (wave 60 probes, tracker TST-BRB-5): the fork route loses
+ * `runQuotaMiddleware`; a refused fork is charged; the copy failure stops failing the
+ * row before answering (both writes below), or stops naming the fork in `Location`;
+ * the cancel cascade stops excluding `forkMode` rows.
+ *
+ * Double guard, recorded: RRWF-7's failed row is written by `storage.updateRun`
+ * AND by `emitTerminalFailure` (`routes/runs.ts`). Dropping either alone stays green;
+ * skipping both reds it.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -19,7 +28,8 @@ let server: http.Server;
 let BASE = '';
 let storage: Storage;
 const H = { 'content-type': 'application/json', authorization: 'Bearer dev-token' };
-const SAVED = { ...process.env };
+const ENV_KEYS = ['OPENWOP_STORAGE_DSN', 'OPENWOP_AUTH_DISABLE_COOKIES', 'OPENWOP_RATELIMIT_DISABLED', 'OPENWOP_RATELIMIT_SESSION_RUNS_PER_MIN', 'OPENWOP_RATELIMIT_IP_RUNS_PER_DAY'] as const;
+const SAVED = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -29,7 +39,7 @@ beforeAll(async () => {
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
 });
 afterAll(async () => {
-  process.env = SAVED;
+  for (const k of ENV_KEYS) { if (SAVED[k] === undefined) delete process.env[k]; else process.env[k] = SAVED[k]; }
   await new Promise<void>((res) => server.close(() => res()));
 });
 beforeEach(() => {
@@ -88,7 +98,7 @@ describe('ADR 0772 D3 (RRWF-7) — a half-copied fork is failed, never runnable'
     process.env.OPENWOP_RATELIMIT_DISABLED = 'true';
     const src = await completedRun();
     const events = await storage.listEvents(bareRunId(src));
-    const fromSeq = events[events.length - 1]!.sequence; // a real mid-log checkpoint
+    const fromSeq = events[events.length - 1]!.sequence; // the source log's last event: a multi-event prefix to copy
     const real = storage.appendEvent.bind(storage);
     let copied = 0;
     const spy = vi.spyOn(storage, 'appendEvent').mockImplementation(async (ev) => {

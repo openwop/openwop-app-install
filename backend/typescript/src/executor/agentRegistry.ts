@@ -79,6 +79,9 @@ export interface ResolvedAgentManifest {
    *  Consumers MUST gate visibility / dispatch on
    *  `(!ownerTenant || ownerTenant === requestTenant)`. */
   ownerTenant?: string;
+  /** ADR 0962 D8 — `false` keeps a PACK agent off the A2A 0.3 card and refuses it on
+   *  `message/send` (both read `a2aListedAgents` / `isA2aDispatchable`). Absent = listed. */
+  a2aExposed?: false;
 }
 
 /** A pre-compiled handoff-schema validator (closes over an Ajv ValidateFunction

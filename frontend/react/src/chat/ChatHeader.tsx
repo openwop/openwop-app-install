@@ -133,7 +133,7 @@ export function ChatHeader({
       { id: 'export-json', label: t('exportAsJson'), onSelect: () => onExport('json') },
     ] : []),
     ...(hasTurns && onShare ? [{ id: 'share', label: t('share', { defaultValue: 'Share link' }), title: t('shareConversationTitle', { defaultValue: 'Create a public read-only link to this conversation' }), onSelect: onShare }] : []),
-    ...(onImport ? [{ id: 'import', label: t('import'), title: t('importConversationTitle'), onSelect: () => importInputRef.current?.click() }] : []),
+    ...(onImport ? [{ id: 'import', label: t('importConversation'), title: t('importConversationTitle'), onSelect: () => importInputRef.current?.click() }] : []),
   ];
 
   return (

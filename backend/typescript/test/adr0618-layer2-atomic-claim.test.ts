@@ -18,10 +18,24 @@
  * attempts at one identity mint two rows. The emitter's own docblock had already
  * named the fix it lacked: *"a real CAS claim (an `ON CONFLICT DO NOTHING`
  * insert used as a lock), not a longer read."*
+ *
+ * Tracker TST-BG3-14. Red when: the sqlite claim's conflict arm takes over a FRESH
+ * claim (`WHERE 1 = 1`), loses the stale takeover (`DO NOTHING`), measures staleness
+ * from `nowMs` instead of `nowMs - staleAfterMs`, the release DELETE matches nothing,
+ * or `emitNotification` fires after LOSING the claim (`if (!won)` skipped). The
+ * claim key's lack of `attempt` is pinned at COMPILE time (`@ts-expect-error`).
  */
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import type { Storage } from '../src/storage/storage.js';
+import { runWithEffectContext } from '../src/host/runEffectContext.js';
+import { setEffectEscapeBackend, mintEffectIdentity } from '../src/host/effectEscapeLedger.js';
+import { setInvocationBackend } from '../src/executor/invocationLog.js';
+import { resetLogicalInvocationOrdinals } from '../src/host/effectIdentity.js';
+import { getNotificationEmitter, setNotificationBackend } from '../src/notifications/emitter.js';
 
 let storage: Storage;
 const KEY = { runId: 'r1', nodeId: 'n1', invocationId: 'inv-1' };
@@ -68,10 +82,11 @@ describe('ADR 0618 — claimInvocation is an atomic claim', () => {
   // A second ATTEMPT at one identity must not be able to re-fire the effect.
   it('the claim key excludes `attempt` — a retry cannot mint a fresh claim', async () => {
     expect(await storage.claimInvocation(KEY, FRESH)).toBe(true);
-    // There is no attempt parameter to vary; this pins that the SIGNATURE has
-    // none, so a future change adding one is a deliberate act, not a slip.
-    expect(Object.keys(KEY).sort()).toEqual(['invocationId', 'nodeId', 'runId']);
-    expect(await storage.claimInvocation(KEY, FRESH)).toBe(false);
+    // The SIGNATURE has no attempt: tsc refuses the extra property (the directive
+    // below goes red the moment `attempt` joins the key), and at run time a second
+    // ATTEMPT at the same identity still loses the claim.
+    // @ts-expect-error — `attempt` is not part of the claim key (RFC 0150 §B).
+    expect(await storage.claimInvocation({ runId: 'r1', nodeId: 'n1', invocationId: 'inv-1', attempt: 2 }, FRESH)).toBe(false);
   });
 });
 
@@ -152,27 +167,17 @@ describe('ADR 0618 — the notification seam declines to fire when it loses the 
   };
   const CTX = { runId: 'run-0616', replaying: false, nodeId: 'notify', tenantId: 't1', attempt: 1 };
 
-  async function host(): Promise<Storage> {
-    const { mkdtempSync } = await import('node:fs');
-    const { tmpdir } = await import('node:os');
-    const { join } = await import('node:path');
-    const { setEffectEscapeBackend } = await import('../src/host/effectEscapeLedger.js');
-    const { setInvocationBackend } = await import('../src/executor/invocationLog.js');
-    const { setNotificationBackend } = await import('../src/notifications/emitter.js');
+  async function host(): Promise<{ st: Storage; dir: string }> {
     const dir = mkdtempSync(join(tmpdir(), 'adr0616-'));
     const st = await openStorage(`sqlite://${join(dir, 'c.db')}`);
     setNotificationBackend(st);
     setEffectEscapeBackend(st);
     setInvocationBackend(st);
-    return st;
+    return { st, dir };
   }
 
   it('LOSER: with the identity already claimed and NO memo, nothing is inserted', async () => {
-    const { runWithEffectContext } = await import('../src/host/runEffectContext.js');
-    const { mintEffectIdentity } = await import('../src/host/effectEscapeLedger.js');
-    const { resetLogicalInvocationOrdinals } = await import('../src/host/effectIdentity.js');
-    const { getNotificationEmitter } = await import('../src/notifications/emitter.js');
-    const st = await host();
+    const { st, dir } = await host();
 
     // Mint exactly what the emit will mint, then hold it as the other executor.
     resetLogicalInvocationOrdinals();
@@ -195,13 +200,11 @@ describe('ADR 0618 — the notification seam declines to fire when it loses the 
     const listed = await st.listNotifications({ tenantId: 't1', recipientUserId: 'u1' });
     expect(listed.length, 'the loser must not notify a second person').toBe(0);
     await st.close();
+    rmSync(dir, { recursive: true, force: true });
   });
 
   it('WINNER positive control — with the claim FREE, the same emit does insert', async () => {
-    const { runWithEffectContext } = await import('../src/host/runEffectContext.js');
-    const { resetLogicalInvocationOrdinals } = await import('../src/host/effectIdentity.js');
-    const { getNotificationEmitter } = await import('../src/notifications/emitter.js');
-    const st = await host();
+    const { st, dir } = await host();
 
     resetLogicalInvocationOrdinals();
     await runWithEffectContext(CTX, async () => {
@@ -211,6 +214,7 @@ describe('ADR 0618 — the notification seam declines to fire when it loses the 
     const listed = await st.listNotifications({ tenantId: 't1', recipientUserId: 'u1' });
     expect(listed.length, 'without a competing claim the emit must fire').toBe(1);
     await st.close();
+    rmSync(dir, { recursive: true, force: true });
   });
 });
 
@@ -244,17 +248,6 @@ describe('ADR 0618 — the notification seam declines to fire when it loses the 
  */
 describe('ADR 0618 — the race, driven concurrently (G17 witness)', () => {
   it('two concurrent executors at one identity deliver EXACTLY ONE notification', async () => {
-    const { mkdtempSync } = await import('node:fs');
-    const { tmpdir } = await import('node:os');
-    const { join } = await import('node:path');
-    const { runWithEffectContext } = await import('../src/host/runEffectContext.js');
-    const { setEffectEscapeBackend } = await import('../src/host/effectEscapeLedger.js');
-    const { setInvocationBackend } = await import('../src/executor/invocationLog.js');
-    const { resetLogicalInvocationOrdinals } = await import('../src/host/effectIdentity.js');
-    const { getNotificationEmitter, setNotificationBackend } = await import(
-      '../src/notifications/emitter.js'
-    );
-
     const dir = mkdtempSync(join(tmpdir(), 'adr0618-race-'));
     const st = await openStorage(`sqlite://${join(dir, 'race.db')}`);
     setNotificationBackend(st);
@@ -283,5 +276,6 @@ describe('ADR 0618 — the race, driven concurrently (G17 witness)', () => {
       'the same harness delivers 2 without the claim — see the docblock',
     ).toBe(1);
     await st.close();
+    rmSync(dir, { recursive: true, force: true });
   });
 });

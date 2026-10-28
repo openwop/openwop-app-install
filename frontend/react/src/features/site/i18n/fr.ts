@@ -7,6 +7,8 @@ export const messages = {
   // Default hero — the thesis, beside the run ledger (visual: 'run')
   heroHeading: 'Créez des workflows multi-agents que vous pouvez suivre, mettre en pause et *rembobiner.*',
   heroSubheading: 'Esquissez un workflow sur un canevas ou décrivez-le dans le chat. Suivez chaque décision en direct, répondez quand l’exécution s’arrête pour demander, et rejouez n’importe quelle exécution à partir de n’importe quelle étape. Elle repose sur OpenWOP, le protocole open source d’orchestration de workflows multi-agents : vos agents et vos workflows peuvent passer sur n’importe quel hôte qui l’implémente.',
+  /** Issue 5226 — the white-label fallback home's one call to action. */
+  neutralCtaLabel: 'Commencer',
   heroCtaLabel: 'Commencer, sans inscription',
   heroCtaLabel2: 'Lire le protocole',
   heroEyebrow: 'L’application de référence du protocole OpenWOP',
@@ -238,4 +240,13 @@ export const messages = {
   consentFooterLink: "Choix de confidentialité",
   consentSavedOn: "Mesure d’audience activée.",
   consentSavedOff: "Mesure d’audience désactivée.",
+  consentBodyOptOut: "Nous comptons les pages vues, la vitesse des pages et les versions de page que vous voyez, pour améliorer ce site, sauf si vous le désactivez. L’enregistrement de session reste désactivé sauf si vous le cochez.",
+  consentReplayLabel: "Autoriser aussi l’enregistrement de session.",
+  consentReplayHint: "Enregistre votre parcours sur les pages pour repérer ce qui est difficile à utiliser. Tout le texte et les saisies de formulaire sont masqués avant de quitter votre navigateur, et les champs de paiement, de mot de passe et de santé ne sont jamais enregistrés.",
+  consentReplayStateOn: "L’enregistrement de session est activé pour vous.",
+  consentReplayStateOff: "L’enregistrement de session est désactivé pour vous.",
+  consentReplayTurnOn: "Autoriser l’enregistrement de session",
+  consentReplayTurnOff: "Arrêter l’enregistrement de session",
+  consentReplaySavedOn: "Enregistrement de session activé.",
+  consentReplaySavedOff: "Enregistrement de session désactivé. Les enregistrements de vos visites sont supprimés.",
 } as const;

@@ -1,8 +1,8 @@
 {
   "name": "feature.campaign-ops.nodes",
-  "version": "1.0.0",
+  "version": "1.3.0",
   "kind": "node",
-  "description": "Campaign operations node pack (ADR 0923). The change planner: `interpret` turns an operator's change request into structured intents or asks about missing facts (never both), and `propose` turns those intents into constrained before/after edits on the request's assets, minting a hashed change set. Both validate through ctx.features['campaign-ops'], make one error-fed repair, and otherwise fail with a typed reason. `execute` carries out an approved change set and verifies it by read-back.",
+  "description": "Campaign operations node pack (ADR 0923). The change planner: `interpret` turns an operator's change request into structured intents or asks about missing facts (never both), and `propose` turns those intents into constrained before/after edits on the request's assets, minting a hashed change set. Both validate through ctx.features['campaign-ops'], make one error-fed repair, and otherwise fail with a typed reason. `execute` carries out an approved change set and verifies it by read-back. ADR 0957 adds the client-report steps: `compute-snapshot` freezes a report's figures from the app's own sources, `report-snapshot-read` reads a frozen report back, and `publish-report` publishes a reviewed report only if its numbers are the approved ones. Client memory adds client-notes-list and client-note-propose; only a person may approve a proposed fact into memory. Report publication remains unavailable until its review chain ships.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": [
@@ -42,6 +42,116 @@
       "category": "integration",
       "role": "side-effect",
       "capabilities": []
+    },
+    {
+      "typeId": "feature.campaign-ops.nodes.compute-snapshot",
+      "version": "1.0.0",
+      "label": "Client report: Compute snapshot",
+      "description": "Runs a report definition's sections for its client and stores the figures, frozen and fingerprinted, as an internal draft report. Each figure is copied from the app's own source with its lineage; nothing is calculated here. A scheduled run passes the definition version it was armed with and fails if the definition changed since. Inputs: { orgId, definitionId, definitionVersion?, periodStart?, periodEnd? }. Output: { reportId, snapshotHash, snapshot }.",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.campaign-ops.nodes.report-snapshot-read",
+      "version": "1.0.0",
+      "label": "Client report: Read snapshot",
+      "description": "Reads a stored report's frozen figures and their lineage, for the client the run belongs to. Inputs: { orgId, reportId }. Output: { found, reportId?, periodStart?, periodEnd?, snapshot?, snapshotHash? }.",
+      "category": "integration",
+      "role": "read",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.campaign-ops.nodes.publish-report",
+      "version": "1.0.0",
+      "label": "Client report: Publish",
+      "description": "Publishes a report in review, only if its fingerprint is the one its reviewer approved, so changed numbers can never publish under an older approval. Until the review gate can approve a client report (ADR 0942), this step refuses with report_publish_unavailable rather than publish anything unreviewed. Inputs: { orgId, reportId, snapshotHash }. Output: { reportId, status, publishedAt }.",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.campaign-ops.nodes.client-notes-list",
+      "version": "1.0.0",
+      "label": "Campaign ops: Read client notes",
+      "description": "Reads the curated notes in one client's shared agent memory (ADR 0944), bound to the run's client: a run for another client is refused. Inputs: { orgId }. Output: { notes: [{ id, content, createdAt }] }.",
+      "category": "integration",
+      "role": "read",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.campaign-ops.nodes.client-note-propose",
+      "version": "1.0.0",
+      "label": "Campaign ops: Propose client note",
+      "description": "Records an agent's proposed fact about a client for a person to approve. Nothing enters the client's memory until a person with write access on that client approves it. Bound to the run's client; idempotent per run node and text. Inputs: { orgId, content, rationale? }. Output: { proposalId, status }.",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.campaign-ops.nodes.mcp-campaign-list",
+      "version": "1.0.0",
+      "label": "Campaign ops: list campaigns (external agent)",
+      "description": "ADR 0962 P1 read tool. Lists one client's campaigns (id, name, status, channels). Binds the run to the client first. Inputs: { clientId }. Output: { text }.",
+      "category": "integration",
+      "role": "read",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.campaign-ops.nodes.mcp-campaign-get",
+      "version": "1.0.0",
+      "label": "Campaign ops: get a campaign (external agent)",
+      "description": "ADR 0962 P1 read tool. One campaign's summary (aggregates only, no lead data). Inputs: { clientId, campaignId }. Output: { text }.",
+      "category": "integration",
+      "role": "read",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.campaign-ops.nodes.mcp-campaign-performance",
+      "version": "1.0.0",
+      "label": "Campaign ops: campaign performance (external agent)",
+      "description": "ADR 0962 P1 read tool. Spend, impressions, clicks and conversions per platform and currency. Inputs: { clientId, campaignId }. Output: { text }.",
+      "category": "integration",
+      "role": "read",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.campaign-ops.nodes.mcp-pending-gates",
+      "version": "1.0.0",
+      "label": "Campaign ops: pending approvals (external agent)",
+      "description": "ADR 0962 P1 read tool. Open approvals on a client's campaign runs: title, roles, how many approvals; no payload content. Inputs: { clientId }. Output: { text }.",
+      "category": "integration",
+      "role": "read",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.campaign-ops.nodes.mcp-run-status",
+      "version": "1.0.0",
+      "label": "Campaign ops: run status (external agent)",
+      "description": "ADR 0962 P1 read tool. A campaign run of that client: its status and what it waits on. Inputs: { clientId, runId }. Output: { text }.",
+      "category": "integration",
+      "role": "read",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.campaign-ops.nodes.mcp-explain",
+      "version": "1.0.0",
+      "label": "Campaign ops: explain a run's review decisions (external agent)",
+      "description": "ADR 0942/0962 read tool. Which review-policy rule decided each step of a campaign run. Inputs: { clientId, runId }. Output: { text }.",
+      "category": "integration",
+      "role": "read",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.campaign-ops.nodes.mcp-request-change",
+      "version": "1.0.1",
+      "label": "Campaign ops: request a change (external agent)",
+      "description": "ADR 0962 P2 request tool. Records an outside agent's change request for one client and starts the change-request workflow; the change waits for a person at the client to approve it. Inputs: { clientId, text, assetIds?, campaignId? }. Output: { text }.",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": [
+        "side-effectful"
+      ]
     }
   ],
   "runtime": {

@@ -47,6 +47,7 @@ const RESOURCE_TYPE_KEY: Record<ResourceType, string> = {
   priority_idea: 'resourceTypePriorityIdea',
   creative_brief: 'resourceTypeCreativeBrief',
   canvas_slides: 'resourceTypeCanvasSlides',
+  media_asset: 'resourceTypeMediaAsset',
 };
 const NO_RESOURCES_KEY: Record<ResourceType, string> = {
   cms_page: 'noResourcesCmsPage',
@@ -56,6 +57,7 @@ const NO_RESOURCES_KEY: Record<ResourceType, string> = {
   priority_idea: 'noResourcesPriorityIdea',
   creative_brief: 'noResourcesCreativeBrief',
   canvas_slides: 'noResourcesCanvasSlides',
+  media_asset: 'noResourcesMediaAsset',
 };
 /** Does this type have a resource picker on this page? */
 const isPickable = (rt: ResourceType): boolean => (RESOURCE_TYPES as readonly string[]).includes(rt);

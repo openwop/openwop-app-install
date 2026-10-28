@@ -16,6 +16,11 @@
  *     appears), converted server-side to credits;
  *   - honest-when-unconfigured: no plan `aiCreditsMonthly` ⇒ `monthly: null`,
  *     no ready managed key ⇒ `freeDaily: null` — never a fabricated zero cap.
+ * Tracker: TST-BNC-5.
+ *
+ * Red when (wave 60 probes w60g4-meter-*): an editor is served; charged tokens
+ * or the ranking are wrong; another tenant's spend is read; an unconfigured
+ * allowance is shown as zero.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -56,7 +61,10 @@ interface Meter {
   otherCredits: number;
 }
 
+const ENV_KEYS = ['OPENWOP_STORAGE_DSN', 'OPENWOP_SESSION_SECRET', 'OPENWOP_TEST_AUTH_ENABLED', 'OPENWOP_BILLING_TOKENS_PER_CREDIT', 'OPENWOP_AUTH_DISABLE_COOKIES', 'OPENWOP_BILLING_PLAN_LIMITS'] as const;
+const savedEnv: Record<string, string | undefined> = {};
 beforeAll(async () => {
+  for (const k of ENV_KEYS) savedEnv[k] = process.env[k];
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
   process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
@@ -79,7 +87,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  for (const k of ['OPENWOP_TEST_AUTH_ENABLED', 'OPENWOP_BILLING_TOKENS_PER_CREDIT', 'OPENWOP_BILLING_PLAN_LIMITS']) delete process.env[k];
+  for (const k of ENV_KEYS) { const v = savedEnv[k]; if (v === undefined) delete process.env[k]; else process.env[k] = v; }
   await new Promise<void>((res) => server.close(() => res()));
 });
 
@@ -96,16 +104,15 @@ describe('GET billing/ai-credits — authority', () => {
 
   it('a caller who is not a member of the workspace never reads its meter (cross-tenant)', async () => {
     // Under `sharedWorkspace: true` a NON-member is bounced to their own personal
-    // tenant by the ADR 0015 re-check (see `authTestSeam.ts`), so the outcome is
-    // either a refusal or THEIR OWN empty meter — never the workspace's figures.
+    // tenant by the ADR 0015 re-check (see `authTestSeam.ts`) — never the
+    // workspace's figures.
+    // MEASURED (wave 60): the re-check bounces the outsider to its personal
+    // tenant, where it owns the (empty) meter — so it is served ITS meter.
     const res = await get(`${B}/ai-credits`, await login(OUTSIDER, WS));
-    if (res.status === 200) {
-      const m = await res.json() as Meter;
-      expect(m.topFeatures).toEqual([]);
-      expect(m.balanceCredits).toBe(0);
-    } else {
-      expect(res.status).toBeGreaterThanOrEqual(400);
-    }
+    expect(res.status).toBe(200);
+    const m = await res.json() as Meter;
+    expect(m.topFeatures).toEqual([]);
+    expect(m.balanceCredits).toBe(0);
   });
 
   it('serves an ADMIN the workspace\'s own meter, in credits, and no other tenant\'s spend', async () => {

@@ -1,16 +1,33 @@
 /**
- * Per-tool read/write permission gate (ADR 0101 Phase 4 / ADR 0102).
+ * Per-tool read/write permission gate (ADR 0102, docs/adr/0102-per-tool-permission-enforcement.md).
  *
  * Covers the pure evaluator (`evaluateToolPermission`) and its wiring into the
  * shared live tool loop (`runChatToolLoop`) behind the env flag: a tool off an
  * opted-in agent's allowlist is refused before it executes when the gate is on,
  * and unaffected when it's off.
+ *
+ * SIX loop branches emit `agent.toolReturned{status:'forbidden'}`, so each
+ * refusal is pinned by the exact line the loop feeds back to the model — that
+ * names WHICH layer refused.
+ *
+ * TST-BLT-1. Red when: a namespace token matches across a non-dot boundary, an
+ * "no positive allowlist" branch swallows a declared one, `never` stops denying, the
+ * enforcing branch is skipped, or the §A14 offering check is skipped.
  */
 
 import { afterEach, describe, expect, it } from 'vitest';
 import { evaluateToolPermission } from '../src/host/agentToolPermissions.js';
 import { runChatToolLoop, type CompiledTool } from '../src/host/agentDispatch.js';
 import type { AiToolCallRequest, AiToolCallResult } from '../src/executor/types.js';
+
+/** The text of the last message the loop sent the model on round 2. */
+function lastFeedback(seen: AiToolCallRequest[]): string {
+  const msgs = seen[1]?.messages ?? [];
+  const last = msgs[msgs.length - 1];
+  return typeof last?.content === 'string' ? last.content : JSON.stringify(last?.content);
+}
+const GUARDRAIL_LINE = 'Tool "crm.field.delete" is blocked by P\'s guardrails (not-allowlisted).';
+const NOT_OFFERED_LINE = 'Tool "crm.field.delete" is not permitted for this agent.';
 
 function tool(name: string): CompiledTool {
   return {
@@ -52,9 +69,10 @@ describe('runChatToolLoop — per-tool permission gate wiring (ADR 0102)', () =>
   afterEach(() => { delete process.env[FLAG]; });
 
   // A model that calls an off-allowlist tool once, then answers.
-  function mockProvider(toolName: string): (req: AiToolCallRequest) => Promise<AiToolCallResult> {
+  function mockProvider(toolName: string, seen: AiToolCallRequest[] = []): (req: AiToolCallRequest) => Promise<AiToolCallResult> {
     let round = 0;
-    return async () => {
+    return async (req) => {
+      seen.push(req);
       round += 1;
       if (round === 1) return { toolCalls: [{ id: 'c1', name: toolName, input: {} }], finishReason: 'tool-call' };
       return { content: 'done', toolCalls: [], finishReason: 'stop' };
@@ -66,17 +84,19 @@ describe('runChatToolLoop — per-tool permission gate wiring (ADR 0102)', () =>
   it('blocks an off-allowlist tool (forbidden, not executed) when the flag is ON', async () => {
     process.env[FLAG] = 'true';
     const executed: string[] = [];
+    const seen: AiToolCallRequest[] = [];
     const res = await runChatToolLoop(
       {
         provider: 'anthropic', model: 'm', credentialRef: 'r', systemPrompt: 'sp',
         messages: [{ role: 'user', content: 'go' }], tools: [tool('crm.field.delete')],
         agentId: 'a', persona: 'P', toolPermissions: [perms],
       },
-      { callAIWithTools: mockProvider('crm.field.delete'), executeTool: async (c) => { executed.push(c.name); return { content: 'x' }; } },
+      { callAIWithTools: mockProvider('crm.field.delete', seen), executeTool: async (c) => { executed.push(c.name); return { content: 'x' }; } },
     );
     expect(executed).toEqual([]); // the tool never ran
     const forbidden = res.events.find((e) => e.type === 'agent.toolReturned' && (e as { status?: string }).status === 'forbidden');
     expect(forbidden).toBeTruthy();
+    expect(lastFeedback(seen)).toBe(GUARDRAIL_LINE); // the PERMISSION gate refused
   });
 
   it('lets the same call through when the flag is OFF (unchanged behavior)', async () => {
@@ -115,9 +135,10 @@ describe('runChatToolLoop — ADR 0104 offering × ADR 0102 entitlement compose 
   const FLAG = 'OPENWOP_AGENT_TOOL_PERMISSIONS_ENABLED';
   afterEach(() => { delete process.env[FLAG]; });
 
-  function callsThen(toolName: string): (req: AiToolCallRequest) => Promise<AiToolCallResult> {
+  function callsThen(toolName: string, seen: AiToolCallRequest[] = []): (req: AiToolCallRequest) => Promise<AiToolCallResult> {
     let round = 0;
-    return async () => {
+    return async (req) => {
+      seen.push(req);
       round += 1;
       if (round === 1) return { toolCalls: [{ id: 'c1', name: toolName, input: {} }], finishReason: 'tool-call' };
       return { content: 'done', toolCalls: [], finishReason: 'stop' };
@@ -129,16 +150,18 @@ describe('runChatToolLoop — ADR 0104 offering × ADR 0102 entitlement compose 
     const executed: string[] = [];
     // The override OFFERS crm.field.delete (present in `tools`), but permissions
     // do NOT entitle it → the permission gate is the binding constraint.
+    const seen: AiToolCallRequest[] = [];
     const res = await runChatToolLoop(
       {
         provider: 'anthropic', model: 'm', credentialRef: 'r', systemPrompt: 'sp',
         messages: [{ role: 'user', content: 'go' }], tools: [tool('crm.field.delete')],
         agentId: 'a', persona: 'P', toolPermissions: [{ read: ['crm.read'], write: [], never: [] }],
       },
-      { callAIWithTools: callsThen('crm.field.delete'), executeTool: async (c) => { executed.push(c.name); return { content: 'x' }; } },
+      { callAIWithTools: callsThen('crm.field.delete', seen), executeTool: async (c) => { executed.push(c.name); return { content: 'x' }; } },
     );
     expect(executed).toEqual([]);
     expect(res.events.some((e) => e.type === 'agent.toolReturned' && (e as { status?: string }).status === 'forbidden')).toBe(true);
+    expect(lastFeedback(seen)).toBe(GUARDRAIL_LINE); // the ENTITLEMENT layer refused
   });
 
   it('entitled-but-not-offered → refused by the offering layer (§A14)', async () => {
@@ -146,15 +169,17 @@ describe('runChatToolLoop — ADR 0104 offering × ADR 0102 entitlement compose 
     const executed: string[] = [];
     // Permissions ENTITLE crm.field.delete, but the override does NOT offer it
     // (absent from `tools`) → refused at the manifest layer; offering is binding.
+    const seen: AiToolCallRequest[] = [];
     const res = await runChatToolLoop(
       {
         provider: 'anthropic', model: 'm', credentialRef: 'r', systemPrompt: 'sp',
         messages: [{ role: 'user', content: 'go' }], tools: [tool('crm.read')],
         agentId: 'a', persona: 'P', toolPermissions: [{ read: ['crm.read', 'crm.field.delete'], write: [], never: [] }],
       },
-      { callAIWithTools: callsThen('crm.field.delete'), executeTool: async (c) => { executed.push(c.name); return { content: 'x' }; } },
+      { callAIWithTools: callsThen('crm.field.delete', seen), executeTool: async (c) => { executed.push(c.name); return { content: 'x' }; } },
     );
     expect(executed).toEqual([]);
     expect(res.events.some((e) => e.type === 'agent.toolReturned' && (e as { status?: string }).status === 'forbidden')).toBe(true);
+    expect(lastFeedback(seen)).toBe(NOT_OFFERED_LINE); // the OFFERING layer (§A14) refused
   });
 });

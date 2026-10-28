@@ -9,6 +9,19 @@
  * in ANY lane. §D0 pins that population so the emptiness is visible, not silent; §D1 makes
  * the four lanes equal by construction (leg 1 is born-red on the pre-ADR hook); §D2 gives
  * the voice bridge's "gated exactly like a typed one" docblock the parity witness it lacked.
+ *
+ * CORRECTED (8f grade-tests wave 2): every production lane now builds its hook through
+ * `host/laneFirewall.buildLaneFirewall` (toolBridge, agentRunnerNode, anonymousActor,
+ * conversationToolLoop, liveDispatchLane), which passes `gateHostMediatedEgress: true`
+ * explicitly. So the two helpers below no longer model today's lanes: they model the
+ * DERIVED default (no flag) and the EXPLICIT flag, and §D2 is a derived ⇔ explicit hook
+ * parity, not a parity between two live lanes. The ADR 0724 D1 implication still matters:
+ * any caller that builds a safe-posture hook without the flag gets the class gate anyway.
+ *
+ * Sabotage witnessed red (8f grade-tests wave 2): the derived default removed
+ * (`8fw2g3-egi-derive`), destination-sync's classifier row removed (`-egi-classrow`),
+ * the class gate removed (`-egi-classgate`), bypass no longer downgrading
+ * (`-egi-bypass`), and http.fetch dropped from the name set (`-egi-nameset`).
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
@@ -18,15 +31,18 @@ import { buildFirewallHook, SENSITIVE_APPROVAL_TOOLS } from '../src/features/cap
 
 /** The ADR 0610 witness name — a node type id the classifier keys on, NOT a registered tool id. */
 const SYNTHETIC_EGRESS = 'core.openwop.integration.email-send';
-/** The one REAL off-host egress agent tool. Gated by NAME (it is in SENSITIVE_APPROVAL_TOOLS). */
+/** The one agent tool the classifier rates host-mediated egress. Gated by CLASS, NOT by name:
+ *  it is NOT in SENSITIVE_APPROVAL_TOOLS (R3b asserts exactly that). */
 const DEST_SYNC = 'openwop:destination-sync.run';
 const HTTP_FETCH = 'openwop:core.openwop.http.fetch';
 const CODE_EXEC = 'openwop:feature.code-exec.nodes.run';
 const READ_TOOL = 'openwop:knowledge.search';
 
-/** The literal option shape of the two lanes that never passed the flag (toolBridge.ts:141, routes/agents.ts:407). */
+/** The DERIVED-default shape: a safe posture with NO `gateHostMediatedEgress` flag. Historically
+ *  the voice and dispatch lanes' option shape; today no production lane omits the flag (all build
+ *  through `buildLaneFirewall`), so this is the ADR 0724 implication's own contract. */
 const asVoiceOrDispatchLane = () => buildFirewallHook({ rules: [], requireApprovalTools: SENSITIVE_APPROVAL_TOOLS, bypassApproval: false });
-/** The chat loop's shape (conversationToolLoop.ts:485) — passes the flag explicitly. */
+/** The EXPLICIT-flag shape — what `buildLaneFirewall` passes on every production lane. */
 const asChatLane = () => buildFirewallHook({ rules: [], requireApprovalTools: SENSITIVE_APPROVAL_TOOLS, bypassApproval: false, gateHostMediatedEgress: true });
 
 describe('ADR 0724 §D0 — the class gate\'s REAL population, pinned after a full boot', () => {
@@ -39,7 +55,9 @@ describe('ADR 0724 §D0 — the class gate\'s REAL population, pinned after a fu
   afterAll(() => { /* nothing listened */ });
 
   it('R1: the population is non-trivial (a boot that registers nothing would make every pin below vacuous)', () => {
-    expect(ids.length).toBeGreaterThan(150);
+    // MEASURED 211 live tools at 2404797bf (the census file's four tables sum to the same
+    // exact set). Floor = measured − 2, so a boot that drops a handful of registrations reds.
+    expect(ids.length).toBeGreaterThanOrEqual(209);
   });
   it('R2: every registered agent tool id is `openwop:`-prefixed — the namespace the egress classifier does NOT key on', () => {
     expect(ids.filter((i) => !i.startsWith('openwop:'))).toEqual([]);
@@ -95,8 +113,10 @@ describe('ADR 0724 §D1 — safe posture IMPLIES the class gate (hook contract, 
   });
 });
 
-describe('ADR 0724 §D2 — voice/dispatch ⇔ chat firewall PARITY (the witness toolBridge.ts:5 claims)', () => {
+describe('ADR 0724 §D2 — derived ⇔ explicit-flag firewall PARITY (the hook contract behind toolBridge.ts:5)', () => {
   it('the same names get the same verdict from the voice/dispatch shape and the chat shape', () => {
+    // Title kept for the probe keys: "voice/dispatch shape" = the derived default (no flag),
+    // "chat shape" = the explicit flag every production lane passes (see the header).
     const a = asVoiceOrDispatchLane(); const b = asChatLane();
     for (const name of [HTTP_FETCH, CODE_EXEC, READ_TOOL, SYNTHETIC_EGRESS, 'openwop:core.files.write', 'openwop:email.draft']) {
       expect(a.evaluate([], name).decision, name).toBe(b.evaluate([], name).decision);

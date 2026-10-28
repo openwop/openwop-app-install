@@ -16,6 +16,7 @@
 
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
+import type { Storage } from '../src/storage/storage.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import {
   createChallengePublishApproval,
@@ -47,6 +48,7 @@ import {
   evaluateQuorumTally,
   eraseReviewDecisionsForSubject,
   __clearDecisionLedger,
+  type ReviewDecision,
 } from '../src/host/reviewDecisionLedger.js';
 
 const T = 'tenant-0463';
@@ -55,8 +57,25 @@ const A = 'user:alice';
 const B = 'user:bob';
 const iso = (o: number) => new Date(Date.now() + o).toISOString();
 
+let storage: Storage;
+
+/** The review-decision rows exactly as stored (key → row), read from the KV
+ *  layer under the collection's `hostext:review:decision:` prefix — NOT through
+ *  `tallyDecisions`, which projects reviewerRef only and so could never show
+ *  `actedBy` or `reason` (8fw3g2-hs-rd-actedby / -reason were vacuous). */
+async function rawDecisions(): Promise<Map<string, ReviewDecision>> {
+  const rows = await storage.kvList('hostext:review:decision:');
+  const out = new Map<string, ReviewDecision>();
+  for (const { key, value } of rows) {
+    const row: ReviewDecision = JSON.parse(value);
+    out.set(key, row);
+  }
+  return out;
+}
+
 beforeEach(async () => {
-  initHostExtPersistence(await openStorage('memory://'));
+  storage = await openStorage('memory://');
+  initHostExtPersistence(storage);
   await __resetApprovalStore();
   await __clearDecisionLedger();
   await _clearDelegationsForTest(T);
@@ -169,6 +188,9 @@ describe('ADR 0464 — review:decision eraser (quorum shape preserved)', () => {
 
     const before = await tallyDecisions('appr:g1');
     expect(evaluateQuorumTally(before, { requiredApprovals: 2 })).toBe('accept');
+    const rawBefore = await rawDecisions();
+    expect(rawBefore.size, 'the raw read sees all four rows').toBe(4);
+    const g3Before = [...rawBefore.entries()].find(([, d]) => d.gateId === 'appr:g3');
 
     const touched = await eraseReviewDecisionsForSubject(T, A);
     expect(touched).toBe(2); // g1 (reviewerRef) + g2 (actedBy)
@@ -188,6 +210,23 @@ describe('ADR 0464 — review:decision eraser (quorum shape preserved)', () => {
 
     // Other tenant untouched.
     expect((await tallyDecisions('appr:g3')).accepts).toEqual([A]);
+
+    // The stored rows: g2's actedBy is the sentinel, A's two reasons are
+    // redacted, B's row (no reason) gains none, and T2's row is byte-unchanged.
+    const rawAfter = await rawDecisions();
+    const byGate = (gate: string) => [...rawAfter.values()].filter((d) => d.gateId === gate);
+    const g2Row = byGate('appr:g2');
+    expect(g2Row).toHaveLength(1);
+    expect(g2Row[0]?.actedBy).toBe(ERASED);
+    expect(g2Row[0]?.reviewerRef).toBe('user:principal');
+    expect(g2Row[0]?.reason).toBe(ERASED);
+    const g1Rows = byGate('appr:g1');
+    expect(g1Rows.map((d) => d.reason ?? null).sort()).toEqual([ERASED, null].sort());
+    const reasons = [...rawAfter.values()].map((d) => d.reason);
+    expect(reasons).not.toContain('looks good to A');
+    expect(reasons).not.toContain('A clicked');
+    expect(g3Before).toBeDefined();
+    expect(rawAfter.get(g3Before![0])).toEqual(g3Before![1]);
 
     // The frozen key still clears (deletes the anonymized row at its real key).
     await clearDecisions('appr:g1');

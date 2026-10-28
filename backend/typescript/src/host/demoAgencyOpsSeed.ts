@@ -18,9 +18,11 @@ import { createMember, createOrg, deleteOrg, getOrg, listMembers } from './acces
 import { createPage, deletePage, getPage, listPages, transitionPage } from '../features/cms/cmsService.js';
 import { createClient, deleteClient, getClient, updateClient } from '../features/campaign-ops/clientService.js';
 import { addAsset, listAssets, purgeAssetsForOrg } from '../features/campaign-ops/assetService.js';
+import { deleteClientAgentBindings } from '../features/campaign-ops/agentBindingService.js';
 import { purgeRequestsForOrg } from '../features/campaign-ops/requestService.js';
 import { purgeChangeSetsForOrg } from '../features/campaign-ops/changeSetService.js';
 import { purgeJobsForOrg } from '../features/campaign-ops/execution.js';
+import { purgeCollaborationForOrg } from '../features/campaign-ops/erasure.js';
 
 const ACTOR = 'demo:agency-ops';
 const PAGE_PREFIX = 'page-copsdemo-';
@@ -88,8 +90,10 @@ export async function clearAgencyOpsDemo(tenantId: string): Promise<{ cleared: n
     if (!(await getOrg(c.orgId))) continue;
     cleared += await purgeJobsForOrg(tenantId, c.orgId);
     cleared += await purgeChangeSetsForOrg(tenantId, c.orgId);
+    cleared += await purgeCollaborationForOrg(tenantId, c.orgId);
     cleared += await purgeRequestsForOrg(tenantId, c.orgId);
     cleared += await purgeAssetsForOrg(tenantId, c.orgId);
+    cleared += await deleteClientAgentBindings(tenantId, c.orgId);
     if (await deleteClient(tenantId, c.orgId)) cleared++;
     for (const p of await listPages(tenantId, c.orgId)) {
       if (p.pageId.startsWith(PAGE_PREFIX) && await deletePage(tenantId, c.orgId, p.pageId)) cleared++;

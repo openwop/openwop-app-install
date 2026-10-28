@@ -10,7 +10,7 @@ import {
   ENTITLED_ORDER_STATUSES,
   type SellerAccount, type OnboardingState, type ConnectOrder, type ConnectDispute,
 } from './stores.js';
-import { bindSellerAccount } from './stores.js';
+import { bindSellerAccount, sellerRows } from './stores.js';
 import { createLogger } from '../../observability/logger.js';
 
 const log = createLogger('features.commerce-connect.adminOps');
@@ -175,7 +175,10 @@ export async function importSellers(rows: Partial<SellerAccount>[]): Promise<{ s
     // DIFFERENT tenant is refused, never silently re-pointed (the old code
     // overwrote accountIndex, re-routing that account's webhook attribution).
     const bound = await accountIndex.get(row.stripeAccountId);
-    if (bound && bound.tenantId !== row.tenantId) { rejected.push({ tenantId: row.tenantId, reason: 'account_already_bound' }); continue; }
+    // ADR 0948 P0b — an account bound to one of the tenant's CLIENT orgs is
+    // refused too: importing it as the tenant's seller would settle the agency's
+    // storefront on the client's account.
+    if (bound && (bound.tenantId !== row.tenantId || (bound.orgId ?? '') !== '')) { rejected.push({ tenantId: row.tenantId, reason: 'account_already_bound' }); continue; }
     // Grade pass CC-10: the importer is a one-time continuity tool — it must
     // never clobber a LIVE row (a re-run could silently flip a restricted
     // seller back to enabled). Skip-if-exists; validate the state enum.
@@ -194,8 +197,16 @@ export async function importSellers(rows: Partial<SellerAccount>[]): Promise<{ s
       createdAt: row.createdAt ?? now,
       updatedAt: now,
     };
+    // Bind BEFORE writing the row (ADR 0948 P0b): a bind that loses a race
+    // refuses the row instead of leaving a seller on an account it does not own.
+    try {
+      await bindSellerAccount(seller.tenantId, seller.stripeAccountId); // ADR 0576 — create-only CAS
+    } catch (err) {
+      if (!(err instanceof OpenwopError) || err.details?.reason !== 'binding_conflict') throw err;
+      rejected.push({ tenantId: row.tenantId, reason: 'account_already_bound' });
+      continue;
+    }
     await sellers.put(seller);
-    await bindSellerAccount(seller.tenantId, seller.stripeAccountId); // ADR 0576 — create-only CAS
     count++;
   }
   return { sellers: count, skipped, rejected };
@@ -215,10 +226,11 @@ export async function reconcileSellerBindings(): Promise<{ checked: number; dive
   let divergent = 0;
   for (const idx of await accountIndex.list()) {
     checked++;
-    const seller = await sellers.get(idx.tenantId);
+    // ADR 0948 P0b — a client-org binding is checked against that org's seller.
+    const seller = await sellerRows({ tenantId: idx.tenantId, ...(idx.orgId ? { orgId: idx.orgId } : {}) }).get().catch(() => null);
     if (!seller || seller.stripeAccountId !== idx.stripeAccountId) {
       divergent++;
-      log.error('seller_binding_divergence', { stripeAccountId: idx.stripeAccountId, indexTenant: idx.tenantId, sellerAccount: seller?.stripeAccountId ?? null });
+      log.error('seller_binding_divergence', { stripeAccountId: idx.stripeAccountId, indexTenant: idx.tenantId, indexOrg: idx.orgId ?? null, sellerAccount: seller?.stripeAccountId ?? null });
     }
   }
   return { checked, divergent };

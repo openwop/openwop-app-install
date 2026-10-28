@@ -46,9 +46,23 @@
  * gap (BUG PATTERN B — this pack reads no org-scoped feature surface at
  * all). Fixing it would mean inventing a fetch step and two new
  * parameters' semantics unilaterally, which is a product decision beyond
- * this pass's wiring-bug mandate — recorded here instead, and the test
- * below asserts the REAL, reproducible failure rather than papering over
- * it.
+ * this pass's wiring-bug mandate — recorded here instead.
+ *
+ * HOW IT IS PINNED NOW (/grade-tests 8f W5, grade-code row MKTI-VOC-1): the file
+ * used to assert `voc` → `INVALID_INPUTS` as the EXPECTED outcome, which blessed
+ * the defect (a fix would have turned it red). It is now two cases:
+ *   1. the correct behaviour that holds today — `discover` threads the run's
+ *      `topic` into its AI prompt and shapes the reply (8fw5g6-mi-topic);
+ *   2. `it.fails('… (MKTI-VOC-1)')` asserting the CORRECT outcome — `voc`
+ *      succeeds on the chain's own wiring. It passes while the defect is live and
+ *      turns red when it is fixed (fix-probe 8fw5g6-mi-voc-fix-r2 supplies the
+ *      three inputs `voc` requires). Defect sites:
+ *      `packs/vendor.myndhyve.market-intel-voc/index.mjs:247-265` (the required
+ *      `content` / `icpContext` / `productContext`) and
+ *      `examples/workflow-chain-packs/market-intel-digest/pack.json:39` (the
+ *      `voc` node: empty config, one inbound edge from `discover`, no params).
+ * The mini-scheduler below MIRRORS the executor's port semantics; it does not
+ * test them (the scheduler's own tests do).
  */
 
 import { dirname, join } from 'node:path';
@@ -131,7 +145,7 @@ async function runChain(chainId: string, params: Record<string, string>): Promis
 }
 
 describe('market-intel.digest — end-to-end execution (mini-scheduler, real nodes, fake ctx.callAI)', () => {
-  it('threads the real topic into discovery, then fails cleanly + reproducibly at voc (INVALID_INPUTS — a real, documented chain incompleteness)', async () => {
+  it('threads the real topic into discovery, and discover shapes the reply into its documented outputs', async () => {
     const params = { topic: 'AI workflow orchestration for mid-market ops teams', audience: '' };
     const { results, capturedAiCalls } = await runChain('market-intel.digest', params);
 
@@ -139,18 +153,20 @@ describe('market-intel.digest — end-to-end execution (mini-scheduler, real nod
     // run's topic (not a canned/ignored value), and discover's REAL output-
     // validation logic shaped the fake JSON into the documented success shape.
     expect(results.discover?.status).toBe('success');
+    // MKTI-VOC-1: rises to at least 2 when voc reaches the AI (then score / synthesize
+    // add theirs) — update with the fix, alongside the ratchet's KNOWN entry.
     expect(capturedAiCalls.length).toBe(1);
     const sentMessages = capturedAiCalls[0]!.args.messages as Array<{ content: string }>;
     expect(sentMessages[0]!.content).toContain('AI workflow orchestration for mid-market ops teams');
     expect(results.discover?.outputs?.sources).toEqual(['https://example.com/thread-1']);
-    expect((results.discover?.outputs?.communities as unknown[]).length).toBe(1);
+    expect(results.discover?.outputs?.communities).toHaveLength(1);
+    expect(results.discover?.outputs?.searchQueries).toEqual(['topic pain points']);
+  });
 
-    // voc genuinely, reproducibly fails — the documented incompleteness above.
-    expect(results.voc?.status).toBe('error');
-    expect(results.voc?.error?.code).toBe('INVALID_INPUTS');
-
-    // The chain never got anywhere near score/synthesize.
-    expect(results.score).toBeUndefined();
-    expect(results.synthesize).toBeUndefined();
+  it.fails('voc succeeds on the chain\'s own wiring — needs a content-fetch step + icp/product params (MKTI-VOC-1)', async () => {
+    const params = { topic: 'AI workflow orchestration for mid-market ops teams', audience: '' };
+    const { results } = await runChain('market-intel.digest', params);
+    expect(results.discover?.status).toBe('success'); // the defect is downstream of a working discover
+    expect(results.voc?.status, JSON.stringify(results.voc?.error)).toBe('success');
   });
 });

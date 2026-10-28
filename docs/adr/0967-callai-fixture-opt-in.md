@@ -151,7 +151,7 @@ Preflight before the cut: `/.well-known/openwop` under `OpenWOP-Version: 2` list
 - [x] Merge and deploy: #5147 merged as f17ee3753 (train 168), live in deploy 168b
 - [x] Production flag flip (the user's go): verified `true` on revision 01025-lg2
 - [x] Discovery preflight, then the re-cut against 165c: 91 fixtures listed, cut 169c matched (see Outcome)
-- [ ] ec checks in the bundle; RFC 0248 Active → Accepted (bundle handed to ec 2026-10-23)
+- [x] ec checks in the bundle; RFC 0248 Active → Accepted: openwop #2028 merged (5a60d48ea), 169c checked in as the canonical openwop-workflow-engine bundle. Shipped in the tagged release v0.7.0 (c43c91c2a).
 - [x] Tell Book AI the fields are certified (no release tag promised; that is a separate decision)
 
 ## Outcome (2026-10-23, cut 169c)

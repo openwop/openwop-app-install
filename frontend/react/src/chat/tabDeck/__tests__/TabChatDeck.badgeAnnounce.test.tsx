@@ -24,6 +24,11 @@ import type { BYOKActiveConfig } from '../../../byok/lib/useBYOKConfig.js';
 const announceSpy = vi.fn();
 let captured: ((sid: string, kind: 'unread' | 'blocked') => void) | undefined;
 
+// ADR 0978 D4 — the deck resolves the active workspace before it restores.
+vi.mock('../../../client/workspaceClient.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../client/workspaceClient.js')>()),
+  listMyWorkspaces: async () => ({ workspaces: [], active: 'ws-test', personal: 'ws-test' }),
+}));
 vi.mock('../TabSession.js', () => ({
   TabSession: ({ sessionId }: { sessionId: string }) => <div data-testid="tabsession" data-sid={sessionId} />,
 }));

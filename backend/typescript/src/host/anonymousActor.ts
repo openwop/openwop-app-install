@@ -41,7 +41,7 @@ import type { Storage } from '../storage/storage.js';
 import type { AiCallMessage, AiToolCallRequest, AiToolCallResult } from '../executor/types.js';
 import { buildRunRecord } from './runDispatch.js';
 import { compileAgentTools, runChatToolLoop, type AgentEvent } from './agentDispatch.js';
-import { createScopedAgentToolProvider } from './agentToolProvider.js';
+import { createScopedAgentToolProvider, isAnonHitlOnlyTool } from './agentToolProvider.js';
 import { buildLaneFirewall } from './laneFirewall.js';
 import { isDeniedWebhookHost } from './webhookEgressGuard.js';
 import { getApproval, resolveApproval, reopenApproval, eraseApprovalSubject, registerAnonSurfaceWriteApprovalHandler, type PendingApproval } from './approvalService.js';
@@ -229,7 +229,9 @@ export function authorizeAnonTool(grant: AnonSurfaceGrant, toolName: string): An
     // host wires `hitl` (approval hold) + `rate-limit-session-cap` (capped auto-run);
     // a surface with no control is exactly the fail-open shape the RFC forbids, denied.
     if (grant.writeControl === 'hitl' || grant.writeControl === 'rate-limit-session-cap') {
-      return { allowed: true, reason: 'anon-granted', tier: 'bounded-write-egress', requiresApproval: true, control: grant.writeControl };
+      // ADR 0954 P4 — a hold-only tool is held even on an auto-run surface.
+      const control = isAnonHitlOnlyTool(toolName) ? 'hitl' : grant.writeControl;
+      return { allowed: true, reason: 'anon-granted', tier: 'bounded-write-egress', requiresApproval: true, control };
     }
     return { allowed: false, reason: 'anon-write-ungated', tier: 'bounded-write-egress' };
   }

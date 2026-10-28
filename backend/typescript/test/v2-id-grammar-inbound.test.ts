@@ -18,6 +18,12 @@
  * caller, so "refuses the bad input" and "refuses all input" are
  * indistinguishable from the negative tests alone. The accepting legs below are
  * what tell those apart.
+ *
+ * DOUBLE GUARD (grade-tests w63): `/etc/passwd` is refused by BOTH the opaque
+ * grammar (`etc/passwd` holds a `/`) and the tenant compare (empty segment), so
+ * weakening either one alone stays green (probe ig-leading-opaque: vacuous).
+ * The leading-separator case is witnessed by restoring the exact old bug — the
+ * `slash <= 0` branch that returned the id verbatim (probe ig-leading-oldbug).
  */
 import { describe, expect, it } from 'vitest';
 import { fromWireRunId, toWireRunId } from '../src/host/v2Ids.js';

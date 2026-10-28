@@ -19,6 +19,8 @@
  *   a seeder), so it is a recorded deferral — the enrollment surface is real.
  * - Each sub-step is toggle-gated and skips honestly (never flips a toggle).
  */
+import { deleteCollectedEvent, isLiveCollectedEvent, persistCollectedEvent } from '../features/cdp/visitorEventIndex.js';
+import { randomUUID } from 'node:crypto';
 import { createLogger } from '../observability/logger.js';
 import { DurableCollection } from './hostExtPersistence.js';
 import { resolveOne } from './featureToggles/service.js';
@@ -65,7 +67,7 @@ function ago(nowMs: number, days: number): string {
 }
 
 export async function countDemoCdp(tenantId: string): Promise<number> {
-  return (await collectedStore.listForTenantIndexed(tenantId)).filter((e) => e.eventId.startsWith('evt:demo-cdp-c-')).length;
+  return (await collectedStore.listForTenantIndexed(tenantId)).filter((e) => isLiveCollectedEvent(e) && e.eventId.startsWith('evt:demo-cdp-c-')).length;
 }
 
 export async function seedDemoCdp(tenantId: string): Promise<{ created: number; details?: Record<string, unknown> }> {
@@ -91,14 +93,16 @@ export async function seedDemoCdp(tenantId: string): Promise<{ created: number; 
     if (checkoutVersions < 2) { await registerEventSchema(tenantId, 'checkout_completed', { type: 'object', properties: { orderId: { type: 'string' }, total: { type: 'number' }, email: { type: 'string' } } }); created += 1; }
 
     // Collected events (~400 over 45 days; some PII-tagged).
-    if (!(await collectedStore.listForTenantIndexed(tenantId)).some((e) => e.eventId.startsWith('evt:demo-cdp-c-'))) {
+    if (!(await collectedStore.listForTenantIndexed(tenantId)).some((e) => isLiveCollectedEvent(e) && e.eventId.startsWith('evt:demo-cdp-c-'))) {
+      const generation = randomUUID();
       for (let i = 0; i < COLLECTED_COUNT; i += 1) {
         const type = DEMO_EVENT_TYPES[i % 3]!;
         const isCheckout = type === 'checkout_completed';
         const payload: Record<string, unknown> = isCheckout
           ? { orderId: `ord-${i}`, total: 20 + (i % 60), email: `shopper${i % SESSION_COUNT}@example.com` }
           : type === 'product_viewed' ? { productId: `prod-${i % 24}`, price: 16 + (i % 30) } : { path: ['/shop', '/product', '/cart', '/'][i % 4], referrer: 'google' };
-        await collectedStore.put({ eventId: `evt:demo-cdp-c-${tenantId}-${i}`, tenantId, eventType: type, payload, piiFields: isCheckout ? ['email'] : [], ...(isCheckout ? { schemaVersion: 2 } : {}), at: ago(nowMs, i % 45) });
+        const row = { eventId: `evt:demo-cdp-c-${tenantId}-${generation}-${i}`, tenantId, eventType: type, payload, piiFields: isCheckout ? ['email'] : [], ...(isCheckout ? { schemaVersion: 2 } : {}), at: ago(nowMs, i % 45) };
+        await persistCollectedEvent(row);
         created += 1;
       }
     }
@@ -176,7 +180,10 @@ export async function seedDemoCdp(tenantId: string): Promise<{ created: number; 
     const { contactIds } = await resolveSegment(tenantId, demoCrmSegmentId(tenantId, 'cafe-accounts'));
     for (const contactId of contactIds) {
       if (holdoutArm(contactId, JOURNEY_ID, 20).arm === 'control') continue; // holdout
-      const r = await enroll(tenantId, JOURNEY_ID, contactId);
+      // ADR 0955 D1 — the demo journey is the workspace's own (its house account): named as
+      // the root org, which stays valid once the demo agency-ops seed adds clients (a
+      // client-less enroll would be refused `client_required` in that workspace).
+      const r = await enroll(tenantId, JOURNEY_ID, contactId, undefined, { orgId: tenantId });
       if (r.enrolled) created += 1;
     }
   } else skipped.push('campaign-journeys');
@@ -197,7 +204,7 @@ export async function seedDemoCdp(tenantId: string): Promise<{ created: number; 
 
 export async function clearDemoCdp(tenantId: string): Promise<{ cleared: number; details?: Record<string, unknown> }> {
   let cleared = 0;
-  for (const e of (await collectedStore.listForTenantIndexed(tenantId)).filter((x) => x.eventId.startsWith('evt:demo-cdp-c-'))) { await collectedStore.delete(e.eventId); cleared += 1; }
+  for (const e of (await collectedStore.listForTenantIndexed(tenantId)).filter((x) => isLiveCollectedEvent(x) && x.eventId.startsWith('evt:demo-cdp-c-'))) { if (await deleteCollectedEvent(tenantId, e.eventId)) cleared += 1; }
   for (const e of (await analyticsStore.listForTenantIndexed(tenantId)).filter((x) => x.eventId.startsWith('evt:demo-cdp-a-'))) { await analyticsStore.delete(e.eventId); cleared += 1; }
   for (const l of (await identityStore.listForTenantIndexed(tenantId)).filter((x) => x.sessionKey.startsWith('demo-cdp-sess-'))) { await identityStore.delete(l.key); cleared += 1; }
   for (const s of (await eventSchemaStore.listForTenantIndexed(tenantId)).filter((x) => DEMO_EVENT_TYPES.includes(x.eventType))) { await eventSchemaStore.delete(s.key); cleared += 1; }
@@ -211,7 +218,7 @@ export async function clearDemoCdp(tenantId: string): Promise<{ cleared: number;
     cleared += 1;
   }
   for (const s of (await listDestinationSyncs(tenantId)).filter((x) => x.name.startsWith(DEMO_SYNC_PREFIX))) { if (await deleteDestinationSync(tenantId, s.syncId)) cleared += 1; }
-  for (const e of await listEnrollments(tenantId, JOURNEY_ID)) { if (await resetEnrollment(tenantId, JOURNEY_ID, e.contactId)) cleared += 1; }
+  for (const e of await listEnrollments(tenantId, JOURNEY_ID)) { if (await resetEnrollment(tenantId, JOURNEY_ID, e.contactId, e.orgId ?? '')) cleared += 1; }
   // Developer keys (no delete API → direct store; drop the hash index too).
   for (const k of (await devkeyStore.listForTenantIndexed(tenantId)).filter((x) => x.createdBy === DEMO_CDP_ACTOR)) {
     if (k.tokenHash) await devkeyHashStore.delete(k.tokenHash).catch(() => undefined);

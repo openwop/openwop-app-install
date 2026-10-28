@@ -6,6 +6,12 @@
  * ADR 0726 escaped `:` with RFC 0184's `~` (`user~3A<hex>`), which MINTED `~`
  * into every signed-in user's tenant-bound ids. No conformance leg saw it: the
  * conformance key lands in `default`, and the id regex admits `~` syntactically.
+ * Tracker: TST-BVC-11.
+ *
+ * Red when (wave 60 probes w60g4-wt-*): a decoded new-form value need not be
+ * canonical (aliases); a reserved wire prefix is accepted as an internal key
+ * (here and in the leaf-module copy); a mapping mints `~`; ADR 0726's escaped
+ * spelling stops decoding; an over-long key is accepted.
  */
 import { describe, expect, it } from 'vitest';
 import { fromWireTenant, toWireRunId, toWireTenant, wireTenantViolation } from '../src/host/v2Ids.js';

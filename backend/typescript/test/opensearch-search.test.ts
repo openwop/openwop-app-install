@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { SearchSurface } from '../src/host/inMemorySurfaces.js';
-import { createOpenSearchSearch, type OpenSearchConfig } from '../src/host/search/openSearchSearch.js';
+import { createOpenSearchSearch, physicalIndexName, type OpenSearchConfig } from '../src/host/search/openSearchSearch.js';
 
 // A tiny fake OpenSearch: Map<physicalIndex, Map<id, fields>>, served over fetch.
 function makeFakeOS() {
@@ -66,7 +66,7 @@ describe('OpenSearch search surface', () => {
     await searchFor('tenant-a', fetchFn).index({ index: 'docs', docs: [{ id: '1', fields: { t: 'secret' } }] });
     // tenant-b queries its own (empty) physical index
     expect(await searchFor('tenant-b', fetchFn).query({ index: 'docs', q: 'secret' })).toEqual({ hits: [] });
-    expect([...indices.keys()]).toContain('owp-tenant-a-docs');
+    expect([...indices.keys()]).toEqual([physicalIndexName('owp-', 'tenant-a', 'docs')]);
   });
 
   it('throws when constructed without config', () => {

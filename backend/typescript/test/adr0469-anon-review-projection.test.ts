@@ -2,6 +2,9 @@
  * ADR 0469 Phase C — the anon-surface-write approval projects into the shared review
  * inbox (data-driven `ReviewCard`) with a clear label, an opaque-visitor requester,
  * and a risk chip — no new UI. A resolved approval offers no actions (audit row).
+ *
+ * TST-BQR-19. Red when the requester label or the medium risk level changes,
+ * or a resolved approval still offers approve/reject.
  */
 import { describe, it, expect } from 'vitest';
 import { approvalToReview } from '../src/host/reviewProjection.js';
@@ -21,7 +24,7 @@ function anonApproval(overrides: Partial<PendingApproval> = {}): PendingApproval
     status: 'pending',
     createdAt: '2026-07-22T00:00:00.000Z',
     ...overrides,
-  } as PendingApproval;
+  };
 }
 
 describe('ADR 0469 Phase C — anon-surface-write review projection', () => {
@@ -29,8 +32,8 @@ describe('ADR 0469 Phase C — anon-surface-write review projection', () => {
     const r = approvalToReview(anonApproval());
     expect(r.kind).toBe('anon-surface-write');
     expect(r.summary).toBe('Anonymous visitor requested: openwop:kanban.add-todo');
+    // The opaque principal, never PII (RFC 0048).
     expect(r.requestedBy).toEqual({ kind: 'system', id: 'anon:sess-abc', label: 'Anonymous visitor' });
-    expect(r.requestedBy?.id).not.toMatch(/@|email/i); // opaque principal, never PII (RFC 0048)
     expect(r.risk?.level).toBe('medium');
     expect(r.risk?.reasons).toContain('Anonymous website visitor');
     expect(r.risk?.reasons.some((x) => x.includes('openwop:kanban.add-todo'))).toBe(true);

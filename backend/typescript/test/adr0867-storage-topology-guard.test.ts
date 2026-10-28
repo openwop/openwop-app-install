@@ -13,6 +13,10 @@
  *     and never for sql (a per-node SQLite file); the engines always;
  *   - the v2 document: on `multi`, every process-local family is withheld from
  *     `buildV2Advertisement`, and a shared one is kept; on `single`, nothing is.
+ *
+ * Tracker TST-BFB-5. Red when: a platform marker stops meaning multi; the explicit value is
+ * case-sensitive; a typo is accepted; durable sql counts as shared; a sqlite
+ * Storage counts as shared; process-local families are not withheld on multi.
  */
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
@@ -21,7 +25,7 @@ import { buildV2Advertisement } from '../src/routes/discovery.js';
 import { isBackendShared, readInstanceTopology } from '../src/host/instanceTopology.js';
 import { STORAGE_FAMILIES, processLocalStorageFamilies, v2AdvertisedStorageFamilies } from '../src/host/storageFamilyAdvert.js';
 
-const CONFIG = { port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false } as AppConfig;
+const CONFIG: AppConfig = { port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false };
 const PG = 'postgresql://u:p@/db?host=/cloudsql/x';
 
 const ENV_KEYS = [

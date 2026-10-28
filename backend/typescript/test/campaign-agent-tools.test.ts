@@ -42,7 +42,9 @@ import { createOrg } from '../src/host/accessControlService.js';
 import { createBrief } from '../src/features/campaign-brief/briefService.js';
 import {
   CAMPAIGN_ORCH_STATUS_TOOL_ID,
+  CAMPAIGN_ORCH_GET_TOOL_ID,
   CAMPAIGN_ORCH_RUN_TOOL_ID,
+  CAMPAIGN_ORCH_AUTONOMY_TOOL_ID,
 } from '../src/features/campaign-orchestration/agentTools.js';
 import {
   CAMPAIGN_CHANNELS_LIST_TOOL_ID,
@@ -96,9 +98,9 @@ describe('CFP-1 — the campaign packs allowlist EXACTLY the registered tool ids
     return [...manifest.agents[0]!.toolAllowlist].sort();
   };
 
-  it('the strategist allowlist is exactly [status, run]', () => {
+  it('the strategist allowlist is exactly [status, get-campaign, get-autonomy, run]', () => {
     expect(readAllowlist('vendor.openwop-app.campaign-orchestration.agents')).toEqual(
-      [CAMPAIGN_ORCH_STATUS_TOOL_ID, CAMPAIGN_ORCH_RUN_TOOL_ID].sort(),
+      [CAMPAIGN_ORCH_STATUS_TOOL_ID, CAMPAIGN_ORCH_GET_TOOL_ID, CAMPAIGN_ORCH_AUTONOMY_TOOL_ID, CAMPAIGN_ORCH_RUN_TOOL_ID].sort(),
     );
   });
   it('the generator allowlist is exactly [channels, generate]', () => {

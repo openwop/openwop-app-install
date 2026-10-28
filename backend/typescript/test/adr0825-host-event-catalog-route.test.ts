@@ -5,6 +5,13 @@
  * shrink-only parity baseline). The SSOT is pinned against every emit site by
  * `adr0825-rfc0236-host-events.test.ts`, so this test pins only that the route
  * serves exactly the SSOT, as JSON, and that every row is bindable.
+ *
+ * The non-vacuity floor (179) is the MEASURED catalog size at w62; a smaller
+ * catalog fails here until the floor is lowered deliberately.
+ *
+ * Tracker TST-BHE-2. Sabotage-witnessed (w62): red when the route serves a
+ * subset of the SSOT, or the binding route's eventType check stops accepting a
+ * catalogued spelling outside both grammars (`crm.segment.entered`).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -55,7 +62,7 @@ describe('host-event catalog route (ADR 0825)', () => {
     const body = (await res.json()) as { types: Array<{ emitted: string; type: string; delivery: string }> };
     const ssot = hostEventTypeEntries();
     // Non-vacuity: the SSOT is the real population, not an empty list.
-    expect(ssot.length).toBeGreaterThan(100);
+    expect(ssot.length).toBeGreaterThanOrEqual(179);
     expect(body.types).toEqual(ssot.map((e) => ({ emitted: e.emitted, type: e.type, delivery: e.delivery })));
     // Rows the retired hand list was missing (its baseline) are now discoverable.
     const emitted = new Set(body.types.map((t) => t.emitted));

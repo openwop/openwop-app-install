@@ -65,6 +65,8 @@ import {
   verifyWorkloadCredential,
 } from './workloadIdentity.js';
 import { unwindOnDispatchTerminal } from './compensationRuntime.js';
+import { reconcileDispatchWaits } from './dispatchWaitAll.js';
+import { reconcileApprovalWaits } from './autonomyPolicy/waiters.js';
 
 const log = createLogger('runDispatchSweeper');
 
@@ -565,6 +567,7 @@ export function startRunDispatchSweeper(deps: RunSweeperDeps, workerId: string =
   // can starve the other.
   let outboxRunning = false;
   let orphanRunning = false;
+  let dispatchWaitRunning = false;
   let lastOrphanSweepAt = 0;
   let wedgeReported = false;
   let outboxStartedAt = 0;
@@ -607,6 +610,11 @@ export function startRunDispatchSweeper(deps: RunSweeperDeps, workerId: string =
       void runLane('orphan sweep', () => orphanRunning, (v) => { orphanRunning = v; },
         () => sweepOrphanedRuns(deps, workerId));
     }
+    void runLane('dispatch wait recovery', () => dispatchWaitRunning, (v) => { dispatchWaitRunning = v; },
+      async () => {
+        await reconcileDispatchWaits(deps.storage, deps.hostSuite);
+        await reconcileApprovalWaits(deps.storage, deps.hostSuite);
+      });
   };
   const timer = setInterval(() => runUnderWorkerContract(tick), POLL_INTERVAL_MS);
   if (typeof timer.unref === 'function') timer.unref();

@@ -258,6 +258,8 @@ export const messages = {
   templateVersionMismatch_other: 'Copied — but {{count}} steps are installed at different versions than this template was built for: {{nodes}}. They may behave differently.',
   templateVersionMismatchItem: '{{label}} ({{installed}} installed, template uses {{pinned}})',
   templateIncompleteConfig: 'Copied — but {{count}} step still needs setup: {{fields}}. Open the step to fill it in.',
+  templateUnfilledParams_one: 'Copied — but {{count}} template input is still blank: {{params}}. A run will fail until you fill it in.',
+  templateUnfilledParams_other: 'Copied — but {{count}} template inputs are still blank: {{params}}. A run will fail until you fill them in.',
   templateInstantiateError: 'Could not create a workflow from this template. Please try again.',
 
   // ── Node palette ────────────────────────────────────────────────────────
@@ -265,6 +267,7 @@ export const messages = {
   paletteCategoryData: 'Data',
   paletteCategoryAi: 'AI',
   paletteCategoryControl: 'Control',
+  paletteCategoryJourney: 'Journey',
   paletteCategoryIntegration: 'Integration',
   paletteBuiltin: 'Built-in',
   nodes: 'Nodes',

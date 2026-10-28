@@ -9,12 +9,15 @@
  *
  * @see docs/adr/0294-funnel-a-funnel-entity-builder-analytics.md
  */
+import { registerFunnelBlueprints } from './blueprints.js';
+import { registerFunnelPublishApprovalGate } from './funnelPublishApproval.js';
 import type { BackendFeature } from '../types.js';
 import { registerFunnelsRoutes } from './routes.js';
 import { registerFunnelsFormsSink } from './formsAttributionSink.js';
 import { registerFunnelsAgentTools } from './agentTools.js';
 import { buildFunnelsSurface } from './surface.js';
 import { startFunnelStatsSweep } from './funnelStats.js';
+import { registerFunnelExperimentSurface } from './experimentSurface.js';
 import { registerFeatureDataExporter } from '../../host/featureDataExport.js';
 import { exportFunnelsData } from './dataExport.js';
 
@@ -26,11 +29,20 @@ export const funnelsFeature: BackendFeature = {
     registerFunnelsFormsSink(); // ADR 0332 §D3 — opt-in capture attribution (funnels → forms seam)
     // CFP-1 (CHAT-FIRST-PORT-AUDIT #1) — the Funnel Architect's real chat tools
     // (openwop:funnels.list/get/step-stats/draft), sharing the routes' authority.
-    registerFunnelsAgentTools();
+    registerFunnelsAgentTools({ storage: deps.storage, hostSuite: deps.hostSuite });
+    // ADR 0948 P3a — every blueprint chain becomes a chain-backed workflow owned by
+    // the funnels toggle (deterministic id, gated launch).
+    registerFunnelBlueprints();
+    // ADR 0948 P1b — the `funnel-publish` decide handler on the core approvals hook
+    // (the inbox approve path dispatches here). Direction: feature → core only.
+    registerFunnelPublishApprovalGate(deps.storage);
     // Phase 3 — the derived stats rebuild sweep (reservation/affinity clone).
     startFunnelStatsSweep();
+    registerFunnelExperimentSurface(); // ADR 0949 P2a — the `funnel.step` experiment adapter
   },
-  surface: { id: 'funnels', build: buildFunnelsSurface },
+  // ADR 0948 P1b — the writes a run may make need the same bar as their routes
+  // (`workspace:write`); a read-only member's run can neither draft nor request a publish.
+  surface: { id: 'funnels', build: buildFunnelsSurface, orgPolicy: { methodScopes: { create: 'workspace:write', setSteps: 'workspace:write', requestPublish: 'workspace:write' } } },
   toggleDefault: {
     id: 'funnels',
     label: 'Funnels',

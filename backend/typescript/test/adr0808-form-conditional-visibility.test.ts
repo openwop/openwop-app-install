@@ -2,11 +2,17 @@
  * ADR 0808 — conditional field visibility (`form-content-packs.md`
  * §"Conditional visibility", RFC 0177 §E.4): a field's `when` is the workflow
  * edge-condition grammar, validated and evaluated by the SAME functions the
- * chain loader and the executor use.
+ * chain loader and the executor use. Tracker: TST-BTR-5.
+ *
+ * Red when (wave 60 probes w60g4-when-*): a `when` may name a later field or
+ * itself, or a `left` that is not `fields.<key>`; a meaningless `right` is kept;
+ * a hidden controller's posted value reveals its dependents; a hidden field's
+ * value is kept or it is still required; the pack loader stops checking `when`.
  */
-import { afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { createApp } from '../src/index.js';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { openStorage } from '../src/storage/index.js';
+import { initHostExtPersistence, __resetHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { sanitizeWhen, visibleFieldKeys } from '../src/host/formFieldConditions.js';
@@ -16,7 +22,10 @@ import { createFormContentRegistry, loadFormContentPacks } from '../src/host/for
 const SHIPPING: FormField = { key: 'shipping', label: 'Shipping', type: 'text', required: true };
 const REGION: FormField = { key: 'region', label: 'Region', type: 'text', required: true, when: { type: 'equals', left: 'fields.shipping', right: 'international' } };
 const POSTCODE: FormField = { key: 'postcode', label: 'Postcode', type: 'text', required: true, when: { type: 'truthy', left: 'fields.region' } };
-const form = (fields: FormField[]): FormDef => ({ formId: 'f', fields } as unknown as FormDef);
+const form = (fields: FormField[]): FormDef => ({
+  formId: 'f', tenantId: 't-0808', orgId: 'o-0808', title: 'Ship', status: 'published', fields,
+  createToContact: false, createdBy: 'u', createdAt: '2026-10-01T00:00:00.000Z', updatedAt: '2026-10-01T00:00:00.000Z',
+});
 
 describe('ADR 0808 — authoring: one grammar, earlier fields only', () => {
   it('accepts every operator the host evaluates, and drops a meaningless right', () => {
@@ -44,10 +53,9 @@ describe('ADR 0808 — authoring: one grammar, earlier fields only', () => {
 });
 
 describe('ADR 0808 — createForm keeps a valid when and refuses an invalid one', () => {
-  beforeAll(async () => {
-    process.env.OPENWOP_STORAGE_DSN = 'memory://';
-    await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  });
+  // `createForm` needs only the host-extension store, not a booted app.
+  beforeAll(async () => { initHostExtPersistence(await openStorage('memory://')); });
+  afterAll(() => { __resetHostExtPersistence(); });
   it('round-trips through the same sanitizer a template instantiation uses', async () => {
     const f = await createForm({ tenantId: 't-0808', orgId: 'o-0808', title: 'Ship', createdBy: 'u', fields: [
       { key: 'shipping', label: 'Shipping', type: 'text' },
@@ -82,14 +90,14 @@ describe('ADR 0808 — submission: hidden means neither required nor kept', () =
   });
 
   it('a form with no `when` anywhere behaves exactly as before', () => {
-    const plain = { ...REGION, when: undefined } as FormField;
+    const plain: FormField = { key: 'region', label: 'Region', type: 'text', required: true };
     expect(() => validateValues(form([SHIPPING, plain]), { shipping: 'domestic' })).toThrow(/region/);
   });
 });
 
 describe('ADR 0808 — the pack loader refuses what createForm would refuse', () => {
   let root = '';
-  afterEach(() => { root = ''; });
+  afterEach(() => { if (root) rmSync(root, { recursive: true, force: true }); root = ''; });
   function packWith(when: unknown): string {
     root = mkdtempSync(join(tmpdir(), 'adr0808-'));
     mkdirSync(join(root, 'p'));
@@ -125,7 +133,8 @@ describe('ADR 0808 — the server evaluator agrees with the public renderer, cas
   const table = JSON.parse(readFileSync(join(process.cwd(), '../../frontend/react/src/features/forms/render/whenCases.json'), 'utf8')) as {
     cases: Array<{ when: FormField['when']; a: unknown; shown: boolean }>;
   };
-  it('has rows (a parity check over an empty table proves nothing)', () => { expect(table.cases.length).toBeGreaterThan(10); });
+  // Floor = the measured row count (15 on 2026-10-23); a parity check over an empty table proves nothing.
+  it('has rows (a parity check over an empty table proves nothing)', () => { expect(table.cases.length).toBeGreaterThanOrEqual(15); });
   it.each(table.cases)('$when.type on $a → shown=$shown', (c) => {
     const values = c.a === null ? {} : { a: c.a };
     expect(visibleFieldKeys([{ key: 'a' }, { key: 'b', when: c.when }], values).has('b')).toBe(c.shown);

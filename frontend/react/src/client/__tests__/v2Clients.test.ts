@@ -350,6 +350,34 @@ describe('SSE — one transport, major 2, this app\'s auth', () => {
     expect(stream.init?.credentials).toBe('include');
   });
 
+  // ADR 0975 D5 — on production the SSE base is the direct *.run.app URL while
+  // the API is same-origin /api. A bearer alone resolves the caller's PERSONAL
+  // tenant there, so a run in a workspace they switched into was refused
+  // 403 id_tenant_mismatch on every reconnect (kicktodo.com, 2026-10-25). The
+  // stream now also carries a token minted where the cookie (and the active
+  // workspace) IS sent. Red when the cross-origin arm is removed.
+  it('bearer mode on a CROSS-ORIGIN stream base still carries a same-origin-minted streamToken', async () => {
+    const saved = config.sseBaseUrl;
+    config.sseBaseUrl = 'https://backend-abc123-uc.a.run.app';
+    try {
+      stub((url) => url.includes('/events/token') ? json({ streamToken: 'tok-x' }) : sse(FRAME + TERMINAL));
+      const { subscribeToRun } = await import('../streamsClient.js');
+      let closed = false;
+      const sub = subscribeToRun(BARE, { onEvent: () => {}, onClose: () => { closed = true; } });
+      await waitFor(() => closed);
+      sub.close();
+      expect(closed, 'the stream settled (not a waitFor timeout)').toBe(true);
+      const token = calls.find((c) => c.url.includes('/events/token'))!;
+      expect(new URL(token.url, 'http://localhost').origin, 'minted on the API base, where the cookie is sent').not.toBe('https://backend-abc123-uc.a.run.app');
+      const stream = calls.find((c) => c.url.includes('/events') && !c.url.includes('/token'))!;
+      const u = new URL(stream.url);
+      expect(u.origin).toBe('https://backend-abc123-uc.a.run.app');
+      expect(u.searchParams.get('streamToken')).toBe('tok-x');
+    } finally {
+      config.sseBaseUrl = saved;
+    }
+  });
+
   // ADR 0897 / RFC 0247 — the host may end an opted-in stream before the run
   // ends. The reader resumes from the last sequence it saw, and only the
   // terminal event ends the subscription.

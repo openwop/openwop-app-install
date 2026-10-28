@@ -21,7 +21,11 @@ export const messages = {
 
   // Consentimento de extração automática (ADR 0120)
   consentLabel: 'Aprender automaticamente fatos duradouros das minhas conversas',
-  consentHint: 'Quando ativado, seu assistente pode salvar fatos duradouros que aprende durante as conversas. Os fatos aprendidos aparecem abaixo, marcados como “Aprendida automaticamente”, e você pode excluí-los. Desativar isto interrompe o aprendizado futuro, mas não exclui o que já foi aprendido. Desativado por padrão.',
+  consentHint: 'Quando ativado, sempre que você inicia uma nova conversa, seu assistente revisa a conversa que você acabou de deixar e salva fatos duradouros que você disse sobre si mesmo. Ele lê apenas suas próprias mensagens, e apenas as conversas do seu espaço de trabalho pessoal. Os fatos aprendidos aparecem abaixo, marcados como “Aprendida automaticamente”, e os assistentes os tratam como não verificados. Excluir um também impede que ele seja aprendido de novo com as mesmas palavras. Desativar isto interrompe o aprendizado futuro, mas não exclui o que já foi aprendido. Desativado por padrão.',
+  consentUnavailable: 'Aprender com as conversas exige um espaço de trabalho pessoal, e esta conta não tem um.',
+  consentSignIn: 'Entre para que seu assistente aprenda fatos duradouros com suas conversas.',
+  consentTurnOff: 'Desativar',
+  removeLearnedConfirmBody: 'Remover este fato aprendido? Ele não será mais lembrado, e não será aprendido de novo com as mesmas palavras.',
   erasureScopeNote: 'Excluir os dados da sua conta remove a sua memória pessoal. Isso não alcança o que um agente compartilhado do workspace lembra das suas conversas com ele — essa memória pertence ao workspace. Peça a um administrador para limpar a memória do agente na aba Memória dele.',
   consentError: 'Não foi possível atualizar a configuração de aprendizado de memória.',
   consentLoadFailed: 'Não foi possível ler se o aprendizado de memória está ativado. Ele pode estar ATIVADO — isto não confirma que está desativado.',

@@ -5,6 +5,17 @@
  * forbidden-syscall escape (+escapeKind), capability-gate denial
  * (+requestedCapability), timeout, and an allow-listed host call. Boots the real
  * app with OPENWOP_TEST_SANDBOX_MVP=true.
+ *
+ * Each refusal is asserted whole (a 200 carrying `error` and NO `result`), so a
+ * dispatch that returns nothing cannot pass as either outcome. Round 1's
+ * `8fw2g3-seam-fetchmock` was vacuous because the fetch case asserted only that
+ * no error came back.
+ *
+ * Sabotage witnessed red (8f grade-tests wave 2): the allow-list check removed
+ * (`8fw2g3-seam-allow`), escapeKind dropped (`-seam-escapekind`), the capability
+ * name not split from its message (`-seam-reqcap`), the timeout pattern broken
+ * (`-seam-timeout`), args not passed (`-seam-args`), and the fetch mock's value
+ * dropped (`-seam-fetchmock-r2`).
  */
 
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
@@ -48,28 +59,38 @@ describe('A13(a) — sandbox-invoke via execInSandboxVm', () => {
   });
 
   it('classifies a forbidden-syscall escape with its escapeKind', async () => {
-    const body = await (await invoke({ typeId: 'misbehave.fs-escape-read' })).json() as SeamResp;
-    expect(body.error?.code).toBe('sandbox_escape_attempt');
-    expect(body.error?.details?.escapeKind).toBe('host-fs-escape');
+    const r = await invoke({ typeId: 'misbehave.fs-escape-read' });
+    expect(r.status).toBe(200);
+    const body = await r.json() as SeamResp;
+    expect(body.result).toBeUndefined();
+    expect(body.error).toEqual({ code: 'sandbox_escape_attempt', details: { escapeKind: 'host-fs-escape', message: expect.any(String) } });
   });
 
   it('classifies a capability-gate violation with requestedCapability', async () => {
-    const body = await (await invoke({ typeId: 'misbehave.capability-gate-violation' })).json() as SeamResp;
-    expect(body.error?.code).toBe('sandbox_capability_denied');
-    expect(body.error?.details?.requestedCapability).toBe('notInAllowedList');
+    const r = await invoke({ typeId: 'misbehave.capability-gate-violation' });
+    expect(r.status).toBe(200);
+    const body = await r.json() as SeamResp;
+    expect(body.result).toBeUndefined();
+    expect(body.error).toEqual({
+      code: 'sandbox_capability_denied',
+      details: { requestedCapability: 'notInAllowedList', message: 'host.notInAllowedList is not in allowedHostCalls' },
+    });
   });
 
   it('times out a runaway loop', async () => {
-    const body = await (await invoke({ typeId: 'misbehave.timeout' })).json() as SeamResp;
-    expect(body.error?.code).toBe('sandbox_timeout');
+    const r = await invoke({ typeId: 'misbehave.timeout' });
+    expect(r.status).toBe(200);
+    const body = await r.json() as SeamResp;
+    expect(body.result).toBeUndefined();
+    expect(body.error).toEqual({ code: 'sandbox_timeout', details: { message: expect.stringMatching(/timed out/i) } });
   });
 
   it('permits an allow-listed host call (fetch)', async () => {
     const r = await invoke({ typeId: 'well-behaved.host-fetch', allowedHostCalls: ['fetch'] });
     expect(r.status).toBe(200);
     const body = await r.json() as SeamResp;
-    // host.fetch is mocked in the seam context → a value, not a capability denial.
-    expect(body.error).toBeUndefined();
+    // host.fetch is mocked in the seam context → the mock's VALUE, not a capability denial.
+    expect(body).toEqual({ result: { status: 200, body: 'mocked' } });
   });
 
   it('404s an unknown program id with sandbox_pack_not_found', async () => {

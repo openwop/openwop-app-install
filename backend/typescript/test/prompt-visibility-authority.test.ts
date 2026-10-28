@@ -33,7 +33,7 @@ import { tmpdir } from 'node:os';
 import { initInMemorySurfaces } from '../src/host/inMemorySurfaces.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openStorage } from '../src/storage/index.js';
-import { createUserTemplate, clearUserTemplatesForTest } from '../src/host/promptStore.js';
+import { createTenantTemplate } from '../src/host/tenantPromptTemplates.js';
 import { userIdFor } from '../src/features/users/usersService.js';
 import {
   createEntry, listEntries, listEntriesUnfiltered, getEntry, updateEntry,
@@ -53,54 +53,70 @@ const NODES = ['feature.prompts.nodes.list-library', 'feature.prompts.nodes.get-
 let orgN = 0;
 let ORG = 'org-a';
 
-function seed(id: string): void {
-  expect(createUserTemplate({ templateId: id, version: '1.0.0', kind: 'user', text: 'Hello {{name}}', name: id }).ok).toBe(true);
+// ADR 0993 D5 — a user template belongs to ONE tenant, so it is seeded per tenant.
+async function seed(id: string, tenant: string = T): Promise<void> {
+  expect((await createTenantTemplate(tenant, { templateId: id, version: '1.0.0', kind: 'user', text: 'Hello {{name}}', name: id })).ok).toBe(true);
 }
 
 beforeAll(async () => {
   initInMemorySurfaces({ dataDir: mkdtempSync(join(tmpdir(), 'openwop-plvis-')) });
-  initHostExtPersistence(await openStorage('memory://'));
 });
-beforeEach(() => { clearUserTemplatesForTest(); ORG = `vorg-${orgN++}`; });
+beforeEach(async () => { initHostExtPersistence(await openStorage('memory://')); ORG = `vorg-${orgN++}`; });
 
 describe('ADR 0694 D1 — only the owner may change a private prompt visibility', () => {
   it('leg 1: a co-member with write authority may NOT widen someone else private entry', async () => {
-    seed('t1');
+    await seed('t1');
     const e = await createEntry(T, ORG, OWNER, { name: 'Mine', promptRef: 't1', visibility: 'private' });
     expect(e.visibility).toBe('private');
     expect(await getEntry(T, ORG, e.entryId, OTHER), 'precondition: OTHER cannot read it').toBeNull();
 
+    // ADR 0993 D2 — refused with the read lane's uniform 404 (it was a 403, which
+    // confirmed to someone who cannot read the entry that it exists).
     await expect(
       updateEntry(T, ORG, e.entryId, OTHER, { visibility: 'shared' }),
       'a workspace:write co-member must not be able to GRANT access to it',
-    ).rejects.toMatchObject({ code: 'forbidden' });
+    ).rejects.toMatchObject({ code: 'not_found' });
 
     expect((await getEntry(T, ORG, e.entryId, OWNER))?.visibility, 'the refused widening wrote nothing').toBe('private');
     expect(await getEntry(T, ORG, e.entryId, OTHER), 'and it is still unreadable').toBeNull();
   });
 
   it('leg 2: the OWNER may widen their own entry', async () => {
-    seed('t2');
+    await seed('t2');
     const e = await createEntry(T, ORG, OWNER, { name: 'Mine2', promptRef: 't2', visibility: 'private' });
     const up = await updateEntry(T, ORG, e.entryId, OWNER, { visibility: 'org' });
     expect(up.visibility).toBe('org');
     expect(await getEntry(T, ORG, e.entryId, OTHER), 'now visible to the org').not.toBeNull();
   });
 
-  it('leg 3: once org-visible, any writer may change it (the gate is about PRIVATE, not about visibility edits)', async () => {
-    seed('t3');
+  // ADR 0993 (grade-code P61CD-6) OVERTURNS this leg's former claim ("once
+  // org-visible, any writer may change it"). Visibility is the ACL in BOTH
+  // directions: a co-member narrowing an org entry to private took it away from
+  // the whole org. The other fields of an org entry stay org-writable (below).
+  it('leg 3: visibility is the owner\'s in both directions; other fields of an org entry stay org-writable', async () => {
+    await seed('t3');
     const e = await createEntry(T, ORG, OWNER, { name: 'Shared3', promptRef: 't3', visibility: 'org' });
-    const up = await updateEntry(T, ORG, e.entryId, OTHER, { visibility: 'shared' });
-    expect(up.visibility, 'a readable entry is not owner-gated').toBe('shared');
+    await expect(updateEntry(T, ORG, e.entryId, OTHER, { visibility: 'shared' })).rejects.toMatchObject({ code: 'forbidden' });
+    await expect(updateEntry(T, ORG, e.entryId, OTHER, { visibility: 'private' })).rejects.toMatchObject({ code: 'forbidden' });
+    const renamed = await updateEntry(T, ORG, e.entryId, OTHER, { name: 'Renamed3', visibility: 'org' });
+    expect(renamed.name, 'naming the CURRENT visibility is not a change').toBe('Renamed3');
+    expect((await updateEntry(T, ORG, e.entryId, OWNER, { visibility: 'shared' })).visibility).toBe('shared');
   });
 
-  it('leg 4 (negative control): the OTHER fields stay org-writable — D1 must not become a general owner-only rule', async () => {
-    seed('t4a'); seed('t4b');
+  // ADR 0993 D2 OVERTURNS this leg's former claim ("the OTHER fields stay
+  // org-writable — D1 must not become a general owner-only rule"). A member who
+  // could not read the entry could repoint it, and a repointed prompt decides what
+  // its owner sends: the same grant D1 refused, made a different way. The negative
+  // control that survives is the one leg 3 pins: an org-visible entry's other
+  // fields stay org-writable.
+  it('leg 4: no field of a private entry is writable by a non-owner (ADR 0993 D2)', async () => {
+    await seed('t4a'); await seed('t4b');
     const e = await createEntry(T, ORG, OWNER, { name: 'Editable', promptRef: 't4a', visibility: 'private' });
-    const up = await updateEntry(T, ORG, e.entryId, OTHER, { name: 'Renamed', tags: ['x'], promptRef: 't4b' });
-    expect(up.name, 'org-scoped write authority over ordinary fields is UNCHANGED').toBe('Renamed');
-    expect(up.promptRef).toBe('t4b');
-    expect(up.visibility, 'and visibility is untouched by an edit that did not name it').toBe('private');
+    await expect(updateEntry(T, ORG, e.entryId, OTHER, { name: 'Renamed', tags: ['x'], promptRef: 't4b' }))
+      .rejects.toMatchObject({ code: 'not_found' });
+    const after = await getEntry(T, ORG, e.entryId, OWNER);
+    expect(after?.name).toBe('Editable');
+    expect(after?.promptRef).toBe('t4a');
   });
 });
 
@@ -120,8 +136,10 @@ describe('ADR 0694 D3 — the IMPORT LANE itself canonicalizes (wiring, not just
     // tests GREEN. Mechanism and wiring must be pinned separately; this leg drives
     // `applyImport` end-to-end so the CALL SITE cannot silently regress.
     const TB = 'pl-import-tenant';
-    seed('tpl-import-1');
+    await seed('tpl-import-1', TB);
     const raw = 'oidc:importer-9';
+    // ADR 0993 D7 — an import writes only into an org the importer may write.
+    await createOrg({ tenantId: TB, orgId: 'io1', createdBy: raw, name: 'Import org', ownerSubject: raw });
     const canonical = userIdFor(TB, raw);
     expect(canonical, 'the id spaces must genuinely differ or this leg is vacuous').not.toBe(raw);
 
@@ -148,10 +166,10 @@ describe('ADR 0694 D3 — the IMPORT LANE itself canonicalizes (wiring, not just
     // exported `private` prompt would have returned `org`-visible. A fix that creates
     // a fresh instance of the class it closes.
     const TS = 'pl-rt-src';
-    seed('tpl-rt');
+    await seed('tpl-rt', TS);
     // The exporter walks `listOrgs(tenantId)` (portabilityService.ts:276), so the
     // org must really exist — writing entries under a bare orgId string exports NOTHING.
-    const srcOrg = await createOrg({ tenantId: TS, createdBy: OWNER, name: 'RT Src' });
+    const srcOrg = await createOrg({ tenantId: TS, createdBy: OWNER, name: 'RT Src', ownerSubject: OWNER });
     const priv = await createEntry(TS, srcOrg.orgId, OWNER, { name: 'rt-private', promptRef: 'tpl-rt', visibility: 'private' });
     const shared = await createEntry(TS, srcOrg.orgId, OWNER, { name: 'rt-org', promptRef: 'tpl-rt', visibility: 'org' });
     expect(priv.visibility).toBe('private');
@@ -165,11 +183,14 @@ describe('ADR 0694 D3 — the IMPORT LANE itself canonicalizes (wiring, not just
     }
 
     const TD = 'pl-rt-dst';
-    // No re-seed: `createUserTemplate` is GLOBAL (no tenantId), so the template
-    // seeded above is already resolvable from the destination tenant.
-    const res = await applyImport(TD, OWNER, { bundleVersion: '1', source: { origin: 'adapter:test' }, items: bundle.items });
+    // ADR 0993 D5/D7 — a template is one tenant's, and org ids are global, so the
+    // destination has its own template and its own org, and the bundle is pointed
+    // at that org (what an operator moving a library does).
+    await seed('tpl-rt', TD);
+    const destOrg = (await createOrg({ tenantId: TD, createdBy: OWNER, name: 'RT Dst', ownerSubject: OWNER })).orgId;
+    const items = bundle.items.map((i) => ({ ...i, payload: { ...i.payload, orgId: destOrg } }));
+    const res = await applyImport(TD, OWNER, { bundleVersion: '1', source: { origin: 'adapter:test' }, items });
     expect(res.imported, JSON.stringify(res)).toBeGreaterThan(0);
-    const destOrg = String((bundle.items.find((i) => i.payload.name === 'rt-private')!).payload.orgId);
     const landed = await listEntries(TD, destOrg, OWNER);
     expect(landed.find((e) => e.name === 'rt-private')?.visibility, 'private must STAY private across a round trip').toBe('private');
     expect(landed.find((e) => e.name === 'rt-org')?.visibility, 'and org must stay org').toBe('org');
@@ -177,7 +198,7 @@ describe('ADR 0694 D3 — the IMPORT LANE itself canonicalizes (wiring, not just
 
   it('leg 6c: an import with no resolvable subject is refused, not minted unownable (D3c)', async () => {
     const TB = 'pl-import-tenant2';
-    seed('tpl-import-2');
+    await seed('tpl-import-2', TB);
     const res = await applyImport(TB, 'import', {
       bundleVersion: '1',
       source: { origin: 'adapter:test' },

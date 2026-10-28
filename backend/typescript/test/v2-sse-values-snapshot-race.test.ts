@@ -4,6 +4,10 @@
  * `storage.getRun` took a real round trip (Postgres). In-memory sqlite answered
  * inside the same tick, so the ordinary witness stayed green. This test injects
  * a real timer into `getRun` to reproduce the production ordering.
+ *
+ * Witnessed (8f W4): sr-close-before-snapshot (predicted uncertain in round 1,
+ * came back witnessed — the spy does intercept). The delayed-read counter is
+ * the positive control that keeps it that way.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -11,6 +15,10 @@ import type { Server } from 'node:http';
 import * as sqlite from '../src/storage/sqlite/index.js';
 
 let server: Server; let base = '';
+/** Positive control: how many getRun reads actually took the injected 40 ms.
+ *  Without it, a spy that silently failed to intercept would leave the ordinary
+ *  same-tick ordering — the one the header says could not see the bug. */
+let delayedReads = 0;
 const V2 = { Authorization: 'Bearer dev-token', 'Content-Type': 'application/json', 'OpenWOP-Version': '2' };
 
 beforeAll(async () => {
@@ -18,7 +26,7 @@ beforeAll(async () => {
   vi.spyOn(sqlite, 'openSqliteStorage').mockImplementation((dbPath: string) => {
     const s = real(dbPath);
     const getRun = s.getRun.bind(s);
-    s.getRun = async (id: string) => { await new Promise((r) => setTimeout(r, 40)); return getRun(id); };
+    s.getRun = async (id: string) => { delayedReads += 1; await new Promise((r) => setTimeout(r, 40)); return getRun(id); };
     return s;
   });
   process.env.OPENWOP_STORAGE_DSN = 'memory://'; process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true'; process.env.OPENWOP_TEST_SEAM_ENABLED = 'true';
@@ -40,11 +48,17 @@ describe('values stream on a terminal run with a slow storage read (the producti
       if (s.status === 'completed') break;
       await new Promise((r) => setTimeout(r, 50));
     }
+    // Honest ceiling: a real-clock poll for the run to settle (no completion hook
+    // to await; the 40 ms read latency is the production condition under test).
+    const settled = await (await fetch(`${base}/runs/${encodeURIComponent(runId)}`, { headers: V2 })).json() as { status: string };
+    expect(settled.status, 'the run must be terminal before the values stream is opened').toBe('completed');
+    const readsBefore = delayedReads;
     const r = await fetch(`${base}/runs/${encodeURIComponent(runId)}/events?streamMode=values`, { headers: { ...V2, Accept: 'text/event-stream', 'Last-Event-ID': '1' } });
     expect(r.status).toBe(200);
     const text = await r.text();
     const events = text.split('\n').filter((l) => l.startsWith('event:')).map((l) => l.slice(6).trim());
     expect(events.length, `a 200 with only the keep-alive is the production defect; got: ${JSON.stringify(text.slice(0, 120))}`).toBeGreaterThan(0);
     expect(new Set(events)).toEqual(new Set(['state.snapshot']));
+    expect(delayedReads, 'the slow getRun was really in the stream path').toBeGreaterThan(readsBefore);
   });
 });

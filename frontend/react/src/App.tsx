@@ -1,6 +1,6 @@
 import { Suspense, lazy, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Link, Route, Routes, matchPath, useLocation } from 'react-router-dom';
+import { Link, Navigate, Route, Routes, matchPath, useLocation } from 'react-router-dom';
 import { useNotificationStore } from './notifications/notificationStore.js';
 
 // Overlays are lazy-loaded and mounted only when actually opened, so the
@@ -81,12 +81,15 @@ function CommandPaletteLazy(): JSX.Element | null {
 import { RateLimitBanner } from './chrome/RateLimitBanner.js';
 import { NavTelemetry } from './chrome/NavTelemetry.js';
 import { NotificationNavigator } from './notifications/NotificationNavigator.js';
-import { NotFoundPage } from './NotFoundPage.js';
+// ADR 0874: unknown-route recovery loads on that route, like other page bodies.
+const NotFoundPage = lazy(() => import('./NotFoundPage.js').then((m) => ({ default: m.NotFoundPage })));
 import { Sidebar } from './chrome/Sidebar.js';
 import { AppGate } from './chrome/AppGate.js';
 import { SiteShell } from './chrome/SiteShell.js';
 import { siteWrapsAppGate, tierIsSessionBearing } from './chrome/tierShell.js';
-import { PublicShell } from './chrome/PublicShell.js';
+// Anonymous-route navigation belongs to the public shell; workspace visits
+// load their own chrome without downloading that shell or its public probes.
+const PublicShell = lazy(() => import('./chrome/PublicShell.js').then((m) => ({ default: m.PublicShell })));
 import { matchSharedToken } from './features/sharing/shareRoute.js';
 import { matchPresentRemoteToken } from './canvas/presentRemoteRoute.js';
 import { matchFormFillId } from './features/forms/fillRoute.js';
@@ -96,7 +99,7 @@ import { matchSignToken } from './features/crm/signRoute.js';
 import { matchPublicPageSlug } from './features/site/publicPageRoute.js';
 import { matchBlogRoute } from './features/site/blogRoute.js';
 import { matchPricingRoute } from './features/site/pricingRoute.js';
-import { matchPrivacyRoute } from './features/site/privacyRoute.js';
+import { matchPrivacyRoute, privacyRedirect } from './features/site/privacyRoute.js';
 import { PRIVACY_HREF } from './brand/privacyHref.js';
 import { FRONTEND_FEATURES, lastKnownEntitlementFeatureIds } from './features/registry.js';
 import { config } from './client/config.js';
@@ -263,6 +266,8 @@ export function App() {
   const pricingRoute = matchPricingRoute(location.pathname);
   // The privacy disclosure is for visitors too: bare PublicShell, not the workspace sidebar.
   const privacyRoute = matchPrivacyRoute(location.pathname);
+  // A brand with its own adopted policy redirects `/privacy` to it rather than serving the generic page too.
+  const privacyTarget = privacyRedirect(location.pathname, PRIVACY_HREF);
   // ADR 0390 — the public podcast show/episode pages, same bare-PublicShell posture.
   const podcastView = matchPodcastView(location.pathname);
   // ADR 0544 P3 — `/verify/:token`, a SIBLING public path (never under
@@ -408,6 +413,7 @@ export function App() {
 
   if (showPublic) {
     return (
+      <Suspense fallback={<RouteLoading />}>
       <PublicShell>
         {verifyToken
           ? <Suspense fallback={<div className="u-p-4"><Skeleton /></div>}><AttestationVerifyPage token={verifyToken} /></Suspense>
@@ -415,6 +421,8 @@ export function App() {
           ? <Suspense fallback={<div className="u-p-4"><Skeleton /></div>}><PublicPodcastPage view={podcastView} /></Suspense>
           : pricingRoute
           ? <Suspense fallback={<div className="u-p-4"><Skeleton /></div>}><PricingPage /></Suspense>
+          : privacyTarget
+          ? <Navigate replace to={privacyTarget} />
           : privacyRoute
           ? <Suspense fallback={<div className="u-p-4"><Skeleton /></div>}><PrivacyPage /></Suspense>
           : featurePublic
@@ -449,6 +457,7 @@ export function App() {
             ? <div className="u-p-4"><Skeleton /></div>
             : <Suspense fallback={<div className="u-p-4"><Skeleton /></div>}><FrontPage orgId={pointer?.orgId ?? ''} slug={pointer?.slug ?? 'home'} surface="root" /></Suspense>}
       </PublicShell>
+      </Suspense>
     );
   }
 

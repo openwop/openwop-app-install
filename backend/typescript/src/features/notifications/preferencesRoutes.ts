@@ -19,6 +19,7 @@
  * @see docs/adr/0010-notifications.md
  */
 
+import { localClock } from '../../host/localClock.js';
 import type { Express } from 'express';
 import type { NotificationPriority } from '../../types.js';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
@@ -133,13 +134,12 @@ function defaultPreferences(tenantId: string, userId: string, now: string): Noti
 function isWithinQuietHours(qh: QuietHours, priority: NotificationPriority): boolean {
   if (!qh.enabled || !qh.timezone) return false;
   if (qh.allowUrgent && (priority === 'urgent' || priority === 'high')) return false;
-  let parts: Intl.DateTimeFormatPart[];
-  try {
-    parts = new Intl.DateTimeFormat('en-US', { timeZone: qh.timezone, hour12: false, weekday: 'short', hour: '2-digit', minute: '2-digit' }).formatToParts(new Date());
-  } catch { return false; }
-  const wd = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(parts.find((p) => p.type === 'weekday')?.value ?? '');
-  if (wd < 0 || !qh.days.includes(wd)) return false;
-  const nowMin = (Number(parts.find((p) => p.type === 'hour')?.value) % 24) * 60 + Number(parts.find((p) => p.type === 'minute')?.value);
+  // ADR 0955 P2 — the shared clock reading (`host/localClock.ts`); a bad zone does not enforce.
+  const clock = localClock(new Date(), qh.timezone);
+  if (!clock) return false;
+  const wd = clock.weekday;
+  if (!qh.days.includes(wd)) return false;
+  const nowMin = clock.minuteOfDay;
   const [sh, sm] = qh.start.split(':').map(Number); const startMin = sh! * 60 + sm!;
   const [eh, em] = qh.end.split(':').map(Number); const endMin = eh! * 60 + em!;
   return startMin <= endMin ? (nowMin >= startMin && nowMin < endMin) : (nowMin >= startMin || nowMin < endMin);

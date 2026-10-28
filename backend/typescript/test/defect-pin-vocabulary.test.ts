@@ -100,13 +100,12 @@ const KNOWN = new Map<string, 'correction' | 'pin'>([
   // reword until it passed; that is policing a spelling instead of the invariant, and it is
   // how a ratchet stops meaning anything. Registered instead.
   ['destructive-lane-census.test.ts', 'pin'],
-  // ADR 0879 / `CH2WF-4`, 2026-10-12 (feature loop row 40). A private channel's agent-turn
-  // runs are LISTED to every workspace member, because run reads are tenant-scoped
-  // (`host/runAccess.ts`). The file asserts that exposure as current behaviour so it
-  // cannot go stale, which is exactly a `pin`: a shipped gap blessed until the platform
-  // run-read decision for conversation-bound runs lands (same class as `DSHCD-9`). Closing
-  // `CH2WF-4` flips the assertion, removes this entry and lowers PIN_CEILING.
-  ['adr0879-ch2wf4-run-read-residue.test.ts', 'pin'],
+  // (Removed 2026-10-24, /grade-tests wave 62: `adr0879-ch2wf4-run-read-residue.test.ts`
+  // was rewritten in neutral words, so it no longer matches PATTERN and this registry
+  // cannot see it. CH2WF-4 is STILL a live, labelled defect pin in that file — tracked
+  // as TST-BHC-1 / BLOCKED-ON-PRODUCT in docs/steward/TEST-ASSESSMENT.md — so the
+  // vocabulary ledger now under-counts pins by one. PIN_CEILING was lowered with it so
+  // the slack cannot be spent on a new pin.)
 ]);
 
 /** Live pins may only SHRINK. Raising this means a new defect was pinned.
@@ -121,7 +120,10 @@ const KNOWN = new Map<string, 'correction' | 'pin'>([
  *  through the tenant-scoped run lane, could not fix it inside a feature PR (it is the
  *  platform's run-read model), and chose a pinned, tracked residue over an unrecorded one.
  *  This is debt, blessed knowingly; closing `CH2WF-4` lowers it back to 5. */
-const PIN_CEILING = 6;
+/*  LOWERED 6 -> 5, 2026-10-24 (/grade-tests wave 62): the CH2WF-4 file left this
+ *  registry (see the removal note above) WITHOUT the defect being closed. The ceiling
+ *  follows the registry count so no slack is left; CH2WF-4 is tracked as TST-BHC-1. */
+const PIN_CEILING = 5;
 
 function walk(dir: string): string[] {
   const out: string[] = [];

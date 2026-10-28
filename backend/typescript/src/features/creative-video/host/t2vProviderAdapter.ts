@@ -49,13 +49,17 @@ export function makeT2VAdapter(deps: BrokeredEgressDeps): VideoAdapter {
   const versionHeader = { 'X-Runway-Version': t2vApiVersion() };
   return {
     async submitJob(input) {
+      // ADR 0945 D7 — the same task API animates a still: `image_to_video` takes
+      // the image as a data URI (`promptImage`) and the motion as `promptText`.
       const body = JSON.stringify({
+        ...(input.promptImage ? { promptImage: input.promptImage } : {}),
         promptText: input.script.slice(0, 1000),
         model: input.model || defaultModel(),
         ...(input.durationSec ? { duration: input.durationSec } : {}),
         ratio: input.width && input.height ? `${input.width}:${input.height}` : '1280:768',
       });
-      const out = await brokeredPost(deps, { provider: t2vProvider(), url: `${t2vApiBase()}/v1/text_to_video`, body, extraHeaders: versionHeader, ...auth });
+      const path = input.promptImage ? '/v1/image_to_video' : '/v1/text_to_video';
+      const out = await brokeredPost(deps, { provider: t2vProvider(), url: `${t2vApiBase()}${path}`, body, extraHeaders: versionHeader, ...auth });
       if (out.outcome !== 'sent') return { ok: false, error: out.outcome };
       let json: Record<string, unknown> = {};
       try { json = (await out.res.json()) as Record<string, unknown>; } catch { /* {} */ }

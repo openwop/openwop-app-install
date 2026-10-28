@@ -23,6 +23,7 @@ import type { StartRunDeps } from '../src/host/runStarter.js';
 import { initInMemorySurfaces } from '../src/host/inMemorySurfaces.js';
 import { initHostExtPersistence, __resetHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { resetScheduling, getJob } from '../src/host/schedulingService.js';
+import { ensureConversationMeta } from '../src/host/conversationStore.js';
 import { processDueSchedules } from '../src/host/scheduleDaemon.js';
 import { createScheduledChat, listScheduledChatsWithStatus } from '../src/features/scheduled-agent-chats/scheduledChatService.js';
 import { registerToggleDefault } from '../src/host/featureToggles/registry.js';
@@ -52,6 +53,18 @@ beforeEach(async () => {
 });
 afterEach(() => { __resetHostExtPersistence(); });
 
+// ADR 0985 D1 — the fire gate asks, before the run, whether the reply could land: the
+// conversation must exist and its person must still belong to the workspace. A
+// personal workspace with a real conversation is the fixture that passes both.
+const T1 = 'user:schedfire1';
+const C1 = 'c1';
+async function fixtureChat() {
+  const now = new Date().toISOString();
+  await storage.createChatSession({ sessionId: C1, tenantId: T1, title: 'Digest', createdAt: now, updatedAt: now, messageCount: 0 });
+  await ensureConversationMeta(T1, C1, { type: 'agent', ownerUserId: T1 });
+  return createScheduledChat(T1, { orgId: 'o1' }, T1, { agentId: 'iris', prompt: 'digest', conversationId: C1, cronExpr: '0 * * * *' }, T1, T1);
+}
+
 async function runsForJob(jobId: string) {
   return (await storage.listRuns({ limit: 100 })).filter((r) => {
     const schedule: unknown = r.metadata['schedule'];
@@ -61,7 +74,7 @@ async function runsForJob(jobId: string) {
 
 describe('scheduled-chat firing (ADR 0125 Phase 4)', () => {
   it('fires the turn-workflow ONCE on the due tick, then does not re-fire the same slot', async () => {
-    const chat = await createScheduledChat('t1', { orgId: 'o1' }, 'u1', { agentId: 'iris', prompt: 'digest', conversationId: 'c1', cronExpr: '0 * * * *' });
+    const chat = await fixtureChat();
     const jobId = `schedchat-${chat.chatId}`;
     const due = (await getJob(jobId))!.nextFireAt!;
     expect(due).toBeGreaterThan(0);
@@ -71,8 +84,8 @@ describe('scheduled-chat firing (ADR 0125 Phase 4)', () => {
     expect(runs).toHaveLength(1);
     const run = runs[0]!;
     expect(run.workflowId).toBe(SCHEDULED_CHAT_TURN_WORKFLOW_ID);
-    expect(run.tenantId).toBe('t1');
-    expect(run.configurable).toMatchObject({ agentId: 'iris', task: 'digest', conversationId: 'c1', credentialRef: SCHEDULED_CHAT_CREDENTIAL_REF });
+    expect(run.tenantId).toBe(T1);
+    expect(run.configurable).toMatchObject({ agentId: 'iris', task: 'digest', conversationId: C1, credentialRef: SCHEDULED_CHAT_CREDENTIAL_REF });
     expect(run.metadata).toMatchObject({ kind: 'scheduled-agent-chat', chatId: chat.chatId, schedule: { jobId, trigger: 'schedule' } });
 
     // A second tick in the SAME slot: the job advanced nextFireAt past `due` on the
@@ -86,14 +99,14 @@ describe('scheduled-chat firing (ADR 0125 Phase 4)', () => {
   // pre-0879 org schedule whose channel the creator can no longer post to), the run
   // fails TYPED and the owner's schedule list carries the reason.
   it('surfaces the last run\'s failure on the schedule (never a silent drop)', async () => {
-    const chat = await createScheduledChat('t1', { orgId: 'o1' }, 'u1', { agentId: 'iris', prompt: 'digest', conversationId: 'c1', cronExpr: '0 * * * *' });
+    const chat = await fixtureChat();
     const jobId = `schedchat-${chat.chatId}`;
     const due = (await getJob(jobId))!.nextFireAt!;
     expect(await processDueSchedules(deps, due + 1000)).toBe(1);
-    expect((await listScheduledChatsWithStatus('t1', { orgId: 'o1' }))[0]!.lastError).toBeUndefined();
+    expect((await listScheduledChatsWithStatus(T1, { orgId: 'o1' }))[0]!.lastError).toBeUndefined();
     const run = (await runsForJob(jobId))[0]!;
     await storage.updateRun(run.runId, { status: 'failed', error: { code: 'conversation_write_refused', message: 'The reply was not posted to this conversation (cannot_post).' } });
-    const [listed] = await listScheduledChatsWithStatus('t1', { orgId: 'o1' });
+    const [listed] = await listScheduledChatsWithStatus(T1, { orgId: 'o1' });
     expect(listed!.lastError).toEqual({ code: 'conversation_write_refused', message: 'The reply was not posted to this conversation (cannot_post).' });
     // Another tenant's listing never sees it.
     expect(await listScheduledChatsWithStatus('t2', { orgId: 'o1' })).toEqual([]);

@@ -321,7 +321,8 @@ export type ResolveAgentTool = (name: string) => AgentToolDef | undefined;
  *  capability-precondition (a returned structured failure carries its code in
  *  `content` JSON instead — see `deriveToolErrorCode`). */
 export type ExecuteAgentTool = (
-  call: { name: string; input: Record<string, unknown> },
+  /** `callId` is the dispatcher's call id (ADR 0984 D7 keys the as-executed record by it). */
+  call: { name: string; input: Record<string, unknown>; callId?: string },
 ) => Promise<{ content: string; isError?: boolean; errorCode?: string; continueTurn?: string | null }>;
 
 /** Bound `ctx.callAIWithTools` (a single Anthropic tool-calling round). */
@@ -344,6 +345,7 @@ export type CallAiWithTools = (req: AiToolCallRequest) => Promise<AiToolCallResu
  *  importing this module there would close a cycle. */
 export { MEMORY_UNTRUSTED_TAG } from './memoryTrust.js';
 import { MEMORY_UNTRUSTED_TAG } from './memoryTrust.js';
+import { isSentinelMemoryScope } from './memoryScopeSentinel.js';
 
 export interface AgentMemoryPort {
   /** Resolve a memory scope to its entries (most-relevant-first). The OPTIONAL
@@ -352,8 +354,9 @@ export interface AgentMemoryPort {
    *  order is returned (back-compat — RFC 0080 §B keeps the memory query
    *  host-internal, so widening the read is additive, not a wire change).
    *  `contentTrust:'untrusted'` (from the `MEMORY_UNTRUSTED_TAG` tag) ⇒ the
-   *  caller MUST fence the entry, never inject it as agent-trusted. */
-  read(scope: string, query?: string): Promise<ReadonlyArray<{ content: string; contentTrust?: 'trusted' | 'untrusted' }>>;
+   *  caller MUST fence the entry, never inject it as agent-trusted. `id` (when
+   *  the port knows it) is what an ADR 0944 D6 read receipt records. */
+  read(scope: string, query?: string): Promise<ReadonlyArray<{ content: string; contentTrust?: 'trusted' | 'untrusted'; id?: string }>>;
   /** Append a durable entry to the scope. An `id` makes the write an upsert of
    *  that entry (a re-executed run node rewrites its own summary). */
   write(scope: string, entry: { content: string; tags?: string[]; id?: string }): Promise<void>;
@@ -389,7 +392,7 @@ export type AgentKnowledgeRetrieve = (
    * `retrieve(query)` and ignore this; the previews pass it and say so.
    */
   onSourceError?: (source: KnowledgeSourceKind) => void,
-) => Promise<ReadonlyArray<{ content: string; title?: string; kind: 'kb' | 'memory'; contentTrust?: 'trusted' | 'untrusted' }>>;
+) => Promise<ReadonlyArray<{ content: string; title?: string; kind: 'kb' | 'memory'; contentTrust?: 'trusted' | 'untrusted'; /** ADR 0944 D6 — chunk or memory-row id, for read receipts. */ id?: string }>>;
 
 export interface LiveDispatchDeps {
   /** The real provider call (managed or BYOK), already scoped to a run/tenant. */
@@ -431,6 +434,15 @@ export interface LiveDispatchDeps {
    *  the summary so recall fences it, because a run's task may be a webhook or
    *  event payload nobody vetted. Absent ⇒ the chat lane's behaviour. */
   memoryWrite?: { id?: string; skip?: boolean; untrusted?: boolean };
+  /** ADR 0944 D2 — the lane resolved `memoryScope` to a fail-closed sentinel the
+   *  model must be told about (a client run whose client memory could not be
+   *  read). Recall is skipped, this label joins the fenced degradation notice,
+   *  and no turn summary is written. Absent ⇒ unchanged behaviour. */
+  memoryUnavailable?: string;
+  /** ADR 0944 D6 — asked after memory and knowledge were read: a label for the
+   *  degradation notice when a receipt-served replay recalled less than its
+   *  source did. Absent ⇒ unchanged behaviour. */
+  recallNotice?: () => string | undefined;
   /** Per-agent knowledge retrieval (ADR 0038). When present, the live turn
    *  retrieves from the agent's bound KB collections (cited docs) for the task
    *  text and injects the top chunks — with their source titles — into the
@@ -651,14 +663,18 @@ async function buildInitialMessages(
   const degradedSources: string[] = [];
   if (memoryRecalled) {
     let entries: ReadonlyArray<{ content: string; contentTrust?: 'trusted' | 'untrusted' }> = [];
-    try {
-      // A5 — pass the task text as the recall query so a RAG-backed port returns
-      // the most semantically-relevant prior memory (a recency-only port ignores it).
-      entries = await deps.memory.read(deps.memoryScope, task);
-    } catch (err) {
-      log.warn('agent_memory_read_failed', { error: err instanceof Error ? err.message : String(err) });
-      entries = [];
-      degradedSources.push('your long-term memory');
+    if (deps.memoryUnavailable) {
+      degradedSources.push(deps.memoryUnavailable);
+    } else {
+      try {
+        // A5 — pass the task text as the recall query so a RAG-backed port returns
+        // the most semantically-relevant prior memory (a recency-only port ignores it).
+        entries = await deps.memory.read(deps.memoryScope, task);
+      } catch (err) {
+        log.warn('agent_memory_read_failed', { error: err instanceof Error ? err.message : String(err) });
+        entries = [];
+        degradedSources.push('your long-term memory');
+      }
     }
     const trustedMem = entries.filter((e) => e.contentTrust !== 'untrusted');
     if (trustedMem.length > 0) memoryRecall = trustedMem.map((e) => `- ${e.content}`).join('\n');
@@ -736,6 +752,11 @@ async function buildInitialMessages(
     }
   }
 
+  // ADR 0944 D6 — a replay served from a read receipt that could not serve
+  // everything the source recalled (an erased or evicted row) says so.
+  const recallNotice = deps.recallNotice?.();
+  if (recallNotice && !degradedSources.includes(recallNotice)) degradedSources.push(recallNotice);
+
   const contextBlocks = deps.contextBlocks ?? [];
   const consumedUntrusted = untrustedItems.length > 0 || borrowedItems.length > 0 || !!deps.handoffNote || contextBlocks.length > 0;
   // MEM-UX-14 — the degradation notice is itself a reason to build a scaffold: a
@@ -783,6 +804,8 @@ async function persistTurnSummary(
 ): Promise<void> {
   if (!memoryEnabled(agent, deps)) return;
   if (deps.memoryWrite?.skip) return;
+  // ADR 0944 D1 — a sentinel scope is never written, whichever lane passed it.
+  if (deps.memoryUnavailable || isSentinelMemoryScope(deps.memoryScope)) return;
   try {
     // If the turn consumed UNTRUSTED knowledge, its result may echo it — mark the
     // summary derived-from-untrusted so recall FENCES it next run, never recalling
@@ -1101,6 +1124,16 @@ export const ANNOUNCED_WITHOUT_CALL_NUDGE =
   'Your reply announced an action but contained no tool call, so nothing happened. '
   + 'Make the tool call now. If you have nothing further to do, give your final answer instead.';
 
+/** ADR 0975 D6 — the note a model gets instead of a re-run when it repeats a
+ *  call it already made with the same arguments and nothing ran in between. */
+export function repeatedCallNote(toolName: string): string {
+  return `You already called ${toolName} with exactly these arguments, and nothing has run since, so its result above is unchanged. `
+    + 'Do not call it again. Use that result: call a different tool, or give your answer.';
+}
+
+/** ADR 0975 D6 — a turn that used every round and produced no text. */
+export const TOOL_ROUNDS_EXHAUSTED = 'tool_rounds_exhausted';
+
 /** True when a no-tool-call reply ends on a colon: the shape of an action
  *  announced and not taken. Deliberately narrow — a question, a full stop or a
  *  list is a real final answer and is left alone. */
@@ -1169,6 +1202,15 @@ export async function runChatToolLoop(
   let schemaRoundsUsed = 0;
   // ADR 0796 — the one-per-turn "you announced it, now call it" follow-up.
   let announceNudged = false;
+  // ADR 0975 D6 — the last call that RAN successfully (name + args hash). A
+  // repeat of it is answered with a note, not re-executed; any other tool
+  // running clears it, because a read after a write may legitimately differ.
+  // MEASURED on kicktodo.com (2026-10-25): the managed model called
+  // `openwop:kicktodo.candidates` five times with identical arguments, spent
+  // every round, and the turn ended with no reply at all.
+  let lastRanCall: string | undefined;
+  // Did the model end the turn with an answer (vs. running out of rounds)?
+  let answered = false;
   // Native web-search/grounding sources accumulated across rounds, deduped by
   // URL, appended as a Sources footer (ADR 0101 Phase 2).
   const citationsByUrl = new Map<string, AiCitation>();
@@ -1265,6 +1307,7 @@ export async function runChatToolLoop(
         log.info('announced_without_call_followup', { agentId, round, replyChars: out.content!.length });
         continue;
       }
+      answered = true;
       break; // model produced a final answer
     }
     if (out.content) messages.push({ role: 'assistant', content: defangUntrustedFence(out.content) });
@@ -1368,12 +1411,19 @@ export async function runChatToolLoop(
         messages.push({ role: 'user', content: `Tool "${call.name}" arguments failed validation: ${v.errors ?? 'invalid'}.` });
         continue;
       }
+      const callKey = `${call.name}\u0000${computeArgsHash(call.input)}`;
+      if (callKey === lastRanCall) {
+        await emit({ type: 'agent.reasoned', agentId, reasoning: `${persona} repeated ${call.name} with the same arguments; the earlier result was kept, not re-run.` });
+        log.info('tool_call_repeat_suppressed', { agentId, toolName: call.name, round });
+        messages.push({ role: 'user', content: repeatedCallNote(call.name) });
+        continue;
+      }
       firewallSeen.push(call.name); // ADR 0135 — this tool's classes now count toward later combinations this turn
       await emit({ type: 'agent.toolCalled', agentId, toolName: call.name, callId: call.id, argsHash: computeArgsHash(call.input), transport: 'native' });
       const startedAt = Date.now();
       let execOut: { content: string; isError?: boolean; errorCode?: string; continueTurn?: string | null };
       try {
-        execOut = await deps.executeTool({ name: call.name, input: call.input });
+        execOut = await deps.executeTool({ name: call.name, input: call.input, callId: call.id });
       } catch (err) {
         // ADR 0764 (CHATCD-3) — a lost lease abandons the node; it is never a tool result.
         if (err instanceof LeaseLostError) throw err;
@@ -1386,6 +1436,10 @@ export async function runChatToolLoop(
       // ADR 0773 B.7 — the latest word from a tool that tracks unfinished work:
       // a string arms the follow-up, `null` (the work is done) disarms it.
       if (!execOut.isError && execOut.continueTurn !== undefined) pendingContinuation = execOut.continueTurn || undefined;
+      // A failed call may be retried as-is (transient), and a call that reported
+      // unfinished work (`continueTurn`, ADR 0773 B.7) is MEANT to be made again;
+      // only a finished success counts as "already answered".
+      lastRanCall = execOut.isError || execOut.continueTurn ? undefined : callKey;
       if (execOut.isError) {
         // RFC 0064 §F — a failure MUST carry `error` populated + `status:'error'`
         // (a bare `status:'error'` with no `error` is the WFAU-4 gap: a failure a
@@ -1436,6 +1490,16 @@ export async function runChatToolLoop(
       citationCount: citationsByUrl.size,
       grounded: citationsByUrl.size > 0,
     });
+  }
+  // ADR 0975 D6 — out of rounds with nothing to say is a typed failure, never an
+  // empty success (CLAUDE.md: "invalid model output is a typed failure"). A turn
+  // that deferred a tool for approval or produced structured data still answered.
+  if (!answered && !lastText.trim() && lastData === undefined && pendingApprovals.length === 0) {
+    log.warn('tool_rounds_exhausted', { agentId, provider, model, rounds });
+    return {
+      finalText: '', finalData: lastData, events, rounds,
+      error: { code: TOOL_ROUNDS_EXHAUSTED, message: `${persona} used all ${rounds} tool rounds without giving an answer.` },
+    };
   }
   return {
     finalText: appendSourcesFooter(lastText, [...citationsByUrl.values()]),

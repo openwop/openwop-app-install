@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.crm.nodes/1.15.0/sla-rung.input.json",
+  "title": "CrmSlaRungInput",
+  "description": "`orgId`, `contactId`, `routingEpoch` and `rung` are required by the surface (a typed refusal).",
+  "type": "object",
+  "properties": {
+    "orgId": {
+      "type": "string"
+    },
+    "contactId": {
+      "type": "string"
+    },
+    "routingEpoch": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "rung": {
+      "type": "integer",
+      "enum": [
+        1,
+        2,
+        3
+      ]
+    }
+  },
+  "additionalProperties": true
+}

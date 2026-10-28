@@ -1,6 +1,10 @@
 /**
  * ADR 0914 (Book AI P3 + P10) — the Markdown EPUB/DOCX writers carry the
  * content language (and direction), and DOCX images carry alt text.
+ *
+ * Tracker TST-BJT. Red when (probe-witnessed, w65): a malformed tag is accepted as
+ * the language; the EPUB or the DOCX image ignores the resolver's description (or
+ * `decorative`); the rtl spine loses `page-progression-direction`.
  */
 import { describe, expect, it } from 'vitest';
 import JSZip from 'jszip';

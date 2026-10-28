@@ -430,6 +430,13 @@ export const PUBLIC_PATH_PREFIXES = [
   // link-tenant's `crm` toggle, uniform 404. `public-sign` ≠ `crm`, so this prefix
   // does NOT shadow the authed `…/crm/*` management surface.
   '/host/openwop-app/public-sign',
+  // ADR 0924 D5 — the client approver's decision on ONE change set. Authorizes by
+  // the sharing `campaign_approval` capability token; tenant, org and change set
+  // come from the link, gated on the link-tenant's `campaign-ops` AND
+  // `campaign-ops-client-portal` toggles, uniform 404, shared rate limits (ADR
+  // 0934, fail closed). `public-campaign-approval` ≠ `campaign-ops`, so this
+  // prefix does NOT shadow the authed `…/campaign-ops/*` surface.
+  '/host/openwop-app/public-campaign-approval',
   // Consent (ADR 0020) — the PUBLIC record/read surface
   // (POST /v1/host/openwop-app/public-consent/{orgId}, GET …/{orgId}/{subjectKey}).
   // Unauthenticated by design — a visitor records consent before any auth. Tenant

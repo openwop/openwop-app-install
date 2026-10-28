@@ -9,7 +9,7 @@
  * The bug this whole feature exists to fix — a `high` card filed today waiting
  * behind every `low` card ever filed — is the first ordering test below.
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { KanbanCard } from '../src/host/kanbanService.js';
 import { rankByPriority, computePriority } from '../src/host/weightedScoring.js';
 import {
@@ -28,15 +28,16 @@ const daysAgo = (n: number) => new Date(NOW - n * 86_400_000).toISOString();
 const daysAhead = (n: number) => new Date(NOW + n * 86_400_000).toISOString();
 
 function card(patch: Partial<KanbanCard> & { id: string }): KanbanCard {
-  return {
+  const base: KanbanCard = {
+    id: patch.id,
     boardId: 'b1',
     columnId: 'todo',
     title: patch.id,
     order: 0,
     createdAt: daysAgo(0),
     updatedAt: daysAgo(0),
-    ...patch,
-  } as KanbanCard;
+  };
+  return { ...base, ...patch };
 }
 
 const rank = (cards: KanbanCard[]) =>
@@ -138,10 +139,26 @@ describe('ADR 0534 P1 — projections are pure and bounded', () => {
     expect(ageScore(card({ id: 'future', createdAt: daysAhead(5) }), NOW), 'a clock skew must not go negative').toBe(1);
   });
 
-  it('is deterministic — the same card at the same instant always projects the same', () => {
+  it('is deterministic — the projection depends on the supplied instant, never the wall clock', () => {
     // The ADR 0534 D3 replay stamp is meaningless if the projection can drift.
+    // Calling it twice in one millisecond proves nothing, so move the wall clock
+    // a year away and require the hand-derived literal projection at NOW:
+    // due in 3 d → band(10 − 3/14·7) = band(8.5) = 9; filed 9 d ago →
+    // band(1 + 9/30·9) = band(3.7) = 4; high → 10; no blocker → 1.
+    // (Sabotage: reading Date.now() in place of `now` reds this — 8fw5g5-wsc-clock-r2.)
     const c = card({ id: 'x', priority: 'high', dueAt: daysAhead(3), createdAt: daysAgo(9) });
-    expect(projectCardScores(c, NOW)).toEqual(projectCardScores(c, NOW));
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(NOW + 365 * 86_400_000);
+      expect(projectCardScores(c, NOW)).toEqual({
+        'ws.urgency': 9,
+        'ws.priority': 10,
+        'ws.age': 4,
+        'ws.blocked': 1,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('exposes exactly the four criteria the set declares', () => {

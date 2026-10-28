@@ -7,6 +7,18 @@
  * Pins the fail-closed contract: a dispatch error marks a non-terminal run
  * `failed` + appends a `run.failed` event carrying `dispatch_failed: <cause>`,
  * and never touches a run the executor already drove to a terminal state.
+ *
+ * Breaks it (round-1 probes, witnessed): the dispatch error code renamed
+ * (8fw2g2-rdf-code), the closed-log repair skipped (rdf-log).
+ *
+ * DOUBLE GUARD on "leaves an already-terminal run untouched": the STATUS check
+ * (`!['completed','failed','cancelled'].includes(current.status)`) AND the
+ * closed-log repair (a completed run's log ends `run.completed`, so the repair
+ * path rewrites `completed` and appends nothing). Removing the status check
+ * alone kept status + events identical (round-1 8fw2g2-rdf-terminal VACUOUS).
+ * The observable that separates them is `completedAt`: the repair path
+ * rewrites it, the status guard does not touch the row — so case 2 stamps a
+ * sentinel `completedAt` and asserts it survives (8fw2g2-rdf-terminal-r2).
  */
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -14,6 +26,7 @@ import http from 'node:http';
 import { createApp } from '../src/index.js';
 import { failRunClosedOnDispatchError } from '../src/host/runDispatch.js';
 import { getEventLog } from '../src/executor/eventLog.js';
+import { hostExtStorage } from '../src/host/hostExtPersistence.js';
 import { bareRunId } from './support/bareRunId.js';
 
 let server: http.Server;
@@ -49,22 +62,15 @@ async function createGateRun(): Promise<string> {
 describe('dispatch fail-closed (the pending-forever incident)', () => {
   it('marks a non-terminal run failed + appends run.failed with the cause', async () => {
     const runId = await createGateRun();
-    await failRunClosedOnDispatchError(
-      // The real storage the app booted with — reach it through the API-visible
-      // run instead of poking internals: the helper takes the Storage the
-      // dispatcher holds, so import the app's storage via the debug bundle
-      // route is unnecessary; use the module-level host storage.
-      (await import('../src/host/hostExtPersistence.js')).hostExtStorage(),
-      bareRunId(runId),
-      'simulated executor crash',
-    );
+    // The real storage the app booted with (the module-level host storage the
+    // dispatcher holds).
+    await failRunClosedOnDispatchError(hostExtStorage(), bareRunId(runId), 'simulated executor crash');
     const run = await api<{ status: string }>(`/runs/${runId}`);
     expect(run.body.status).toBe('failed');
     const events = await getEventLog().list(bareRunId(runId), { fromSeq: -1, limit: 1000 });
-    const failed = events.find((e) => e.type === 'run.failed');
-    expect(failed).toBeTruthy();
-    expect(JSON.stringify(failed?.payload)).toContain('dispatch_failed');
-    expect(JSON.stringify(failed?.payload)).toContain('simulated executor crash');
+    const failed = events.filter((e) => e.type === 'run.failed');
+    expect(failed).toHaveLength(1);
+    expect(failed[0]!.payload).toMatchObject({ error: { code: 'dispatch_failed', message: 'simulated executor crash' } });
     // G6 — the canonical terminal sequence includes the node-level terminal too.
     expect(events.some((e) => e.type === 'node.failed')).toBe(true);
   });
@@ -77,9 +83,16 @@ describe('dispatch fail-closed (the pending-forever incident)', () => {
     });
     expect(close.status).toBe(200);
     const before = await api<{ status: string }>(`/runs/${runId}`);
-    await failRunClosedOnDispatchError((await import('../src/host/hostExtPersistence.js')).hostExtStorage(), bareRunId(runId), 'late crash');
+    expect(before.body.status).toBe('completed');
+    // A sentinel completedAt: the closed-log repair path (the second guard) would
+    // REWRITE it, the status guard leaves the row alone (header).
+    const SENTINEL = '2026-01-01T00:00:00.000Z';
+    await hostExtStorage().updateRun(bareRunId(runId), { completedAt: SENTINEL });
+    expect((await hostExtStorage().getRun(bareRunId(runId)))?.completedAt).toBe(SENTINEL);
+    await failRunClosedOnDispatchError(hostExtStorage(), bareRunId(runId), 'late crash');
     const after = await api<{ status: string }>(`/runs/${runId}`);
-    expect(after.body.status).toBe(before.body.status); // completed, not failed
+    expect(after.body.status).toBe('completed'); // not failed
+    expect((await hostExtStorage().getRun(bareRunId(runId)))?.completedAt, 'the status guard never touched the row').toBe(SENTINEL);
     const events = await getEventLog().list(bareRunId(runId), { fromSeq: -1, limit: 1000 });
     expect(events.some((e) => e.type === 'run.failed')).toBe(false);
   });
@@ -94,7 +107,7 @@ describe('dispatch fail-closed (the pending-forever incident)', () => {
     const before = await api<{ status: string }>(`/runs/${runId}`);
     expect(before.body.status, 'precondition: the row is still non-terminal').not.toMatch(/^(completed|failed|cancelled)$/);
 
-    await failRunClosedOnDispatchError((await import('../src/host/hostExtPersistence.js')).hostExtStorage(), bareRunId(runId), 'timeout exceeded when trying to connect');
+    await failRunClosedOnDispatchError(hostExtStorage(), bareRunId(runId), 'timeout exceeded when trying to connect');
 
     const after = await api<{ status: string }>(`/runs/${runId}`);
     expect(after.body.status, 'the row follows the durable log').toBe('completed');

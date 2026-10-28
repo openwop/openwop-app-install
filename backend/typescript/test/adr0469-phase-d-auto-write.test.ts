@@ -9,6 +9,12 @@
  *    the write on the HITL hold path — auto-execute is never reached, so no
  *    audience-unbound egress is auto-run.
  *  - per-session counter fail-closed when uncapped; the cross-field save guard.
+ *
+ * Tracker TST-BG3-1. Red when: the `!egressDeclared` arm is dropped (EGRESS), the
+ * `!cap.allowed` denial is skipped (OVER CAP), the auto path holds instead of
+ * executing or audits another reason (AUTO-EXECUTES / N3), `checkAnonAutoWrite`
+ * loses its no-bound fail-closed, its `>=` bound or its per-session key, or
+ * `assertControlCapsCoherent` stops refusing an unbounded control.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -28,7 +34,13 @@ function scriptedProvider(calls: { id: string; name: string; input: Record<strin
   return async (r) => { round += 1; if (round === 1) return { content: '', toolCalls: calls }; captured.round2 = r.messages; return { content: 'done', toolCalls: [] }; };
 }
 const reasonsOf = async (storage: Awaited<ReturnType<typeof openStorage>>, runId: string): Promise<string[]> =>
-  (await storage.listEvents(runId)).filter((e) => e.type === 'authorization.decided').map((e) => (e.payload as { reason: string }).reason);
+  (await storage.listEvents(runId))
+    .filter((e) => e.type === 'authorization.decided')
+    .map((e) => {
+      const payload = e.payload as Record<string, unknown> | null;
+      return payload !== null && typeof payload['reason'] === 'string' ? payload['reason'] : '';
+    });
+const UNBOUNDED_MSG = 'requires `caps.maxAutoWritesPerSession`';
 
 describe('ADR 0469 Phase D — rate-limit-session-cap auto-write', () => {
   // ADR 0834 D1 — the anonymous lane now builds the capability firewall, which reads the
@@ -95,7 +107,7 @@ describe('ADR 0469 Phase D — rate-limit-session-cap auto-write', () => {
     const captured = { round2: [] as AiToolCallRequest['messages'] };
     let autoCalled = false;
     let heldCalled = false;
-    await runAnonReadTurn({
+    const turn = await runAnonReadTurn({
       storage, tenantId: 'acme', agent: AGENT,
       grant: { read: [], write: [DELIVERABLE], writeControl: 'rate-limit-session-cap', egressAudiences: ['api.acme.example'] },
       surfaceSessionKey: 'w:s3', fencedUserMessage: 'go',
@@ -106,6 +118,10 @@ describe('ADR 0469 Phase D — rate-limit-session-cap auto-write', () => {
     expect(autoCalled).toBe(false); // never auto-run on an egress surface
     expect(heldCalled).toBe(true);  // fell back to the HITL hold path
     expect(JSON.stringify(captured.round2)).toContain('pending_approval');
+    // The audit trail says HELD, never auto-allowed.
+    const reasons = await reasonsOf(storage, turn.runId);
+    expect(reasons).toContain('anon-write-held');
+    expect(reasons).not.toContain('anon-write-auto-allowed');
   });
 });
 
@@ -137,7 +153,7 @@ describe('ADR 0469 Phase D — cross-field validation (control requires its boun
     await expect(provisionWidget('t', 'o', 'u', {
       agentId: 'a', allowedDomains: ['x.com'],
       anonToolGrant: { write: [DELIVERABLE], writeControl: 'rate-limit-session-cap' },
-    })).rejects.toMatchObject({ code: 'validation_error' });
+    })).rejects.toMatchObject({ code: 'validation_error', message: expect.stringContaining(UNBOUNDED_MSG) });
   });
 
   it('accepts it WITH the per-session bound; a later patch that removes the bound is rejected', async () => {
@@ -147,6 +163,6 @@ describe('ADR 0469 Phase D — cross-field validation (control requires its boun
     });
     expect(w.anonToolGrant?.writeControl).toBe('rate-limit-session-cap');
     expect(w.caps.maxAutoWritesPerSession).toBe(3);
-    await expect(patchWidget('t', 'o', w.widgetId, { caps: {} })).rejects.toMatchObject({ code: 'validation_error' });
+    await expect(patchWidget('t', 'o', w.widgetId, { caps: {} })).rejects.toMatchObject({ code: 'validation_error', message: expect.stringContaining(UNBOUNDED_MSG) });
   });
 });

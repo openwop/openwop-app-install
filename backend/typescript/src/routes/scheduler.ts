@@ -63,10 +63,11 @@ import { getRosterEntry } from '../host/rosterService.js';
 import { callerSubject, personalTenantOf, isDurableCaller, isPersonalTenantId } from '../host/requestSubject.js';
 import { resolveSubjectAccess, type AccessLevel } from '../host/subjectAccess.js';
 import { scheduledJobReadable } from '../host/scheduledJobReadGates.js';
-import { isFeatureReservedJobId } from '../host/scheduledJobFireGates.js';
+import { isFeatureReservedJobId, reservedJobOwner, scheduledJobCadenceRefusal } from '../host/scheduledJobFireGates.js';
 import { keyDeclarationPermits } from '../host/protocolAuthorization.js';
 import { callerHoldsTenantScope, callerOwnerSpellings, requireTenantWrite } from '../features/featureRoute.js';
 import { CALLER_LINKAGE_KEYS } from '../host/runLinkage.js';
+import { APPROVER_SCOPE_KEYS } from '../host/runDispatch.js';
 
 interface Deps {
   storage: Storage;
@@ -97,10 +98,17 @@ function tenantOf(req: Request): string {
 // feature-configured guard read: a client may neither forge nor drop them.
 // ADR 0921 D3 — the campaign-ops run stamp rides onto every run a job fires, so a
 // client may not set it on a job either (the same rule as `POST /runs`).
-const RESERVED_JOB_METADATA_KEYS = new Set<string>(['actingUserId', 'heartbeat', 'schedule', 'kanban', 'approval', 'assistantLoop', 'disabledReason', 'orgScopeSubject', 'personalTenant', 'goalId', 'purpose', 'openwop-app.campaignOps', ...CALLER_LINKAGE_KEYS]);
+const RESERVED_JOB_METADATA_KEYS = new Set<string>(['actingUserId', 'heartbeat', 'schedule', 'kanban', 'approval', 'assistantLoop', 'disabledReason', 'orgScopeSubject', 'personalTenant', 'goalId', 'purpose', 'openwop-app.campaignOps',
+  // ADR 0985 (review M2) — the chat tools' marker: their per-user caps count it.
+  'tool', ...CALLER_LINKAGE_KEYS, ...APPROVER_SCOPE_KEYS]);
 
 /** ADR 0908 D2 — the refusal for a goal's continuation job, naming its owner. */
-const GOAL_JOB_MESSAGE = 'This schedule belongs to a standing goal. Pause, resume or re-arm it through the goal.';
+/** ADR 0985 D3 — the 409 for a job under a feature-reserved prefix names the
+ *  feature that manages it (it used to say "standing goal" for every prefix). */
+function managedByRefusal(jobId: string): OpenwopError {
+  const owner = reservedJobOwner(jobId) ?? { id: 'feature', message: 'This schedule is managed by its feature; change it there.' };
+  return new OpenwopError('conflict', owner.message, 409, { jobId, managedBy: owner.id });
+}
 
 function clientMetadata(raw: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(raw).filter(([k]) => !RESERVED_JOB_METADATA_KEYS.has(k)));
@@ -347,7 +355,7 @@ export function registerSchedulerRoutes(app: Express, deps: Deps): void {
       // is minted by that feature only: refusing it here closes both the REPLACE
       // of an armed job and the SQUAT of one not yet armed.
       if (explicitJobId && isFeatureReservedJobId(jobId)) {
-        throw new OpenwopError('conflict', GOAL_JOB_MESSAGE, 409, { jobId, managedBy: 'goal' });
+        throw managedByRefusal(jobId);
       }
       if (explicitJobId) {
         const prior = await getJob(jobId);
@@ -443,7 +451,7 @@ export function registerSchedulerRoutes(app: Express, deps: Deps): void {
       // allowed here; enabling is the feature's resume (which checks the goal is
       // still active), and nothing else is editable.
       if (isFeatureReservedJobId(job.jobId) && !(body.enabled === false && body.cronExpr === undefined && body.workflowId === undefined && body.metadata === undefined && body.timezone === undefined)) {
-        throw new OpenwopError('conflict', GOAL_JOB_MESSAGE, 409, { jobId: job.jobId, managedBy: 'goal' });
+        throw managedByRefusal(job.jobId);
       }
       const patch: Parameters<typeof updateJob>[1] = {};
       if (body.enabled !== undefined) {
@@ -487,6 +495,14 @@ export function registerSchedulerRoutes(app: Express, deps: Deps): void {
           throw new OpenwopError('validation_error', 'Field `timezone` MUST be a string.', 400, { field: 'timezone' });
         }
         patch.timezone = body.timezone;
+      }
+      // ADR 0985 D2 — a feature's cadence floor holds on this door too (the fire
+      // gate is the backstop): a scheduled chat is not re-cadenced finer than hourly.
+      if (patch.cronExpr !== undefined || patch.timezone !== undefined) {
+        const refusal = scheduledJobCadenceRefusal(job, patch.cronExpr ?? job.cronExpr, patch.timezone ?? job.timezone, Date.now());
+        if (refusal !== null) {
+          throw new OpenwopError('validation_error', refusal, 400, { field: 'cronExpr', code: 'cadence_too_frequent' });
+        }
       }
       if (body.metadata !== undefined) {
         if (typeof body.metadata !== 'object' || body.metadata === null) {
@@ -540,7 +556,7 @@ export function registerSchedulerRoutes(app: Express, deps: Deps): void {
       // ADR 0908 (`GL2CD-5`) — a paused goal continuation is not run by hand: its
       // goal's resume is the one door that turns it back on.
       if (isFeatureReservedJobId(job.jobId) && !job.enabled) {
-        throw new OpenwopError('conflict', GOAL_JOB_MESSAGE, 409, { jobId: job.jobId, managedBy: 'goal' });
+        throw managedByRefusal(job.jobId);
       }
       // §B.2 fire-once-per-tick: advance the deterministic clock once.
       const result = singleTick(req.params.jobId);

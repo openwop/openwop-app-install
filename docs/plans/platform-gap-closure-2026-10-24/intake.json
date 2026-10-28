@@ -1,0 +1,63 @@
+{
+  "date": "2026-10-24",
+  "audit_commit": "f4f0167046e27de43bbc603eaa3d0fc46a7c6abc",
+  "app_base": "87719df6fed20cc26936ff22c808dc03c9b5d35f",
+  "spec_base": "10633f3c9862f0e2bc231aaef43fa7b903cfe5fb",
+  "primary_gap_ids": [
+    "OPS-01",
+    "OPS-02",
+    "UX-01",
+    "SEC-01",
+    "SCALE-01",
+    "EVENT-01",
+    "OPS-03",
+    "REL-01",
+    "DATA-01",
+    "UX-02",
+    "UX-03",
+    "UX-04",
+    "UX-05",
+    "LOC-01",
+    "BRAND-01",
+    "OPS-04",
+    "APP-01",
+    "INT-01",
+    "AI-01",
+    "DEV-01",
+    "MKT-01",
+    "COM-01",
+    "SEC-02",
+    "QA-01",
+    "SUP-01",
+    "FAM-01",
+    "MKT-02",
+    "TCO-01"
+  ],
+  "live_checklist_ids": [
+    "CT-01",
+    "CT-02",
+    "CT-03",
+    "CT-04",
+    "CT-05",
+    "CT-06",
+    "CT-07",
+    "CT-08"
+  ],
+  "status": "Planning coverage complete; all implementation/evidence gaps remain open",
+  "semantics": "No gap is marked closed by writing a plan; evidence and implementation remain open.",
+  "upstream_refresh_note": "RFC0249 advanced Draft to Active during planning; local spec worktree fast-forwarded, status summaries regenerated; RFC0250 remains newly proposed Draft.",
+  "upstream_draft_commit": "97def7cf585e2c4f8b428b689a55bd3d5b8412cc",
+  "upstream_draft_url": "https://github.com/openwop/openwop/blob/97def7cf585e2c4f8b428b689a55bd3d5b8412cc/RFCS/0250-opt-in-host-event-replay-and-resync.md",
+  "upstream_draft_branch": "codex/platform-remediation-rfc-2026-10-24",
+  "additional_verified_input": {
+    "source": "GitHub Dependabot API",
+    "date": "2026-10-24",
+    "open_alerts": 28,
+    "severity_counts": {
+      "medium": 18,
+      "low": 6,
+      "high": 4
+    },
+    "coverage": "SEC-02; actual reachability/compatible remediation still open"
+  }
+}

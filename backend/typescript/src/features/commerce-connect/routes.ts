@@ -14,7 +14,8 @@
  */
 import type { Request } from 'express';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
-import { requireFeatureEnabled, requireTenantScope, tenantOf, optionalString, requireString, publicBaseUrl } from '../featureRoute.js';
+import { requireFeatureEnabled, requireTenantScope, tenantOf, optionalString, requireString, publicBaseUrl, authorizeOrgScope } from '../featureRoute.js';
+import { isNonRootWorkspaceOrg } from '../../host/accessControlService.js';
 import { requireSuperadmin } from '../../host/superadmin.js';
 import { appendAudit } from '../../host/auditChainService.js';
 import { getApproval, listPendingCommerceListingApprovals } from '../../host/approvalService.js';
@@ -66,6 +67,22 @@ async function authorizeTenant(req: Request, scope: 'workspace:read' | 'workspac
   return tenantOf(req);
 }
 
+/**
+ * ADR 0948 P0b — a CLIENT org's own seller (David, 2026-10-19, #5038). Org-scoped
+ * on the client org itself; reading needs `workspace:read`, while choosing where a
+ * client's money is paid out (onboard, sync) is an org-admin act, `host:org:manage`
+ * — stricter than the tenant route's `workspace:write`. Only a non-root org of an
+ * agency workspace has one: the workspace root uses the tenant routes above, and
+ * every other org settles on its tenant's seller, so they get `400 not_a_client_org`.
+ */
+async function authorizeClientOrg(req: Request, scope: 'workspace:read' | 'host:org:manage'): Promise<{ tenantId: string; orgId: string }> {
+  const { tenantId, orgId } = await authorizeOrgScope(req, FEATURE, scope);
+  if (!isNonRootWorkspaceOrg(tenantId, orgId)) {
+    throw new OpenwopError('validation_error', 'Only a client organization of an agency workspace has its own payment account; use the workspace payment account.', 400, { code: 'not_a_client_org' });
+  }
+  return { tenantId, orgId };
+}
+
 export function registerCommerceConnectRoutes(deps: RouteDeps): void {
   const { app } = deps;
 
@@ -93,6 +110,31 @@ export function registerCommerceConnectRoutes(deps: RouteDeps): void {
   app.post(`${BASE}/seller/sync`, async (req, res, next) => {
     try {
       res.json({ seller: await syncSellerFromStripe(await authorizeTenant(req, 'workspace:write')) });
+    } catch (err) { next(err); }
+  });
+
+  // ── ADR 0948 P0b — a client org's own seller ─────────────────────────────────
+  app.get(`${BASE}/orgs/:orgId/seller`, async (req, res, next) => {
+    try {
+      const { tenantId, orgId } = await authorizeClientOrg(req, 'workspace:read');
+      res.json({ seller: await getSeller(tenantId, orgId) });
+    } catch (err) { next(err); }
+  });
+
+  app.post(`${BASE}/orgs/:orgId/seller/onboard`, async (req, res, next) => {
+    try {
+      const { tenantId, orgId } = await authorizeClientOrg(req, 'host:org:manage');
+      const base = publicBaseUrl(req);
+      const country = optionalString((req.body ?? {}).country);
+      const back = `${base}/commerce?org=${encodeURIComponent(orgId)}&onboarding=`;
+      res.status(201).json(await startOnboarding(tenantId, { returnUrl: `${back}return`, refreshUrl: `${back}refresh` }, country ? { country } : {}, orgId));
+    } catch (err) { next(err); }
+  });
+
+  app.post(`${BASE}/orgs/:orgId/seller/sync`, async (req, res, next) => {
+    try {
+      const { tenantId, orgId } = await authorizeClientOrg(req, 'host:org:manage');
+      res.json({ seller: await syncSellerFromStripe(tenantId, orgId) });
     } catch (err) { next(err); }
   });
 

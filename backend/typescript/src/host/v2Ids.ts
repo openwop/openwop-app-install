@@ -276,7 +276,11 @@ function deriveKeysBoundTo(refRe: RegExp, floor: readonly string[]): ReadonlySet
       for (const [k, v] of Object.entries(obj)) {
         // `properties`/`items`/`$defs` are containers, not field names — keep
         // the enclosing key so `{ sourceRunIds: { items: { $ref: runId } } }`
-        // attributes to `sourceRunIds` rather than to `items`.
+        // attributes to `sourceRunIds` rather than to `items`. A map's value
+        // schema (`additionalProperties` / `patternProperties`) has no field
+        // name: its ids sit under caller-chosen keys no key set can match, so
+        // it binds no key. RFC 0252 `fixtureRuns` is one, echoed verbatim (§E).
+        if (k === 'additionalProperties' || k === 'patternProperties') { walk(v, undefined); continue; }
         walk(v, ['properties', 'items', '$defs', 'allOf', 'anyOf', 'oneOf'].includes(k) ? parentKey : k);
       }
     };

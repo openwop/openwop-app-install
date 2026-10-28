@@ -103,8 +103,8 @@ curl -s "$BASE/.well-known/openwop" | \
 #   2) tick RFC 0101's behavioral-evidence acceptance box [~] → [x].
 
 # 2. Catalog (mints the __session cookie)
-curl -s -c $CJAR -i "$BASE/v1/host/openwop-app/node-catalog" | grep -i set-cookie | head -1
-curl -s -b $CJAR "$BASE/v1/host/openwop-app/node-catalog" | \
+curl -s -c $CJAR -i "$BASE/host/openwop-app/node-catalog" | grep -i set-cookie | head -1
+curl -s -b $CJAR "$BASE/host/openwop-app/node-catalog" | \
   python3 -c "import json,sys; d=json.load(sys.stdin); print('nodes:', len(d['nodes']), 'runnable:', sum(1 for n in d['nodes'] if not n.get('missingHostSurfaces')))"
 
 # 3. Register a sample workflow under the cookie's tenant.
@@ -119,24 +119,24 @@ curl -s -b $CJAR "$BASE/v1/host/openwop-app/node-catalog" | \
 #    A fresh $WFID each run exercises the real register→run path. Expect 201
 #    `{"workflowId":"smoke-uc-…","nodeCount":1}`.
 curl -s -b $CJAR -c $CJAR -X POST -H 'content-type: application/json' \
-  "$BASE/v1/host/openwop-app/workflows" \
+  "$BASE/host/openwop-app/workflows" \
   -d "{\"workflowId\":\"$WFID\",\"nodes\":[{\"nodeId\":\"shout\",\"typeId\":\"local.openwop-app.uppercase\"}]}"
 
 # 4. Create a run — body omits tenantId, cookie provides it
 RUNID=$(curl -s -b $CJAR -c $CJAR -X POST -H 'content-type: application/json' \
-  "$BASE/v1/runs" -d "{\"workflowId\":\"$WFID\",\"inputs\":{\"text\":\"hello demo\"}}" | \
+  "$BASE/runs" -d "{\"workflowId\":\"$WFID\",\"inputs\":{\"text\":\"hello demo\"}}" | \
   python3 -c "import json,sys; print(json.load(sys.stdin)['runId'])")
 echo "runId: $RUNID"
 
 # 5. Fetch snapshot
 sleep 1
-curl -s -b $CJAR "$BASE/v1/runs/$RUNID" | \
+curl -s -b $CJAR "$BASE/runs/$RUNID" | \
   python3 -c "import json,sys; d=json.load(sys.stdin); print('status:', d['status'])"
 
 # 6. Admin cleanup (Bearer the OPENWOP_ADMIN_TOKEN from Secret Manager)
 ADMIN=$(gcloud secrets versions access latest --secret=openwop-admin-token)
 curl -s -X POST -H "Authorization: Bearer $ADMIN" \
-  "$BASE/v1/host/openwop-app/admin/cleanup" | python3 -m json.tool
+  "$BASE/host/openwop-app/admin/cleanup" | python3 -m json.tool
 
 # 7. /privacy page reachable
 curl -sI https://app.openwop.dev/privacy | head -1
@@ -184,7 +184,7 @@ secrets/tenants but not these global registrations. Always register a unique
 ## What this proves
 
 - Firebase Hosting → Cloud Run `/api/**` rewrite working end-to-end.
-- Backend `/api` prefix strip correct (`/api/v1/...` → `/v1/...`).
+- Backend `/api` prefix strip correct (`/api/runs` → `/runs`).
 - Session cookie minted with the right attributes: name `__session` (the only
   cookie name Firebase Hosting forwards through its CDN), HttpOnly, Secure,
   SameSite=None (required for the `/api` rewrite path), Max-Age=86400, HS256
@@ -216,7 +216,7 @@ provider (DEPLOY.md § Configuring provider OAuth clients).
 ```bash
 # 1. Catalog honesty flag — the provider should report oauthConfigured: true
 #    (requires a signed-in session cookie; superadmin not needed for the read).
-curl -s -b "$COOKIE_JAR" https://app.openwop.dev/api/v1/host/openwop-app/providers \
+curl -s -b "$COOKIE_JAR" https://app.openwop.dev/api/host/openwop-app/providers \
   | jq '.providers[] | select(.id=="google") | {id, oauthConfigured}'
 ```
 

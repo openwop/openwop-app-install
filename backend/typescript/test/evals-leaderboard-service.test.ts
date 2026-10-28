@@ -1,66 +1,81 @@
 /**
- * ADR 0123 Phase 1c — tenant leaderboard service (`features/evals/leaderboardService.ts`):
- * reads ONE tenant's MessageFeedback, resolves each rated message's model once (CONV-1
- * dedupe), drops unattributable rows, and ranks win-rate + Elo.
+ * ADR 0986 D2 — the tenant leaderboard service ranks only ratings the SERVER
+ * attributed, and counts the rest.
  *
- * Witnessed (wave 25 probes): a tenant-blind feedback read reds the empty-tenant and CONV-1
- * cases; no dedupe reds CONV-1; passing every rating as 'up' reds the aggregate.
- * HONEST CEILING: "drops unattributable" is held by THREE guards (`if (!model)` here and
- * `!r.model` in both `computeLeaderboard` and `computeEloRatings`), so no single sabotage
- * can red it (probe `lbs-drop` vacuous by design); the case pins the end-to-end outcome.
+ * - A rating stamped at write (`attribution`) ranks under that model.
+ * - A legacy row (no stamp) gets one lookup against the exchange's attribution
+ *   row, which must belong to the rating's conversation.
+ * - Everything else is `coverage.unattributed` — never dropped silently, never
+ *   read from client message meta.
+ *
+ * Sabotage witnesses: skipping the legacy lookup reds "a legacy row…"; dropping the
+ * conversation check in `resolveRatingAttribution` reds "…another conversation";
+ * replacing the bound-run arm with `true` reds "a run bound WITHOUT a session
+ * stamp…"; dropping the `attributionChecked` filter reds "…never looked up again";
+ * not counting unattributed rows reds the coverage case.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openStorage } from '../src/storage/index.js';
 import { setMessageFeedback } from '../src/host/messageFeedbackStore.js';
+import { recordTurnAttribution } from '../src/host/turnAttribution.js';
+import { conversationMessageId } from '../src/host/conversationMessageId.js';
 import { buildTenantLeaderboard } from '../src/features/evals/leaderboardService.js';
+import { setConversationRun } from '../src/host/conversationStore.js';
 
 const T = 'lb-tenant';
+const served = (model: string) => ({ served: { provider: 'openai', model }, runId: 'run-1' });
 
 beforeAll(async () => {
   initHostExtPersistence(await openStorage('memory://'));
-  // model A: 2 up, 1 down; model B: 1 up, 1 down. Each msg maps to a model below.
-  await setMessageFeedback({ tenantId: T, conversationId: 'c1', messageId: 'a1', subjectRef: 'user:1', rating: 'up' });
-  await setMessageFeedback({ tenantId: T, conversationId: 'c1', messageId: 'a2', subjectRef: 'user:1', rating: 'up' });
-  await setMessageFeedback({ tenantId: T, conversationId: 'c1', messageId: 'a3', subjectRef: 'user:1', rating: 'down' });
-  await setMessageFeedback({ tenantId: T, conversationId: 'c1', messageId: 'b1', subjectRef: 'user:1', rating: 'up' });
-  await setMessageFeedback({ tenantId: T, conversationId: 'c1', messageId: 'b2', subjectRef: 'user:1', rating: 'down' });
-  await setMessageFeedback({ tenantId: T, conversationId: 'c1', messageId: 'x9', subjectRef: 'user:1', rating: 'up' }); // unattributable
+  await setMessageFeedback({ tenantId: T, conversationId: 'c1', messageId: 'a1', subjectRef: 'user:1', rating: 'up', attribution: served('model-A') });
+  await setMessageFeedback({ tenantId: T, conversationId: 'c1', messageId: 'a2', subjectRef: 'user:2', rating: 'up', attribution: served('model-A') });
+  await setMessageFeedback({ tenantId: T, conversationId: 'c1', messageId: 'b1', subjectRef: 'user:1', rating: 'down', attribution: served('model-B') });
+  await setMessageFeedback({ tenantId: T, conversationId: 'c1', messageId: 'x9', subjectRef: 'user:1', rating: 'up' }); // no row anywhere
 });
 
-const resolver = (_c: string, m: string): string | null => (m.startsWith('a') ? 'model-A' : m.startsWith('b') ? 'model-B' : null);
-
 describe('buildTenantLeaderboard', () => {
-  it('aggregates feedback → per-model win-rate + Elo, ranked', async () => {
-    const lb = await buildTenantLeaderboard(T, resolver);
-    const a = lb.find((m) => m.model === 'model-A')!;
-    const b = lb.find((m) => m.model === 'model-B')!;
-    expect(a).toMatchObject({ up: 2, down: 1 });
-    expect(a.winRate).toBeCloseTo(2 / 3);
-    expect(b.winRate).toBeCloseTo(0.5);
-    expect(a.elo).toBeGreaterThan(b.elo); // A ranks above B
-    expect(lb[0]!.model).toBe('model-A');
+  it('ranks stamped ratings by model and counts the unattributable one', async () => {
+    const { leaderboard, coverage } = await buildTenantLeaderboard(T);
+    expect(leaderboard.map((r) => r.model)).toEqual(['model-A', 'model-B']);
+    expect(leaderboard[0]).toMatchObject({ up: 2, down: 0, raters: 2 });
+    expect(coverage).toEqual({ attributed: 3, unattributed: 1 });
   });
 
-  it('drops unattributable feedback (model x9 → null)', async () => {
-    const lb = await buildTenantLeaderboard(T, resolver);
-    expect(lb.some((m) => m.model === null || m.model === '')).toBe(false);
-    // only the two attributable models present
-    expect(new Set(lb.map((m) => m.model))).toEqual(new Set(['model-A', 'model-B']));
+  it('a legacy row is attributed through the exchange row of ITS conversation, never another conversation\'s', async () => {
+    const TL = 'lb-legacy';
+    const wire = 'run-L:gate:0:2:agent';
+    await recordTurnAttribution({ tenantId: TL, wireMessageId: wire, runId: 'run-L', chatSessionId: 'sess-L', served: { provider: 'google', model: 'gemini-x' } });
+    await setMessageFeedback({ tenantId: TL, conversationId: 'sess-L', messageId: conversationMessageId(wire), subjectRef: 'user:1', rating: 'up' });
+    await setMessageFeedback({ tenantId: TL, conversationId: 'sess-OTHER', messageId: conversationMessageId(wire), subjectRef: 'user:1', rating: 'up' });
+    const { leaderboard, coverage } = await buildTenantLeaderboard(TL);
+    expect(leaderboard).toEqual([expect.objectContaining({ key: 'google/gemini-x', up: 1 })]);
+    expect(coverage).toEqual({ attributed: 1, unattributed: 1 });
   });
 
-  it('a tenant with no feedback sees none of another tenant\'s rows (empty leaderboard)', async () => {
-    expect(await buildTenantLeaderboard('no-feedback', resolver)).toEqual([]);
+  it('a run bound WITHOUT a session stamp attributes only inside the conversation it is bound to', async () => {
+    const TB = 'lb-bound';
+    const wire = 'run-B:gate:0:2:agent';
+    await recordTurnAttribution({ tenantId: TB, wireMessageId: wire, runId: 'run-B', served: { provider: 'openai', model: 'gpt-bound' } });
+    await setConversationRun(TB, 'sess-bound', 'run-B');
+    await setConversationRun(TB, 'sess-other', 'run-X');
+    await setMessageFeedback({ tenantId: TB, conversationId: 'sess-bound', messageId: conversationMessageId(wire), subjectRef: 'user:1', rating: 'up' });
+    await setMessageFeedback({ tenantId: TB, conversationId: 'sess-other', messageId: conversationMessageId(wire), subjectRef: 'user:1', rating: 'up' });
+    const { leaderboard, coverage } = await buildTenantLeaderboard(TB);
+    expect(leaderboard).toEqual([expect.objectContaining({ key: 'openai/gpt-bound', up: 1 })]);
+    expect(coverage).toEqual({ attributed: 1, unattributed: 1 });
   });
 
-  it('CONV-1: dedupes — two feedback rows on the SAME message resolve the model ONCE', async () => {
-    await setMessageFeedback({ tenantId: 'dedup-t', conversationId: 'c', messageId: 'm1', subjectRef: 'user:1', rating: 'up' });
-    await setMessageFeedback({ tenantId: 'dedup-t', conversationId: 'c', messageId: 'm1', subjectRef: 'user:2', rating: 'down' });
-    let calls = 0;
-    const counting = (_c: string, _m: string): string | null => { calls++; return 'model-A'; };
-    const lb = await buildTenantLeaderboard('dedup-t', counting);
-    expect(calls).toBe(1); // the shared message is resolved once, not once per feedback row
-    // …and BOTH feedback rows still count toward the model.
-    expect(lb).toEqual([expect.objectContaining({ model: 'model-A', up: 1, down: 1 })]);
+  it('a rating already checked at write is never looked up again', async () => {
+    const TC = 'lb-checked';
+    const wire = 'run-C:gate:0:2:agent';
+    // Checked (and found nothing) when it was recorded; the row appears later.
+    await setMessageFeedback({ tenantId: TC, conversationId: 'sess-C', messageId: conversationMessageId(wire), subjectRef: 'user:1', rating: 'up', attribution: null });
+    await recordTurnAttribution({ tenantId: TC, wireMessageId: wire, runId: 'run-C', chatSessionId: 'sess-C', served: { provider: 'openai', model: 'late' } });
+    expect((await buildTenantLeaderboard(TC)).coverage).toEqual({ attributed: 0, unattributed: 1 });
+  });
+
+  it('a tenant with no feedback sees none of another tenant\'s rows', async () => {
+    expect(await buildTenantLeaderboard('no-feedback')).toEqual({ leaderboard: [], coverage: { attributed: 0, unattributed: 0 } });
   });
 });

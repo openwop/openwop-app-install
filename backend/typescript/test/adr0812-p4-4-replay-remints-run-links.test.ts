@@ -11,6 +11,10 @@
  * The legacy row is planted through the storage interface the route itself
  * uses (claim + complete), with the exact pre-2b body shape measured in
  * production on 2026-10-17: `{ runId: <bare>, status, statusUrl, eventsUrl }`.
+ * Tracker: TST-BVC-7.
+ *
+ * Red when (wave 60 probes w60g4-remint-*): a replay serves the stored links,
+ * or the stored links win over the re-minted ones.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';
@@ -79,7 +83,9 @@ describe('ADR 0812 P4 slice 4 — a replay re-mints its run links', () => {
     const r = await create(key);
     expect(r.status).toBe(201);
     expect(r.replay).toBe('true'); // served from the planted row, not a fresh create
-    expect(String(r.json['runId'])).toContain(bare);
+    // Bound to the CALLER's tenant (`dev-token` acts in `default`), the same
+    // tenant the response projector binds with — not the body's `tenantId`.
+    expect(r.json['runId']).toBe(`default/${bare}`);
     expectLinksAddress(r.json);
   });
 

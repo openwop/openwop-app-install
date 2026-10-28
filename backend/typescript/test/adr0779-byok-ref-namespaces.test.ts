@@ -11,6 +11,11 @@
  *
  * The second leg pins that each owner builds its refs FROM the shared prefix,
  * so the list and the refs cannot drift apart.
+ *
+ * Tracker: TST-BBK-2 (/grade-tests wave 60). Probe-witnessed:
+ *   - red when a new file calls `setSecret(` unclassified        → leg 1
+ *   - red when an owner builds its ref from a literal prefix      → leg 2
+ *   - red when `systemOwnedRefOwner` matches by substring         → leg 3
  */
 import { describe, expect, it } from 'vitest';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
@@ -76,7 +81,8 @@ describe('ADR 0779 D2 — owned ref namespaces', () => {
     expect(stale, 'remove classified entries that no longer write secrets').toEqual([]);
     expect(unclassified, 'classify each new secret writer in this test and, if it mints a namespace, in byok/refNamespaces.ts').toEqual([]);
     // The anti-vacuity floor: the scan must actually see the known writers.
-    expect(writers.length).toBeGreaterThanOrEqual(10);
+    // MEASURED 2026-10-23: 17 writers (the set equality above already pins each one).
+    expect(writers.length).toBeGreaterThanOrEqual(17);
     expect(writers).toContain('routes/byok.ts');
   });
 
@@ -86,7 +92,8 @@ describe('ADR 0779 D2 — owned ref namespaces', () => {
       if (!m) continue;
       const key = m[1] as keyof typeof OWNED_REF_PREFIXES;
       expect(OWNED_REF_PREFIXES[key], `${file} names an unknown namespace ${key}`).toBeTypeOf('string');
-      expect(readFileSync(join(SRC, file), 'utf8'), `${file} must build its refs from OWNED_REF_PREFIXES.${key}`).toContain(`OWNED_REF_PREFIXES.${key}`);
+      // Comments stripped: a doc comment naming the prefix must not satisfy this.
+      expect(code(readFileSync(join(SRC, file), 'utf8')), `${file} must build its refs from OWNED_REF_PREFIXES.${key}`).toContain(`OWNED_REF_PREFIXES.${key}`);
     }
   });
 

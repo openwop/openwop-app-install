@@ -127,11 +127,17 @@ describe('H61 — the KB does not parse with the pdf.js unpdf vendors', () => {
     // call site is cruder and cannot be fooled that way.
     const at = src.indexOf('getDocumentProxy(');
     expect(at, 'parsers/pdfPages.ts no longer calls getDocumentProxy — re-point this assertion').toBeGreaterThan(-1);
-    const call = src.slice(at, at + 200);
-    expect(
-      call,
-      'the KB PDF path must disable pdf.js string-eval: it parses authenticated user uploads, ' +
-        'and the flag defaults to TRUE.',
-    ).toContain('isEvalSupported: false');
+    // EVERY KB call site (ADR 0904 P6 added a page-count read in kbService before a
+    // Document AI call), each in a fixed window after the call.
+    for (const file of [src, kb]) {
+      for (let i = file.indexOf('getDocumentProxy('); i >= 0; i = file.indexOf('getDocumentProxy(', i + 1)) {
+        if (file.slice(Math.max(0, i - 12), i).includes('{ ')) continue; // the destructuring import, not a call
+        expect(
+          file.slice(i, i + 200),
+          'the KB PDF path must disable pdf.js string-eval: it parses authenticated user uploads, ' +
+            'and the flag defaults to TRUE.',
+        ).toContain('isEvalSupported: false');
+      }
+    }
   });
 });

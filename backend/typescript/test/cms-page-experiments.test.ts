@@ -89,6 +89,9 @@ interface Body extends ExperimentBody {
   page: { status: string; title: string } | null;
   baselineKey: string;
   unattributed: { legacy: number; dropped: number };
+  /** ADR 0949 P0 */
+  health: { stopEarly: string; srm: { chiSquare: number; pValue: number; mismatch: boolean; alpha: number } | null };
+  significanceWithheld?: 'srm';
 }
 interface Res { status: number; body: Body }
 interface Client {
@@ -423,6 +426,44 @@ async function keysOn(tenantId: string, orgId: string, pageId: string, variant: 
 }
 
 describe('results — read-time projection over stamped events', () => {
+  // ADR 0949 P0 (E-1, E-4) — the legacy verdict carries an SRM check and the
+  // fixed-horizon notice; a broken split withholds `significant`.
+  async function seed(tenantId: string, orgId: string, pageId: string, experimentId: string, arm: string, sessions: number, conversions: number, prefix: string): Promise<void> {
+    const keys = await keysOn(tenantId, orgId, pageId, arm, sessions, prefix);
+    for (let i = 0; i < sessions; i++) {
+      await recordEvent({ tenantId, orgId, raw: { type: 'pageview', sessionKey: keys[i], experiment: { id: experimentId, variant: arm } } });
+      if (i < conversions) await recordEvent({ tenantId, orgId, raw: { type: 'conversion', sessionKey: keys[i], experiment: { id: experimentId, variant: arm } } });
+    }
+  }
+
+  it('ADR 0949 P0: a balanced split keeps its verdict and carries the SRM check + stop-early notice', async () => {
+    const { owner, orgId, tenantId } = await ownerOrg();
+    const { pageId, v1 } = await pageWithHistory(owner, orgId);
+    const e = (await owner.post(exps(orgId, pageId), fiftyFifty(v1))).body;
+    await owner.post(exps(orgId, pageId, `/${e.experimentId}/start`));
+    await seed(tenantId, orgId, pageId, e.experimentId, 'control', 100, 10, 'bc');
+    await seed(tenantId, orgId, pageId, e.experimentId, 'legacy', 100, 40, 'bl');
+    const r = await owner.get(exps(orgId, pageId, `/${e.experimentId}/results`));
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    expect(r.body.health).toMatchObject({ stopEarly: 'fixed_horizon_do_not_stop_early', srm: { mismatch: false, chiSquare: 0 } });
+    expect(r.body.significanceWithheld).toBeUndefined();
+    expect(r.body.variants[1]).toMatchObject({ key: 'legacy', significant: true });
+  });
+
+  it('ADR 0949 P0: a broken split (300 vs 100 on 50/50) withholds every verdict', async () => {
+    const { owner, orgId, tenantId } = await ownerOrg();
+    const { pageId, v1 } = await pageWithHistory(owner, orgId);
+    const e = (await owner.post(exps(orgId, pageId), fiftyFifty(v1))).body;
+    await owner.post(exps(orgId, pageId, `/${e.experimentId}/start`));
+    await seed(tenantId, orgId, pageId, e.experimentId, 'control', 300, 30, 'sc');
+    await seed(tenantId, orgId, pageId, e.experimentId, 'legacy', 100, 40, 'sl');
+    const r = await owner.get(exps(orgId, pageId, `/${e.experimentId}/results`));
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    expect(r.body.health.srm).toMatchObject({ mismatch: true, chiSquare: 100 });
+    expect(r.body.significanceWithheld).toBe('srm');
+    expect(r.body.variants.map((v) => v.significant)).toEqual([null, null]);
+  });
+
   it('reports insufficientSample honestly below the session floor', async () => {
     const { owner, orgId, tenantId } = await ownerOrg();
     const { pageId, v1 } = await pageWithHistory(owner, orgId);

@@ -1,7 +1,12 @@
 /**
  * ADR 0809 — connection-pack provider identity at major 2 (`connection-packs.md`
  * §"Provider identity" + §"The qualified form", RFC 0177 §D.1), with v1 §B.6
- * precedence kept for every pack that still admits major 1.
+ * precedence kept for every pack that still admits major 1. Tracker: TST-BTR-6.
+ *
+ * Red when (wave 60 probes w60g4-prov-*): a v2-only pack may re-register a held
+ * id (at any version) or shadow a built-in; re-registering the same pack is
+ * refused; the qualified form resolves to another pack's definition; a v1-era
+ * pack's lower version supersedes a higher one.
  */
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -65,8 +70,11 @@ describe('ADR 0809 — a pack that still admits major 1 keeps v1 §B.6 precedenc
     const id = `acme-0809-d-${Date.now()}`;
     expect(installConnectionPackManifest(pack({ id, name: 'vendor.test.v1-a', engines: '>=1.0.0 <3.0.0', version: '1.0.0' })).installed).toBe(true);
     expect(installConnectionPackManifest(pack({ id, name: 'vendor.test.v1-b', engines: '>=1.0.0 <3.0.0', version: '1.1.0' })).installed).toBe(true);
+    // Superseded: the id now resolves to the 1.1.0 definition.
+    expect(seamResolveProvider(id)).toMatchObject({ resolved: true, source: 'pack', version: '1.1.0' });
     const lower = installConnectionPackManifest(pack({ id, name: 'vendor.test.v1-c', engines: '>=1.0.0 <3.0.0', version: '1.0.5' }));
     expect(lower.installed).toBe(false);
     expect(codes(lower)).toContain('connection_provider_conflict');
+    expect(seamResolveProvider(id), 'the refused lower version changed nothing').toMatchObject({ version: '1.1.0' });
   });
 });

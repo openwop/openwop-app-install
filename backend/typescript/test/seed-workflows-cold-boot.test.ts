@@ -19,22 +19,49 @@
  * The regression is invisible in-process: the sync Map is warm after the first
  * seed, so only a genuinely cold cache reproduces it. These tests clear the
  * cache deliberately rather than hoping.
+ *
+ * PROTECTED (replay determinism). The "from cold" and "records a revision"
+ * cases each run on their OWN empty storage (`withFreshStorage`), so neither
+ * passes on an earlier case's rows. Sabotage witnesses (grade-tests 8f w2):
+ * cb-durable-read, cb-revision, cb-never-seed.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { join } from 'node:path';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { setDurableStorage } from '../src/host/durable/durableStore.js';
 import { openStorage } from '../src/storage/index.js';
+import type { Storage } from '../src/storage/storage.js';
 import {
   registerWorkflowDurable, getRegisteredWorkflow, getRegisteredWorkflowAsync, __resetWorkflowRegistryForTests,
 } from '../src/host/workflowsRegistry.js';
 import { loadWorkflowChainPacks, listChains, _resetChainRegistryForTest } from '../src/host/workflowChainPackLoader.js';
 import { seedZeroConfigWorkflows } from '../src/host/seedWorkflows.js';
+import { latestRevision } from '../src/host/workflowRevisions.js';
 
 const TENANT = 'tenant-seed-cold';
+let shared: Storage;
+
+/** Run `fn` against a FRESH, empty storage (both seams), with a cold registry
+ *  cache, then restore the file's shared storage — so "nothing is stored yet"
+ *  is true no matter which case ran first (shuffle-safe). */
+async function withFreshStorage(fn: () => Promise<void>): Promise<void> {
+  const fresh = await openStorage('memory://');
+  initHostExtPersistence(fresh);
+  setDurableStorage(fresh);
+  __resetWorkflowRegistryForTests();
+  try {
+    await fn();
+  } finally {
+    initHostExtPersistence(shared);
+    setDurableStorage(shared);
+    __resetWorkflowRegistryForTests();
+    await fresh.close();
+  }
+}
 
 beforeAll(async () => {
   const storage = await openStorage('memory://');
+  shared = storage;
   initHostExtPersistence(storage);
   // The workflow REGISTRY reads a different seam than host-ext persistence —
   // without this its durable read returns null, the async lookup always misses,
@@ -61,17 +88,25 @@ describe('seeded definitions survive a cold instance', () => {
     // stayed green against the defect until the chain also changed. ADR 0498
     // changed `expansionId` (and therefore every node id) for 77 of 169 chains
     // by adding params, which is exactly this shape.
+    // The mutation is on the loaded registry's chain (module state), so it is
+    // restored in `finally`: under shuffle it must not leak into later cases.
     const loaded = listChains().find((c) => c.chain.chainId === 'starters.webhook-notify')!.chain;
     const params = (loaded.parameters ?? {}) as { properties?: Record<string, unknown> };
+    const before = params.properties;
     params.properties = { ...(params.properties ?? {}), addedByADeploy: { type: 'string', default: 'x' } };
 
-    // Fresh Cloud Run instance: durable storage intact, cache empty.
-    __resetWorkflowRegistryForTests();
-    expect(getRegisteredWorkflow(seededId), 'cache must actually be cold').toBeUndefined();
+    let after: Awaited<ReturnType<typeof getRegisteredWorkflowAsync>>;
+    try {
+      // Fresh Cloud Run instance: durable storage intact, cache empty.
+      __resetWorkflowRegistryForTests();
+      expect(getRegisteredWorkflow(seededId), 'cache must actually be cold').toBeUndefined();
 
-    await seedZeroConfigWorkflows(TENANT);
+      await seedZeroConfigWorkflows(TENANT);
 
-    const after = await getRegisteredWorkflowAsync(seededId);
+      after = await getRegisteredWorkflowAsync(seededId);
+    } finally {
+      params.properties = before;
+    }
     expect(after).not.toBeNull();
     // THE assertion: node ids are the replay join key. If the seeder re-expanded,
     // these change and every prior run of this workflow loses its outcomes.
@@ -98,19 +133,28 @@ describe('seeded definitions survive a cold instance', () => {
   });
 
   it('seeding still WORKS from cold when nothing is stored yet', async () => {
-    // The guard must not turn into "never seed".
-    __resetWorkflowRegistryForTests();
-    const res = await seedZeroConfigWorkflows('tenant-seed-cold-fresh');
-    expect(res.seeded).toBeGreaterThan(0);
+    // The guard must not turn into "never seed". Own empty storage: in file
+    // order the shared one already holds every `wf.seed.*` row.
+    await withFreshStorage(async () => {
+      expect(await getRegisteredWorkflowAsync('wf.seed.starters-webhook-notify'), 'premise: nothing stored yet').toBeNull();
+      const res = await seedZeroConfigWorkflows('tenant-seed-cold-fresh');
+      expect(res.seeded).toBeGreaterThan(0);
+      // …and the definition really landed in durable storage.
+      __resetWorkflowRegistryForTests();
+      expect(await getRegisteredWorkflowAsync('wf.seed.starters-webhook-notify')).not.toBeNull();
+    });
   });
 });
 
 describe('seeded runs can resolve the definition they executed', () => {
   it('seeding records a revision (else replay silently resolves HEAD)', async () => {
-    const { latestRevision } = await import('../src/host/workflowRevisions.js');
-    __resetWorkflowRegistryForTests();
-    await seedZeroConfigWorkflows('tenant-seed-rev');
-    const head = await latestRevision('wf.seed.starters-webhook-notify');
-    expect(head, 'no revision row ⇒ resolveRunDefinition falls through to HEAD').not.toBeNull();
+    // Own empty storage, so THIS seed is the one that must record the revision
+    // (in file order an earlier case's seed had already recorded it).
+    await withFreshStorage(async () => {
+      expect(await latestRevision('wf.seed.starters-webhook-notify'), 'premise: no revision yet').toBeNull();
+      await seedZeroConfigWorkflows('tenant-seed-rev');
+      const head = await latestRevision('wf.seed.starters-webhook-notify');
+      expect(head, 'no revision row ⇒ resolveRunDefinition falls through to HEAD').not.toBeNull();
+    });
   });
 });

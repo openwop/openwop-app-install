@@ -2,10 +2,20 @@
  * Exec-ops workflow-chain pack (ADR 0149 — Executive / Chief-of-Staff cluster).
  *
  * Daily Briefing, Meeting Prep, Board Update. Asserts each chain loads, expands
- * to a FROZEN validated WorkflowDefinition, substitutes run params, references
- * only known shipped typeIds, and binds connection packs via http.openapi-call
- * `connectionRef` config (the ADR 0149 connector pattern). Mirrors the lighthouse
- * pack's gate.
+ * to a FROZEN validated WorkflowDefinition with a params-derived deterministic id,
+ * substitutes run params, and references only known shipped typeIds. Mirrors the
+ * lighthouse pack's gate.
+ *
+ * > CORRECTED (wave 64): this header used to say the chains "bind connection
+ * > packs via http.openapi-call `connectionRef` config". ADR 0186 replaced that
+ * > pattern with provider-agnostic capability-dispatch nodes, which carry NO
+ * > pinned connectionRef; the frozen-config case asserts exactly that absence.
+ *
+ * The approval gate's EDGE (a rejected review cannot reach `deliver`) is held by
+ * `workflow-chain-exec-ops-gate.test.ts` › "the real {action:"reject"} payload
+ * makes `deliver` SKIP" (wave 64 probe 8fw5g2-eo-gate-edge-condition-covering,
+ * witnessed; the same sabotage stays green here, 8fw5g2-eo-gate-edge-condition).
+ * This file asserts only that the gate NODE exists where it must and nowhere else.
  */
 
 import { beforeAll, describe, expect, it } from 'vitest';
@@ -55,9 +65,10 @@ describe('exec-ops pack — every node uses a known shipped typeId', () => {
 
 describe('exec-ops pack — expansion (RFC 0013, frozen + validated)', () => {
   const sample: Record<string, Record<string, unknown>> = {
-    'exec-ops.daily-briefing': {},
-    'exec-ops.meeting-prep': { attendeeCompanyId: 'acme-co' },
-    'exec-ops.board-update': { period: '2026-05' },
+    // Every REQUIRED param of each chain (pack.json `parameters.required`).
+    'exec-ops.daily-briefing': { orgId: 'org-1' },
+    'exec-ops.meeting-prep': { orgId: 'org-1', attendeeCompanyId: 'acme-co' },
+    'exec-ops.board-update': { orgId: 'org-1', period: '2026-05' },
   };
 
   it.each(CHAINS)('%s expands to a validated definition with a deterministic id', (id) => {
@@ -67,10 +78,14 @@ describe('exec-ops pack — expansion (RFC 0013, frozen + validated)', () => {
       expect(n.nodeId.startsWith(id.replace(/\./g, '_') + '_')).toBe(true);
       expect(isKnownTypeId(n.typeId)).toBe(true);
     }
+    // Deterministic: the same params give the same id; a different param value
+    // gives a different one (the id folds the params, RFC 0013).
+    expect(expandChain(getChain(id)!.chain, { params: { ...sample[id]! } }).workflowId).toBe(def.workflowId);
+    expect(expandChain(getChain(id)!.chain, { params: { ...sample[id]!, orgId: 'org-2' } }).workflowId).not.toBe(def.workflowId);
   });
 
-  it('RFC 0013 Path A — params FROZEN into config at expansion; connectionRef binding preserved', () => {
-    const prep = expandChain(getChain('exec-ops.meeting-prep')!.chain, { params: { attendeeCompanyId: 'acme-co' } });
+  it('RFC 0013 Path A — params FROZEN into config at expansion; ADR 0186 capability nodes carry NO pinned connectionRef', () => {
+    const prep = expandChain(getChain('exec-ops.meeting-prep')!.chain, { params: { orgId: 'org-1', attendeeCompanyId: 'acme-co' } });
     expect(prep.variables).toBeUndefined();
     const company = prep.nodes.find((n) => n.typeId === 'feature.crm.nodes.get-company')!;
     expect((company.config as { companyId: string }).companyId).toBe('acme-co'); // frozen value, not a token
@@ -83,7 +98,7 @@ describe('exec-ops pack — expansion (RFC 0013, frozen + validated)', () => {
     const dossier = prep.nodes.find((n) => n.typeId === 'core.ai.chatCompletion')!;
     expect((dossier.config as { systemPrompt: string }).systemPrompt).not.toContain('{{params');
 
-    const board = expandChain(getChain('exec-ops.board-update')!.chain, { params: { period: '2026-05' } });
+    const board = expandChain(getChain('exec-ops.board-update')!.chain, { params: { orgId: 'org-1', period: '2026-05' } });
     const fin = board.nodes.find((n) => n.typeId === 'core.openwop.connectors.erp-action')!;
     expect((fin.config as { action?: string }).action, 'erp capability node keeps its action config').toBeTruthy();
     expect((fin.config as { connectionRef?: string }).connectionRef).toBeUndefined();
@@ -93,7 +108,7 @@ describe('exec-ops pack — expansion (RFC 0013, frozen + validated)', () => {
     expect(board.variables).toBeUndefined();
   });
 
-  it('gates the board update behind an approval but leaves the read-only briefing ungated', () => {
+  it('the board update carries an approval-gate node and the read-only briefing has none (the gate EDGE is held by workflow-chain-exec-ops-gate)', () => {
     const board = getChain('exec-ops.board-update')!.chain;
     expect(board.dag.nodes.some((n) => n.typeId === 'core.chat.approvalGate')).toBe(true);
     const briefing = getChain('exec-ops.daily-briefing')!.chain;

@@ -3,8 +3,21 @@
  * closed+hatched def are CARRIED under `vendor.openwop-app`, never dropped;
  * an unhatched def is left alone (its residue is a writer defect the audit
  * ratchet gates); the step is idempotent (fan-out runs the projection twice).
+ *
+ * Tracker TST-BAA-6. Red when (sabotage-witnessed, wave 60): `carry` returns a
+ * new object when nothing moved; undeclared keys stay in place instead of the
+ * box; nested sub-plans are dropped; an unhatched def is boxed anyway; a corpus
+ * kind is rewritten; the `conversation` alias or the carried host kind is lost;
+ * a non-interrupt type has its `kind` projected.
  */
 import { describe, expect, it } from 'vitest';
+
+type Obj = Record<string, unknown>;
+/** A projection result read as an object (each projector returns `unknown`). */
+const obj = (v: unknown): Obj => {
+  expect(v !== null && typeof v === 'object' && !Array.isArray(v), 'projection returns an object').toBe(true);
+  return v as Obj;
+};
 import { carryPlanFor, carryVendorKeys, VENDOR_CARRY_KEY } from '../src/storage/vendorKeyCarry.js';
 import { projectV2Payload } from '../src/storage/v2PayloadProjection.js';
 import { corpusInterruptKinds, kindCarryingTypes, projectInterruptKind } from '../src/storage/interruptKindProjection.js';
@@ -22,16 +35,16 @@ describe('ADR 0725 — vendor-key carry', () => {
     // `run-event-payloads#conversationOpened` (they were undeclared through
     // 2.45.14 and were the carried examples here). Declared keys now stay in
     // place; the box receives only what the def still does not name.
-    const out = carryVendorKeys('conversation.opened', {
+    const out = obj(carryVendorKeys('conversation.opened', {
       conversationId: 'c1', initialTurn: { messageId: 'm0' }, participants: [], capabilities: ['multi-turn'],
       hostDraftId: 'd1', uiHint: { pinned: true },
-    }) as Record<string, unknown>;
+    }));
     expect(Object.keys(out).sort()).toEqual(['capabilities', 'conversationId', 'initialTurn', 'participants', VENDOR_CARRY_KEY].sort());
     expect(out[VENDOR_CARRY_KEY]).toEqual({ hostDraftId: 'd1', uiHint: { pinned: true } });
   });
 
   it('carries inside a nested closed+hatched sub-object (run.failed.error enrichment)', () => {
-    const out = carryVendorKeys('run.failed', { error: { code: 'x', message: 'y', category: 'provider', userMessage: 'Try again' }, failedNodeId: 'n1' }) as any;
+    const out = obj(carryVendorKeys('run.failed', { error: { code: 'x', message: 'y', category: 'provider', userMessage: 'Try again' }, failedNodeId: 'n1' }));
     expect(out.error).toEqual({ code: 'x', message: 'y', [VENDOR_CARRY_KEY]: { category: 'provider', userMessage: 'Try again' } });
     expect(out.failedNodeId).toBe('n1');
   });
@@ -50,7 +63,7 @@ describe('ADR 0725 — vendor-key carry', () => {
   });
 
   it('runs LAST in the composed projection: seats (ids, aliases, owner echo) before the box, and the fan-out\'s second pass is a no-op', () => {
-    const first = projectV2Payload('artifact.created', { artifactTypeId: 'deck', versionId: 'v3', registeredBy: 'host' }, { runId: 'r1', nodeId: 'n1' }) as Record<string, unknown>;
+    const first = obj(projectV2Payload('artifact.created', { artifactTypeId: 'deck', versionId: 'v3', registeredBy: 'host' }, { runId: 'r1', nodeId: 'n1' }));
     expect(first.artifactType, 'alias ran first — a seated rename is not boxed').toBe('deck');
     expect(first[VENDOR_CARRY_KEY]).toEqual({ registeredBy: 'host' });
     expect(projectV2Payload('artifact.created', first, { runId: 'r1', nodeId: 'n1' })).toBe(first);
@@ -66,8 +79,8 @@ describe('ADR 0725 — interrupt kinds onto the corpus enum', () => {
     expect(projectInterruptKind('node.suspended', p)).toBe(p);
   });
   it('`conversation` is the conversation.start seat; a host-only kind becomes `custom` with the spelling CARRIED, and the composed projection boxes it once', () => {
-    expect((projectInterruptKind('node.suspended', { interruptId: 'i', kind: 'conversation' }) as any).kind).toBe('conversation.start');
-    const out = projectV2Payload('node.suspended', { interruptId: 'a'.repeat(32), kind: 'walkthrough-step' }, { runId: 'r1', nodeId: 'n1' }) as any;
+    expect(obj(projectInterruptKind('node.suspended', { interruptId: 'i', kind: 'conversation' })).kind).toBe('conversation.start');
+    const out = obj(projectV2Payload('node.suspended', { interruptId: 'a'.repeat(32), kind: 'walkthrough-step' }, { runId: 'r1', nodeId: 'n1' }));
     expect(out.kind).toBe('custom');
     expect(out[VENDOR_CARRY_KEY]).toEqual({ kind: 'walkthrough-step' });
     expect(projectV2Payload('node.suspended', out, { runId: 'r1', nodeId: 'n1' }), 'idempotent').toBe(out);

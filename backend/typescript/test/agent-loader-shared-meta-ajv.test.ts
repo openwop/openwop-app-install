@@ -5,6 +5,18 @@
  * reused across two packs never collides; error text is byte-identical to a
  * plain Ajv2020; the warm (shared-meta already compiled) path yields working
  * validators.
+ *
+ * Tracker TST-BKY-5. Red when the shared meta instance is not cached (a fresh
+ * Ajv per call — the boot-perf regression), an invalid schema stops throwing
+ * the plain message, the meta errors are not copied, a non-2020-12 `$schema`
+ * is validated against the 2020-12 meta instead of failing like a plain
+ * Ajv2020, or the per-pack instance becomes shared (`$id` collision) — each
+ * sabotage-witnessed (w65). The non-2020-12 branch is witnessed with a CUSTOM
+ * meta-schema registered on the per-pack instance: only that instance knows it,
+ * so routing the schema to the shared 2020-12 meta validator throws "no schema
+ * with key or ref". (An UNKNOWN `$schema` such as draft-07 cannot witness it:
+ * the shared meta validator is itself a plain Ajv2020 and throws the identical
+ * lookup error — equivalent on that input, w65 round 3.)
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { join } from 'node:path';
@@ -88,8 +100,11 @@ describe('agentLoader — shared 2020-12 meta-schema', () => {
       expect(agent!.handoff!.validateTask!({ n: 2 })).toEqual({ ok: true });
       expect(agent!.handoff!.validateReturn!({ n: 0 })).toEqual({ ok: false, errors: 'data/n must be >= 1' });
     }
-    // One per `allErrors` value at most — never one per pack.
-    expect(sharedMetaInstanceCount()).toBeLessThanOrEqual(2);
+    // At least one (the shared meta IS cached) and one per `allErrors` value at
+    // most — never one per pack. `≤ 2` alone also held at 0, i.e. never cached.
+    const n = sharedMetaInstanceCount();
+    expect(n).toBeGreaterThanOrEqual(1);
+    expect(n).toBeLessThanOrEqual(2);
   });
 });
 
@@ -122,6 +137,22 @@ describe('SharedMetaAjv2020 — parity with a plain Ajv2020', () => {
     expect(shared.errorsText()).toBe(plain.errorsText());
     expect(shared.validateSchema({ type: 'string' })).toBe(true);
     expect(shared.errors).toBeNull();
+  });
+
+  it('a non-2020-12 `$schema` is checked against the meta-schema registered on THIS instance', () => {
+    // A custom meta-schema known only to the per-pack instance: it requires `title`.
+    const CUSTOM_META = { $id: 'https://example.test/meta/titled', type: 'object', required: ['title'] };
+    const plain = new Ajv2020({ allErrors: true, strict: false });
+    const shared = new SharedMetaAjv2020({ allErrors: true, strict: false });
+    plain.addMetaSchema(CUSTOM_META);
+    shared.addMetaSchema(CUSTOM_META);
+    const titled = { $schema: CUSTOM_META.$id, title: 'T', type: 'string' };
+    const untitled = { $schema: CUSTOM_META.$id, type: 'string' };
+    expect(plain.validateSchema(titled)).toBe(true);
+    expect(shared.validateSchema(titled)).toBe(true);
+    expect(plain.validateSchema(untitled)).toBe(false);
+    expect(shared.validateSchema(untitled)).toBe(false);
+    expect(shared.errorsText()).toBe(plain.errorsText());
   });
 
   it('the 2020-12 meta-schema stays resolvable as a $ref target on the per-pack instance', () => {

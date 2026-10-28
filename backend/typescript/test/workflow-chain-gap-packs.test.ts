@@ -7,8 +7,16 @@
  * Same portability contract the support/starters suite enforces: each chain
  * loads, references ONLY this host's shipped node typeIds (a typo'd typeId
  * otherwise ships a silently degraded template, ADR 0163 R6), expands to a
- * FROZEN validated WorkflowDefinition, and every EXTERNAL-send sink sits
- * behind a human approval gate (draft-only + in-app sinks are exempt).
+ * FROZEN validated WorkflowDefinition.
+ *
+ * Grade-tests wave 64 cut two cases, each with a covering probe red in its
+ * covering file: "derives zero missing typeIds against the known set" ran
+ * `chainRequirements` over the SAME hand-copied set as the typeId case here
+ * (probe 8fw5g3-gap-typeid reds both), and the per-chain "external sends declare
+ * an approval gate" precondition is enforced for EVERY vendored chain by
+ * `workflow-chain-knowledge-inbox.test.ts` › "every vendored chain DECLARES an
+ * approval-gate node…" (probe 8fw5g3-gap-cover-ki). The behavioural guarantee is
+ * `workflow-chain-effect-reject-witness.test.ts`.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import {
@@ -17,7 +25,6 @@ import {
   getChain,
   listChains,
   expandChain,
-  chainRequirements,
   _resetChainRegistryForTest,
 } from '../src/host/workflowChainPackLoader.js';
 
@@ -77,12 +84,6 @@ const KNOWN_TYPEIDS = new Set([
   'feature.crm.nodes.create-task',
 ]);
 
-const GATED_SINKS = new Set([
-  'core.openwop.integration.email-send',
-  'core.openwop.integration.slack-message',
-  'core.openwop.integration.sms-send',
-]);
-
 describe('gap packs — discovery', () => {
   it.each(Object.entries(PACKS))('%s loads all its chains', (pack, ids) => {
     for (const id of ids) {
@@ -95,36 +96,10 @@ describe('gap packs — discovery', () => {
 });
 
 describe('gap packs — every node uses a shipped typeId', () => {
-  it.each(ALL_CHAINS)('%s references only registered typeIds', (id) => {
+  it.each(ALL_CHAINS)('%s references only the shipped-palette typeIds', (id) => {
     const chain = getChain(id)!.chain;
     for (const n of chain.dag.nodes) {
       expect(KNOWN_TYPEIDS.has(n.typeId), `${id}:${n.id} → ${n.typeId}`).toBe(true);
-    }
-  });
-
-  it.each(ALL_CHAINS)('%s derives zero missing typeIds against the known set', (id) => {
-    const chain = getChain(id)!.chain;
-    const req = chainRequirements(chain, KNOWN_TYPEIDS, () => true);
-    expect(req.missingNodeTypeIds).toEqual([]);
-  });
-});
-
-/**
- * WF-EM-4 — a PRECONDITION, not the gating guarantee. `approvalGateCount`
- * counts gate NODES, so ten chains that mailed a contact on a REJECT passed
- * this assertion for its whole life. The behavioural witness — real gate
- * handler, real UI payloads, real scheduler — is
- * `workflow-chain-email-reject-witness.test.ts`. A green here means "a gate
- * node exists", nothing more.
- */
-describe('gap packs — external sends declare an approval gate', () => {
-  it.each(ALL_CHAINS)('%s declares a gate node + side-effectful for every external-send sink', (id) => {
-    const chain = getChain(id)!.chain;
-    const sendsExternally = chain.dag.nodes.some((n) => GATED_SINKS.has(n.typeId));
-    if (sendsExternally) {
-      const req = chainRequirements(chain, KNOWN_TYPEIDS, () => true);
-      expect(req.approvalGateCount, `${id} sends externally with no gate node at all`).toBeGreaterThanOrEqual(1);
-      expect(chain.capabilities ?? [], `${id} sends externally but isn't marked side-effectful`).toContain('side-effectful');
     }
   });
 });
@@ -132,6 +107,9 @@ describe('gap packs — external sends declare an approval gate', () => {
 describe('gap packs — expansion (RFC 0013, frozen + validated)', () => {
   it.each(ALL_CHAINS)('%s expands to a frozen validated definition', (id) => {
     const chain = getChain(id)!.chain;
-    expect(() => expandChain(chain, { params: {}, isTypeIdKnown: (t) => KNOWN_TYPEIDS.has(t) })).not.toThrow();
+    const def = expandChain(chain, { params: {}, isTypeIdKnown: (t) => KNOWN_TYPEIDS.has(t) });
+    expect(def.nodes).toHaveLength(chain.dag.nodes.length);
+    expect(JSON.stringify(def.nodes), `${id} kept a param token`).not.toContain('{{params');
+    expect(def.nodes.filter((n) => n.outputRole === 'primary')).toHaveLength(1);
   });
 });

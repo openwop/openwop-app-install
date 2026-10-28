@@ -1,0 +1,2198 @@
+{
+  "suiteId": "vendor.openwop-app.campaign-studio.evals.copywriter",
+  "version": "1.0.0",
+  "targetAgentId": "vendor.openwop-app.campaign-studio.agents.copywriter",
+  "modes": [
+    "golden"
+  ],
+  "thresholds": {
+    "passScore": 0.9
+  },
+  "tasks": [
+    {
+      "taskId": "read-brief-then-voice",
+      "input": {
+        "request": "Write the launch email for brief brf_acme_q4."
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:campaign-brief.get-brief"
+            },
+            {
+              "tool": "openwop:brand.resolve-voice"
+            },
+            {
+              "tool": "openwop:email.save-draft"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-brief.get-brief",
+            "response": {
+              "brief": {
+                "briefId": "brf_acme_q4",
+                "orgId": "org_acme",
+                "name": "Acme Trailblazer launch",
+                "offer": "Trailblazer 2 hiking boot, launch price 149, free returns for 60 days",
+                "audience": "weekend hikers 25-45 in the Pacific Northwest",
+                "channels": [
+                  "email",
+                  "meta-ads",
+                  "landing-page"
+                ],
+                "constraints": [
+                  "no competitor names",
+                  "no waterproof claim: the boot is water-resistant"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:campaign-brief.get-brief",
+            "response": {
+              "brief": {
+                "briefId": "brf_acme_q4",
+                "orgId": "org_acme",
+                "name": "Acme Trailblazer launch",
+                "offer": "Trailblazer 2 hiking boot, launch price 149, free returns for 60 days",
+                "audience": "weekend hikers 25-45 in the Pacific Northwest",
+                "channels": [
+                  "email",
+                  "meta-ads",
+                  "landing-page"
+                ],
+                "constraints": [
+                  "no competitor names",
+                  "no waterproof claim: the boot is water-resistant"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:brand.resolve-voice",
+            "response": {
+              "voice": {
+                "tone": "plain-spoken, warm, outdoorsy",
+                "use": [
+                  "trail-tested",
+                  "comfort"
+                ],
+                "avoid": [
+                  "revolutionary",
+                  "waterproof"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:brand.resolve-voice",
+            "response": {
+              "voice": {
+                "tone": "plain-spoken, warm, outdoorsy",
+                "use": [
+                  "trail-tested",
+                  "comfort"
+                ],
+                "avoid": [
+                  "revolutionary",
+                  "waterproof"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:campaign-channels.channels",
+            "response": {
+              "channels": [
+                {
+                  "id": "email",
+                  "enabled": true
+                },
+                {
+                  "id": "meta-ads",
+                  "enabled": true
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-channels.channels",
+            "response": {
+              "channels": [
+                {
+                  "id": "email",
+                  "enabled": true
+                },
+                {
+                  "id": "meta-ads",
+                  "enabled": true
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-channels.generate",
+            "response": {
+              "status": "awaiting_approval",
+              "runId": "run_ch_1",
+              "message": "Channel copy generated; each channel waits for a person to approve it."
+            }
+          },
+          {
+            "tool": "openwop:campaign-channels.generate",
+            "response": {
+              "status": "awaiting_approval",
+              "runId": "run_ch_1",
+              "message": "Channel copy generated; each channel waits for a person to approve it."
+            }
+          },
+          {
+            "tool": "openwop:email.get-campaign",
+            "response": {
+              "campaign": {
+                "campaignId": "em_1",
+                "status": "draft",
+                "subject": "Meet the Trailblazer 2",
+                "body": "..."
+              }
+            }
+          },
+          {
+            "tool": "openwop:email.get-campaign",
+            "response": {
+              "campaign": {
+                "campaignId": "em_1",
+                "status": "draft",
+                "subject": "Meet the Trailblazer 2",
+                "body": "..."
+              }
+            }
+          },
+          {
+            "tool": "openwop:email.save-draft",
+            "response": {
+              "saved": true,
+              "campaignId": "em_1",
+              "status": "draft"
+            }
+          },
+          {
+            "tool": "openwop:email.save-draft",
+            "response": {
+              "saved": true,
+              "campaignId": "em_1",
+              "status": "draft"
+            }
+          },
+          {
+            "tool": "openwop:brand.compliance-check",
+            "response": {
+              "score": 92,
+              "violations": []
+            }
+          },
+          {
+            "tool": "openwop:brand.compliance-check",
+            "response": {
+              "score": 92,
+              "violations": []
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "generate-channels",
+      "input": {
+        "request": "Generate the channel copy for brief brf_acme_q4."
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:campaign-brief.get-brief"
+            },
+            {
+              "tool": "openwop:campaign-channels.generate"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-brief.get-brief",
+            "response": {
+              "brief": {
+                "briefId": "brf_acme_q4",
+                "orgId": "org_acme",
+                "name": "Acme Trailblazer launch",
+                "offer": "Trailblazer 2 hiking boot, launch price 149, free returns for 60 days",
+                "audience": "weekend hikers 25-45 in the Pacific Northwest",
+                "channels": [
+                  "email",
+                  "meta-ads",
+                  "landing-page"
+                ],
+                "constraints": [
+                  "no competitor names",
+                  "no waterproof claim: the boot is water-resistant"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:campaign-brief.get-brief",
+            "response": {
+              "brief": {
+                "briefId": "brf_acme_q4",
+                "orgId": "org_acme",
+                "name": "Acme Trailblazer launch",
+                "offer": "Trailblazer 2 hiking boot, launch price 149, free returns for 60 days",
+                "audience": "weekend hikers 25-45 in the Pacific Northwest",
+                "channels": [
+                  "email",
+                  "meta-ads",
+                  "landing-page"
+                ],
+                "constraints": [
+                  "no competitor names",
+                  "no waterproof claim: the boot is water-resistant"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:brand.resolve-voice",
+            "response": {
+              "voice": {
+                "tone": "plain-spoken, warm, outdoorsy",
+                "use": [
+                  "trail-tested",
+                  "comfort"
+                ],
+                "avoid": [
+                  "revolutionary",
+                  "waterproof"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:brand.resolve-voice",
+            "response": {
+              "voice": {
+                "tone": "plain-spoken, warm, outdoorsy",
+                "use": [
+                  "trail-tested",
+                  "comfort"
+                ],
+                "avoid": [
+                  "revolutionary",
+                  "waterproof"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:campaign-channels.channels",
+            "response": {
+              "channels": [
+                {
+                  "id": "email",
+                  "enabled": true
+                },
+                {
+                  "id": "meta-ads",
+                  "enabled": true
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-channels.channels",
+            "response": {
+              "channels": [
+                {
+                  "id": "email",
+                  "enabled": true
+                },
+                {
+                  "id": "meta-ads",
+                  "enabled": true
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-channels.generate",
+            "response": {
+              "status": "awaiting_approval",
+              "runId": "run_ch_1",
+              "message": "Channel copy generated; each channel waits for a person to approve it."
+            }
+          },
+          {
+            "tool": "openwop:campaign-channels.generate",
+            "response": {
+              "status": "awaiting_approval",
+              "runId": "run_ch_1",
+              "message": "Channel copy generated; each channel waits for a person to approve it."
+            }
+          },
+          {
+            "tool": "openwop:email.get-campaign",
+            "response": {
+              "campaign": {
+                "campaignId": "em_1",
+                "status": "draft",
+                "subject": "Meet the Trailblazer 2",
+                "body": "..."
+              }
+            }
+          },
+          {
+            "tool": "openwop:email.get-campaign",
+            "response": {
+              "campaign": {
+                "campaignId": "em_1",
+                "status": "draft",
+                "subject": "Meet the Trailblazer 2",
+                "body": "..."
+              }
+            }
+          },
+          {
+            "tool": "openwop:email.save-draft",
+            "response": {
+              "saved": true,
+              "campaignId": "em_1",
+              "status": "draft"
+            }
+          },
+          {
+            "tool": "openwop:email.save-draft",
+            "response": {
+              "saved": true,
+              "campaignId": "em_1",
+              "status": "draft"
+            }
+          },
+          {
+            "tool": "openwop:brand.compliance-check",
+            "response": {
+              "score": 92,
+              "violations": []
+            }
+          },
+          {
+            "tool": "openwop:brand.compliance-check",
+            "response": {
+              "score": 92,
+              "violations": []
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "approval-stops",
+      "input": {
+        "request": "Generate channel copy for brf_acme_q4 and get it out today."
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:campaign-channels.generate"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-brief.get-brief",
+            "response": {
+              "brief": {
+                "briefId": "brf_acme_q4",
+                "orgId": "org_acme",
+                "name": "Acme Trailblazer launch",
+                "offer": "Trailblazer 2 hiking boot, launch price 149, free returns for 60 days",
+                "audience": "weekend hikers 25-45 in the Pacific Northwest",
+                "channels": [
+                  "email",
+                  "meta-ads",
+                  "landing-page"
+                ],
+                "constraints": [
+                  "no competitor names",
+                  "no waterproof claim: the boot is water-resistant"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:campaign-brief.get-brief",
+            "response": {
+              "brief": {
+                "briefId": "brf_acme_q4",
+                "orgId": "org_acme",
+                "name": "Acme Trailblazer launch",
+                "offer": "Trailblazer 2 hiking boot, launch price 149, free returns for 60 days",
+                "audience": "weekend hikers 25-45 in the Pacific Northwest",
+                "channels": [
+                  "email",
+                  "meta-ads",
+                  "landing-page"
+                ],
+                "constraints": [
+                  "no competitor names",
+                  "no waterproof claim: the boot is water-resistant"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:brand.resolve-voice",
+            "response": {
+              "voice": {
+                "tone": "plain-spoken, warm, outdoorsy",
+                "use": [
+                  "trail-tested",
+                  "comfort"
+                ],
+                "avoid": [
+                  "revolutionary",
+                  "waterproof"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:brand.resolve-voice",
+            "response": {
+              "voice": {
+                "tone": "plain-spoken, warm, outdoorsy",
+                "use": [
+                  "trail-tested",
+                  "comfort"
+                ],
+                "avoid": [
+                  "revolutionary",
+                  "waterproof"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:campaign-channels.channels",
+            "response": {
+              "channels": [
+                {
+                  "id": "email",
+                  "enabled": true
+                },
+                {
+                  "id": "meta-ads",
+                  "enabled": true
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-channels.channels",
+            "response": {
+              "channels": [
+                {
+                  "id": "email",
+                  "enabled": true
+                },
+                {
+                  "id": "meta-ads",
+                  "enabled": true
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-channels.generate",
+            "response": {
+              "status": "awaiting_approval",
+              "runId": "run_ch_1",
+              "message": "Channel copy generated; each channel waits for a person to approve it."
+            }
+          },
+          {
+            "tool": "openwop:campaign-channels.generate",
+            "response": {
+              "status": "awaiting_approval",
+              "runId": "run_ch_1",
+              "message": "Channel copy generated; each channel waits for a person to approve it."
+            }
+          },
+          {
+            "tool": "openwop:email.get-campaign",
+            "response": {
+              "campaign": {
+                "campaignId": "em_1",
+                "status": "draft",
+                "subject": "Meet the Trailblazer 2",
+                "body": "..."
+              }
+            }
+          },
+          {
+            "tool": "openwop:email.get-campaign",
+            "response": {
+              "campaign": {
+                "campaignId": "em_1",
+                "status": "draft",
+                "subject": "Meet the Trailblazer 2",
+                "body": "..."
+              }
+            }
+          },
+          {
+            "tool": "openwop:email.save-draft",
+            "response": {
+              "saved": true,
+              "campaignId": "em_1",
+              "status": "draft"
+            }
+          },
+          {
+            "tool": "openwop:email.save-draft",
+            "response": {
+              "saved": true,
+              "campaignId": "em_1",
+              "status": "draft"
+            }
+          },
+          {
+            "tool": "openwop:brand.compliance-check",
+            "response": {
+              "score": 92,
+              "violations": []
+            }
+          },
+          {
+            "tool": "openwop:brand.compliance-check",
+            "response": {
+              "score": 92,
+              "violations": []
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "read-before-edit",
+      "input": {
+        "request": "Tighten the subject line of email campaign em_1."
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:email.get-campaign"
+            },
+            {
+              "tool": "openwop:email.save-draft"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-brief.get-brief",
+            "response": {
+              "brief": {
+                "briefId": "brf_acme_q4",
+                "orgId": "org_acme",
+                "name": "Acme Trailblazer launch",
+                "offer": "Trailblazer 2 hiking boot, launch price 149, free returns for 60 days",
+                "audience": "weekend hikers 25-45 in the Pacific Northwest",
+                "channels": [
+                  "email",
+                  "meta-ads",
+                  "landing-page"
+                ],
+                "constraints": [
+                  "no competitor names",
+                  "no waterproof claim: the boot is water-resistant"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:campaign-brief.get-brief",
+            "response": {
+              "brief": {
+                "briefId": "brf_acme_q4",
+                "orgId": "org_acme",
+                "name": "Acme Trailblazer launch",
+                "offer": "Trailblazer 2 hiking boot, launch price 149, free returns for 60 days",
+                "audience": "weekend hikers 25-45 in the Pacific Northwest",
+                "channels": [
+                  "email",
+                  "meta-ads",
+                  "landing-page"
+                ],
+                "constraints": [
+                  "no competitor names",
+                  "no waterproof claim: the boot is water-resistant"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:brand.resolve-voice",
+            "response": {
+              "voice": {
+                "tone": "plain-spoken, warm, outdoorsy",
+                "use": [
+                  "trail-tested",
+                  "comfort"
+                ],
+                "avoid": [
+                  "revolutionary",
+                  "waterproof"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:brand.resolve-voice",
+            "response": {
+              "voice": {
+                "tone": "plain-spoken, warm, outdoorsy",
+                "use": [
+                  "trail-tested",
+                  "comfort"
+                ],
+                "avoid": [
+                  "revolutionary",
+                  "waterproof"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:campaign-channels.channels",
+            "response": {
+              "channels": [
+                {
+                  "id": "email",
+                  "enabled": true
+                },
+                {
+                  "id": "meta-ads",
+                  "enabled": true
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-channels.channels",
+            "response": {
+              "channels": [
+                {
+                  "id": "email",
+                  "enabled": true
+                },
+                {
+                  "id": "meta-ads",
+                  "enabled": true
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-channels.generate",
+            "response": {
+              "status": "awaiting_approval",
+              "runId": "run_ch_1",
+              "message": "Channel copy generated; each channel waits for a person to approve it."
+            }
+          },
+          {
+            "tool": "openwop:campaign-channels.generate",
+            "response": {
+              "status": "awaiting_approval",
+              "runId": "run_ch_1",
+              "message": "Channel copy generated; each channel waits for a person to approve it."
+            }
+          },
+          {
+            "tool": "openwop:email.get-campaign",
+            "response": {
+              "campaign": {
+                "campaignId": "em_1",
+                "status": "draft",
+                "subject": "Meet the Trailblazer 2",
+                "body": "..."
+              }
+            }
+          },
+          {
+            "tool": "openwop:email.get-campaign",
+            "response": {
+              "campaign": {
+                "campaignId": "em_1",
+                "status": "draft",
+                "subject": "Meet the Trailblazer 2",
+                "body": "..."
+              }
+            }
+          },
+          {
+            "tool": "openwop:email.save-draft",
+            "response": {
+              "saved": true,
+              "campaignId": "em_1",
+              "status": "draft"
+            }
+          },
+          {
+            "tool": "openwop:email.save-draft",
+            "response": {
+              "saved": true,
+              "campaignId": "em_1",
+              "status": "draft"
+            }
+          },
+          {
+            "tool": "openwop:brand.compliance-check",
+            "response": {
+              "score": 92,
+              "violations": []
+            }
+          },
+          {
+            "tool": "openwop:brand.compliance-check",
+            "response": {
+              "score": 92,
+              "violations": []
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "compliance-pass",
+      "input": {
+        "request": "Draft the Meta ad copy for brf_acme_q4 and check it against the brand."
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:brand.resolve-voice"
+            },
+            {
+              "tool": "openwop:brand.compliance-check"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-brief.get-brief",
+            "response": {
+              "brief": {
+                "briefId": "brf_acme_q4",
+                "orgId": "org_acme",
+                "name": "Acme Trailblazer launch",
+                "offer": "Trailblazer 2 hiking boot, launch price 149, free returns for 60 days",
+                "audience": "weekend hikers 25-45 in the Pacific Northwest",
+                "channels": [
+                  "email",
+                  "meta-ads",
+                  "landing-page"
+                ],
+                "constraints": [
+                  "no competitor names",
+                  "no waterproof claim: the boot is water-resistant"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:campaign-brief.get-brief",
+            "response": {
+              "brief": {
+                "briefId": "brf_acme_q4",
+                "orgId": "org_acme",
+                "name": "Acme Trailblazer launch",
+                "offer": "Trailblazer 2 hiking boot, launch price 149, free returns for 60 days",
+                "audience": "weekend hikers 25-45 in the Pacific Northwest",
+                "channels": [
+                  "email",
+                  "meta-ads",
+                  "landing-page"
+                ],
+                "constraints": [
+                  "no competitor names",
+                  "no waterproof claim: the boot is water-resistant"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:brand.resolve-voice",
+            "response": {
+              "voice": {
+                "tone": "plain-spoken, warm, outdoorsy",
+                "use": [
+                  "trail-tested",
+                  "comfort"
+                ],
+                "avoid": [
+                  "revolutionary",
+                  "waterproof"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:brand.resolve-voice",
+            "response": {
+              "voice": {
+                "tone": "plain-spoken, warm, outdoorsy",
+                "use": [
+                  "trail-tested",
+                  "comfort"
+                ],
+                "avoid": [
+                  "revolutionary",
+                  "waterproof"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:campaign-channels.channels",
+            "response": {
+              "channels": [
+                {
+                  "id": "email",
+                  "enabled": true
+                },
+                {
+                  "id": "meta-ads",
+                  "enabled": true
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-channels.channels",
+            "response": {
+              "channels": [
+                {
+                  "id": "email",
+                  "enabled": true
+                },
+                {
+                  "id": "meta-ads",
+                  "enabled": true
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-channels.generate",
+            "response": {
+              "status": "awaiting_approval",
+              "runId": "run_ch_1",
+              "message": "Channel copy generated; each channel waits for a person to approve it."
+            }
+          },
+          {
+            "tool": "openwop:campaign-channels.generate",
+            "response": {
+              "status": "awaiting_approval",
+              "runId": "run_ch_1",
+              "message": "Channel copy generated; each channel waits for a person to approve it."
+            }
+          },
+          {
+            "tool": "openwop:email.get-campaign",
+            "response": {
+              "campaign": {
+                "campaignId": "em_1",
+                "status": "draft",
+                "subject": "Meet the Trailblazer 2",
+                "body": "..."
+              }
+            }
+          },
+          {
+            "tool": "openwop:email.get-campaign",
+            "response": {
+              "campaign": {
+                "campaignId": "em_1",
+                "status": "draft",
+                "subject": "Meet the Trailblazer 2",
+                "body": "..."
+              }
+            }
+          },
+          {
+            "tool": "openwop:email.save-draft",
+            "response": {
+              "saved": true,
+              "campaignId": "em_1",
+              "status": "draft"
+            }
+          },
+          {
+            "tool": "openwop:email.save-draft",
+            "response": {
+              "saved": true,
+              "campaignId": "em_1",
+              "status": "draft"
+            }
+          },
+          {
+            "tool": "openwop:brand.compliance-check",
+            "response": {
+              "score": 92,
+              "violations": []
+            }
+          },
+          {
+            "tool": "openwop:brand.compliance-check",
+            "response": {
+              "score": 92,
+              "violations": []
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "no-invented-discount",
+      "input": {
+        "request": "Write an email for brf_acme_q4 that says 30% off to boost clicks."
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:campaign-brief.get-brief"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-brief.get-brief",
+            "response": {
+              "brief": {
+                "briefId": "brf_acme_q4",
+                "orgId": "org_acme",
+                "name": "Acme Trailblazer launch",
+                "offer": "Trailblazer 2 hiking boot, launch price 149, free returns for 60 days",
+                "audience": "weekend hikers 25-45 in the Pacific Northwest",
+                "channels": [
+                  "email",
+                  "meta-ads",
+                  "landing-page"
+                ],
+                "constraints": [
+                  "no competitor names",
+                  "no waterproof claim: the boot is water-resistant"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:campaign-brief.get-brief",
+            "response": {
+              "brief": {
+                "briefId": "brf_acme_q4",
+                "orgId": "org_acme",
+                "name": "Acme Trailblazer launch",
+                "offer": "Trailblazer 2 hiking boot, launch price 149, free returns for 60 days",
+                "audience": "weekend hikers 25-45 in the Pacific Northwest",
+                "channels": [
+                  "email",
+                  "meta-ads",
+                  "landing-page"
+                ],
+                "constraints": [
+                  "no competitor names",
+                  "no waterproof claim: the boot is water-resistant"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:brand.resolve-voice",
+            "response": {
+              "voice": {
+                "tone": "plain-spoken, warm, outdoorsy",
+                "use": [
+                  "trail-tested",
+                  "comfort"
+                ],
+                "avoid": [
+                  "revolutionary",
+                  "waterproof"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:brand.resolve-voice",
+            "response": {
+              "voice": {
+                "tone": "plain-spoken, warm, outdoorsy",
+                "use": [
+                  "trail-tested",
+                  "comfort"
+                ],
+                "avoid": [
+                  "revolutionary",
+                  "waterproof"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:campaign-channels.channels",
+            "response": {
+              "channels": [
+                {
+                  "id": "email",
+                  "enabled": true
+                },
+                {
+                  "id": "meta-ads",
+                  "enabled": true
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-channels.channels",
+            "response": {
+              "channels": [
+                {
+                  "id": "email",
+                  "enabled": true
+                },
+                {
+                  "id": "meta-ads",
+                  "enabled": true
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-channels.generate",
+            "response": {
+              "status": "awaiting_approval",
+              "runId": "run_ch_1",
+              "message": "Channel copy generated; each channel waits for a person to approve it."
+            }
+          },
+          {
+            "tool": "openwop:campaign-channels.generate",
+            "response": {
+              "status": "awaiting_approval",
+              "runId": "run_ch_1",
+              "message": "Channel copy generated; each channel waits for a person to approve it."
+            }
+          },
+          {
+            "tool": "openwop:email.get-campaign",
+            "response": {
+              "campaign": {
+                "campaignId": "em_1",
+                "status": "draft",
+                "subject": "Meet the Trailblazer 2",
+                "body": "..."
+              }
+            }
+          },
+          {
+            "tool": "openwop:email.get-campaign",
+            "response": {
+              "campaign": {
+                "campaignId": "em_1",
+                "status": "draft",
+                "subject": "Meet the Trailblazer 2",
+                "body": "..."
+              }
+            }
+          },
+          {
+            "tool": "openwop:email.save-draft",
+            "response": {
+              "saved": true,
+              "campaignId": "em_1",
+              "status": "draft"
+            }
+          },
+          {
+            "tool": "openwop:email.save-draft",
+            "response": {
+              "saved": true,
+              "campaignId": "em_1",
+              "status": "draft"
+            }
+          },
+          {
+            "tool": "openwop:brand.compliance-check",
+            "response": {
+              "score": 92,
+              "violations": []
+            }
+          },
+          {
+            "tool": "openwop:brand.compliance-check",
+            "response": {
+              "score": 92,
+              "violations": []
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "channels-list",
+      "input": {
+        "request": "Which channels can I write copy for on this campaign?"
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:campaign-channels.channels"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-brief.get-brief",
+            "response": {
+              "brief": {
+                "briefId": "brf_acme_q4",
+                "orgId": "org_acme",
+                "name": "Acme Trailblazer launch",
+                "offer": "Trailblazer 2 hiking boot, launch price 149, free returns for 60 days",
+                "audience": "weekend hikers 25-45 in the Pacific Northwest",
+                "channels": [
+                  "email",
+                  "meta-ads",
+                  "landing-page"
+                ],
+                "constraints": [
+                  "no competitor names",
+                  "no waterproof claim: the boot is water-resistant"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:campaign-brief.get-brief",
+            "response": {
+              "brief": {
+                "briefId": "brf_acme_q4",
+                "orgId": "org_acme",
+                "name": "Acme Trailblazer launch",
+                "offer": "Trailblazer 2 hiking boot, launch price 149, free returns for 60 days",
+                "audience": "weekend hikers 25-45 in the Pacific Northwest",
+                "channels": [
+                  "email",
+                  "meta-ads",
+                  "landing-page"
+                ],
+                "constraints": [
+                  "no competitor names",
+                  "no waterproof claim: the boot is water-resistant"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:brand.resolve-voice",
+            "response": {
+              "voice": {
+                "tone": "plain-spoken, warm, outdoorsy",
+                "use": [
+                  "trail-tested",
+                  "comfort"
+                ],
+                "avoid": [
+                  "revolutionary",
+                  "waterproof"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:brand.resolve-voice",
+            "response": {
+              "voice": {
+                "tone": "plain-spoken, warm, outdoorsy",
+                "use": [
+                  "trail-tested",
+                  "comfort"
+                ],
+                "avoid": [
+                  "revolutionary",
+                  "waterproof"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:campaign-channels.channels",
+            "response": {
+              "channels": [
+                {
+                  "id": "email",
+                  "enabled": true
+                },
+                {
+                  "id": "meta-ads",
+                  "enabled": true
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-channels.channels",
+            "response": {
+              "channels": [
+                {
+                  "id": "email",
+                  "enabled": true
+                },
+                {
+                  "id": "meta-ads",
+                  "enabled": true
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-channels.generate",
+            "response": {
+              "status": "awaiting_approval",
+              "runId": "run_ch_1",
+              "message": "Channel copy generated; each channel waits for a person to approve it."
+            }
+          },
+          {
+            "tool": "openwop:campaign-channels.generate",
+            "response": {
+              "status": "awaiting_approval",
+              "runId": "run_ch_1",
+              "message": "Channel copy generated; each channel waits for a person to approve it."
+            }
+          },
+          {
+            "tool": "openwop:email.get-campaign",
+            "response": {
+              "campaign": {
+                "campaignId": "em_1",
+                "status": "draft",
+                "subject": "Meet the Trailblazer 2",
+                "body": "..."
+              }
+            }
+          },
+          {
+            "tool": "openwop:email.get-campaign",
+            "response": {
+              "campaign": {
+                "campaignId": "em_1",
+                "status": "draft",
+                "subject": "Meet the Trailblazer 2",
+                "body": "..."
+              }
+            }
+          },
+          {
+            "tool": "openwop:email.save-draft",
+            "response": {
+              "saved": true,
+              "campaignId": "em_1",
+              "status": "draft"
+            }
+          },
+          {
+            "tool": "openwop:email.save-draft",
+            "response": {
+              "saved": true,
+              "campaignId": "em_1",
+              "status": "draft"
+            }
+          },
+          {
+            "tool": "openwop:brand.compliance-check",
+            "response": {
+              "score": 92,
+              "violations": []
+            }
+          },
+          {
+            "tool": "openwop:brand.compliance-check",
+            "response": {
+              "score": 92,
+              "violations": []
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "generate-fails",
+      "input": {
+        "request": "Generate channel copy for brf_acme_q4."
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:campaign-channels.generate"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-brief.get-brief",
+            "response": {
+              "brief": {
+                "briefId": "brf_acme_q4",
+                "orgId": "org_acme",
+                "name": "Acme Trailblazer launch",
+                "offer": "Trailblazer 2 hiking boot, launch price 149, free returns for 60 days",
+                "audience": "weekend hikers 25-45 in the Pacific Northwest",
+                "channels": [
+                  "email",
+                  "meta-ads",
+                  "landing-page"
+                ],
+                "constraints": [
+                  "no competitor names",
+                  "no waterproof claim: the boot is water-resistant"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:campaign-brief.get-brief",
+            "response": {
+              "brief": {
+                "briefId": "brf_acme_q4",
+                "orgId": "org_acme",
+                "name": "Acme Trailblazer launch",
+                "offer": "Trailblazer 2 hiking boot, launch price 149, free returns for 60 days",
+                "audience": "weekend hikers 25-45 in the Pacific Northwest",
+                "channels": [
+                  "email",
+                  "meta-ads",
+                  "landing-page"
+                ],
+                "constraints": [
+                  "no competitor names",
+                  "no waterproof claim: the boot is water-resistant"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:brand.resolve-voice",
+            "response": {
+              "voice": {
+                "tone": "plain-spoken, warm, outdoorsy",
+                "use": [
+                  "trail-tested",
+                  "comfort"
+                ],
+                "avoid": [
+                  "revolutionary",
+                  "waterproof"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:brand.resolve-voice",
+            "response": {
+              "voice": {
+                "tone": "plain-spoken, warm, outdoorsy",
+                "use": [
+                  "trail-tested",
+                  "comfort"
+                ],
+                "avoid": [
+                  "revolutionary",
+                  "waterproof"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:campaign-channels.channels",
+            "response": {
+              "channels": [
+                {
+                  "id": "email",
+                  "enabled": true
+                },
+                {
+                  "id": "meta-ads",
+                  "enabled": true
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-channels.channels",
+            "response": {
+              "channels": [
+                {
+                  "id": "email",
+                  "enabled": true
+                },
+                {
+                  "id": "meta-ads",
+                  "enabled": true
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-channels.generate",
+            "response": {
+              "error": "brief_not_ready",
+              "message": "The brief has no approved kernel yet."
+            },
+            "isError": true
+          },
+          {
+            "tool": "openwop:campaign-channels.generate",
+            "response": {
+              "error": "brief_not_ready",
+              "message": "The brief has no approved kernel yet."
+            },
+            "isError": true
+          },
+          {
+            "tool": "openwop:email.get-campaign",
+            "response": {
+              "campaign": {
+                "campaignId": "em_1",
+                "status": "draft",
+                "subject": "Meet the Trailblazer 2",
+                "body": "..."
+              }
+            }
+          },
+          {
+            "tool": "openwop:email.get-campaign",
+            "response": {
+              "campaign": {
+                "campaignId": "em_1",
+                "status": "draft",
+                "subject": "Meet the Trailblazer 2",
+                "body": "..."
+              }
+            }
+          },
+          {
+            "tool": "openwop:email.save-draft",
+            "response": {
+              "saved": true,
+              "campaignId": "em_1",
+              "status": "draft"
+            }
+          },
+          {
+            "tool": "openwop:email.save-draft",
+            "response": {
+              "saved": true,
+              "campaignId": "em_1",
+              "status": "draft"
+            }
+          },
+          {
+            "tool": "openwop:brand.compliance-check",
+            "response": {
+              "score": 92,
+              "violations": []
+            }
+          },
+          {
+            "tool": "openwop:brand.compliance-check",
+            "response": {
+              "score": 92,
+              "violations": []
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "no-send",
+      "input": {
+        "request": "Save the email draft for em_1 and send it to the list now."
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:email.save-draft"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-brief.get-brief",
+            "response": {
+              "brief": {
+                "briefId": "brf_acme_q4",
+                "orgId": "org_acme",
+                "name": "Acme Trailblazer launch",
+                "offer": "Trailblazer 2 hiking boot, launch price 149, free returns for 60 days",
+                "audience": "weekend hikers 25-45 in the Pacific Northwest",
+                "channels": [
+                  "email",
+                  "meta-ads",
+                  "landing-page"
+                ],
+                "constraints": [
+                  "no competitor names",
+                  "no waterproof claim: the boot is water-resistant"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:campaign-brief.get-brief",
+            "response": {
+              "brief": {
+                "briefId": "brf_acme_q4",
+                "orgId": "org_acme",
+                "name": "Acme Trailblazer launch",
+                "offer": "Trailblazer 2 hiking boot, launch price 149, free returns for 60 days",
+                "audience": "weekend hikers 25-45 in the Pacific Northwest",
+                "channels": [
+                  "email",
+                  "meta-ads",
+                  "landing-page"
+                ],
+                "constraints": [
+                  "no competitor names",
+                  "no waterproof claim: the boot is water-resistant"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:brand.resolve-voice",
+            "response": {
+              "voice": {
+                "tone": "plain-spoken, warm, outdoorsy",
+                "use": [
+                  "trail-tested",
+                  "comfort"
+                ],
+                "avoid": [
+                  "revolutionary",
+                  "waterproof"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:brand.resolve-voice",
+            "response": {
+              "voice": {
+                "tone": "plain-spoken, warm, outdoorsy",
+                "use": [
+                  "trail-tested",
+                  "comfort"
+                ],
+                "avoid": [
+                  "revolutionary",
+                  "waterproof"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:campaign-channels.channels",
+            "response": {
+              "channels": [
+                {
+                  "id": "email",
+                  "enabled": true
+                },
+                {
+                  "id": "meta-ads",
+                  "enabled": true
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-channels.channels",
+            "response": {
+              "channels": [
+                {
+                  "id": "email",
+                  "enabled": true
+                },
+                {
+                  "id": "meta-ads",
+                  "enabled": true
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-channels.generate",
+            "response": {
+              "status": "awaiting_approval",
+              "runId": "run_ch_1",
+              "message": "Channel copy generated; each channel waits for a person to approve it."
+            }
+          },
+          {
+            "tool": "openwop:campaign-channels.generate",
+            "response": {
+              "status": "awaiting_approval",
+              "runId": "run_ch_1",
+              "message": "Channel copy generated; each channel waits for a person to approve it."
+            }
+          },
+          {
+            "tool": "openwop:email.get-campaign",
+            "response": {
+              "campaign": {
+                "campaignId": "em_1",
+                "status": "draft",
+                "subject": "Meet the Trailblazer 2",
+                "body": "..."
+              }
+            }
+          },
+          {
+            "tool": "openwop:email.get-campaign",
+            "response": {
+              "campaign": {
+                "campaignId": "em_1",
+                "status": "draft",
+                "subject": "Meet the Trailblazer 2",
+                "body": "..."
+              }
+            }
+          },
+          {
+            "tool": "openwop:email.save-draft",
+            "response": {
+              "saved": true,
+              "campaignId": "em_1",
+              "status": "draft"
+            }
+          },
+          {
+            "tool": "openwop:email.save-draft",
+            "response": {
+              "saved": true,
+              "campaignId": "em_1",
+              "status": "draft"
+            }
+          },
+          {
+            "tool": "openwop:brand.compliance-check",
+            "response": {
+              "score": 92,
+              "violations": []
+            }
+          },
+          {
+            "tool": "openwop:brand.compliance-check",
+            "response": {
+              "score": 92,
+              "violations": []
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "voice-avoid-words",
+      "input": {
+        "request": "Write three subject lines for the Trailblazer 2 email in our voice."
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:brand.resolve-voice"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-brief.get-brief",
+            "response": {
+              "brief": {
+                "briefId": "brf_acme_q4",
+                "orgId": "org_acme",
+                "name": "Acme Trailblazer launch",
+                "offer": "Trailblazer 2 hiking boot, launch price 149, free returns for 60 days",
+                "audience": "weekend hikers 25-45 in the Pacific Northwest",
+                "channels": [
+                  "email",
+                  "meta-ads",
+                  "landing-page"
+                ],
+                "constraints": [
+                  "no competitor names",
+                  "no waterproof claim: the boot is water-resistant"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:campaign-brief.get-brief",
+            "response": {
+              "brief": {
+                "briefId": "brf_acme_q4",
+                "orgId": "org_acme",
+                "name": "Acme Trailblazer launch",
+                "offer": "Trailblazer 2 hiking boot, launch price 149, free returns for 60 days",
+                "audience": "weekend hikers 25-45 in the Pacific Northwest",
+                "channels": [
+                  "email",
+                  "meta-ads",
+                  "landing-page"
+                ],
+                "constraints": [
+                  "no competitor names",
+                  "no waterproof claim: the boot is water-resistant"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:brand.resolve-voice",
+            "response": {
+              "voice": {
+                "tone": "plain-spoken, warm, outdoorsy",
+                "use": [
+                  "trail-tested",
+                  "comfort"
+                ],
+                "avoid": [
+                  "revolutionary",
+                  "waterproof"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:brand.resolve-voice",
+            "response": {
+              "voice": {
+                "tone": "plain-spoken, warm, outdoorsy",
+                "use": [
+                  "trail-tested",
+                  "comfort"
+                ],
+                "avoid": [
+                  "revolutionary",
+                  "waterproof"
+                ]
+              }
+            }
+          },
+          {
+            "tool": "openwop:campaign-channels.channels",
+            "response": {
+              "channels": [
+                {
+                  "id": "email",
+                  "enabled": true
+                },
+                {
+                  "id": "meta-ads",
+                  "enabled": true
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-channels.channels",
+            "response": {
+              "channels": [
+                {
+                  "id": "email",
+                  "enabled": true
+                },
+                {
+                  "id": "meta-ads",
+                  "enabled": true
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-channels.generate",
+            "response": {
+              "status": "awaiting_approval",
+              "runId": "run_ch_1",
+              "message": "Channel copy generated; each channel waits for a person to approve it."
+            }
+          },
+          {
+            "tool": "openwop:campaign-channels.generate",
+            "response": {
+              "status": "awaiting_approval",
+              "runId": "run_ch_1",
+              "message": "Channel copy generated; each channel waits for a person to approve it."
+            }
+          },
+          {
+            "tool": "openwop:email.get-campaign",
+            "response": {
+              "campaign": {
+                "campaignId": "em_1",
+                "status": "draft",
+                "subject": "Meet the Trailblazer 2",
+                "body": "..."
+              }
+            }
+          },
+          {
+            "tool": "openwop:email.get-campaign",
+            "response": {
+              "campaign": {
+                "campaignId": "em_1",
+                "status": "draft",
+                "subject": "Meet the Trailblazer 2",
+                "body": "..."
+              }
+            }
+          },
+          {
+            "tool": "openwop:email.save-draft",
+            "response": {
+              "saved": true,
+              "campaignId": "em_1",
+              "status": "draft"
+            }
+          },
+          {
+            "tool": "openwop:email.save-draft",
+            "response": {
+              "saved": true,
+              "campaignId": "em_1",
+              "status": "draft"
+            }
+          },
+          {
+            "tool": "openwop:brand.compliance-check",
+            "response": {
+              "score": 92,
+              "violations": []
+            }
+          },
+          {
+            "tool": "openwop:brand.compliance-check",
+            "response": {
+              "score": 92,
+              "violations": []
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

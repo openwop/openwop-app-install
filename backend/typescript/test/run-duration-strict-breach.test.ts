@@ -14,6 +14,10 @@
  * land on it — that is precisely why the defect survived as an intermittent red
  * for months rather than a reproducible failure. Testing the comparison directly
  * makes the boundary case deterministic instead of hoping the scheduler hits it.
+ *
+ * Breaks it (round-1 probes, witnessed): `>` → `>=` (8fw2g2-rdb-strict reds the
+ * regression, the table and the zero window) and a predicate one ms late
+ * (rdb-past reds 'PAST the deadline' and the table's breached rows).
  */
 import { describe, expect, it } from 'vitest';
 import { isRunDurationBreached } from '../src/executor/executor.js';
@@ -38,19 +42,21 @@ describe('RFC 0058 — run-duration breach is strictly past the deadline', () =>
   });
 
   it('the emitted `observed` is therefore always > `limit`', () => {
-    // The property the spec actually states, derived rather than asserted
-    // separately: the executor computes `observed = now - runStartMs` and
-    // `deadline = runStartMs + limit`, so a breach at `now > deadline` implies
-    // `observed > limit` for every possible clock value.
+    // The property the spec actually states: the executor computes
+    // `observed = now - runStartMs` and `deadline = runStartMs + limit`. An
+    // exact table (no conditional skip): every (limit, offset) pair has a
+    // literal expected verdict, and every breached row has observed > limit.
     const runStartMs = 5_000;
-    for (const limit of [0, 1, 250, 600_000]) {
+    const table: Array<[limit: number, offset: number, breached: boolean]> = [
+      [0, -1, false], [0, 0, false], [0, 1, true],
+      [1, -1, false], [1, 0, false], [1, 1, true],
+      [250, -1, false], [250, 0, false], [250, 1, true],
+    ];
+    for (const [limit, offset, breached] of table) {
       const deadlineAt = runStartMs + limit;
-      for (const offset of [-2, -1, 0, 1, 2, 1_000]) {
-        const now = deadlineAt + offset;
-        if (!isRunDurationBreached(now, deadlineAt)) continue;
-        const observed = now - runStartMs;
-        expect(observed, `limit=${limit} offset=${offset}`).toBeGreaterThan(limit);
-      }
+      const now = deadlineAt + offset;
+      expect(isRunDurationBreached(now, deadlineAt), `limit=${limit} offset=${offset}`).toBe(breached);
+      if (breached) expect(now - runStartMs, `limit=${limit} offset=${offset}`).toBeGreaterThan(limit);
     }
   });
 

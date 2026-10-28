@@ -8,12 +8,21 @@
  *      architect review called out: tenant isolation, fail-closed resolution,
  *      and decoupling from the descriptive org-chart (RFC 0087 §B — org
  *      position confers no authority).
+ *
+ * Tracker TST-BG1-18 (ADR 0006 Phases 1-3, ADR 0797, ADR 0015). Red when
+ * (probe-witnessed, wave 58): an unmatched subject resolves to owner instead of
+ * zero; the demo bypass reaches a shared `ws:` tenant; a foreign tenant's group
+ * leaks its roles in; group roles stop unioning in; `listOrgs` reads beyond the
+ * tenant slice; `requireScope` stops refusing; an unknown role id or a `host:`
+ * scope on a custom role is accepted; superadmin is projected into a preview;
+ * `loadOrgOwned` stops checking the org's tenant.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
+import { detailOf, errorCodeOf } from './helpers/errorEnvelope.js';
 import {
   resolveEffectiveAccess,
   scopesForRoles,
@@ -115,11 +124,13 @@ describe('access-control host-extension — HTTP', () => {
 
   it('rejects an unknown role id at the boundary (fail-closed)', async () => {
     const org = await api<Org>('/host/openwop-app/orgs', { method: 'POST', body: JSON.stringify({ name: 'RoleTest' }) });
-    const bad = await api(`/host/openwop-app/orgs/${org.body.orgId}/members`, {
+    const bad = await api<{ message?: string }>(`/host/openwop-app/orgs/${org.body.orgId}/members`, {
       method: 'POST',
       body: JSON.stringify({ displayName: 'X', roles: ['superuser'] }),
     });
     expect(bad.status).toBe(400);
+    expect(errorCodeOf(bad.body)).toBe('validation_error');
+    expect(bad.body.message).toBe('Unknown role id `superuser`.');
   });
 
   it('effective access is MEMBERSHIP-derived (ADR 0006 Phase 2): creator is owner in-org; non-member is fail-closed', async () => {
@@ -224,12 +235,14 @@ describe('access-control host-extension — HTTP', () => {
     expect(asOwner.status).toBe(201);
 
     // Acting as a viewer (lacks host:teams:manage) → 403 forbidden_scope.
-    const asViewer = await api<{ error?: { code?: string } }>(`/host/openwop-app/orgs/${orgId}/teams`, {
+    const asViewer = await api<unknown>(`/host/openwop-app/orgs/${orgId}/teams`, {
       method: 'POST',
       headers: { 'x-openwop-act-as': viewer.body.memberId },
       body: JSON.stringify({ name: 'T-viewer' }),
     });
     expect(asViewer.status).toBe(403);
+    expect(errorCodeOf(asViewer.body)).toBe('forbidden_scope');
+    expect(detailOf(asViewer.body, 'requiredScope')).toBe('host:teams:manage');
 
     // Acting as an admin (has host:teams:manage) → allowed.
     const asAdmin = await api(`/host/openwop-app/orgs/${orgId}/teams`, {
@@ -252,13 +265,15 @@ describe('access-control host-extension — HTTP', () => {
     const orgId = org.body.orgId;
 
     // Unknown scope rejected fail-closed.
-    const bad = await api(`/host/openwop-app/orgs/${orgId}/roles`, { method: 'POST', body: JSON.stringify({ name: 'X', scopes: ['not-a-scope'] }) });
+    const bad = await api<{ message?: string }>(`/host/openwop-app/orgs/${orgId}/roles`, { method: 'POST', body: JSON.stringify({ name: 'X', scopes: ['not-a-scope'] }) });
     expect(bad.status).toBe(400);
+    expect(bad.body.message).toContain('Scope `not-a-scope` is not assignable to a custom role');
 
     // A `host:` management scope is NOT assignable to a custom role (reserved to
     // built-in admin/owner) — a custom role can't administer the access surface.
-    const mgmt = await api(`/host/openwop-app/orgs/${orgId}/roles`, { method: 'POST', body: JSON.stringify({ name: 'Sneaky', scopes: ['host:roles:manage'] }) });
+    const mgmt = await api<{ message?: string }>(`/host/openwop-app/orgs/${orgId}/roles`, { method: 'POST', body: JSON.stringify({ name: 'Sneaky', scopes: ['host:roles:manage'] }) });
     expect(mgmt.status).toBe(400);
+    expect(mgmt.body.message).toContain('Scope `host:roles:manage` is not assignable to a custom role');
 
     // Define a custom role carrying two protocol scopes.
     const role = await api<{ roleId: string; scopes: string[] }>(`/host/openwop-app/orgs/${orgId}/roles`, {
@@ -285,8 +300,17 @@ describe('access-control host-extension — HTTP', () => {
   });
 
   it('404s a foreign/unknown orgId rather than leaking it', async () => {
-    const res = await api('/host/openwop-app/orgs/org-doesnotexist');
+    // A REAL org in ANOTHER tenant: a missing id alone never reaches the tenant
+    // fence in `loadOrgOwned` (wave 58 `ac-orgfence` was vacuous on that shape).
+    const foreign = await createOrg({ tenantId: 'iso-foreign-404', createdBy: 'iso-foreign-404', name: 'Foreign Co' });
+    const res = await api<unknown>(`/host/openwop-app/orgs/${foreign.orgId}`);
     expect(res.status).toBe(404);
+    expect(errorCodeOf(res.body)).toBe('not_found');
+    // Positive control: an org in the caller's own tenant reads 200.
+    const mine = await api<Org>('/host/openwop-app/orgs', { method: 'POST', body: JSON.stringify({ name: 'Mine 404 Control' }) });
+    expect((await api(`/host/openwop-app/orgs/${mine.body.orgId}`)).status).toBe(200);
+    // And a missing id is the same answer.
+    expect((await api('/host/openwop-app/orgs/org-doesnotexist')).status).toBe(404);
   });
 });
 

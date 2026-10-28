@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.crm.nodes/1.15.0/assess-lead.output.json",
+  "title": "CrmAssessLeadOutput",
+  "type": "object",
+  "required": [
+    "success",
+    "outcome",
+    "answers",
+    "adjustment"
+  ],
+  "properties": {
+    "success": {
+      "type": "boolean",
+      "const": true
+    },
+    "outcome": {
+      "type": "string",
+      "enum": [
+        "recorded",
+        "replayed",
+        "superseded"
+      ]
+    },
+    "answers": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "adjustment": {
+      "type": "string",
+      "enum": [
+        "none",
+        "pending"
+      ]
+    }
+  },
+  "additionalProperties": false
+}

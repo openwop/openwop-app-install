@@ -10,8 +10,16 @@
  * Route-level because every property here — the refusal's absence, token
  * separation, the resolve path, the ancestry ownership rule — is only observable
  * through the HTTP boundary and the real executor.
+ *
+ * Tracker TST-BAB-11. Red when (sabotage-witnessed, wave 60): an already-open
+ * gate is re-created; a prefix-named interrupt of a non-ancestor is used, or a
+ * named-but-foreign interrupt falls back to the parent's row; a sub-run child is
+ * treated as a fork; the re-created gate loses the source deadline; a child gets
+ * fork dispatch options; the snapshot does not restore an open gate as
+ * suspended. CEILING (conversation leg): the source gate's data already carries
+ * its `conversationId`, so the prefix-derived fallback is not reached here.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
@@ -28,6 +36,9 @@ import { toWireRunId } from '../src/host/v2Ids.js';
 let server: http.Server;
 let BASE = '';
 let sweeperDeps: RunSweeperDeps;
+/** The resolve route's success status (measured wave 60). */
+const RESOLVE_STATUS = 200;
+let seq = 0;
 const H = { 'content-type': 'application/json', authorization: 'Bearer dev-token', 'OpenWOP-Version': '2' };
 
 beforeAll(async () => {
@@ -109,7 +120,7 @@ describe('ADR 0751 — a fork at a suspended checkpoint inherits the gate', () =
 
       // The fork resumes through the NORMAL resolve path; the source stays suspended.
       const resolve = await api(`/interrupts/${forkGate!.token}`, { method: 'POST', body: JSON.stringify({ resumeValue: { action: 'accept' } }) });
-      expect(resolve.status, JSON.stringify(resolve.body)).toBeLessThan(300);
+      expect(resolve.status, JSON.stringify(resolve.body)).toBe(RESOLVE_STATUS);
       expect(await waitStatus(forkId, (s) => ['completed', 'failed', 'cancelled'].includes(s))).toBe('completed');
       expect((await api<{ status: string }>(`/runs/${runId}`)).body.status).toBe('waiting-approval');
       await api(`/runs/${runId}/cancel`, { method: 'POST', body: '{}' });
@@ -128,7 +139,9 @@ describe('ADR 0751 — a fork at a suspended checkpoint inherits the gate', () =
     // decision, so the replay takes it from there instead of waiting for a new one
     // (this used to settle on the gate as `waiting-approval`).
     expect(await waitStatus(forkId, (s) => ['completed', 'failed', 'cancelled'].includes(s) || s.startsWith('waiting'))).toBe('completed');
-    await new Promise((r) => setTimeout(r, 150));
+    // The log is ordered and `run.completed` is its last event: once it is on the
+    // log, any `replay.diverged` this run could emit is already there.
+    await vi.waitFor(async () => expect((await events(forkId)).some((e) => e.type === 'run.completed')).toBe(true));
     expect((await events(forkId)).filter((e) => e.type === 'replay.diverged')).toHaveLength(0);
   });
 
@@ -189,7 +202,9 @@ describe('ADR 0751 — the pieces', () => {
       f: { runId: 'f', workflowId: 'w', tenantId: 't', status: 'pending', inputs: {}, metadata: {}, configurable: {}, createdAt: '', updatedAt: '', parentRunId: 'p', parentSeq: 5, forkMode: 'branch' },
     };
     const log: EventRecord[] = [{ eventId: 'e', runId: 'f', sequence: 2, type: 'node.suspended', nodeId: 'gate', payload: { interruptId: named, kind: 'approval' }, timestamp: '' }];
-    const created: Json[] = [];
+    const real = getSuspendManager();
+    type CreateInput = Parameters<typeof real.createInterrupt>[0];
+    const created: CreateInput[] = [];
     const storage = {
       getRun: async (id: string) => runs[id] ?? null,
       listEvents: async () => log,
@@ -197,10 +212,18 @@ describe('ADR 0751 — the pieces', () => {
       getInterruptByNode: async (runId: string, nodeId: string) => rows.find((r) => r.runId === runId && r.nodeId === nodeId) ?? null,
     };
     const open: InterruptRecord[] = [];
-    const suspend = {
+    // The real manager's full surface, with the two methods the helper calls
+    // replaced by an in-memory double (no cast: same type, two overrides).
+    const suspend: ReturnType<typeof getSuspendManager> = {
+      ...real,
       listOpen: async () => open,
-      createInterrupt: async (i: Json) => { created.push(i); const rec = { ...i, interruptId: `new-${created.length}`, token: 't' } as unknown as InterruptRecord; open.push(rec); return rec; },
-    } as unknown as ReturnType<typeof getSuspendManager>;
+      createInterrupt: async (i: CreateInput) => {
+        created.push(i);
+        const rec: InterruptRecord = { interruptId: `new-${created.length}`, runId: i.runId, nodeId: i.nodeId, kind: i.kind, token: 't', data: i.data, createdAt: i.createdAt ?? '' };
+        open.push(rec);
+        return rec;
+      },
+    };
     return { run: runs['f']!, storage, suspend, created };
   }
   const row = (runId: string, interruptId: string): InterruptRecord => ({ interruptId, runId, nodeId: 'gate', kind: 'approval', token: 'x', data: { title: 'T' }, createdAt: '2026-01-01T00:00:00.000Z' });
@@ -237,7 +260,7 @@ describe('ADR 0755 (FORKINT-2) — a fork orphaned between its 201 and its dispa
     const prefix = (await storage.listEvents(bareRunId(runId), { fromSeq: -1, limit: 1000 })).filter((e) => e.sequence < fromSeq);
     // Exactly what the :fork route persists before its 201 — then "crash": no dispatch.
     const old = new Date(Date.now() - 10 * 60_000).toISOString();
-    const forkId = `run-forkint2-${Math.random().toString(36).slice(2)}`;
+    const forkId = `run-forkint2-${String(++seq).padStart(8, '0')}`; // ≥ 16 chars: the v2 opaque grammar binds it
     const crashed: RunRecord = {
       ...source,
       runId: forkId,
@@ -248,9 +271,10 @@ describe('ADR 0755 (FORKINT-2) — a fork orphaned between its 201 and its dispa
       schedulerSnapshot: JSON.stringify(snapshotFromEventPrefix(prefix)),
       createdAt: old,
       updatedAt: old,
+      // Persisted before dispatch: no execution has claimed it yet.
+      dispatchOwner: null,
+      dispatchLeaseExpiresAt: null,
     };
-    delete (crashed as { dispatchOwner?: unknown }).dispatchOwner;
-    delete (crashed as { dispatchLeaseUntil?: unknown }).dispatchLeaseUntil;
     await storage.insertRun(crashed);
     for (const ev of prefix) {
       await getEventLog().append({ runId: forkId, type: ev.type, nodeId: ev.nodeId, payload: ev.payload, causationId: ev.eventId, timestamp: ev.timestamp });
@@ -276,7 +300,8 @@ describe('ADR 0755 (FORKINT-2) — a fork orphaned between its 201 and its dispa
   });
 
   it('a sub-run child (parentRunId, no forkMode) gets no fork options', () => {
-    expect(forkDispatchOptions({ runId: 'c', parentRunId: 'p', schedulerSnapshot: '{}' } as RunRecord)).toEqual({});
+    const child: RunRecord = { runId: 'c', workflowId: 'w', tenantId: 't', status: 'pending', inputs: {}, metadata: {}, configurable: {}, createdAt: '', updatedAt: '', parentRunId: 'p', schedulerSnapshot: '{}' };
+    expect(forkDispatchOptions(child)).toEqual({});
   });
 
   it('ADR 0754 (WIT-FORK-2) — two CONCURRENT deliveries of one fork re-create the gate ONCE: the execution claim fences them', async () => {
@@ -284,14 +309,13 @@ describe('ADR 0755 (FORKINT-2) — a fork orphaned between its 201 and its dispa
     const { storage, hostSuite } = sweeperDeps;
     const source = (await storage.getRun(bareRunId(runId)))!;
     const prefix = (await storage.listEvents(bareRunId(runId), { fromSeq: -1, limit: 1000 })).filter((e) => e.sequence < fromSeq);
-    const forkId = `run-forkint-race-${Math.random().toString(36).slice(2)}`;
+    const forkId = `run-forkint-race-${String(++seq).padStart(8, '0')}`;
     const now = new Date().toISOString();
     const fork: RunRecord = {
       ...source, runId: forkId, status: 'pending', parentRunId: bareRunId(runId), parentSeq: fromSeq, forkMode: 'branch',
       schedulerSnapshot: JSON.stringify(snapshotFromEventPrefix(prefix)), createdAt: now, updatedAt: now,
+      dispatchOwner: null, dispatchLeaseExpiresAt: null,
     };
-    delete (fork as { dispatchOwner?: unknown }).dispatchOwner;
-    delete (fork as { dispatchLeaseUntil?: unknown }).dispatchLeaseUntil;
     await storage.insertRun(fork);
     for (const ev of prefix) {
       await getEventLog().append({ runId: forkId, type: ev.type, nodeId: ev.nodeId, payload: ev.payload, causationId: ev.eventId, timestamp: ev.timestamp });

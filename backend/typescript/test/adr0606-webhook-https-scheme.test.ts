@@ -16,6 +16,12 @@
  * names at :169 was already covered by the denied-host arm. What leaked is
  * confidentiality, not the secret: HMAC authenticates, it does not encrypt, and
  * a captured delivery replays to the receiver inside the ±5min freshness window.
+ *
+ * Tracker TST-BG3-10. Red when: `assertEgressUrlAllowed` drops its https arm, checks
+ * the denied host BEFORE the scheme, honours the dev flag ahead of the protocol-family
+ * arm (file: reopens) or not at all (loopback stays shut), refuses a public https url,
+ * stops refusing non-http(s) schemes, or `assertReachableUrl` maps an unparseable url
+ * to anything but `validation_error`.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { assertReachableUrl } from '../src/routes/webhooks.js';

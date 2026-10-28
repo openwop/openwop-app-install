@@ -1,6 +1,6 @@
 # ADR 0941 — Campaign Studio program and the canonical campaign
 
-Status: Proposed
+Status: implemented (P0–P5 built 2026-10-20; PRs merge in order through the release queue)
 Date: 2026-10-19
 
 Program: **Campaign Studio** (ADRs 0941–0962). This ADR is the program charter
@@ -120,7 +120,7 @@ the campaign carries `orgId` = the **client org** (ADR 0921 D1). Owner:
 interface MarketingCampaign {          // existing fields unchanged (types.ts:14-47)
   briefId?: string;                    // D2: optional — ops/imported campaigns need no brief
   productRefs?: Array<{ productId: string; role: 'primary' | 'secondary' }>; // ADR 0410, same orgId
-  funnelIds?: string[];                // funnels the campaign drives (owner: funnels)
+  // funnelIds — corrected 2026-10-20: NOT stored here; the funnel holds campaignId (ADR 0948).
   autonomy?: { policyId: string; version: number };  // ADR 0942 binding (null ⇒ org default)
   goal?: CampaignGoal;                 // D2b; frozen into each run at start
   // NOT here: experiments, variant sets, assets, sends, dispatches, caps.
@@ -189,6 +189,43 @@ mismatch, the ADR 0921 D3 loader); a dangling `campaignId` is refused, not store
   when `derivedFromRun`, and a child run copies its parent's goal. A goal edit
   affects only runs started after it, the same rule as the ADR 0942 policy stamp.
 
+> **Corrected 2026-10-20 (P0 build, `/architect` review).** The code proved four
+> details of D2/D2b wrong or underspecified:
+> 1. **The race arbiter is the campaign row, not the index.** The id is derived
+>    from (tenant, brief), so `campaigns.putIfAbsent` on that row decides the race
+>    and the loser reads the winner. The brief index is then an idempotent `put`
+>    of a value every caller computes identically. A crash between the two writes
+>    self-heals: `getCampaignByBrief` also probes the derived id.
+> 2. **Pre-0941 rows are indexed once per tenant.** The first index miss scans
+>    the tenant's campaigns one time, writes an index row per brief and then a
+>    marker row; after the marker a miss is authoritative. The live TOCTOU defect
+>    means a brief can already have two campaigns; the backfill picks the oldest
+>    (then the smaller id), deterministically. A row with no `ignitedAt` was
+>    finalized when it was created, so finalizing it is a re-finalize.
+> 3. **The run index is written by a post-insert hook, not by `stampCampaignRun`.**
+>    The helper only composes the tag; the run id does not exist yet when it
+>    runs, and `:fork` (core) and sub-workflow children never call it. A new core
+>    seam, `registerRunInsertedHook` (`host/runInsert.ts`), fires after every
+>    insert through `insertRunWithStartContext`, so starts, forks and children
+>    all land in the index without core importing the feature. A fork row carries
+>    `forkOf`, a child row `parentRunId`.
+> 4. **Children inherit the tag and the frozen goal.** A sub-workflow child is
+>    built fresh, so without this a channel child of the spine would leave the
+>    campaign and escape its 0942 policy. A second seam,
+>    `registerInheritedRunMetadataKey` (`host/inheritedRunMetadata.ts`), copies
+>    registered host-written keys verbatim from the parent row. The goal
+>    contributor stamps only when the campaign's goal version still equals the
+>    tag's `goalVersion` (0 = no goal), so a child, or a run started while the
+>    goal was being edited, never acquires a goal its parent was not started under.
+>
+> Also: `setCampaignGoal` assigns the goal version itself (previous + 1, and a
+> cleared goal keeps a `goalVersionFloor`), so a version a run names is never
+> reused. `readCampaignRunTag` is the one reader and throws `wrong_client` when
+> the ADR 0921 client stamp names another org. Standalone channel runs started by
+> `campaign-channels.generate` still carry only the `campaignChannel` block
+> (campaign-orchestration imports campaign-channels, so the reverse import would
+> cycle); P2 tags them through the back-link work.
+
 ### D3 — Product link to the commerce catalog
 
 `productRefs` names catalog products of the **same org**; validated through
@@ -196,6 +233,57 @@ mismatch, the ADR 0921 D3 loader); a dangling `campaignId` is refused, not store
 stays as a description. `onProductDeleted` (`productLifecycleSeam.ts:28`)
 detaches the ref and flags the campaign `needs_attention` (no cascade delete of a
 campaign). ADR 0945 owns how creative uses `imageAssetTokens`.
+
+> **Corrected 2026-10-20 (P1 build, `/architect` review).**
+> - `needs_attention` is a flag list, `MarketingCampaign.attention[]`
+>   (`{reason:'product_deleted', productId, at}`, deduped, at most 20), not a
+>   `status` value: status is the campaign's lifecycle, the flag is the system
+>   asking for a person. A person clears it with `PATCH {attention: []}`.
+> - The product-delete hook is a point lookup through a reverse index
+>   (`campaign-orchestration:product-ref`, `tenant::productId::campaignId`). Its
+>   rows are written before the campaign write and removed after, so a crash
+>   leaves an extra row (the hook re-checks and prunes it), never a missing one.
+> - **Every** writer of a campaign row now goes through one compare-and-swap
+>   mutator (`mutateCampaign`). Before P1 every writer did read → put, so a rename
+>   racing the product-delete hook could silently drop the flag. A CAS on the new
+>   writers alone would have protected nothing.
+> - **No `funnelIds` on the campaign** (agreed with ADR 0948, 2026-10-20). D1
+>   listed `funnelIds?` "(owner: funnels)" while also saying children point up and
+>   the campaign holds no child lists; two stored copies of one edge would drift.
+>   The edge is the funnel's own `campaignId` (ADR 0948 P0), validated through
+>   `assertCampaignRef`, and ADR 0948 adds the `funnels` section to the links read
+>   through its `listFunnelsForCampaign` seam.
+> - `autonomy` is typed but written only by ADR 0942. `briefId` stays required
+>   until a brief-less creator exists (ADR 0959 or 0962); `cmp_`+uuid is that
+>   creator's id rule.
+> - The links read gates each section on its SOURCE feature (ADR 0820 G11):
+>   commerce off → `products: unavailable`. It returns display fields only, never
+>   product cost, inventory or download tokens. A product in another org reads
+>   as `missing`, so the projection cannot be used to probe another client.
+
+> **Corrected 2026-10-20 (P2 build, `/architect` review).**
+> - **The plan link is a row, not a doc field.** P2 said "canvas doc `campaignId`
+>   (validator + AJV + pack + agent tool together)". The canvas state is written by
+>   six lanes (editor save, collab, restore, seed, the agent tool, the run lane)
+>   through a synchronous validator (`features/canvasEditorRoutes.ts:73`), so a doc
+>   field could only be shape-checked: "a dangling id is refused" would have been
+>   false on five of the six lanes. The link is instead a campaign-studio-owned row
+>   (`campaign-studio:plan-link`, plus a by-campaign index) written by ONE route,
+>   `PUT …/campaign-studio/orgs/:orgId/canvases/:canvasId/campaign`. It requires
+>   canvas write access and `workspace:write` on the path org. When the plan is
+>   project-owned, the project must be in that org (a canvas has no `orgId` of its
+>   own). Canvas delete and campaign delete clear it. No pack or AJV change was
+>   needed, so the ADR 0570 lockstep rule does not apply.
+> - **One seam for every writer:** `host/campaignRefs.ts`. `assertCampaignRef`
+>   refuses a missing or other-org campaign with the same 404 and fails closed with
+>   no resolver registered. The pure tag reader moved there beside the key's strip
+>   list, so the ads adapter (core) reads the run tag without importing the feature.
+> - **The ads and email back-links never come from an argument.** They come from
+>   the publishing run's tag (`campaignForRun`), else from the brief through the
+>   campaign owner (Q4: back-filled where the brief resolves). Rows written before
+>   P2 read back by the campaign's brief and are flagged `legacy` in the links read.
+> - Standalone channel runs now carry the run tag (role `stage`) when their brief
+>   has a campaign (`CO941WF-2`).
 
 ### D4 — One owner per duplicated concept
 
@@ -243,6 +331,46 @@ campaign). ADR 0945 owns how creative uses `imageAssetTokens`.
   display labels change: `campaigns` → "Campaign Studio", `campaign-orchestration`
   → "Campaign Studio — orchestration", `campaign-studio` → "Campaign plans
   (canvas)" (4 locales).
+
+> **Corrected 2026-10-20 (P3 build, `/architect` + `/ux-review`).**
+> - The campaign detail's wayfinding parent is `/campaigns`, not `/campaign-studio`:
+>   the hub is gated by the separate `campaigns` toggle (default OFF), so a back
+>   link to it could land on a disabled page; `/campaigns` is reachable whenever
+>   `campaign-orchestration` is on.
+> - The redirect accepts `new` or `canvas-<id>` (the shape `host/canvasSurface.ts`
+>   mints) and nothing else, so it can never swallow a reserved word.
+> - Toggle display labels are server strings (`toggleDefault.label`, English
+>   only); "4 locales" applies to the new page copy, not to the toggle labels. The
+>   nav copy (`Campaign Studio` console, `Campaigns` list) was already right.
+
+> **Corrected 2026-10-20 (P4 build, `/architect` review).**
+> - **`adapterOnly` cannot be written into the four ads connection packs.** The
+>   RFC 0095 manifest's `provider` object is closed
+>   (`schemas/connection-pack-manifest.schema.json`, `additionalProperties: false`)
+>   and has no such field, so the pack edit P4 named would have been a wire change.
+>   Verified first, as P4 asked: `adapterOnly` is read only by the generic
+>   credential injection (`host/connectionInjection.ts` `matchAllowedProvider`);
+>   the ads adapter's `brokeredPost` / `brokeredFetch` never read it. So the flag
+>   is a **host policy**: `host/governedWriteProviders.ts` names the four
+>   ad-platform providers, and `connectionPackLoader.toProviderManifest` marks
+>   them `adapterOnly` and drops `core.openwop.http` from their advertised
+>   consumers. A portable `adapterOnly` would be an optional RFC 0095 revision;
+>   it is recorded here and not authored.
+> - **The ratchets pin the shipped corpus only.** A tenant-authored workflow or a
+>   registry-installed chain can still place `ads.publish.*` or
+>   `get-app-identity` in a campaign run. Refusing that at run time is ADR 0942
+>   D6, so the two defect rows below stay open for the runtime half.
+
+> **Corrected 2026-10-20 (P5 build, `/architect` review).** The matrix row 3
+> said `getCampaign({campaignId})` and `.links({campaignId})`. Both campaign-scoped
+> reads now take NO id: `campaignContext({})` and `links({})` resolve from the
+> calling run's tag only (D2b), and return typed `not_a_campaign_run` /
+> `campaign_not_found` / `wrong_client` instead of an empty campaign. The
+> id-taking `getCampaign` / `attachAssets` refuse another client's campaign in a
+> tagged run; an untagged run stays tenant-trusted as before. The node returns
+> the goal FROZEN on the run, never the live one. The Strategist's read tool
+> (`openwop:campaign-orchestration.get-campaign`) is pack-allowlisted, not part of
+> the ADR 0315 default baseline, and has its LLM-EXCHANGE-AUDIT row.
 
 ### D6 — The program's differentiator, concretely
 
@@ -357,7 +485,7 @@ portable node→agent binding (D9). It does not block v1.
 | Phase | Scope | Exit criteria |
 |---|---|---|
 | **P0** | Deterministic id + brief index; `ensureDraftCampaign` at ignition; `finalize` → update; run tag via `stampCampaignRun`; per-campaign run index; `CampaignGoal` + frozen `campaignGoal` stamp | Route test: two concurrent ignitions produce one campaign; the run tag names it; a caller-supplied tag or goal is stripped; the index lists the run without a tenant scan |
-| P1 | `productRefs`, `funnelIds`, `goal`, `autonomy` fields; same-org validation; product-delete hook; `GET …/links` projection | Wrong-org product ref → 404; deleted product → `needs_attention`; links shows a failed read as failed |
+| P1 | `productRefs`, `goal`, `autonomy` fields (funnels: see the P1 correction); same-org validation; product-delete hook; `GET …/links` projection | Wrong-org product ref → 404; deleted product → `needs_attention`; links shows a failed read as failed |
 | P2 | Back-links: email `marketingCampaignId`; `AdDispatchRecord.{campaignId, orgId}` (reads fall back to `briefId`); canvas doc `campaignId` (validator + AJV + pack + agent tool together, the ADR 0570 rule); `CampaignAsset.campaignId` / `ChangeRequest.campaignId` validated | A dangling id is refused at every writer; legacy rows read back |
 | P3 | Frontend: route rule + canvas move + redirect; label renames; detail shell; product picker | Route-table test; `npm run build`; 4 locales |
 | P4 | Consolidation guards: ratchet tests that campaign chains contain no `vendor.myndhyve.ads-publish-*` node and no `host/brandAssets` read; `adapterOnly` on the four ads connection packs (verify the injection path first) | Sabotage-witnessed red for each ratchet |
@@ -399,7 +527,19 @@ portable node→agent binding (D9). It does not block v1.
    back-fill where the brief resolves; exclude the rest.
 5. Should `utm_campaign` values be minted from `campaignId` going forward
    (attribution stops depending on operator-typed strings)? Proposed: yes, in 0956.
-6. No `/architect` review has been invoked on this ADR yet.
+6. ~~No `/architect` review has been invoked on this ADR yet.~~ Invoked per phase from 2026-10-20 (P0 findings folded into the D2b correction note).
+
+## Owner decisions recorded
+
+Decided by David on 2026-10-19 (all five recommended defaults approved). They unblock Tier 0.
+
+| # | Decision | Recorded in |
+|---|---|---|
+| 1 | New clients start at **Guarded** ($500 / $2,000 daily spend, 50,000 audience thresholds); above Guarded needs passing evals | 0942 Q1, 0961 Q1 |
+| 2 | Each client org settles through **its own Stripe Connect seller**; client checkouts refuse to publish until onboarded | 0948 Q1 |
+| 3 | **CRM contacts are bound to their client org** app-wide before any agency pilot | 0954 Q1 |
+| 4 | Autopilot **never launches or raises paid spend without client approval** unless the client opts in per campaign | 0961 Q2 |
+| 5 | A run started by an outside agent over MCP **never causes an external effect without a named person** (a D10 floor) | 0942 Q7, 0962 Q1 |
 
 ## Corrections requested in other ADRs
 
@@ -456,8 +596,8 @@ consent or authorization fails open.
 |---|---|---|---|
 | Ads spend gate fails open: a governance-policy read error is "treated as unset" and the live write proceeds | `host/adsAdapter.ts:348` | 0952 (P2) | high |
 | Ads audience gate fails open the same way | `host/adsAdapter.ts:1320` | 0952 (P2) | high |
-| `vendor.myndhyve.ads-publish-meta` publishes to Meta with `net.outbound` + `ctx.secrets.resolve`, outside the adsAdapter spend gate | `packs/vendor.myndhyve.ads-publish-meta/pack.json` | 0941 P4, 0942 D6 | high |
-| `meta-ads` connection pack declares `apiHosts` without `adapterOnly`, so the generic `http.fetch` can be credentialed for Meta | `examples/connection-packs/meta-ads/pack.json:53` | 0941 P4 | high |
+| `vendor.myndhyve.ads-publish-meta` publishes to Meta with `net.outbound` + `ctx.secrets.resolve`, outside the adsAdapter spend gate | `packs/vendor.myndhyve.ads-publish-meta/pack.json` | 0941 P4 (shipped chains: ratchet, **done**), 0942 D6 (runtime refusal: **open**) | high |
+| `meta-ads` connection pack declares `apiHosts` without `adapterOnly`, so the generic `http.fetch` can be credentialed for Meta | `examples/connection-packs/meta-ads/pack.json:53` | 0941 P4 — **fixed** (host policy, all four ad packs; witnessed) | high |
 | Consent toggle OFF makes `isAllowed` permit every non-strict category | `features/consent/consentService.ts:908-909` | 0951, 0955 | high |
 | `marketing.sms` is not strict opt-in (only WhatsApp is) | `features/consent/consentService.ts:56` | 0955 (J3) | high |
 | The generic `sms-send` node ignores consent and STOP; the adapter checks only the idempotency ledger | `packs/core.openwop.integration/index.mjs:184-193`, `host/smsAdapter.ts:47-108` | 0955 (J4) | high |
@@ -480,7 +620,20 @@ consent or authorization fails open.
 | Product image tokens are unvalidated strings that nothing ties to the product's org | `features/commerce/commerceService.ts:364` | 0945 (G2) | medium |
 | A2A 0.3 card lists every installed pack agent as directly dispatchable, outside a run | `host/a2aCard.ts:91-97`, `host/a2aServer.ts:226-231` | 0962 (X3, D8) | medium (high if live tools are reachable, 0962 Q3) |
 | Two `getCampaignByBrief` finalizes race (TOCTOU), producing two campaigns for one brief | `features/campaign-orchestration/campaignService.ts:142-157` | 0941 (D2) | low |
+| The spine's `finalize` node is `role:"action"`, so a replay fork re-finalizes (version bump + a second `finalized` webhook) | `packs/feature.campaign-orchestration.nodes/pack.json` | 0941 P5 — **fixed** (`role:"side-effect"`, served by the fast path) | low |
 | Doc rot: orchestration still documented as `builtinWorkflows`; toggle text says fan-out is sequential | `features/campaign-orchestration/orchestrationWorkflow.ts:2-5`, `feature.ts:50-52` | 0961 (A-G6) | low |
+
+## Implementation record
+
+| Phase | Commit / PR | Tests |
+|---|---|---|
+| P5 | branch `feat/0941-p5-campaign-context` (stacked on P4; PR pending) | `test/adr0941-p5-campaign-context.test.ts` (8 cases; five sabotage witnesses incl. the regenerated floor); `campaign-agent-tools`/`campaign-orchestration` allowlist rows, `safe-mode-baseline-census` + `schema-read-exemption-completeness` classify the new tool; floor 351→352, served 308→309 (generators); node pack 1.3.0, agent pack 1.3.0 |
+| P5 (security) | same branch | `test/campaign-orchestration-org-scope.test.ts` (4 cases, real seam): `getCampaign`, `attachAssets` and `finalizeFromBrief` were tenant-only by id, so a client-A run in an agency workspace could read B's campaign, attach assets to it or finalize B's brief. Rows named by id now need the run's person in the ROW's org (writes at `workspace:write`, also declared in `orgPolicy.methodScopes`), the row must match a named `orgId`, refusals are the uniform not-found, the org-less list keeps only readable orgs; an actorless, causeless run stays tenant-trusted (the ADR 0832 seam rule). The campaign-brief fix's shape. Sabotage: no row check reds all four; the read bar on writes reds the write-bar case |
+| P4 | branch `feat/0941-p4-consolidation-guards` (stacked on P3 for the ADR file only; the code is independent; PR pending) | `test/adr0941-p4-consolidation-guards.test.ts` (8 cases; four sabotage witnesses, each run red 2026-10-20) |
+| P3 | branch `feat/0941-p3-campaign-routes` (stacked on P2; PR pending) | FE: `campaignStudioRouteTable.test.tsx` (route rule + redirect, three sabotage witnesses), `campaignDetailPage.test.tsx` (6 cases, five witnesses), the two detail tests moved onto the routed page; `npm run build` green (entry 128.7 kB of 129.0); toggle labels renamed |
+| P2 | branch `feat/0941-p2-back-links` (stacked on P1; PR pending) | `test/adr0941-p2-back-links.test.ts` (7 cases; six sabotage witnesses, each run red 2026-10-20) + the back-link case in `ads-adapter-meta.test.ts`; `adr0886-canvas-write-gate-ratchet` gains the reviewed `campaign-studio/routes.ts` row |
+| P1 | branch `feat/0941-p1-campaign-links` (stacked on P0; PR pending) | `test/adr0941-p1-campaign-links.test.ts` (10 route-level cases; five sabotage witnesses in its header, each run red 2026-10-20) |
+| P0 | branch `feat/0941-p0-canonical-campaign` (PR pending) | `test/adr0941-canonical-campaign.test.ts` (16 cases; six sabotage witnesses listed in its header, each run red 2026-10-20); `run-metadata-copy-sites.test.ts` row re-justified |
 
 ## Planning rows
 
@@ -498,3 +651,51 @@ consent or authorization fails open.
   org; the campaign exists from the first run, links real catalog products, and is
   the anchor for ADRs 0942–0962. No new toggle (extends `campaign-orchestration`;
   labels only change). No RFC.
+
+Recovery correction (2026-10-21, P2): plan links use their existing forward collection with host-only write identities and exact-row CAS clear markers. Reverse candidates are retained and forward-validated. A stale clear or campaign cascade cannot erase another attachment, including same-timestamp ABA writes. Post-write parent reads reconcile campaign/canvas deletion before the forward CAS by clearing only that written snapshot. Public reads hide clear markers.
+
+Recovery correction (2026-10-21, P3): campaign detail route changes remount the detail state owner by campaign id. Prior campaign, parent, organization, links and edit state cannot carry into the next route; late responses settle only the unmounted prior instance. Deferred-response navigation witnesses cover primary and linked-product races.
+
+
+### Recovery correction — 2026-10-21 (P5 live read authority)
+
+A stored campaign tag freezes provenance and goal inputs; it grants no ongoing
+client membership. Argument-free campaign context and link reads recheck the
+actor or causing member through the existing run-org scope filter before reading
+linked data. Revocation returns the same campaign-not-found shape. Truly
+personless system runs retain the tenant-trusted behavior. Real feature-surface
+revocation witnesses cover actor and cause; execution pending the next serialized
+validation slot. Dispatch actor behavior is unchanged.
+Recovery correction (2026-10-21, P1): product reverse-index rows are retained as forward-validated candidates. Post-CAS cleanup could delete a concurrent reattachment marker. The attach path also checks the product after writing and invokes the same detach/attention hook if deletion won before the forward CAS, returning the reconciled campaign. Stale reverse rows contain only tenant/product/campaign ids.
+
+
+### Recovery correction — 2026-10-21 (P0/P1 identity retirement)
+
+A deleted campaign identity is retired by CAS before cleanup and never reused.
+Re-igniting the same brief remains supported: the winning retirement records one
+opaque successor ID, and concurrent ignitions converge there. Only brief lookup
+and ignition follow that chain; by-ID reads/writes/deletion remain exact. Legacy
+UUID campaigns reserve their canonical brief index before retirement. The index
+is retained as a reservation and updated conditionally, never removed by old
+cleanup. Markers contain only structural IDs; all person-authored content is
+removed. Traversal is bounded and corruption refuses writes.
+
+This corrects D2's deterministic identity wording: the initial ID is deterministic;
+a recreation gets a distinct, host-chosen identity so delayed old-ID versions,
+projects and lifecycle hooks cannot damage the successor. It does not claim full
+prevention of late old-ID sidecar orphans. Tagged mutations must bind their
+original campaign ID; an old tag never authorizes following its brief to a new
+generation. The finalizer now accepts that exact expected ID; P5 surface wiring
+is required in the same integration component. Replay preflight precedes both
+ignition reservation and campaign creation. Race, legacy, stale-index, corrupt
+chain, exact-ID and replay witnesses are authored; execution pending the next
+serialized validation slot.
+
+
+P5 generation correction (2026-10-21): tagged finalization passes the exact
+original campaign ID into the service CAS path. Tagged attachment reads that
+exact active row and rejects mismatching campaign/brief arguments. Retirement
+before or during either mutation returns not-found, never a successful null or
+a write to the brief's successor. Untagged manual finalization still permits
+re-ignition. Live and storage-interleaving witnesses are authored; execution
+pending the next serialized validation slot.

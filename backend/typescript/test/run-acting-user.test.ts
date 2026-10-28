@@ -6,7 +6,14 @@
  *      overridden, never trusted (a caller MUST NOT name another user). This is
  *      the same override the :fork path applies to re-own a fork to the forking
  *      caller (confused-deputy guard).
- *   3. :fork re-stamps actingUserId (carries the run's human, doesn't drop it).
+ *   3. :fork re-stamps actingUserId to the FORKING caller. The source row is
+ *      first re-stamped to another user, so a fork that merely COPIED the
+ *      source's value would read 'someone-else' (round 1's symmetric fixture —
+ *      source and fork by the same caller — made 8fw2g2-rau-fork VACUOUS).
+ *
+ * Breaks it: dropping the stamp in `host/runDispatch.ts` buildRunRecord
+ * (8fw2g2-rau-stamp reds 1 + 2), or the fork copying `sourceRun.metadata`
+ * without the `actingUserId: forkingUserId` override (8fw2g2-rau-fork-r2).
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -49,7 +56,7 @@ describe('run acting-user provenance (ADR 0024 §4 / D2)', () => {
   }
 
   const actingUserOf = async (runId: string): Promise<unknown> =>
-    ((await storage.getRun(bareRunId(runId)))?.metadata as Record<string, unknown> | undefined)?.actingUserId;
+    (await storage.getRun(bareRunId(runId)))?.metadata.actingUserId;
 
   it('stamps actingUserId from the authenticated principal on create', async () => {
     const created = await jf<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({ workflowId, inputs: {} }) });
@@ -63,13 +70,18 @@ describe('run acting-user provenance (ADR 0024 §4 / D2)', () => {
       body: JSON.stringify({ workflowId, inputs: {}, metadata: { actingUserId: 'spoofed-other-user', note: 'keep-me' } }),
     });
     expect(created.status).toBe(201);
-    const meta = (await storage.getRun(bareRunId(created.body.runId)))?.metadata as Record<string, unknown> | undefined;
+    const meta = (await storage.getRun(bareRunId(created.body.runId)))?.metadata;
     expect(meta?.actingUserId).toBe(EXPECTED_ACTOR); // spoof rejected
     expect(meta?.note).toBe('keep-me'); // other client metadata preserved
   });
 
   it('re-stamps actingUserId on :fork (carries the human, never drops it)', async () => {
     const src = await jf<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({ workflowId, inputs: {} }) });
+    expect(src.status).toBe(201);
+    // Asymmetric fixture: the SOURCE now names another user, so only a re-stamp
+    // (not a copy) yields the forking caller.
+    await storage.mergeRunMetadata(bareRunId(src.body.runId), { actingUserId: 'someone-else' });
+    expect(await actingUserOf(src.body.runId)).toBe('someone-else');
     const fork = await jf<{ runId: string }>(`/runs/${src.body.runId}:fork`, { method: 'POST', body: JSON.stringify({ fromSeq: 0, mode: 'replay' }) });
     expect(fork.status).toBe(201);
     expect(await actingUserOf(fork.body.runId)).toBe(EXPECTED_ACTOR);

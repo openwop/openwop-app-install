@@ -9,18 +9,29 @@
  * toggle gate and the unknown-org path must be INDISTINGUISHABLE. If "feature
  * off" 403s while "no such org" 404s, the endpoint becomes an oracle for which
  * orgs run KickTodo — a fact nobody asked it to publish.
+ *
+ * Tracker TST-BG3-16. Red when: a toggle-store error opens the catalog
+ * (`.catch(() => true)`), "feature off" answers a different message or status than
+ * "no such org", the data read or the toggle gate is keyed on the org id instead of
+ * the org's tenant, the projection spreads the stored row (authoring state leaks) or
+ * drops `evidencePolicy`, `depthLevel` gains a default, or Accept-Language is read as
+ * the raw first segment.
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import type { Organization } from '../src/host/accessControlService.js';
+import type { ResolvedAssignment, ToggleSubject } from '../src/host/featureToggles/types.js';
+import type { NegotiatedChallenge } from '../src/features/kicktodo-core/challengeService.js';
+import type { ChallengeActivity } from '../src/features/kicktodo-core/types.js';
 
-const getOrg = vi.fn();
-const resolveOne = vi.fn();
-const listPublishedForLocale = vi.fn();
+const getOrg = vi.fn<(orgId: string) => Promise<Organization | null>>();
+const resolveOne = vi.fn<(id: string, subject: ToggleSubject) => Promise<ResolvedAssignment | null>>();
+const listPublishedForLocale = vi.fn<(tenantId: string, locale: string) => Promise<NegotiatedChallenge[]>>();
 
-vi.mock('../src/host/accessControlService.js', () => ({ getOrg: (...a: unknown[]) => getOrg(...a) }));
-vi.mock('../src/host/featureToggles/service.js', () => ({ resolveOne: (...a: unknown[]) => resolveOne(...a) }));
+vi.mock('../src/host/accessControlService.js', () => ({ getOrg: (orgId: string) => getOrg(orgId) }));
+vi.mock('../src/host/featureToggles/service.js', () => ({ resolveOne: (id: string, subject: ToggleSubject) => resolveOne(id, subject) }));
 vi.mock('../src/features/kicktodo-core/challengeService.js', () => ({
-  listPublishedForLocale: (...a: unknown[]) => listPublishedForLocale(...a),
+  listPublishedForLocale: (tenantId: string, locale: string) => listPublishedForLocale(tenantId, locale),
 }));
 
 const { publicChallengeCatalog } = await import('../src/features/kicktodo-core/publicCatalogService.js');
@@ -28,25 +39,28 @@ const { publicChallengeCatalog } = await import('../src/features/kicktodo-core/p
 // The fixture carries every authoring field the leak case names (author,
 // translation lineage, activity alternatives), so a spread of the stored row
 // would put each of them on the wire and the leak case would see it.
-const activity = (day: number) => ({
+const activity = (day: number): ChallengeActivity => ({
   stableActivityId: `a${day}`, day, title: `Day ${day}`, instructions: `Do the day-${day} thing`,
-  estimatedMinutes: 10, evidencePolicy: 'note' as const,
-  alternatives: [{ stableActivityId: `a${day}-alt`, title: 'Lighter', instructions: 'Do less', evidencePolicy: 'note' as const }],
+  estimatedMinutes: 10, evidencePolicy: 'note',
+  alternatives: [{ stableActivityId: `a${day}-alt`, title: 'Lighter', instructions: 'Do less', evidencePolicy: 'note' }],
 });
-const published = (id: string) => ({
+const published = (id: string): NegotiatedChallenge => ({
   challenge: {
-    id, version: 2, status: 'published' as const, tenantId: 't1',
+    id, version: 2, status: 'published', tenantId: 't1',
     authorSubject: 'user:author', translationOf: { challengeId: 'c0', version: 1 },
     title: 'Sleep', summary: 'Sleep better', outcome: 'Rested', durationDays: 7,
     activities: [activity(1), activity(2)],
+    createdAt: '2026-09-01T00:00:00.000Z',
   },
   servedLocale: 'en', exactLocale: true,
 });
+const ACME: Organization = { orgId: 'acme', tenantId: 't1', name: 'Acme', slug: 'acme', createdBy: 'user:owner', createdAt: '2026-09-01T00:00:00.000Z', updatedAt: '2026-09-01T00:00:00.000Z' };
+const assignment = (enabled: boolean): ResolvedAssignment => ({ id: 'kicktodo-core', status: enabled ? 'on' : 'off', enabled, variant: null });
 
 beforeEach(() => {
   getOrg.mockReset(); resolveOne.mockReset(); listPublishedForLocale.mockReset();
-  getOrg.mockResolvedValue({ orgId: 'acme', tenantId: 't1' });
-  resolveOne.mockResolvedValue({ enabled: true });
+  getOrg.mockResolvedValue(ACME);
+  resolveOne.mockResolvedValue(assignment(true));
   listPublishedForLocale.mockResolvedValue([published('c1')]);
 });
 
@@ -154,19 +168,21 @@ describe('ADR 0641 p3 — off and absent are INDISTINGUISHABLE', () => {
   });
 
   it('404s — not 403 — when the feature is OFF for that org', async () => {
-    resolveOne.mockResolvedValue({ enabled: false });
+    resolveOne.mockResolvedValue(assignment(false));
     await expect(publicChallengeCatalog('acme', 'en')).rejects.toMatchObject({ code: 'not_found', httpStatus: 404 });
   });
 
   it('the two answers are byte-identical, so the endpoint is not an oracle', async () => {
     getOrg.mockResolvedValue(null);
     const absent = await publicChallengeCatalog('nope', 'en').catch((e) => e);
-    getOrg.mockResolvedValue({ orgId: 'acme', tenantId: 't1' });
-    resolveOne.mockResolvedValue({ enabled: false });
+    getOrg.mockResolvedValue(ACME);
+    resolveOne.mockResolvedValue(assignment(false));
     const off = await publicChallengeCatalog('acme', 'en').catch((e) => e);
     expect(off.code).toBe(absent.code);
     expect(off.httpStatus).toBe(absent.httpStatus);
     expect(off.message).toBe(absent.message);
+    // Same detail SHAPE too (only the echoed orgId value differs).
+    expect(Object.keys(off.details ?? {}).sort()).toEqual(Object.keys(absent.details ?? {}).sort());
   });
 
   it('fails CLOSED when toggle resolution throws', async () => {

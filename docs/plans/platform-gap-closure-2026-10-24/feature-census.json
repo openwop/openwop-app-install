@@ -1,0 +1,4586 @@
+{
+  "source_commit": "87719df6fed20cc26936ff22c808dc03c9b5d35f",
+  "count": 229,
+  "directory_rows": [
+    {
+      "path": "backend/typescript/src/features/access-hub",
+      "side": "backend",
+      "name": "access-hub",
+      "domain": "identity-and-governance",
+      "source_file_count": 2,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/accessibility",
+      "side": "backend",
+      "name": "accessibility",
+      "domain": "platform-and-operations",
+      "source_file_count": 3,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/advisory-board",
+      "side": "backend",
+      "name": "advisory-board",
+      "domain": "strategy-and-work",
+      "source_file_count": 7,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/agent-author",
+      "side": "backend",
+      "name": "agent-author",
+      "domain": "workflow-and-ai",
+      "source_file_count": 6,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/agent-knowledge",
+      "side": "backend",
+      "name": "agent-knowledge",
+      "domain": "workflow-and-ai",
+      "source_file_count": 4,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/ambient-work-graph",
+      "side": "backend",
+      "name": "ambient-work-graph",
+      "domain": "platform-and-operations",
+      "source_file_count": 9,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/analytics",
+      "side": "backend",
+      "name": "analytics",
+      "domain": "analytics-and-measurement",
+      "source_file_count": 10,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/app-builder",
+      "side": "backend",
+      "name": "app-builder",
+      "domain": "app-builder",
+      "source_file_count": 47,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/assistant",
+      "side": "backend",
+      "name": "assistant",
+      "domain": "workflow-and-ai",
+      "source_file_count": 15,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/bi",
+      "side": "backend",
+      "name": "bi",
+      "domain": "analytics-and-measurement",
+      "source_file_count": 9,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/billing",
+      "side": "backend",
+      "name": "billing",
+      "domain": "commerce-and-billing",
+      "source_file_count": 11,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/brand",
+      "side": "backend",
+      "name": "brand",
+      "domain": "marketing-campaigns",
+      "source_file_count": 10,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/builder-pair",
+      "side": "backend",
+      "name": "builder-pair",
+      "domain": "platform-and-operations",
+      "source_file_count": 8,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/cad",
+      "side": "backend",
+      "name": "cad",
+      "domain": "documents-and-artifacts",
+      "source_file_count": 20,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/campaign-brief",
+      "side": "backend",
+      "name": "campaign-brief",
+      "domain": "marketing-campaigns",
+      "source_file_count": 15,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/campaign-channels",
+      "side": "backend",
+      "name": "campaign-channels",
+      "domain": "marketing-campaigns",
+      "source_file_count": 3,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/campaign-connectors",
+      "side": "backend",
+      "name": "campaign-connectors",
+      "domain": "marketing-campaigns",
+      "source_file_count": 11,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/campaign-intel",
+      "side": "backend",
+      "name": "campaign-intel",
+      "domain": "marketing-campaigns",
+      "source_file_count": 8,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/campaign-journeys",
+      "side": "backend",
+      "name": "campaign-journeys",
+      "domain": "marketing-campaigns",
+      "source_file_count": 4,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/campaign-ops",
+      "side": "backend",
+      "name": "campaign-ops",
+      "domain": "marketing-campaigns",
+      "source_file_count": 17,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/campaign-orchestration",
+      "side": "backend",
+      "name": "campaign-orchestration",
+      "domain": "marketing-campaigns",
+      "source_file_count": 9,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/campaign-studio",
+      "side": "backend",
+      "name": "campaign-studio",
+      "domain": "marketing-campaigns",
+      "source_file_count": 7,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/campaigns",
+      "side": "backend",
+      "name": "campaigns",
+      "domain": "marketing-campaigns",
+      "source_file_count": 1,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/canvas-packs",
+      "side": "backend",
+      "name": "canvas-packs",
+      "domain": "documents-and-artifacts",
+      "source_file_count": 1,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/capability-firewall",
+      "side": "backend",
+      "name": "capability-firewall",
+      "domain": "identity-and-governance",
+      "source_file_count": 12,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/cdp",
+      "side": "backend",
+      "name": "cdp",
+      "domain": "customer-data-and-sales",
+      "source_file_count": 13,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/channels",
+      "side": "backend",
+      "name": "channels",
+      "domain": "platform-and-operations",
+      "source_file_count": 7,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/chat-autotitle",
+      "side": "backend",
+      "name": "chat-autotitle",
+      "domain": "workflow-and-ai",
+      "source_file_count": 3,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/chat-deployment",
+      "side": "backend",
+      "name": "chat-deployment",
+      "domain": "workflow-and-ai",
+      "source_file_count": 1,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/chat-export",
+      "side": "backend",
+      "name": "chat-export",
+      "domain": "workflow-and-ai",
+      "source_file_count": 7,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/chat-widget",
+      "side": "backend",
+      "name": "chat-widget",
+      "domain": "workflow-and-ai",
+      "source_file_count": 6,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/claude-code",
+      "side": "backend",
+      "name": "claude-code",
+      "domain": "platform-and-operations",
+      "source_file_count": 10,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/cms",
+      "side": "backend",
+      "name": "cms",
+      "domain": "content-and-publishing",
+      "source_file_count": 14,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/code-exec",
+      "side": "backend",
+      "name": "code-exec",
+      "domain": "workflow-and-ai",
+      "source_file_count": 2,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/comments",
+      "side": "backend",
+      "name": "comments",
+      "domain": "platform-and-operations",
+      "source_file_count": 6,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/commerce",
+      "side": "backend",
+      "name": "commerce",
+      "domain": "commerce-and-billing",
+      "source_file_count": 32,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/commerce-connect",
+      "side": "backend",
+      "name": "commerce-connect",
+      "domain": "commerce-and-billing",
+      "source_file_count": 13,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/computer-use",
+      "side": "backend",
+      "name": "computer-use",
+      "domain": "workflow-and-ai",
+      "source_file_count": 10,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/connections",
+      "side": "backend",
+      "name": "connections",
+      "domain": "identity-and-governance",
+      "source_file_count": 18,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/consent",
+      "side": "backend",
+      "name": "consent",
+      "domain": "identity-and-governance",
+      "source_file_count": 8,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/conversation-search",
+      "side": "backend",
+      "name": "conversation-search",
+      "domain": "platform-and-operations",
+      "source_file_count": 4,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/conversation-tools",
+      "side": "backend",
+      "name": "conversation-tools",
+      "domain": "platform-and-operations",
+      "source_file_count": 6,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/creative-briefs",
+      "side": "backend",
+      "name": "creative-briefs",
+      "domain": "marketing-campaigns",
+      "source_file_count": 14,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/creative-video",
+      "side": "backend",
+      "name": "creative-video",
+      "domain": "documents-and-artifacts",
+      "source_file_count": 7,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/crm",
+      "side": "backend",
+      "name": "crm",
+      "domain": "customer-data-and-sales",
+      "source_file_count": 50,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/csm",
+      "side": "backend",
+      "name": "csm",
+      "domain": "customer-data-and-sales",
+      "source_file_count": 5,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/custom-domains",
+      "side": "backend",
+      "name": "custom-domains",
+      "domain": "content-and-publishing",
+      "source_file_count": 2,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/dashboard",
+      "side": "backend",
+      "name": "dashboard",
+      "domain": "platform-and-operations",
+      "source_file_count": 4,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/dealers",
+      "side": "backend",
+      "name": "dealers",
+      "domain": "customer-data-and-sales",
+      "source_file_count": 11,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/destination-sync",
+      "side": "backend",
+      "name": "destination-sync",
+      "domain": "customer-data-and-sales",
+      "source_file_count": 7,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/developer-keys",
+      "side": "backend",
+      "name": "developer-keys",
+      "domain": "platform-and-operations",
+      "source_file_count": 8,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/developer-tools",
+      "side": "backend",
+      "name": "developer-tools",
+      "domain": "platform-and-operations",
+      "source_file_count": 1,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/discovery",
+      "side": "backend",
+      "name": "discovery",
+      "domain": "platform-and-operations",
+      "source_file_count": 8,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/docs",
+      "side": "backend",
+      "name": "docs",
+      "domain": "content-and-publishing",
+      "source_file_count": 7,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/document-editor",
+      "side": "backend",
+      "name": "document-editor",
+      "domain": "documents-and-artifacts",
+      "source_file_count": 8,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/documents",
+      "side": "backend",
+      "name": "documents",
+      "domain": "documents-and-artifacts",
+      "source_file_count": 11,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/drawings",
+      "side": "backend",
+      "name": "drawings",
+      "domain": "documents-and-artifacts",
+      "source_file_count": 7,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/email",
+      "side": "backend",
+      "name": "email",
+      "domain": "content-and-publishing",
+      "source_file_count": 13,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/entities",
+      "side": "backend",
+      "name": "entities",
+      "domain": "platform-and-operations",
+      "source_file_count": 12,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/environments",
+      "side": "backend",
+      "name": "environments",
+      "domain": "platform-and-operations",
+      "source_file_count": 7,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/evals",
+      "side": "backend",
+      "name": "evals",
+      "domain": "workflow-and-ai",
+      "source_file_count": 6,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/forms",
+      "side": "backend",
+      "name": "forms",
+      "domain": "content-and-publishing",
+      "source_file_count": 10,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/funnels",
+      "side": "backend",
+      "name": "funnels",
+      "domain": "marketing-campaigns",
+      "source_file_count": 9,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/goals",
+      "side": "backend",
+      "name": "goals",
+      "domain": "strategy-and-work",
+      "source_file_count": 9,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/heartbeat-admin",
+      "side": "backend",
+      "name": "heartbeat-admin",
+      "domain": "platform-and-operations",
+      "source_file_count": 4,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/insights-suite",
+      "side": "backend",
+      "name": "insights-suite",
+      "domain": "platform-and-operations",
+      "source_file_count": 4,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/intent-ledger",
+      "side": "backend",
+      "name": "intent-ledger",
+      "domain": "platform-and-operations",
+      "source_file_count": 9,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/interactive-artifacts",
+      "side": "backend",
+      "name": "interactive-artifacts",
+      "domain": "documents-and-artifacts",
+      "source_file_count": 4,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/job-search",
+      "side": "backend",
+      "name": "job-search",
+      "domain": "vertical-job-search",
+      "source_file_count": 33,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/kb",
+      "side": "backend",
+      "name": "kb",
+      "domain": "platform-and-operations",
+      "source_file_count": 11,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/kicktodo-accountability",
+      "side": "backend",
+      "name": "kicktodo-accountability",
+      "domain": "vertical-kicktodo",
+      "source_file_count": 11,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/kicktodo-commerce",
+      "side": "backend",
+      "name": "kicktodo-commerce",
+      "domain": "vertical-kicktodo",
+      "source_file_count": 12,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/kicktodo-community",
+      "side": "backend",
+      "name": "kicktodo-community",
+      "domain": "vertical-kicktodo",
+      "source_file_count": 8,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/kicktodo-core",
+      "side": "backend",
+      "name": "kicktodo-core",
+      "domain": "vertical-kicktodo",
+      "source_file_count": 30,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/kicktodo-creator",
+      "side": "backend",
+      "name": "kicktodo-creator",
+      "domain": "vertical-kicktodo",
+      "source_file_count": 18,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/kicktodo-engagement",
+      "side": "backend",
+      "name": "kicktodo-engagement",
+      "domain": "vertical-kicktodo",
+      "source_file_count": 5,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/kicktodo-integrations",
+      "side": "backend",
+      "name": "kicktodo-integrations",
+      "domain": "vertical-kicktodo",
+      "source_file_count": 15,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/kicktodo-metrics",
+      "side": "backend",
+      "name": "kicktodo-metrics",
+      "domain": "vertical-kicktodo",
+      "source_file_count": 7,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/kicktodo-organizations",
+      "side": "backend",
+      "name": "kicktodo-organizations",
+      "domain": "vertical-kicktodo",
+      "source_file_count": 4,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/knowledge-sync",
+      "side": "backend",
+      "name": "knowledge-sync",
+      "domain": "workflow-and-ai",
+      "source_file_count": 6,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/manual-tests",
+      "side": "backend",
+      "name": "manual-tests",
+      "domain": "platform-and-operations",
+      "source_file_count": 3,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/marketplace",
+      "side": "backend",
+      "name": "marketplace",
+      "domain": "platform-and-operations",
+      "source_file_count": 11,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/media",
+      "side": "backend",
+      "name": "media",
+      "domain": "content-and-publishing",
+      "source_file_count": 8,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/memory-auto-extract",
+      "side": "backend",
+      "name": "memory-auto-extract",
+      "domain": "workflow-and-ai",
+      "source_file_count": 6,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/model-router",
+      "side": "backend",
+      "name": "model-router",
+      "domain": "workflow-and-ai",
+      "source_file_count": 7,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/multi-tab-chat",
+      "side": "backend",
+      "name": "multi-tab-chat",
+      "domain": "workflow-and-ai",
+      "source_file_count": 1,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/navigation-settings",
+      "side": "backend",
+      "name": "navigation-settings",
+      "domain": "platform-and-operations",
+      "source_file_count": 4,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/notebooks",
+      "side": "backend",
+      "name": "notebooks",
+      "domain": "documents-and-artifacts",
+      "source_file_count": 10,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/notifications",
+      "side": "backend",
+      "name": "notifications",
+      "domain": "platform-and-operations",
+      "source_file_count": 4,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/operations",
+      "side": "backend",
+      "name": "operations",
+      "domain": "platform-and-operations",
+      "source_file_count": 2,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/orgs",
+      "side": "backend",
+      "name": "orgs",
+      "domain": "identity-and-governance",
+      "source_file_count": 6,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/podcasts",
+      "side": "backend",
+      "name": "podcasts",
+      "domain": "documents-and-artifacts",
+      "source_file_count": 12,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/portability",
+      "side": "backend",
+      "name": "portability",
+      "domain": "platform-and-operations",
+      "source_file_count": 4,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/priority-matrix",
+      "side": "backend",
+      "name": "priority-matrix",
+      "domain": "strategy-and-work",
+      "source_file_count": 19,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/production",
+      "side": "backend",
+      "name": "production",
+      "domain": "platform-and-operations",
+      "source_file_count": 10,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/profile-memory",
+      "side": "backend",
+      "name": "profile-memory",
+      "domain": "identity-and-governance",
+      "source_file_count": 4,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/profiles",
+      "side": "backend",
+      "name": "profiles",
+      "domain": "identity-and-governance",
+      "source_file_count": 9,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/projects",
+      "side": "backend",
+      "name": "projects",
+      "domain": "strategy-and-work",
+      "source_file_count": 6,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/promotions",
+      "side": "backend",
+      "name": "promotions",
+      "domain": "marketing-campaigns",
+      "source_file_count": 9,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/prompts",
+      "side": "backend",
+      "name": "prompts",
+      "domain": "workflow-and-ai",
+      "source_file_count": 4,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/proposals",
+      "side": "backend",
+      "name": "proposals",
+      "domain": "strategy-and-work",
+      "source_file_count": 7,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/publishing",
+      "side": "backend",
+      "name": "publishing",
+      "domain": "content-and-publishing",
+      "source_file_count": 8,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/recommendations",
+      "side": "backend",
+      "name": "recommendations",
+      "domain": "marketing-campaigns",
+      "source_file_count": 8,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/runtime-posture",
+      "side": "backend",
+      "name": "runtime-posture",
+      "domain": "platform-and-operations",
+      "source_file_count": 4,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/sales-commissions",
+      "side": "backend",
+      "name": "sales-commissions",
+      "domain": "customer-data-and-sales",
+      "source_file_count": 11,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/sales-maps",
+      "side": "backend",
+      "name": "sales-maps",
+      "domain": "customer-data-and-sales",
+      "source_file_count": 4,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/scheduled-agent-chats",
+      "side": "backend",
+      "name": "scheduled-agent-chats",
+      "domain": "workflow-and-ai",
+      "source_file_count": 5,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/service-desk",
+      "side": "backend",
+      "name": "service-desk",
+      "domain": "service-operations",
+      "source_file_count": 11,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/settings",
+      "side": "backend",
+      "name": "settings",
+      "domain": "platform-and-operations",
+      "source_file_count": 3,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/sharing",
+      "side": "backend",
+      "name": "sharing",
+      "domain": "platform-and-operations",
+      "source_file_count": 3,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/slides",
+      "side": "backend",
+      "name": "slides",
+      "domain": "documents-and-artifacts",
+      "source_file_count": 19,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/strategy",
+      "side": "backend",
+      "name": "strategy",
+      "domain": "strategy-and-work",
+      "source_file_count": 17,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/structured-handoffs",
+      "side": "backend",
+      "name": "structured-handoffs",
+      "domain": "workflow-and-ai",
+      "source_file_count": 4,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/task-deck",
+      "side": "backend",
+      "name": "task-deck",
+      "domain": "strategy-and-work",
+      "source_file_count": 4,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/team-intent-ledger",
+      "side": "backend",
+      "name": "team-intent-ledger",
+      "domain": "strategy-and-work",
+      "source_file_count": 21,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/territories",
+      "side": "backend",
+      "name": "territories",
+      "domain": "customer-data-and-sales",
+      "source_file_count": 14,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/tool-output-compaction",
+      "side": "backend",
+      "name": "tool-output-compaction",
+      "domain": "platform-and-operations",
+      "source_file_count": 4,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/tutorials",
+      "side": "backend",
+      "name": "tutorials",
+      "domain": "platform-and-operations",
+      "source_file_count": 8,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/twin",
+      "side": "backend",
+      "name": "twin",
+      "domain": "workflow-and-ai",
+      "source_file_count": 4,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/ui-plugins",
+      "side": "backend",
+      "name": "ui-plugins",
+      "domain": "platform-and-operations",
+      "source_file_count": 5,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/usage-analytics",
+      "side": "backend",
+      "name": "usage-analytics",
+      "domain": "analytics-and-measurement",
+      "source_file_count": 3,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/users",
+      "side": "backend",
+      "name": "users",
+      "domain": "identity-and-governance",
+      "source_file_count": 7,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/voice",
+      "side": "backend",
+      "name": "voice",
+      "domain": "workflow-and-ai",
+      "source_file_count": 17,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/walkthroughs",
+      "side": "backend",
+      "name": "walkthroughs",
+      "domain": "platform-and-operations",
+      "source_file_count": 6,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/webinars",
+      "side": "backend",
+      "name": "webinars",
+      "domain": "content-and-publishing",
+      "source_file_count": 10,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/whatsapp",
+      "side": "backend",
+      "name": "whatsapp",
+      "domain": "content-and-publishing",
+      "source_file_count": 6,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/work-selection",
+      "side": "backend",
+      "name": "work-selection",
+      "domain": "strategy-and-work",
+      "source_file_count": 6,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "backend/typescript/src/features/workflow-author",
+      "side": "backend",
+      "name": "workflow-author",
+      "domain": "workflow-and-ai",
+      "source_file_count": 9,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/access-hub",
+      "side": "frontend",
+      "name": "access-hub",
+      "domain": "identity-and-governance",
+      "source_file_count": 10,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/advisory-board",
+      "side": "frontend",
+      "name": "advisory-board",
+      "domain": "strategy-and-work",
+      "source_file_count": 10,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/agent-knowledge",
+      "side": "frontend",
+      "name": "agent-knowledge",
+      "domain": "workflow-and-ai",
+      "source_file_count": 10,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/ambient-work-graph",
+      "side": "frontend",
+      "name": "ambient-work-graph",
+      "domain": "platform-and-operations",
+      "source_file_count": 9,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/analytics",
+      "side": "frontend",
+      "name": "analytics",
+      "domain": "analytics-and-measurement",
+      "source_file_count": 15,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/app-builder",
+      "side": "frontend",
+      "name": "app-builder",
+      "domain": "app-builder",
+      "source_file_count": 34,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/assistant",
+      "side": "frontend",
+      "name": "assistant",
+      "domain": "workflow-and-ai",
+      "source_file_count": 1,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/bi",
+      "side": "frontend",
+      "name": "bi",
+      "domain": "analytics-and-measurement",
+      "source_file_count": 10,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/billing",
+      "side": "frontend",
+      "name": "billing",
+      "domain": "commerce-and-billing",
+      "source_file_count": 19,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/brand",
+      "side": "frontend",
+      "name": "brand",
+      "domain": "marketing-campaigns",
+      "source_file_count": 11,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/cad",
+      "side": "frontend",
+      "name": "cad",
+      "domain": "documents-and-artifacts",
+      "source_file_count": 31,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/campaign-brief",
+      "side": "frontend",
+      "name": "campaign-brief",
+      "domain": "marketing-campaigns",
+      "source_file_count": 12,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/campaign-connectors",
+      "side": "frontend",
+      "name": "campaign-connectors",
+      "domain": "marketing-campaigns",
+      "source_file_count": 12,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/campaign-intel",
+      "side": "frontend",
+      "name": "campaign-intel",
+      "domain": "marketing-campaigns",
+      "source_file_count": 9,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/campaign-ops",
+      "side": "frontend",
+      "name": "campaign-ops",
+      "domain": "marketing-campaigns",
+      "source_file_count": 10,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/campaign-orchestration",
+      "side": "frontend",
+      "name": "campaign-orchestration",
+      "domain": "marketing-campaigns",
+      "source_file_count": 11,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/campaign-studio",
+      "side": "frontend",
+      "name": "campaign-studio",
+      "domain": "marketing-campaigns",
+      "source_file_count": 10,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/campaigns",
+      "side": "frontend",
+      "name": "campaigns",
+      "domain": "marketing-campaigns",
+      "source_file_count": 6,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/canvas-packs",
+      "side": "frontend",
+      "name": "canvas-packs",
+      "domain": "documents-and-artifacts",
+      "source_file_count": 7,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/capability-firewall",
+      "side": "frontend",
+      "name": "capability-firewall",
+      "domain": "identity-and-governance",
+      "source_file_count": 9,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/cdp",
+      "side": "frontend",
+      "name": "cdp",
+      "domain": "customer-data-and-sales",
+      "source_file_count": 8,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/challenge-outline",
+      "side": "frontend",
+      "name": "challenge-outline",
+      "domain": "platform-and-operations",
+      "source_file_count": 12,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/channels",
+      "side": "frontend",
+      "name": "channels",
+      "domain": "platform-and-operations",
+      "source_file_count": 1,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/chat-deployment",
+      "side": "frontend",
+      "name": "chat-deployment",
+      "domain": "workflow-and-ai",
+      "source_file_count": 6,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/chat-widget",
+      "side": "frontend",
+      "name": "chat-widget",
+      "domain": "workflow-and-ai",
+      "source_file_count": 9,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/claude-code",
+      "side": "frontend",
+      "name": "claude-code",
+      "domain": "platform-and-operations",
+      "source_file_count": 17,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/cms",
+      "side": "frontend",
+      "name": "cms",
+      "domain": "content-and-publishing",
+      "source_file_count": 68,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/comments",
+      "side": "frontend",
+      "name": "comments",
+      "domain": "platform-and-operations",
+      "source_file_count": 14,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/commerce",
+      "side": "frontend",
+      "name": "commerce",
+      "domain": "commerce-and-billing",
+      "source_file_count": 21,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/commerce-connect",
+      "side": "frontend",
+      "name": "commerce-connect",
+      "domain": "commerce-and-billing",
+      "source_file_count": 13,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/commerce-ucp",
+      "side": "frontend",
+      "name": "commerce-ucp",
+      "domain": "commerce-and-billing",
+      "source_file_count": 8,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/commerce-ucp-buyer",
+      "side": "frontend",
+      "name": "commerce-ucp-buyer",
+      "domain": "commerce-and-billing",
+      "source_file_count": 11,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/connections",
+      "side": "frontend",
+      "name": "connections",
+      "domain": "identity-and-governance",
+      "source_file_count": 21,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/consent",
+      "side": "frontend",
+      "name": "consent",
+      "domain": "identity-and-governance",
+      "source_file_count": 17,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/creative-briefs",
+      "side": "frontend",
+      "name": "creative-briefs",
+      "domain": "marketing-campaigns",
+      "source_file_count": 12,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/creative-video",
+      "side": "frontend",
+      "name": "creative-video",
+      "domain": "documents-and-artifacts",
+      "source_file_count": 8,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/crm",
+      "side": "frontend",
+      "name": "crm",
+      "domain": "customer-data-and-sales",
+      "source_file_count": 64,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/csm",
+      "side": "frontend",
+      "name": "csm",
+      "domain": "customer-data-and-sales",
+      "source_file_count": 12,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/custom-domains",
+      "side": "frontend",
+      "name": "custom-domains",
+      "domain": "content-and-publishing",
+      "source_file_count": 9,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/dashboard",
+      "side": "frontend",
+      "name": "dashboard",
+      "domain": "platform-and-operations",
+      "source_file_count": 97,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/dealers",
+      "side": "frontend",
+      "name": "dealers",
+      "domain": "customer-data-and-sales",
+      "source_file_count": 11,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/design-system-gallery",
+      "side": "frontend",
+      "name": "design-system-gallery",
+      "domain": "platform-and-operations",
+      "source_file_count": 7,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/developer-keys",
+      "side": "frontend",
+      "name": "developer-keys",
+      "domain": "platform-and-operations",
+      "source_file_count": 9,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/docs",
+      "side": "frontend",
+      "name": "docs",
+      "domain": "content-and-publishing",
+      "source_file_count": 11,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/document-editor",
+      "side": "frontend",
+      "name": "document-editor",
+      "domain": "documents-and-artifacts",
+      "source_file_count": 38,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/documents",
+      "side": "frontend",
+      "name": "documents",
+      "domain": "documents-and-artifacts",
+      "source_file_count": 20,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/drawings",
+      "side": "frontend",
+      "name": "drawings",
+      "domain": "documents-and-artifacts",
+      "source_file_count": 22,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/email",
+      "side": "frontend",
+      "name": "email",
+      "domain": "content-and-publishing",
+      "source_file_count": 21,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/entities",
+      "side": "frontend",
+      "name": "entities",
+      "domain": "platform-and-operations",
+      "source_file_count": 12,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/environments",
+      "side": "frontend",
+      "name": "environments",
+      "domain": "platform-and-operations",
+      "source_file_count": 9,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/evals",
+      "side": "frontend",
+      "name": "evals",
+      "domain": "workflow-and-ai",
+      "source_file_count": 23,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/forms",
+      "side": "frontend",
+      "name": "forms",
+      "domain": "content-and-publishing",
+      "source_file_count": 27,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/funnels",
+      "side": "frontend",
+      "name": "funnels",
+      "domain": "marketing-campaigns",
+      "source_file_count": 18,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/job-search",
+      "side": "frontend",
+      "name": "job-search",
+      "domain": "vertical-job-search",
+      "source_file_count": 26,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/kb",
+      "side": "frontend",
+      "name": "kb",
+      "domain": "platform-and-operations",
+      "source_file_count": 15,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/kicktodo",
+      "side": "frontend",
+      "name": "kicktodo",
+      "domain": "vertical-kicktodo",
+      "source_file_count": 36,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/kicktodo-admin",
+      "side": "frontend",
+      "name": "kicktodo-admin",
+      "domain": "vertical-kicktodo",
+      "source_file_count": 33,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/kicktodo-circles",
+      "side": "frontend",
+      "name": "kicktodo-circles",
+      "domain": "vertical-kicktodo",
+      "source_file_count": 14,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/kicktodo-community",
+      "side": "frontend",
+      "name": "kicktodo-community",
+      "domain": "vertical-kicktodo",
+      "source_file_count": 8,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/kicktodo-engagement",
+      "side": "frontend",
+      "name": "kicktodo-engagement",
+      "domain": "vertical-kicktodo",
+      "source_file_count": 8,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/kicktodo-metrics",
+      "side": "frontend",
+      "name": "kicktodo-metrics",
+      "domain": "vertical-kicktodo",
+      "source_file_count": 7,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/kicktodo-org-programs",
+      "side": "frontend",
+      "name": "kicktodo-org-programs",
+      "domain": "vertical-kicktodo",
+      "source_file_count": 7,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/kicktodo-seats",
+      "side": "frontend",
+      "name": "kicktodo-seats",
+      "domain": "vertical-kicktodo",
+      "source_file_count": 9,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/kicktodo-studio",
+      "side": "frontend",
+      "name": "kicktodo-studio",
+      "domain": "vertical-kicktodo",
+      "source_file_count": 21,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/knowledge-sync",
+      "side": "frontend",
+      "name": "knowledge-sync",
+      "domain": "workflow-and-ai",
+      "source_file_count": 9,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/manual-tests",
+      "side": "frontend",
+      "name": "manual-tests",
+      "domain": "platform-and-operations",
+      "source_file_count": 10,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/marketplace",
+      "side": "frontend",
+      "name": "marketplace",
+      "domain": "platform-and-operations",
+      "source_file_count": 40,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/media",
+      "side": "frontend",
+      "name": "media",
+      "domain": "content-and-publishing",
+      "source_file_count": 20,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/model-router",
+      "side": "frontend",
+      "name": "model-router",
+      "domain": "workflow-and-ai",
+      "source_file_count": 10,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/models",
+      "side": "frontend",
+      "name": "models",
+      "domain": "workflow-and-ai",
+      "source_file_count": 8,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/navigation-settings",
+      "side": "frontend",
+      "name": "navigation-settings",
+      "domain": "platform-and-operations",
+      "source_file_count": 9,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/notebooks",
+      "side": "frontend",
+      "name": "notebooks",
+      "domain": "documents-and-artifacts",
+      "source_file_count": 9,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/notifications",
+      "side": "frontend",
+      "name": "notifications",
+      "domain": "platform-and-operations",
+      "source_file_count": 1,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/operations",
+      "side": "frontend",
+      "name": "operations",
+      "domain": "platform-and-operations",
+      "source_file_count": 8,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/podcasts",
+      "side": "frontend",
+      "name": "podcasts",
+      "domain": "documents-and-artifacts",
+      "source_file_count": 15,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/priority-matrix",
+      "side": "frontend",
+      "name": "priority-matrix",
+      "domain": "strategy-and-work",
+      "source_file_count": 21,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/product-discovery",
+      "side": "frontend",
+      "name": "product-discovery",
+      "domain": "platform-and-operations",
+      "source_file_count": 9,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/production",
+      "side": "frontend",
+      "name": "production",
+      "domain": "platform-and-operations",
+      "source_file_count": 10,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/profile-memory",
+      "side": "frontend",
+      "name": "profile-memory",
+      "domain": "identity-and-governance",
+      "source_file_count": 12,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/profiles",
+      "side": "frontend",
+      "name": "profiles",
+      "domain": "identity-and-governance",
+      "source_file_count": 18,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/projects",
+      "side": "frontend",
+      "name": "projects",
+      "domain": "strategy-and-work",
+      "source_file_count": 33,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/promotions",
+      "side": "frontend",
+      "name": "promotions",
+      "domain": "marketing-campaigns",
+      "source_file_count": 9,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/publishing",
+      "side": "frontend",
+      "name": "publishing",
+      "domain": "content-and-publishing",
+      "source_file_count": 8,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/recommendations",
+      "side": "frontend",
+      "name": "recommendations",
+      "domain": "marketing-campaigns",
+      "source_file_count": 9,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/sales-commissions",
+      "side": "frontend",
+      "name": "sales-commissions",
+      "domain": "customer-data-and-sales",
+      "source_file_count": 8,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/sales-maps",
+      "side": "frontend",
+      "name": "sales-maps",
+      "domain": "customer-data-and-sales",
+      "source_file_count": 18,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/scheduled-chats",
+      "side": "frontend",
+      "name": "scheduled-chats",
+      "domain": "workflow-and-ai",
+      "source_file_count": 8,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/service-desk",
+      "side": "frontend",
+      "name": "service-desk",
+      "domain": "service-operations",
+      "source_file_count": 11,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/settings-shell",
+      "side": "frontend",
+      "name": "settings-shell",
+      "domain": "platform-and-operations",
+      "source_file_count": 15,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/sharing",
+      "side": "frontend",
+      "name": "sharing",
+      "domain": "platform-and-operations",
+      "source_file_count": 18,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/showcase",
+      "side": "frontend",
+      "name": "showcase",
+      "domain": "platform-and-operations",
+      "source_file_count": 9,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/site",
+      "side": "frontend",
+      "name": "site",
+      "domain": "platform-and-operations",
+      "source_file_count": 38,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/slides",
+      "side": "frontend",
+      "name": "slides",
+      "domain": "documents-and-artifacts",
+      "source_file_count": 15,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/strategy",
+      "side": "frontend",
+      "name": "strategy",
+      "domain": "strategy-and-work",
+      "source_file_count": 20,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/territories",
+      "side": "frontend",
+      "name": "territories",
+      "domain": "customer-data-and-sales",
+      "source_file_count": 10,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/tutorials",
+      "side": "frontend",
+      "name": "tutorials",
+      "domain": "platform-and-operations",
+      "source_file_count": 21,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/twin",
+      "side": "frontend",
+      "name": "twin",
+      "domain": "workflow-and-ai",
+      "source_file_count": 9,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/ui-plugins",
+      "side": "frontend",
+      "name": "ui-plugins",
+      "domain": "platform-and-operations",
+      "source_file_count": 14,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/usage-analytics",
+      "side": "frontend",
+      "name": "usage-analytics",
+      "domain": "analytics-and-measurement",
+      "source_file_count": 10,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/users",
+      "side": "frontend",
+      "name": "users",
+      "domain": "identity-and-governance",
+      "source_file_count": 9,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    },
+    {
+      "path": "frontend/react/src/features/webinars",
+      "side": "frontend",
+      "name": "webinars",
+      "domain": "content-and-publishing",
+      "source_file_count": 10,
+      "section": 11,
+      "baseline": "Source inventoried; full runtime/competitive depth unverified",
+      "availability": "Collect actual installed/enabled/entitled/credentialed state per deployment",
+      "required_evidence": [
+        "named buyer and complete journey",
+        "positive and failure/recovery outcomes",
+        "role/tenant/toggle/entitlement matrix",
+        "node/agent/chain reachability where applicable",
+        "data/export/erasure lifecycle",
+        "responsive/theme/AT/locale where applicable",
+        "specialist comparison and verified gap disposition"
+      ],
+      "status": "Open"
+    }
+  ]
+}

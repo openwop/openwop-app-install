@@ -3,7 +3,12 @@
  * projection. `v2-compensation-read-projection` (suite) failed its MUST while
  * `compensation` sat on `major2Ledger.ts`; this pins the host side of both of
  * that scenario's legs, plus what the scenario cannot see: the projection of a
- * run that actually owes something, and the major-1 refusal.
+ * run that actually owes something. Tracker: TST-BTR-4.
+ *
+ * Red when (wave 60 probes w60g4-comp-*): the route projects no ledger rows;
+ * an irreversible effect is not flagged; an unresolved row becomes an attempt;
+ * `completed` is not `succeeded`; `manual` is not spelled `manual-intervention`;
+ * a row with no nodeId is given one; a resolution's reason is dropped.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';
@@ -87,7 +92,9 @@ describe('ADR 0807 — the route (the suite scenario\'s two legs)', () => {
     expect(validate(res.json), JSON.stringify(validate.errors)).toBe(true);
     expect(res.json.plan).toEqual([{ nodeId: 'send-receipt', order: 0, irreversibleEffect: true }]);
     expect(res.json.attempts).toMatchObject([{ nodeId: 'send-receipt', attempt: 2, outcome: 'failed', reason: 'cannot unsend' }]);
-    expect(res.json.status).not.toBe('none');
+    // One irreversible row, resolved `failed`, nothing completed: RFC 0151 §D's
+    // rollup for a plan that can never complete and undid nothing.
+    expect(res.json.status).toBe('failed');
   });
 
   // ADR 0812 P3c-0: "under major 1 the operation does not exist" was deleted with
@@ -103,13 +110,14 @@ describe('ADR 0807 — the route (the suite scenario\'s two legs)', () => {
   });
 });
 
+let seq = 0;
 function row(over: Partial<CompensationObligation>): CompensationObligation {
-  return {
-    inverseActionId: `ia-${Math.random()}`, tenantId: 't', runId: 'r', forwardLogicalInvocationId: 'f', compensationOrdinal: 0,
+  const base: CompensationObligation = {
+    inverseActionId: `ia-${seq++}`, tenantId: 't', runId: 'r', forwardLogicalInvocationId: 'f', compensationOrdinal: 0,
     profileVersion: '1', effectKind: 'email', shape: 'forward-effect', resultDigest: 'd', contractDigest: 'c', requiredScopes: [],
     state: 'requested', attempts: 0, committedAt: '2026-10-03T00:00:00.000Z', updatedAt: '2026-10-03T00:00:00.000Z',
-    ...over,
-  } as CompensationObligation;
+  };
+  return { ...base, ...over };
 }
 
 describe('ADR 0807 — the projection of a run that owes something', () => {

@@ -32,7 +32,6 @@ import { describe, expect, it } from 'vitest';
 import {
   SLO_CATALOG,
   RUNBOOK_DOC,
-  githubAnchor,
   projectRows,
   alertsForRow,
   type LabelMatch,
@@ -51,6 +50,11 @@ const RUNBOOK = join(REPO_ROOT, RUNBOOK_DOC);
  *  catalog, so a row deleted from BOTH sides still goes red and has to be a
  *  deliberate decision. */
 const PUBLISHED_OBJECTIVES = 32;
+/** A literal, so the link format is pinned without the product's slugger. */
+const A1_RUNBOOK = 'docs/runbooks/slo-alerts.md#a1-http-availability';
+/** Non-table, non-blockquote objective-id references in docs/SLO.md: MEASURED
+ *  24 at 0151a8bb2 with the widened `[A-Z]\d+` pattern (wave 61). */
+const REFERENCED_FLOOR = 23;
 
 const sloDocText = readFileSync(SLO_DOC, 'utf8');
 
@@ -308,7 +312,8 @@ describe('ADR 0556 P2 — every alert points at a runbook section that exists', 
   it('read a runbook with sections in it (the parse guard)', () => {
     // An empty heading list would make every loop below pass by never running
     // an assertion that could fail.
-    expect(headings.length).toBeGreaterThanOrEqual(20);
+    // MEASURED 28 `##` sections at 0151a8bb2 (/grade-tests wave 61).
+    expect(headings.length).toBeGreaterThanOrEqual(27);
     expect(new Set(headings).size).toBe(headings.length);
   });
 
@@ -322,7 +327,13 @@ describe('ADR 0556 P2 — every alert points at a runbook section that exists', 
   });
 
   it('resolves every EMITTED alert\'s runbook link to a heading in that file', () => {
-    const anchors = new Set(headings.map(githubAnchor));
+    // The anchors are derived HERE, by GitHub's slug rule written out
+    // independently of the product's `githubAnchor`: the old version mapped the
+    // headings through the product function, so a broken slugger moved both
+    // sides and stayed green (8fw3g1-slod-anchor, round-1 vacuous).
+    const githubSlug = (h: string): string => h.toLowerCase().split('').filter((c) => /[a-z0-9 -]/.test(c)).join('').trim().split(/ +/).join('-');
+    const anchors = new Set(headings.map(githubSlug));
+    expect(anchors.has('a1-http-availability'), 'the slug rule itself, on a literal heading').toBe(true);
     const emitted: string[] = [];
     for (const spec of projectable) {
       const row = breachOne(spec);
@@ -332,6 +343,9 @@ describe('ADR 0556 P2 — every alert points at a runbook section that exists', 
       expect(anchors, `SLO ${spec.id} → ${alerts[0]!.runbook}`).toContain(anchor);
       emitted.push(spec.id);
     }
+    // One link pinned as a literal, end to end.
+    const a1 = projectable.find((s) => s.id === 'A1');
+    expect(alertsForRow(breachOne(a1!))[0]!.runbook).toBe(A1_RUNBOOK);
     // The emitted set IS the projectable set — no row quietly absent.
     expect(emitted.sort()).toEqual(projectable.map((s) => s.id).sort());
   });
@@ -367,11 +381,12 @@ describe('ADR 0556 P2 — in-doc cross-references resolve', () => {
       // example, and counting it would make the fix trip the test that caught
       // the bug. Meta-commentary about a reference is not a reference.
       if (t.startsWith('>')) continue;
-      for (const m of line.matchAll(/\b([A-Z]\d)\b/g)) {
+      // `\d+`, not `\d`: a single-digit pattern cannot see a dangling `A12`.
+      for (const m of line.matchAll(/\b([A-Z]\d+)\b/g)) {
         if (groups.has(m[1]![0]!)) referenced.add(m[1]!);
       }
     }
-    expect(referenced.size).toBeGreaterThan(5);
+    expect(referenced.size).toBeGreaterThanOrEqual(REFERENCED_FLOOR);
     const dangling = [...referenced].filter((r) => !ids.has(r)).sort();
     expect(dangling).toEqual([]);
   });

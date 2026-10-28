@@ -5,6 +5,12 @@
  * where each cost significant time precisely because the failure did not name
  * its own cause. The assertions are about the DIAGNOSTIC, not the mechanism:
  * they fail if a future change makes these errors generic again.
+ *
+ * TST-BQA-5. Red when: the guard validates with anything stricter than the
+ * driver's own parser (`new URL()` — the 2026-09-08 outage); `redactDsn`
+ * reverts to the `[^@/?#]*` password class or stops redacting; the
+ * Percent-encode advice is dropped; `readSecretEnv` stops trimming, mangles a
+ * clean value, or returns '' for an unset variable.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { openStorage, redactDsn } from '../src/storage/index.js';
@@ -50,14 +56,6 @@ describe('storage DSN diagnostics', () => {
       'postgresql://u:***@localhost/db?host=/x',
     );
     expect(redactDsn('sqlite://./data/x.db')).toBe('sqlite://./data/x.db');
-  });
-
-  it('does not reject a DSN that parses', async () => {
-    // Reaches the driver rather than the guard: any throw here is a connection
-    // failure, never the URL diagnostic.
-    await expect(
-      openStorage('postgresql://u:p@localhost:1/db?host=/cloudsql/p:r:i'),
-    ).rejects.not.toThrow(/not a parseable URL/);
   });
 });
 

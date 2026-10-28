@@ -64,6 +64,7 @@ const VALID_PLAN: ChallengePlan = {
     estimatedMinutes: 15,
     achievementIds: ['a1'],
     evidencePolicy: 'note' as const,
+    claimRefs: [] as string[],
   })),
 };
 

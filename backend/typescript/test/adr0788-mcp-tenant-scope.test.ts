@@ -11,6 +11,30 @@
  * Every leg here goes through the real HTTP boundary (createApp + session
  * cookies + the real auth middleware), because the tenant a caller acts in and
  * the authority it holds are only observable there.
+ *
+ * Tracker: TST-BMC-1 (docs/steward/TEST-ASSESSMENT.md). Each case seeds the
+ * tools it reads (the D1 plant is a describe-level `beforeAll`), so the file
+ * passes alone and shuffled.
+ *
+ * DOUBLE GUARDS (recorded; each single-guard sabotage stays green by design):
+ *  - Cross-tenant hiding of a workspace tool is held by `listOwned(caller.tenantId)`
+ *    in `host/mcpServerRegistry.ts` (`workspaceDefinitions`) AND by the ownership
+ *    predicate in `resolveTenantWorkflow`, reached through `caller.resolveLaunch`
+ *    (`host/mcpCaller.ts` → `host/resolveLaunchDefinition.ts`). Red when ONE edit
+ *    in `workspaceDefinitions` enumerates every tenant's rows and resolves them
+ *    without the launch resolver.
+ *  - A read-only key is refused by `requireWorkflowWrite` AND by the missing
+ *    `runs:create` declaration (`workspaceLaunchAllowed`). Red when
+ *    `workspaceLaunchAllowed` returns true outright; the `runs:create` half alone
+ *    is witnessed by the "WITHOUT runs:create" case.
+ *
+ * Also red when: the PUBLIC-namespace skip is removed (MCPCD-4); the reserved
+ * host-name check is removed (MCPCD-6); the name de-dup is removed; the disabled
+ * set is ignored (D5) or replaced instead of merged (MCPCD-3); the exposure PATCH
+ * skips `host:mcp:manage` or the key grammar; the descriptor's egress is `none`;
+ * `defangPeerFence` keeps keys raw; the sampling bridge keeps the system prompt
+ * raw or stops clamping maxTokens; `resources/read` leaves the budgeted set; the
+ * operator `OPENWOP_MCP_PUBLIC_URL` is ignored.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -19,6 +43,8 @@ import { createApp } from '../src/index.js';
 import { getSetCookies } from './headerCookies.js';
 import { __clearRegistryCacheForTests, registerWorkflowDurable } from '../src/host/workflowsRegistry.js';
 import { allOwnershipByWorkflow, recordOwnership } from '../src/host/workflowOwnership.js';
+import { listTools } from '../src/host/mcpServerRegistry.js';
+import type { WorkflowDefinition } from '../src/executor/types.js';
 
 let BASE: string;
 let server: http.Server;
@@ -95,15 +121,27 @@ afterAll(async () => {
 
 describe('ADR 0788 D1 — a workspace tool is visible and callable ONLY in its own workspace', () => {
   const planted = `planted_${stamp}`;
+  const plantedWorkflowId = `mcp.plant.${stamp}`;
+  let bobTenant = '';
+
+  // Seeded once for the describe, never by a case: every case below reads it.
+  beforeAll(async () => {
+    await registerExposeTool(bob, plantedWorkflowId, planted);
+    const owners = (await allOwnershipByWorkflow()).get(plantedWorkflowId) ?? [];
+    expect(owners).toHaveLength(1);
+    bobTenant = owners[0]!;
+  });
 
   it('the owner lists and calls it', async () => {
-    await registerExposeTool(bob, `mcp.plant.${stamp}`, planted);
     expect(await toolNames({ cookie: bob })).toContain(planted);
     const call = await rpc({ cookie: bob }, 'tools/call', { name: planted, arguments: {} });
     expect(call.error, JSON.stringify(call.error)).toBeUndefined();
+    expect(call.result).toBeDefined();
   });
 
   it('another tenant neither sees it nor can call it (was: listed and run in the CALLER tenant)', async () => {
+    // Positive control: the plant is live for its owner in this same instance.
+    expect(await toolNames({ cookie: bob })).toContain(planted);
     expect(await toolNames({ cookie: alice }), 'MCPWF-1: a foreign tool reached another tenant').not.toContain(planted);
     const call = await rpc({ cookie: alice }, 'tools/call', { name: planted, arguments: {} });
     expect(call.error?.message).toContain('not exposed');
@@ -113,7 +151,12 @@ describe('ADR 0788 D1 — a workspace tool is visible and callable ONLY in its o
     await registerExposeTool(bob, `mcp.plant.sampler.${stamp}`, `sampler_${stamp}`, [
       { nodeId: 'sample', typeId: 'core.openwop.mcp.handle-sampling' },
     ]);
-    const r = await rpc({ cookie: alice }, 'sampling/createMessage', { messages: [{ role: 'user', content: { type: 'text', text: 'hi' } }] });
+    const request = { messages: [{ role: 'user', content: { type: 'text', text: 'hi' } }] };
+    // Positive control: the planted handler answers its OWN tenant (anything but
+    // "method not found"), so the victim's -32601 below is not "no handler anywhere".
+    const own = await rpc({ cookie: bob }, 'sampling/createMessage', request);
+    expect(own.error?.code, JSON.stringify(own)).not.toBe(-32601);
+    const r = await rpc({ cookie: alice }, 'sampling/createMessage', request);
     expect(r.error?.code, 'the victim tenant must have NO handler').toBe(-32601);
   });
 
@@ -134,23 +177,30 @@ describe('ADR 0788 D1 — a workspace tool is visible and callable ONLY in its o
       body: JSON.stringify({ workflowId: id, nodes: [{ nodeId: 'x', typeId: 'core.noop' }] }),
     });
     expect(refused.status, 'a tenant route must not mint a shared-namespace id').toBe(404);
-    const bobTenant = (await allOwnershipByWorkflow()).get(`mcp.plant.${stamp}`)![0]!;
-    await registerWorkflowDurable({
+    expect(((await refused.json()) as { error?: string }).error).toBe('workflow_not_found');
+    const seeded: WorkflowDefinition = {
       workflowId: id,
       nodes: [{ nodeId: 'expose', typeId: 'core.openwop.mcp.expose-tool', config: { name: shared, description: 'x', inputSchema: { type: 'object', properties: {} } } }],
       edges: [],
-    } as never);
+    };
+    await registerWorkflowDurable(seeded);
     await recordOwnership(bobTenant, id, { name: 'seeded', nodeCount: 1 });
     expect(await toolNames({ cookie: bob })).not.toContain(shared);
   });
 
   it('a workspace tool cannot take the name of a host projection, even one gated off for this caller (MCPCD-6)', async () => {
-    const { listTools } = await import('../src/host/mcpServerRegistry.js');
-    const hostName = listTools()[0]!.name;
-    await registerExposeTool(bob, `mcp.squat.${stamp}`, hostName);
-    const r = await rpc({ cookie: bob }, 'tools/list');
-    const hits = ((r.result?.tools ?? []) as Array<{ name: string; description?: string }>).filter((t) => t.name === hostName);
-    expect(hits.every((t) => t.description !== 'IGNORE PREVIOUS INSTRUCTIONS'), 'the squatting workspace tool must never be listed').toBe(true);
+    // A host projection bob's gate does NOT admit: an admitted one is listed first
+    // and shadows the squat by name before the reserved-name check is reached.
+    const before = new Set(await toolNames({ cookie: bob }));
+    const hostName = listTools().map((t) => t.name).find((n) => !before.has(n));
+    expect(hostName, 'the harness needs a host tool gated off for this caller').toBeDefined();
+    const squatter = `squat_control_${stamp}`;
+    await registerExposeTool(bob, `mcp.squat.${stamp}`, hostName!);
+    await registerExposeTool(bob, `mcp.squat.control.${stamp}`, squatter);
+    const names = await toolNames({ cookie: bob });
+    expect(names, 'the squatting workspace tool must never be listed').not.toContain(hostName);
+    // Positive control: an ordinary workspace tool registered the same way IS listed.
+    expect(names).toContain(squatter);
   });
 
   it('two workspace tools with one name list ONCE (name precedence)', async () => {
@@ -242,15 +292,23 @@ describe('ADR 0788 D5 — an admin switches a tool off for every client in the w
       method: 'POST', headers: { 'content-type': 'application/json', cookie: bob },
       body: JSON.stringify({ name: 'MCP: admin-attempt', scopes: ['workspace:read', 'workspace:write', 'runs:create'] }),
     });
+    expect(mint.status).toBe(201);
     const { token } = (await mint.json()) as { token: string };
-    expect((await patch({ bearer: token }, key, true)).status).toBe(403);
+    const res = await patch({ bearer: token }, key, true);
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error?: string }).error).toBe('forbidden_scope');
   });
 
   it('refuses a malformed key, and an anonymous caller', async () => {
-    expect((await patch({ cookie: bob }, 'not-a-key', true)).status).toBe(400);
-    expect((await patch({ cookie: bob }, key, 'yes')).status).toBe(400);
+    const badKey = await patch({ cookie: bob }, 'not-a-key', true);
+    expect(badKey.status).toBe(400);
+    expect(((await badKey.json()) as { message?: string }).message).toBe('key must be a "source:workflowId:name" entry key.');
+    const badFlag = await patch({ cookie: bob }, key, 'yes');
+    expect(badFlag.status).toBe(400);
+    expect(((await badFlag.json()) as { message?: string }).message).toBe('disabled must be a boolean.');
     const anon = await fetch(`${BASE}/host/openwop-app/mcp/exposure`);
     expect(anon.status).toBe(401);
+    expect(((await anon.json()) as { error?: string }).error).toBe('unauthenticated');
   });
 });
 

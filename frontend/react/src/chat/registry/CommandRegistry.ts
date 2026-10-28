@@ -25,6 +25,9 @@ export interface CommandContext {
   config: BYOKActiveConfig;
   /** Append a synthetic system message to the visible chat (e.g., /help output). */
   emitSystem: (text: string) => void;
+  /** ADR 0993 D1 — put text in the composer the command was typed in, for the
+   *  user to review and send. Optional so existing callers and tests compile. */
+  insert?: (text: string) => void;
 }
 
 export type CommandHandler = (args: string, ctx: CommandContext) => Promise<boolean> | boolean;
@@ -99,6 +102,14 @@ export function filterCommands(query: string): readonly CommandRegistration[] {
     if (reg.aliases?.some((a) => a.slice(1).toLowerCase().includes(q))) return true;
     return false;
   });
+}
+
+/** Remove one command (and the aliases that point at it). Returns whether it existed. */
+export function unregisterCommand(name: string): boolean {
+  const reg = registry.get(name);
+  if (!reg) return false;
+  for (const [key, value] of [...registry]) if (value === reg) registry.delete(key);
+  return true;
 }
 
 export function clearCommands(): void {

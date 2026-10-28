@@ -17,6 +17,7 @@ import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { getOrder } from '../src/features/commerce/commerceService.js';
+import { publishedFunnel } from './helpers/publishedFunnel.js';
 
 let BASE: string; let server: http.Server; let n = 0;
 
@@ -69,12 +70,15 @@ const checkout = (orgId: string): string => `/host/openwop-app/public-store/${en
 describe('ADR 0296 P1 — order bumps in the public checkout', () => {
   it('prices accepted bumps into the single order with route-derived origin + the funnel stamp', async () => {
     const { tenantId, orgId, mainId, bumpId } = await shop();
+    // ADR 0948 D2 — a funnel ref must name a real published checkout that offers the bump.
+    const fn = await publishedFunnel(tenantId, orgId, [{ kind: 'checkout', offer: { productIds: [mainId], bumpProductIds: [bumpId] } }]);
+    const ref = { funnelId: fn.funnelId, stepId: fn.stepIds[0]! };
     const guest = client();
     const res = await guest.post(checkout(orgId), {
       email: `guest-${n++}@x.test`,
       lines: [{ productId: mainId, quantity: 1 }],
       bumps: [{ productId: bumpId }],
-      funnel: { funnelId: 'fn-1', stepId: 'st-checkout' },
+      funnel: ref,
     });
     expect(res.status).toBe(201);
     expect(res.body.total).toBe(120); // 100 + the 20 bump, ONE charge
@@ -83,7 +87,7 @@ describe('ADR 0296 P1 — order bumps in the public checkout', () => {
     const bumpLine = order?.items.find((i) => i.productId === bumpId);
     expect(bumpLine?.origin).toBe('bump');
     expect(order?.items.find((i) => i.productId === mainId)?.origin).toBeUndefined();
-    expect(order?.funnelRef).toEqual({ funnelId: 'fn-1', stepId: 'st-checkout' });
+    expect(order?.funnelRef).toEqual(ref);
     expect(order?.total).toBe(120); // the persisted ONE charge, not just the response
   });
 

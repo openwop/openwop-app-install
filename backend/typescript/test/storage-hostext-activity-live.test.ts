@@ -6,7 +6,19 @@
  * the `k LIKE 'hostext:%'` keyspace prefilter, the value-LIKE parameterization
  * (incl. escaping), and the batched chat cross-check.
  *
- * Skips gracefully when Docker is unreachable (the pg-sql-live pattern);
+ * It also pins grade-pass F-7: `lastChatAt` is rendered with `to_char(… 'YYYY-
+ * MM-DD"T"…"Z"')`. The bare `::text` render ('YYYY-MM-DD hh:mm:ss+00') has a
+ * SPACE at position 10, which string-compares below 'T', so a same-day chat
+ * touch read as stale against the ISO cutoff. The case asserts the exact ISO
+ * shape, so reverting to `::text` reds it.
+ *
+ * RUNS IN NO LANE (recorded gap, grade-tests wave 61). `npm run ci` sets
+ * `OPENWOP_SKIP_TESTCONTAINERS=1` for the whole backend suite, and the
+ * `OPENWOP_CI_LIVE=1` block of `scripts/ci.sh` (`ci:full`) names pgvector-live,
+ * pg-sql-live, opensearch-live and storage-adapter-parity-testcontainers, NOT
+ * this file. So it executes only when someone runs it by hand with Docker up,
+ * and its probes (8fw3g2-hx-kprefix, 8fw3g2-hx-f7-r2) are unwitnessed on any
+ * gate. Skips gracefully when Docker is unreachable (the pg-sql-live pattern);
  * `OPENWOP_SKIP_TESTCONTAINERS=1` skips explicitly.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -67,6 +79,8 @@ describe('postgres listHostExtTenantActivity (live)', () => {
     expect(ids).toEqual(['anon:pg-a']);
     const a = rows[0]!;
     expect(typeof a.lastHostExtAt).toBe('string');
-    expect(a.lastChatAt).not.toBeNull();
+    expect(Number.isNaN(Date.parse(a.lastHostExtAt))).toBe(false);
+    // F-7: the exact ISO-8601 UTC shape, 'T' at position 10.
+    expect(a.lastChatAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
   });
 });

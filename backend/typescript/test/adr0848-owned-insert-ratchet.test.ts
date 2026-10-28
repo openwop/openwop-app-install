@@ -9,6 +9,9 @@
  *     is the shared insert or a `compareAndSwap` (a blind read-then-put after a delete
  *     resurrected the row — architect review M6);
  *  3. no second private "owned or conflict" helper growing back.
+ *
+ * TST-BWB-9 (grade-tests w62): red when an adopter stops calling
+ * `insertOwnedOrConflict(<store>,` or when emailService writes a template blind (`.put(`).
  */
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';

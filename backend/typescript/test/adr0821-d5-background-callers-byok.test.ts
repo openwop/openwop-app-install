@@ -135,8 +135,8 @@ describe('ADR 0821 D5 — chat auto-title honours the BYOK text opt-in', () => {
 describe('ADR 0821 D5 — memory extraction honours the BYOK text opt-in', () => {
   it('opt-in OFF (default): stays on managed, attributed + metered to the acting subject', async () => {
     await bind(false);
-    vi.mocked(dispatchManagedChat).mockResolvedValueOnce({ provider: 'openwop-free', model: 'openwop-free', completion: 'Prefers dark mode' });
-    expect(await llmExtractFacts(T, 'I like dark mode', 'user:alice')).toEqual(['Prefers dark mode']);
+    vi.mocked(dispatchManagedChat).mockResolvedValueOnce({ provider: 'openwop-free', model: 'openwop-free', completion: '{"facts":[{"fact":"Prefers dark mode","category":"preference","evidence":"I like dark mode"}]}' });
+    expect(await llmExtractFacts(T, ['I like dark mode'], { actingSubject: 'user:alice' })).toEqual({ status: 'ok', facts: [{ fact: 'Prefers dark mode', category: 'preference' }], rejected: 0 });
     expect(vi.mocked(dispatchManagedChat)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(dispatchManagedChat).mock.calls[0]![0]).toMatchObject({ tenantId: T, featureId: 'memory-auto-extract', actingSubject: 'user:alice' });
     expect(googleCalls()).toEqual([]);
@@ -144,8 +144,8 @@ describe('ADR 0821 D5 — memory extraction honours the BYOK text opt-in', () =>
 
   it('opt-in ON + usable key: the tenant key is called on its bound model, managed is never reached', async () => {
     await bind(true);
-    googleText = 'Prefers dark mode\nWorks at Acme';
-    expect(await llmExtractFacts(T, 'I like dark mode, I work at Acme', 'user:alice')).toEqual(['Prefers dark mode', 'Works at Acme']);
+    googleText = '{"facts":[{"fact":"Prefers dark mode","category":"preference","evidence":"I like dark mode"},{"fact":"Works at Acme","category":"role","evidence":"I work at Acme"}]}';
+    expect(await llmExtractFacts(T, ['I like dark mode, I work at Acme'], { actingSubject: 'user:alice' })).toEqual({ status: 'ok', facts: [{ fact: 'Prefers dark mode', category: 'preference' }, { fact: 'Works at Acme', category: 'role' }], rejected: 0 });
     expect(vi.mocked(dispatchManagedChat)).not.toHaveBeenCalled();
     expect(googleCalls()).toHaveLength(1);
     expect(googleCalls()[0]).toContain(`/models/${BOUND_MODEL}:`);
@@ -156,17 +156,18 @@ describe('ADR 0821 D5 — memory extraction honours the BYOK text opt-in', () =>
     await removeSecret('gem', { tenantId: T });
     // A REAL fact, so the managed completion is shown to flow through — 'NONE' → [] was
     // indistinguishable from the error/no-op result.
-    vi.mocked(dispatchManagedChat).mockResolvedValueOnce({ provider: 'openwop-free', model: 'openwop-free', completion: 'Works at Acme' });
-    expect(await llmExtractFacts(T, 'hello', 'user:alice')).toEqual(['Works at Acme']);
+    vi.mocked(dispatchManagedChat).mockResolvedValueOnce({ provider: 'openwop-free', model: 'openwop-free', completion: '{"facts":[{"fact":"Works at Acme","category":"role","evidence":"I work at Acme"}]}' });
+    expect(await llmExtractFacts(T, ['hello, I work at Acme'], { actingSubject: 'user:alice' })).toEqual({ status: 'ok', facts: [{ fact: 'Works at Acme', category: 'role' }], rejected: 0 });
     expect(googleCalls()).toEqual([]);
     expect(vi.mocked(dispatchManagedChat).mock.calls[0]![0]).toMatchObject({ featureId: 'memory-auto-extract', actingSubject: 'user:alice' });
   });
 
-  it('opt-in ON and the tenant provider errors: no facts, never throws, managed NOT tried', async () => {
+  it('opt-in ON and the tenant provider errors: a typed failure, never throws, managed NOT tried', async () => {
     await bind(true);
     googleStatus = 401;
-    await expect(llmExtractFacts(T, 'I like dark mode', 'user:alice')).resolves.toEqual([]);
-    expect(googleCalls(), 'the tenant key was tried — the [] is its failure, not a skipped dispatch').toHaveLength(1);
+    // ADR 0982 D5 — the failure is typed; before, it was [] (the same as "no facts").
+    await expect(llmExtractFacts(T, ['I like dark mode'], { actingSubject: 'user:alice' })).resolves.toEqual({ status: 'failed', reason: 'provider-error' });
+    expect(googleCalls(), 'the tenant key was tried — the failure is its error, not a skipped dispatch').toHaveLength(1);
     expect(vi.mocked(dispatchManagedChat)).not.toHaveBeenCalled();
   });
 });

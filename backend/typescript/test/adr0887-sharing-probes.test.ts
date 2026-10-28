@@ -23,16 +23,21 @@
  * The publisher verdict is memoized for 30 s (ADR 0887 D1, architect H3), so
  * every "after the change" read first ELAPSES the clock past that bound — which
  * also witnesses the bound: the change is honoured once it lapses, not instantly.
+ *
+ * Tracker TST-BHF-2. Red when (sabotage-witnessed, wave 62): the org-write re-check,
+ * the disabled-publisher check or the resource entitlement re-check is skipped; the
+ * memo outlives (or ignores) its 30 s bound; the expiry 410 is decided before the
+ * other gates; `Cache-Control: private, no-store` is dropped; the list stops redacting
+ * an unreadable title; or adopt accepts a live publisher's or a revoked link.
  */
 
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { getSetCookies } from './headerCookies.js';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
-import { createUserTemplate } from '../src/host/promptStore.js';
 import type { ShareLink } from '../src/features/sharing/sharingService.js';
 import { setUserStatus } from '../src/features/users/usersService.js';
 
@@ -50,8 +55,10 @@ beforeAll(async () => {
     const d = getToggleDefault(id);
     if (d) await saveConfig({ ...d, status: 'on' }, 'test');
   }
-  createUserTemplate({ templateId: 'tpl-adr0887', version: '1.0.0', kind: 'user', text: 'The secret recipe body', name: 'tpl-adr0887' });
 });
+// ADR 0993 D4 — a published body (the library's own store); the tests used a
+// process-global user template, which no longer exists.
+const RECIPE = { kind: 'user', text: 'The secret recipe body' };
 afterAll(async () => { vi.useRealTimers(); await new Promise<void>((res) => server.close(() => res())); });
 
 interface Res<T> { status: number; body: T; headers: Headers }
@@ -68,13 +75,19 @@ function client(): Client {
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b), del: (p) => call('DELETE', p) };
 }
 
-/** Move the clock forward (cumulative, Date only), past the 30 s verdict memo. */
+/** Move the clock forward (cumulative within a case, Date only), past the 30 s
+ *  verdict memo. The base is the CURRENT clock read before faking — under the
+ *  clock-shift lane that is the shifted time the links and verdicts were stamped
+ *  with; `getRealSystemTime()` would move the clock a year BACKWARDS there. */
 let skew = 0;
+let base: number | undefined;
 function elapse(ms = 31_000): void {
+  base ??= Date.now();
   skew += ms;
   vi.useFakeTimers({ toFake: ['Date'] });
-  vi.setSystemTime(vi.getRealSystemTime() + skew);
+  vi.setSystemTime(base + skew);
 }
+afterEach(() => { vi.useRealTimers(); skew = 0; base = undefined; });
 
 let n = 0;
 async function signup(c: Client, tenantId: string): Promise<string> {
@@ -166,7 +179,7 @@ describe('S1 — a link does not outlive its publisher', () => {
 describe('S2 — a link does not outlive the publisher\'s access to the resource', () => {
   it('a shared prompt made private by its owner stops serving on another member\'s link', async () => {
     const t = await team();
-    const created = await t.owner.post<{ entry: { entryId: string } }>(`/host/openwop-app/prompts/orgs/${t.orgId}/entries`, { name: 'Recipe', promptRef: 'tpl-adr0887', visibility: 'shared' });
+    const created = await t.owner.post<{ entry: { entryId: string } }>(`/host/openwop-app/prompts/orgs/${t.orgId}/entries`, { name: 'Recipe', template: RECIPE, visibility: 'shared' });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
     const entryId = created.body.entry.entryId;
     const token = await mint(t.member, t.orgId, { resourceType: 'prompt', resourceId: entryId });
@@ -174,7 +187,7 @@ describe('S2 — a link does not outlive the publisher\'s access to the resource
     expect(before.status).toBe(200);
     expect(before.body.resource.body).toContain('secret recipe');
 
-    const priv = await t.owner.patch(`/host/openwop-app/prompts/orgs/${t.orgId}/entries/${entryId}`, { name: 'Recipe', promptRef: 'tpl-adr0887', visibility: 'private' });
+    const priv = await t.owner.patch(`/host/openwop-app/prompts/orgs/${t.orgId}/entries/${entryId}`, { name: 'Recipe', visibility: 'private' });
     expect(priv.status, JSON.stringify(priv.body)).toBe(200);
     elapse();
 
@@ -216,7 +229,7 @@ describe('S4 — public share responses are never cacheable', () => {
 describe('S5 — the management list does not show a reader titles they cannot read', () => {
   it('another member\'s private prompt link is listed without its title; its publisher still sees it', async () => {
     const t = await team();
-    const created = await t.owner.post<{ entry: { entryId: string } }>(`/host/openwop-app/prompts/orgs/${t.orgId}/entries`, { name: 'Board pay memo', promptRef: 'tpl-adr0887', visibility: 'private' });
+    const created = await t.owner.post<{ entry: { entryId: string } }>(`/host/openwop-app/prompts/orgs/${t.orgId}/entries`, { name: 'Board pay memo', template: RECIPE, visibility: 'private' });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
     await mint(t.owner, t.orgId, { resourceType: 'prompt', resourceId: created.body.entry.entryId, label: 'pay' });
     type L = { links: Array<ShareLink & { cardTitle?: string; label?: string; cardRedacted?: boolean }> };

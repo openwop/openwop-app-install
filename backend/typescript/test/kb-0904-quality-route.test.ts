@@ -84,7 +84,7 @@ describe('ADR 0904 P0 — GET …/kb/orgs/:orgId/quality', () => {
 
     const h = byId.get(open.collectionId)!;
     expect(h.embedder).toMatchObject({ mode: 'local', provider: 'local', model: 'local-hash-v1', available: true });
-    expect(h.retrievalMode).toBe('dense');
+    expect(h.retrievalMode).toBe('hybrid'); // ADR 0904 D5 (P3) — the default for a collection under 5,000 chunks
     expect(h.documentCount).toBe(1);
     // Ingest built the local index, so it serves what the configuration asks for.
     expect(h.indexState).toBe('current');

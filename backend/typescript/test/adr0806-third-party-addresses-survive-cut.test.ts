@@ -12,7 +12,17 @@
  *   so does a read of an authenticated vendor address or any protocol path.
  *
  * Plus the emitters: every address this host hands to an outsider is now the
- * unversioned one, and the OAuth `redirect_uri` moves with the cut.
+ * unversioned one; the OAuth `redirect_uri` stays on the provider-registered
+ * `/v1` twin unless the operator opts in. Tracker: TST-BVC-1.
+ *
+ * Red when (wave 60 probes w60g4-fwd-*, redirect-uri, ingest-url, oauth-held,
+ * embed-api, form-action): a write or an authenticated read is forwarded; a dot
+ * segment or a non-vendor path reaches the Location; the log carries the
+ * token-bearing path; the CORS / no-cache headers, the `/api` prefix or the
+ * query are dropped; the redirect_uri ignores the opt-in or a pending flow's
+ * stored value; the ingest URL is versioned; the OAuth callback is not held;
+ * `embed.js` rewrites a `/api/v1` base wrongly; any server-rendered form posts
+ * to `/v<N>/`.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import http from 'node:http';
@@ -25,13 +35,19 @@ import { beginAuthorization, consumePendingAuth, inboundIngestUrl, redirectUri }
 import { retiredVendorTwinPath } from '../src/middleware/protocolVersion.js';
 
 let server: http.Server; let base = '';
+const ENV = ['OPENWOP_STORAGE_DSN', 'OPENWOP_AUTH_DISABLE_COOKIES', 'OPENWOP_TEST_SEAM_ENABLED'] as const;
+const savedEnv: Record<string, string | undefined> = {};
 beforeAll(async () => {
+  for (const k of ENV) savedEnv[k] = process.env[k];
   process.env.OPENWOP_STORAGE_DSN = 'memory://'; process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true'; process.env.OPENWOP_TEST_SEAM_ENABLED = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((resolve) => { server = app.listen(0, '127.0.0.1', resolve); });
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
-afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
+afterAll(async () => {
+  await new Promise<void>((r) => server.close(() => r()));
+  for (const k of ENV) { const v = savedEnv[k]; if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+});
 
 /** A GET whose path reaches the server BYTE-FOR-BYTE. `fetch` normalises `/./`
  *  and `/../` client-side, which would test a different path than the one named. */
@@ -133,10 +149,10 @@ describe('ADR 0806 — review fixes on the forward', () => {
       expect(sent).toBe('https://host.example/v1/host/openwop-app/connections/slack/callback');
       process.env.OPENWOP_OAUTH_REDIRECT_UNVERSIONED = 'true'; // the operator opted in mid-flow
       expect(redirectUri('slack', 'https://host.example')).not.toBe(sent);
-      delete process.env.OPENWOP_OAUTH_REDIRECT_UNVERSIONED;
       const p = await consumePendingAuth(begun.state);
       expect(p?.redirectUri).toBe(sent);
     } finally {
+      delete process.env.OPENWOP_OAUTH_REDIRECT_UNVERSIONED;
       delete process.env.OPENWOP_OAUTH_SLACK_CLIENT_ID;
       delete process.env.OPENWOP_OAUTH_SLACK_CLIENT_SECRET;
       delete process.env.OPENWOP_OAUTH_CALLBACK_BASE_URL;
@@ -182,13 +198,11 @@ describe('ADR 0806 — emitters hand outsiders the unversioned address', () => {
       .toBe('https://h.example/proxy/v3/host/openwop-app/public');
   });
 
-  it('the inbound-event URL an operator gives a provider is unversioned on both sides of the cut', () => {
-    expect(inboundIngestUrl('c1', 'https://h.example')).toBe('https://h.example/host/openwop-app/connections-inbound/c1');
+  it('the inbound-event URL an operator gives a provider is unversioned', () => {
     expect(inboundIngestUrl('c1', 'https://h.example')).toBe('https://h.example/host/openwop-app/connections-inbound/c1');
   });
 
-  it('the OAuth redirect_uri stays on the registered twin on BOTH sides of the cut; unversioned is an operator opt-in', () => {
-    expect(redirectUri('google', 'https://h.example')).toBe('https://h.example/v1/host/openwop-app/connections/google/callback');
+  it('the OAuth redirect_uri stays on the registered /v1 twin; unversioned is an operator opt-in', () => {
     // The /v1 callback GET is forwarded after the cut, so the registered URI keeps working.
     expect(redirectUri('google', 'https://h.example')).toBe('https://h.example/v1/host/openwop-app/connections/google/callback');
     process.env.OPENWOP_OAUTH_REDIRECT_UNVERSIONED = 'true';

@@ -12,10 +12,13 @@
  * JSON poll of the same run carried `default/<id>`. No `v2-*` conformance
  * scenario covers SSE (there is none), which is why 55/56 green hid it.
  *
- * Three legs, disjoint under the obvious sabotages: a projector applied only
- * to the single-frame path passes leg 1 and fails leg 2 (batch); a projector
- * applied unconditionally passes both and fails leg 3 (major 1 must be the
- * bare id — same bytes as before).
+ * Two legs, disjoint under the obvious sabotages: removing the projection at
+ * the shared `onWire` choke reds both; un-projecting only the batch flush reds
+ * leg 2 alone (grade-tests w63 probes sse-onwire / sse-batch-only). A third leg
+ * (major 1 keeps the bare id) was deleted with major 1 (ADR 0812 P3c-0).
+ *
+ * Each leg asserts the TERMINAL frame was actually read, so a stream that
+ * stalls is red rather than a slow pass on a partial frame list.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';
@@ -46,13 +49,8 @@ async function createRunV2(): Promise<string> {
   });
   expect(res.status, 'v2 create').toBe(201);
   const j = (await res.json()) as { runId: string };
-  // Let the noop run reach its terminal event so the replay carries run.completed.
-  for (let i = 0; i < 50; i++) {
-    const s = await fetch(`${base}/runs/${encodeURIComponent(j.runId)}`, { headers: V2H });
-    const snap = (await s.json()) as { status: string };
-    if (snap.status === 'completed' || snap.status === 'failed') break;
-    await new Promise((r) => setTimeout(r, 20));
-  }
+  // No settle poll: the stream itself is the settle signal — `readFrames` reads
+  // live frames until the terminal one (and each leg asserts it arrived).
   return j.runId;
 }
 
@@ -90,6 +88,11 @@ async function readFrames(path: string, headers: Record<string, string>): Promis
   return frames;
 }
 
+function sawTerminal(frames: Array<{ data: unknown }>): boolean {
+  return frames.some((f) => (Array.isArray(f.data) ? f.data : [f.data])
+    .some((e) => typeof e === 'object' && e !== null && /^run\.(completed|failed|cancelled)$/.test(String((e as { type?: string }).type))));
+}
+
 function runIdsIn(frames: Array<{ data: unknown }>): string[] {
   const out: string[] = [];
   for (const f of frames) {
@@ -107,6 +110,7 @@ describe('SSE frames carry the tenant-bound run id under major 2', () => {
     const bound = await createRunV2();
     expect(bound.startsWith('default/'), bound).toBe(true);
     const frames = await readFrames(`/runs/${encodeURIComponent(bound)}/events`, { 'OpenWOP-Version': '2' });
+    expect(sawTerminal(frames), 'the stream reached its terminal frame').toBe(true);
     const ids = runIdsIn(frames);
     expect(ids.length, 'non-vacuous: frames with a runId were read').toBeGreaterThan(0);
     expect(new Set(ids), 'every frame bound').toEqual(new Set([bound]));
@@ -115,6 +119,7 @@ describe('SSE frames carry the tenant-bound run id under major 2', () => {
   it('batch path (?bufferMs): every element of the batch array is bound', async () => {
     const bound = await createRunV2();
     const frames = await readFrames(`/runs/${encodeURIComponent(bound)}/events?bufferMs=30`, { 'OpenWOP-Version': '2' });
+    expect(sawTerminal(frames), 'the stream reached its terminal frame').toBe(true);
     const batches = frames.filter((f) => f.event === 'batch');
     expect(batches.length, 'non-vacuous: at least one batch frame').toBeGreaterThan(0);
     const ids = runIdsIn(batches);

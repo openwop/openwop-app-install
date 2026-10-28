@@ -118,10 +118,13 @@ describe('the factory happy path reaches a submitted publication (ADR 0458 §2.2
       ({ runId: 'run-factory-A', nodeId, tenantId: T, actingUserId: AUTHOR, inputs, features, variables, ...extra });
 
     // 1. research-frame
-    const frame = await packNodes['feature.kicktodo.nodes.research-frame']!(mkctx('research-frame', { topic: 'Watercolor painting basics', audience: 'absolute beginners' }));
+    const frame = await packNodes['feature.kicktodo.nodes.research-frame']!(mkctx('research-frame', { topic: 'Watercolor painting basics', audience: 'absolute beginners', transformation: 'paint a simple landscape in one sitting' }));
     expect(frame.status).toBe('success');
     const questions = frame.outputs?.questions;
     expect(Array.isArray(questions) && questions.length > 0).toBe(true);
+    // ADR 0975 D3 — the node emits the search query the chain wires into search.query.
+    const searchQuery = frame.outputs?.searchQuery;
+    expect(searchQuery).toBe('Watercolor painting basics: paint a simple landscape in one sitting — research evidence and practical guidance');
 
     // 2. core.web.search — honest non-stub stand-in (`engine:'brave'`) via a
     //    stub webResearch surface (no live egress / SSRF guard in a unit test).
@@ -134,7 +137,7 @@ describe('the factory happy path reaches a submitted publication (ADR 0458 §2.2
     };
     const searchCtx: NodeContext = {
       runId: 'run-factory-A', nodeId: 'search', tenantId: T, actingUserId: AUTHOR,
-      inputs: { query: 'Watercolor painting basics', maxResults: 8 },
+      inputs: { query: searchQuery, maxResults: 8 },
       configurable: {}, attempt: 1, secrets: {}, features, webResearch,
       emit: async () => ({ eventId: 'evt-search', sequence: 0 }),
     };

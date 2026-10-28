@@ -58,6 +58,7 @@ import { getRunArtifact } from '../src/host/runArtifactStore.js';
 import { validateArtifact } from '../src/host/artifactTypes.js';
 import { registerKicktodoCreatorArtifactTypes, CHALLENGE_LESSON_BATCH_TYPE } from '../src/features/kicktodo-creator/artifactSchemas.js';
 import { createBrief, getBrief } from '../src/features/campaign-brief/briefService.js';
+import { createOrg, getOrg } from '../src/host/accessControlService.js';
 import { configureSecretResolver, setSecret } from '../src/byok/secretResolver.js';
 import type { NodeModule, WorkflowDefinition } from '../src/executor/types.js';
 import type { RunRecord } from '../src/types.js';
@@ -72,6 +73,7 @@ afterAll(() => { __clearFeatureSurfaces(); });
 const kicktodoPackUrl = new URL('../../../packs/feature.kicktodo.nodes/index.mjs', import.meta.url).href;
 const chatPackUrl = new URL('../../../packs/vendor.myndhyve.chat/index.mjs', import.meta.url).href;
 const briefPackUrl = new URL('../../../packs/feature.campaign-brief.nodes/index.mjs', import.meta.url).href;
+const orchestrationPackUrl = new URL('../../../packs/feature.campaign-orchestration.nodes/index.mjs', import.meta.url).href;
 
 type NodeFn = (ctx: Record<string, unknown>) => Promise<{ status: string; outputs?: Record<string, unknown>; error?: unknown }>;
 
@@ -93,6 +95,8 @@ const VALID_PLAN = {
     estimatedMinutes: 15,
     achievementIds: ['a1'],
     evidencePolicy: 'photo' as const,
+    // ADR 0975 D7 — with a dossier in scope the plan must cite it; c-1 is the extractor's claim below.
+    claimRefs: day === 1 ? ['c-1'] : [],
   })),
 };
 
@@ -148,6 +152,7 @@ beforeAll(async () => {
   const kt = ((await import(kicktodoPackUrl)) as { nodes: Record<string, NodeFn> }).nodes;
   const chat = (await import(chatPackUrl)) as { approvalGate: NodeFn };
   const brief = ((await import(briefPackUrl)) as { nodes: Record<string, NodeFn> }).nodes;
+  const orchestration = ((await import(orchestrationPackUrl)) as { nodes: Record<string, NodeFn> }).nodes;
 
   // Pack fns signal failure by RETURNING {status:'failed', error} — the production
   // pack loader (packs/tarballLoader.ts) adapts that to the executor's 'failure'
@@ -262,6 +267,9 @@ beforeAll(async () => {
       return { status: 'success', outputs: { result: { verdict: 'pass', findings: [], personaSummary: 'clear' } } } as never;
     },
   } as NodeModule);
+  // ADR 0942 P2 — kernel-approve is the campaign autonomy gate. The REAL pack node:
+  // with no autonomy toggle and an untagged run it is today's open approval gate.
+  register('feature.campaign-orchestration.nodes.autonomy-gate', orchestration['feature.campaign-orchestration.nodes.autonomy-gate']!);
   // Campaign-brief pack nodes — validate as-is; generate-kernel with a canned kernel.
   register('feature.campaign-brief.nodes.validate', brief['feature.campaign-brief.nodes.validate']!);
   register('feature.campaign-brief.nodes.generate-kernel', brief['feature.campaign-brief.nodes.generate-kernel']!, () => ({
@@ -429,6 +437,41 @@ describe('(A) challenge-factory runs to COMPLETION chain-backed (RFC 0133 + 0134
     expect(publication!.completedAt).toBeUndefined();
     expect((await getApproval(publication!.approvalId))?.kind).toBe('challenge-publish');
     expect((await getCandidate(T, candidate.id))?.state).toBe('planned');
+
+    // ADR 0964 D1 — every build-N (a core.subWorkflow) in a REPLAY fork returns its recorded outcome and
+    // re-applies its outputMapping, so NO lesson-batch child run starts again (its
+    // lesson-batch-build node, which calls the model, runs only inside a child).
+    // Before D1 each build-N dispatched a fresh, non-replay child.
+    const forkNow = new Date().toISOString();
+    const forkRun: RunRecord = {
+      runId: `run-cb-e2e-fork-${Math.random().toString(36).slice(2)}`, workflowId: CHALLENGE_FACTORY_WORKFLOW_ID, tenantId: T,
+      status: 'pending', inputs: parent.inputs, metadata: parent.metadata, configurable: parent.configurable,
+      parentRunId: run.runId, forkMode: 'replay', createdAt: forkNow, updatedAt: forkNow,
+    };
+    await storage.insertRun(forkRun);
+    seedRunVariables(forkRun.runId, def.variables, parent.inputs);
+    await executeRun(storage, forkRun, def);
+    // This from-zero harness has no inherited suspended checkpoint: the host
+    // still raises its chat gates. Resolve those explicitly through the real
+    // human-decision path, as for the source above. D1 proves child suppression
+    // and mapped state, not automatic approval or complete gate replay.
+    let replayGateRounds = 0;
+    while ((await storage.getRun(forkRun.runId))?.status === 'waiting-approval' && replayGateRounds++ < 8) {
+      const openGates = await storage.listOpenInterrupts(forkRun.runId);
+      expect(openGates.length, 'a waiting replay must expose its human gate').toBeGreaterThan(0);
+      for (const open of openGates) {
+        expect(open.nodeId).toMatch(/_(?:outline-approve|gate-\d)$/);
+        await __resolveAndResumeForTests(storage, hostSuite, open.interruptId, { decision: 'approved', approved: true });
+      }
+      await __awaitRunResumeChainForTests(forkRun.runId);
+    }
+    const replayed = await storage.getRun(forkRun.runId);
+    expect(replayed?.status, JSON.stringify(replayed?.error)).toBe('completed');
+    expect(await storage.listRunsByParent(forkRun.runId), 'a replay fork re-dispatched a lesson-batch child').toEqual([]);
+    const forkBag = snapshotRunVariables(forkRun.runId) ?? {};
+    const mapped = Object.keys(bag).filter((k) => /^lessonBatch/.test(k));
+    expect(mapped.length, 'non-vacuity: the source mapped its lesson batches').toBeGreaterThan(0);
+    for (const k of mapped) expect(forkBag[k], `${k} re-applied from the served build node`).toEqual(bag[k]);
   });
 });
 
@@ -474,6 +517,12 @@ describe('(A2) a lesson batch that cannot be built stops the factory run', () =>
 describe('(B) campaign-orchestration runs to its DESIGNED human gate chain-backed', () => {
   it('validate → generate-kernel persists the kernel → suspends at the prefixed kernel-approve gate', async () => {
     const T = 'tenant-cb-e2e-campaign';
+    // The marketer is a real member of the brief's org: the campaign-brief surface
+    // scopes a row named by id to an org the run's person may read (security fix,
+    // ADR 0948 P2 review). Before it, this run read the brief by tenant alone.
+    if (!(await getOrg('org-cb-e2e'))) {
+      await createOrg({ tenantId: T, createdBy: 'user:cb-e2e-marketer', name: 'Campaign e2e', orgId: 'org-cb-e2e', ownerSubject: 'user:cb-e2e-marketer' });
+    }
     const brief = await createBrief(T, 'org-cb-e2e', 'user:cb-e2e-marketer', {
       name: 'Watercolor course launch',
       productName: 'Watercolor Basics',
@@ -491,7 +540,14 @@ describe('(B) campaign-orchestration runs to its DESIGNED human gate chain-backe
     // Genuine terminal state: the designed human gate — never forced past it.
     expect(result.status).toBe('waiting-approval');
     expect((await storage.getRun(run.runId))!.currentNodeId).toMatch(/_kernel-approve$/);
-    expect(await storage.listOpenInterrupts(run.runId)).toHaveLength(1);
+    const open = await storage.listOpenInterrupts(run.runId);
+    expect(open).toHaveLength(1);
+    // ADR 0942 P2 — the gate is the autonomy gate in its legacy posture: an approval
+    // with no policy block and no named approvers, exactly today's open gate.
+    const gate = open[0] ? await storage.getInterrupt(open[0].interruptId) : null;
+    expect(gate?.kind).toBe('approval');
+    expect((gate?.data as Record<string, unknown>).autonomy).toBeUndefined();
+    expect((gate?.data as Record<string, unknown>).approverRoleRefs).toBeUndefined();
     // generate-kernel REALLY persisted through the feature surface before the gate.
     const after = await getBrief(T, brief.id);
     expect(after?.kernel?.headline).toBe('Paint boldly');

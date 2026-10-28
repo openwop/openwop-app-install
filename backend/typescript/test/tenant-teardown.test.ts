@@ -6,6 +6,11 @@
  *    member) vanish for the torn-down tenant only; a GHOST row (a retired
  *    namespace no live collection owns) is swept by its JSON tenantId; a
  *    bystander tenant is untouched; fail-closed on a falsy tenant; idempotent.
+ *    The falsy-tenant leg seeds a ghost row whose tenantId is '' so that the
+ *    entry guard (`if (!tenantId) return …` in purgeTenantHostExt) is the one
+ *    that decides: without that row, each collection's own `purgeTenantRows`
+ *    guard and the empty hook list also return 0 (probe 8fw3g3-tt-falsy was
+ *    vacuous), and the ghost scan would match '' === ''.
  *  - introspected `deleteAllTenantData`: tenant-keyed SQL rows beyond the old
  *    hand-list (chat_sessions + chat_messages, user_agents) are deleted and
  *    reported via `otherRows`/`tablesCovered`.
@@ -13,6 +18,7 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import type { Storage } from '../src/storage/storage.js';
+import type { UserAgentRecord } from '../src/types.js';
 import { DurableCollection, initHostExtPersistence, purgeTenantHostExt } from '../src/host/hostExtPersistence.js';
 import { createContact, getContact } from '../src/features/crm/contactsService.js';
 import { createBoard, listBoards } from '../src/host/kanbanService.js';
@@ -35,13 +41,16 @@ describe('purgeTenantHostExt (ADR 0284)', () => {
     // A ghost row — a retired feature's namespace no live DurableCollection owns.
     await storage.kvSet('hostext:retired-feature:row-1', JSON.stringify({ tenantId: A, payload: 'orphan' }));
     await storage.kvSet('hostext:retired-feature:row-2', JSON.stringify({ tenantId: B, payload: 'bystander' }));
+    await storage.kvSet('hostext:retired-feature:row-blank', JSON.stringify({ tenantId: '', payload: 'malformed' }));
 
-    // Fail-closed: a falsy tenant purges nothing.
+    // Fail-closed: a falsy tenant purges nothing, not even a row whose tenant is ''.
     expect(await purgeTenantHostExt('')).toEqual({ deleted: 0, ghostRows: 0, collections: 0 });
+    expect(await storage.kvGet('hostext:retired-feature:row-blank')).not.toBeNull();
 
     const first = await purgeTenantHostExt(A);
-    expect(first.deleted).toBeGreaterThanOrEqual(2); // contact + board at minimum
-    expect(first.ghostRows).toBe(1);
+    // MEASURED on 0151a8bb2: 4 rows across 4 live collections (the contact, the
+    // board, and the rows each service writes beside them) + the one ghost row.
+    expect(first).toEqual({ deleted: 4, ghostRows: 1, collections: 4 });
 
     expect(await getContact(contactA.contactId)).toBeNull();
     expect((await listBoards(A)).find((b) => b.id === boardA.id)).toBeUndefined();
@@ -101,14 +110,28 @@ describe('introspected deleteAllTenantData (ADR 0284)', () => {
     await storage.createChatSession({ sessionId: 'sess-a1', tenantId: A, title: 'Doomed chat', createdAt: now, updatedAt: now, messageCount: 0 });
     await storage.appendChatMessage({ messageId: 'msg-a1', sessionId: 'sess-a1', role: 'user', content: 'hello', meta: null, authorSubject: null, createdAt: now });
     await storage.createChatSession({ sessionId: 'sess-b1', tenantId: B, title: 'Bystander chat', createdAt: now, updatedAt: now, messageCount: 0 });
+    await storage.appendChatMessage({ messageId: 'msg-b1', sessionId: 'sess-b1', role: 'user', content: 'still here', meta: null, authorSubject: null, createdAt: now });
+    const agent = (tenantId: string, agentId: string): UserAgentRecord => ({
+      agentId, tenantId, persona: 'helper', modelClass: 'standard', systemPrompt: 'Be brief.', toolAllowlist: [],
+      memoryShape: { scratchpad: false, conversation: false, longTerm: false }, createdAt: now,
+    });
+    await storage.insertUserAgent(agent(A, 'ua-a1'));
+    await storage.insertUserAgent(agent(B, 'ua-b1'));
 
     const counts = await storage.deleteAllTenantData(A);
-    expect(counts.tablesCovered).toBeGreaterThan(7); // introspection sees more than the old hand-list
-    // chat session lands in otherRows (introspected table beyond the named set);
-    // its message rode the explicit session-keyed child cascade.
-    expect(counts.otherRows).toBeGreaterThanOrEqual(2);
+    // MEASURED 27 tenant_id tables on 0151a8bb2 (the old hand-list named 7). A
+    // schema change that drops one lowers this floor in the same commit.
+    expect(counts.tablesCovered).toBeGreaterThanOrEqual(27);
+    // Exactly A's three rows: the chat session + the user agent (introspected
+    // tables beyond the named set) and the message (the explicit session-keyed
+    // child cascade). B's three rows are not counted.
+    expect(counts.otherRows).toBe(3);
 
     expect(await storage.getChatSession(A, 'sess-a1')).toBeNull();
+    expect(await storage.getChatMessage('sess-a1', 'msg-a1')).toBeUndefined(); // read, not inferred from a count
+    expect(await storage.getUserAgent(A, 'ua-a1')).toBeNull();
     expect(await storage.getChatSession(B, 'sess-b1')).not.toBeNull(); // bystander intact
+    expect(await storage.getChatMessage('sess-b1', 'msg-b1')).toBeDefined();
+    expect(await storage.getUserAgent(B, 'ua-b1')).not.toBeNull();
   });
 });

@@ -29,8 +29,27 @@
 #
 # IT YIELDS TO GATES, ALWAYS. It starts nothing while any suite, gate, waiting
 # gate or merge train is live (scripts/preflight-suite.sh --check, the gate claim,
-# a waiting `--ci-exec`). It polls every 5 s while its own batch runs and kills
-# that batch (its own pid tree only) the moment one appears. Its vitest runs at
+# a waiting `--ci-exec`), and checks again before every batch.
+#
+# MID-BATCH, THE BROKER STOPS IT (ADR 0974 P2, 2026-10-25). Each tick's work runs
+# under a real, preemptible broker lease (`main.mjs lease --class daemon`). Gates,
+# trains, deploys and measurements register with `observe --yield` (broker
+# invariant I11), so the moment one appears the broker asks the lease to yield: the
+# wrapper SIGTERMs this tick's whole process group and exits 75. Under memory
+# pressure the broker also sheds the lease (I9), which the polling never did.
+# The 5-second `pgrep` poll for gates mid-batch STAYS ON as a backstop.
+# CORRECTED 2026-10-26: P2 retired that poll, and on this machine the broker
+# server had been started from a stale checkout whose broker predates I11, so it
+# ignored `--yield`: train 234's gate waited 180 s on a daemon batch. A server
+# keeps the code it started with, and any client can start one from any tree.
+# So the poll is back, and a tick whose broker runs different broker code than
+# this checkout does not take a lease at all (broker_stale). Neither does a
+# broker that cannot be reached (the lease exits 2), nor OPENWOP_DAEMON_YIELD=legacy.
+# The server itself runs from a dedicated worktree, `<checkout>-broker`
+# (scripts/vendor/tracegate-ci/VENDORED.md): never delete it under a live server.
+# A train in ANY repo on this machine also counts as a gate, from its claim through
+# its installs, through its machine-wide marker (scripts/lib/ci-claims.sh).
+# Its vitest runs at
 # utility QoS + nice (see PRIORITY below) with two
 # workers, in batches of 60 files, each ingested on its own. A killed batch
 # records nothing, because a footprint needs a verdict.
@@ -63,10 +82,14 @@ logpipe() { if [ "${OPENWOP_TRACEGATE_STDOUT_IS_LOG:-}" = 1 ]; then cat; else te
 say() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" | logpipe; }
 
 # ── yielding ──────────────────────────────────────────────────────────────────
+if [ -f "$ROOT/scripts/lib/ci-claims.sh" ]; then . "$ROOT/scripts/lib/ci-claims.sh"; else ci_claims_live() { :; }; fi
 gate_live() {
   [ -d "$COMMON/preflight-suite.claim" ] && return 0
   pgrep -f 'preflight-suite\.sh --ci-exec' >/dev/null 2>&1 && return 0
   pgrep -f 'scripts/merge-train\.sh' >/dev/null 2>&1 && return 0
+  # A train in ANY repo on this machine, from its claim through its installs
+  # (scripts/lib/ci-claims.sh, 2026-10-26).
+  [ -n "$(ci_claims_live)" ] && return 0
   return 1
 }
 busy() {
@@ -78,6 +101,31 @@ busy() {
   local load cores
   load="$(sysctl -n vm.loadavg 2>/dev/null | awk '{print int($2)}')"; cores="$(sysctl -n hw.ncpu 2>/dev/null || echo 8)"
   [ "${load:-0}" -gt "$cores" ] && return 0
+  return 1
+}
+# Mid-run polling, under a lease too: a backstop for a broker that does not stop us
+# (see the header; the 2026-10-26 correction).
+yield_mid_run() { gate_live; }
+# broker_stale — 0 when a broker server is running from broker code that differs
+# from this checkout's: its core.mjs hashes differently, or changed on disk after
+# the server started (git moved that tree under it). Its I11 yield is then not
+# trusted. No server, or one we cannot read, is not stale: the lease starts ours.
+broker_stale() {
+  local host pid cmd main core theirs ours started mtime
+  host="$(printf '%s' "${OPENWOP_TRACEGATE_HOST:-$(hostname -s 2>/dev/null || hostname)}" | tr -c 'A-Za-z0-9_-' '_')"
+  pid="$(cat "$LEDGER/broker/$host/broker.pid" 2>/dev/null)" || return 1
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  cmd="$(ps -o command= -p "$pid" 2>/dev/null)" || return 1
+  main="$(printf '%s\n' "$cmd" | grep -oE '[^ ]*/src/broker/main\.mjs' | head -1)"
+  [ -n "$main" ] || return 1
+  core="$(dirname "$main")/core.mjs"
+  theirs="$(shasum -a 256 "$core" 2>/dev/null | cut -d' ' -f1)"
+  ours="$(shasum -a 256 "$ROOT/scripts/vendor/tracegate-ci/src/broker/core.mjs" 2>/dev/null | cut -d' ' -f1)"
+  [ -n "$theirs" ] && [ -n "$ours" ] || return 1
+  [ "$theirs" != "$ours" ] && { BROKER_STALE_WHY="pid $pid serves $core, which differs from this checkout's"; return 0; }
+  started="$(date -j -f '%a %b %d %T %Y' "$(ps -o lstart= -p "$pid" 2>/dev/null)" +%s 2>/dev/null || echo 0)"
+  mtime="$(stat -f %m "$core" 2>/dev/null || echo 0)"
+  [ "$started" -gt 0 ] && [ "$mtime" -gt "$started" ] && { BROKER_STALE_WHY="pid $pid started before $core last changed"; return 0; }
   return 1
 }
 kill_tree() { # kill_tree <pid> — our own process tree only (never pkill by pattern)
@@ -128,7 +176,12 @@ ensure_work_deps() {
       echo "$sha" > "$dir/node_modules/.tracegate-lock-sha"
     fi
   done
+  # WASI-GATE-1: the gate syncs the CPython-WASI asset, so the daemon must too, or
+  # it records a SKIPPED escape suite as a reusable green. OPENWOP_REQUIRE_WASI
+  # (exported below) turns a failed sync into a red file, whose footprint is dropped.
+  bash "$WORK/scripts/sync-pythonwasm.sh" >/dev/null 2>&1 || say "python-wasi sync failed — the WASI tests will run red, not skip"
 }
+export OPENWOP_REQUIRE_WASI=1
 
 TG() { OPENWOP_TRACEGATE_ROOT="$WORK" node "$ROOT/scripts/tracegate.mjs" "$@"; }
 
@@ -154,7 +207,7 @@ recheck_misses() {
         $( [ "$lane" = backend ] && echo OPENWOP_SKIP_TESTCONTAINERS=1 ) node node_modules/vitest/vitest.mjs run --maxWorkers=1 "$rel" ) > "$log" 2>&1 &
     vp=$!
     while kill -0 "$vp" 2>/dev/null; do
-      if gate_live; then say "a gate appeared mid-recheck — killing pid $vp and yielding"; kill_tree "$vp"; wait "$vp" 2>/dev/null || true; return 3; fi
+      if yield_mid_run; then say "a gate appeared mid-recheck — killing pid $vp and yielding"; kill_tree "$vp"; wait "$vp" 2>/dev/null || true; return 3; fi
       sleep 5
     done
     if wait "$vp"; then
@@ -173,6 +226,7 @@ run_lane() {
   local lane="$1" mode="$2" dir run files n i rc=0
   case "$lane" in backend) dir=backend/typescript ;; frontend) dir=frontend/react ;; esac
   run="$(mktemp -d "${TMPDIR:-/tmp}/owp-tracegate-daemon-$lane.XXXXXX")"
+  CUR_RUN="$run" # removed by the TERM trap if the broker stops this tick
   TG select --lane "$lane" --run "$run" --mode "$mode" --audit 0 | logpipe
   files=(); while IFS= read -r f; do [ -n "$f" ] && files+=("$f"); done < "$run/selected.txt"
   if [ "$mode" != shadow ]; then
@@ -186,7 +240,9 @@ run_lane() {
   say "$lane at $(git -C "$WORK" rev-parse --short HEAD): $n file(s) to run ($mode)"
   local extra=()
   [ "$lane" = frontend ] && [ "$mode" = shadow ] && { : > "$run/live-fetch.audit"; extra=(OPENWOP_LIVE_FETCH_AUDIT="$run/live-fetch.audit"); }
-  [ "$lane" = backend ] && extra=(OPENWOP_SKIP_TESTCONTAINERS=1)
+  # ADR 0968 P2: the daemon is the ONLY recorder of the boot split (count-mode
+  # coverage, +12.5% wall), so no gate pays for it (user decision 2026-10-24).
+  [ "$lane" = backend ] && extra=(OPENWOP_SKIP_TESTCONTAINERS=1 OPENWOP_TRACEGATE_BOOT=1)
   # ADR 0702 — a full run is the only run that can prove an admission stale, so
   # the nightly records payload samples (one file per process; batches share it).
   [ "$lane" = backend ] && [ "$mode" = shadow ] && { mkdir -p "$run/payload"; extra+=(OPENWOP_PAYLOAD_AUDIT="$run/payload"); }
@@ -197,7 +253,7 @@ run_lane() {
         node node_modules/vitest/vitest.mjs run --maxWorkers=2 "${files[@]:i:BATCH}" ) >> "$b/vitest.log" 2>&1 &
     local vp=$!
     while kill -0 "$vp" 2>/dev/null; do
-      if gate_live; then say "a gate appeared mid-batch — killing our batch (pid $vp) and yielding"; kill_tree "$vp"; wait "$vp" 2>/dev/null || true; rm -rf "$run"; return 3; fi
+      if yield_mid_run; then say "a gate appeared mid-batch — killing our batch (pid $vp) and yielding"; kill_tree "$vp"; wait "$vp" 2>/dev/null || true; rm -rf "$run"; return 3; fi
       sleep 5
     done
     if ! wait "$vp"; then
@@ -282,9 +338,33 @@ pregate_one() {
   return 1
 }
 
+BROKER_MAIN="$ROOT/scripts/vendor/tracegate-ci/src/broker/main.mjs"
 tick() {
   take_lock || { say "another daemon tick is running — skipping"; return 0; }
   if busy; then say "machine busy (a gate, suite or high load) — skipping this tick"; return 0; fi
+  if [ "${OPENWOP_DAEMON_YIELD:-broker}" = broker ] && broker_stale; then
+    say "the broker server runs other broker code ($BROKER_STALE_WHY) — its yield is not trusted; running this tick with the script's own yielding"
+    DAEMON_YIELD=legacy tick_work; return 0
+  fi
+  # ADR 0974 P2: the work runs under a preemptible broker lease (see the header).
+  if [ "${OPENWOP_DAEMON_YIELD:-broker}" = broker ] && [ "${OPENWOP_BROKER_OBSERVE:-on}" != off ] && [ -f "$BROKER_MAIN" ]; then
+    local rc=0
+    ( cd "$ROOT" && TRACEGATE_HOST="${OPENWOP_TRACEGATE_HOST:-}" exec node "$BROKER_MAIN" lease --quiet --class daemon --tokens 2 --deadline-min 2 --label "daemon tick" \
+        -- /bin/bash "$ROOT/scripts/tracegate-daemon.sh" tick-work ) || rc=$?
+    case "$rc" in
+      0) ;;
+      # 75: preempted mid-run, or held past --deadline-min because a gate registered first.
+      75) say "the broker asked this tick to yield (a gate, train, deploy or measurement registered, or memory pressure) — stopped" ;;
+      2) say "no broker lease (unreachable or refused) — running this tick with the script's own yielding"; DAEMON_YIELD=legacy tick_work ;;
+      *) say "tick work exited $rc" ;;
+    esac
+    return 0
+  fi
+  DAEMON_YIELD=legacy tick_work
+}
+# The tick's work. Under a lease, `tick-work` runs it in a fresh process (its own
+# process group, which the broker's wrapper stops as a whole on preemption).
+tick_work() {
   local hour last now
   hour="$(date +%H)"; now="$(date +%s)"; last="$(cat "$LEDGER/nightly.last" 2>/dev/null || echo 0)"
   if [ "$((10#$hour))" -ge 1 ] && [ "$((10#$hour))" -le 5 ] && [ $((now - last)) -ge 72000 ]; then
@@ -341,6 +421,11 @@ status() {
 
 case "${1:-}" in
   tick) tick ;;
+  # Internal: started by `tick` under the broker lease; the parent holds the lock.
+  tick-work)
+    DAEMON_YIELD=broker; CUR_RUN=""
+    trap 'say "stopped by the broker (SIGTERM)"; [ -n "$CUR_RUN" ] && rm -rf "$CUR_RUN"; exit 143' TERM
+    tick_work ;;
   nightly) take_lock || { echo "a daemon tick is running"; exit 1; }; busy && { echo "machine busy — try later"; exit 1; }; nightly ;;
   install) install_agent ;;
   uninstall) uninstall_agent ;;

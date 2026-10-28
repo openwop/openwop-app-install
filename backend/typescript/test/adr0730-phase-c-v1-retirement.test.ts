@@ -7,6 +7,16 @@
  * routing, so the boot log said "mounted", the route existed, and every request
  * 404'd while discovery advertised it. Registration is not reachability — these
  * assert the SERVED path.
+ *
+ * Tracker TST-BAA-11. `adr0730-v2-superset-of-spa-reads` asserts the same
+ * extension paths are PRESENT; this file asserts their shape and liveness.
+ * Red when (sabotage-witnessed, wave 60): the host-extension twin route is
+ * unmounted; the host-surfaces record is evaluated empty; the record is served
+ * under another key (an illegal one bypassing the registration check, too);
+ * the ai-providers extension is renamed; the auth family drops `witness`; the
+ * session lane is advertised with cookies disabled. DOUBLE GUARD: an illegal
+ * extensions key is refused at `registerV2Extension` AND asserted on the served
+ * root here, so a sabotage of the registration call alone crashes the boot.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';
@@ -15,6 +25,9 @@ import { randomUUID } from 'node:crypto';
 import { createApp } from '../src/index.js';
 import type { Storage } from '../src/storage/storage.js';
 import type { RunRecord } from '../src/types.js';
+
+/** The live registry's surface count is above this (measured wave 60). */
+const SURFACES_FLOOR = 5;
 
 let server: http.Server; let base = ''; let storage: Storage;
 beforeAll(async () => {
@@ -26,9 +39,26 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
 
-async function get(path: string, headers: Record<string, string> = {}) {
+interface Family { status?: unknown; since?: unknown; witness?: unknown }
+interface Lane { lane: string; issuers?: unknown[]; minimumAssurance?: unknown; revocation?: unknown }
+/** The narrow view of the bundle and the v2 root this file reads. */
+interface Body {
+  runId?: string;
+  events?: unknown;
+  metrics?: { eventCount?: number };
+  hostSurfaces?: unknown;
+  extensions?: Record<string, { surfaces?: Array<{ name: unknown; supported: unknown }>; subscriptionProviders?: unknown }>;
+  auth?: Family & { lanes?: Lane[] };
+  aiProviders?: Family & { authModes?: string[] };
+  prompts?: Family;
+  secrets?: Family;
+  modelCapabilities?: Family;
+}
+async function get(path: string, headers: Record<string, string> = {}): Promise<{ status: number; json: Body; text: string }> {
   const res = await fetch(`${base}${path}`, { headers: { Authorization: 'Bearer dev-token', ...headers } });
-  const text = await res.text(); let json: any; try { json = JSON.parse(text); } catch { json = undefined; }
+  const text = await res.text();
+  let json: Body = {};
+  try { json = JSON.parse(text) as Body; } catch { json = {}; }
   return { status: res.status, json, text };
 }
 
@@ -36,7 +66,8 @@ describe('ADR 0730 C.1 — debug-bundle has a host-extension twin', () => {
   const runId = `run-${randomUUID()}`;
   beforeAll(async () => {
     const now = new Date().toISOString();
-    await storage.insertRun({ runId, workflowId: 'conformance-noop', tenantId: 'default', status: 'completed', inputs: null, metadata: {}, configurable: {}, createdAt: now, updatedAt: now } as RunRecord);
+    const run: RunRecord = { runId, workflowId: 'conformance-noop', tenantId: 'default', status: 'completed', inputs: {}, metadata: {}, configurable: {}, createdAt: now, updatedAt: now };
+    await storage.insertRun(run);
     await storage.appendEvent({ eventId: randomUUID(), runId, type: 'run.started', payload: { workflowId: 'conformance-noop' }, timestamp: now });
   });
 
@@ -81,11 +112,12 @@ describe('ADR 0730 C.2 — hostSurfaces travels in the v2 extensions hatch', () 
     expect(r.status, r.text.slice(0, 160)).toBe(200);
     const rec = r.json?.extensions?.['openwop-app.host-surfaces'];
     expect(rec, 'the extension record is present on the v2 root').toBeDefined();
-    expect(Array.isArray(rec.surfaces)).toBe(true);
+    const surfaces = rec?.surfaces ?? [];
+    expect(Array.isArray(rec?.surfaces)).toBe(true);
     // Non-vacuity: the registrar runs after the seed, so a captured-at-registration
     // snapshot would be empty. The seed alone declares the full surface list.
-    expect(rec.surfaces.length, 'the record reads the registry live').toBeGreaterThan(5);
-    for (const s of rec.surfaces) expect(typeof s.name === 'string' && typeof s.supported === 'boolean').toBe(true);
+    expect(surfaces.length, 'the record reads the registry live').toBeGreaterThan(SURFACES_FLOOR);
+    for (const s of surfaces) expect(typeof s.name === 'string' && typeof s.supported === 'boolean').toBe(true);
   });
 
   it('the v2 root stays CLOSED — the record is under `extensions`, never a new top-level key', async () => {
@@ -102,19 +134,19 @@ describe('ADR 0730 C.3a — the families the SPA reads are advertised on the v2 
   it('auth / prompts / secrets / modelCapabilities / aiProviders are all present, and each is a FAMILY RECORD (status+since+witness), not a bare value', async () => {
     const r = await get('/.well-known/openwop', { 'OpenWOP-Version': '2' });
     expect(r.status).toBe(200);
-    for (const fam of ['auth', 'prompts', 'secrets', 'modelCapabilities', 'aiProviders']) {
-      const rec = r.json?.[fam];
+    for (const fam of ['auth', 'prompts', 'secrets', 'modelCapabilities', 'aiProviders'] as const) {
+      const rec = r.json[fam];
       expect(rec, `${fam} must be advertised on the v2 root — the SPA reads it`).toBeDefined();
-      expect(typeof rec.status, `${fam}.status`).toBe('string');
-      expect(typeof rec.since, `${fam}.since`).toBe('string');
-      expect(typeof rec.witness, `${fam}.witness`).toBe('string');
+      expect(typeof rec?.status, `${fam}.status`).toBe('string');
+      expect(typeof rec?.since, `${fam}.since`).toBe('string');
+      expect(typeof rec?.witness, `${fam}.witness`).toBe('string');
     }
   });
 
   it('auth carries LANES with every required field — a lane row is a claim, not a label', async () => {
     const r = await get('/.well-known/openwop', { 'OpenWOP-Version': '2' });
-    const lanes = r.json?.auth?.lanes;
-    expect(Array.isArray(lanes) && lanes.length > 0, 'at least the unconditional front doors').toBe(true);
+    const lanes = r.json.auth?.lanes ?? [];
+    expect(lanes.length > 0, 'at least the unconditional front doors').toBe(true);
     for (const l of lanes) {
       expect(typeof l.lane === 'string' && Array.isArray(l.issuers) && l.issuers.length > 0).toBe(true);
       expect(typeof l.minimumAssurance === 'string').toBe(true);
@@ -127,25 +159,28 @@ describe('ADR 0730 C.3a — the families the SPA reads are advertised on the v2 
     // The gated lanes must NOT appear on a deployment that does not configure
     // them — that is the difference between "absent" and "off", and advertising
     // a lane this host cannot honour is the dishonesty the family exists to avoid.
-    const names = lanes.map((l: { lane: string }) => l.lane);
+    const names = lanes.map((l) => l.lane);
     expect(names, 'unconditional lanes').toEqual(expect.arrayContaining(['api-key']));
-    // The session lane IS the cookie: advertised exactly when cookies are on.
-    if (process.env.OPENWOP_AUTH_DISABLE_COOKIES === 'true') expect(names).not.toContain('session');
-    else expect(names).toContain('session');
-    if (!process.env.OPENWOP_TEST_SAML_IDP_URL) expect(names).not.toContain('saml');
+    // The session lane IS the cookie: this boot disables cookies (beforeAll), so
+    // the lane must be absent. No SAML IdP is configured, so no `saml` lane.
+    expect(process.env.OPENWOP_AUTH_DISABLE_COOKIES).toBe('true');
+    expect(names).not.toContain('session');
+    expect(process.env.OPENWOP_TEST_SAML_IDP_URL).toBeUndefined();
+    expect(names).not.toContain('saml');
   });
 
   it('the per-provider subscription map rides an EXTENSION, because the corpus family types authModes as a flat vocabulary', async () => {
     const r = await get('/.well-known/openwop', { 'OpenWOP-Version': '2' });
-    expect(Array.isArray(r.json?.aiProviders?.authModes), 'the family carries the vocabulary').toBe(true);
+    const authModes = r.json.aiProviders?.authModes ?? [];
+    expect(Array.isArray(r.json.aiProviders?.authModes), 'the family carries the vocabulary').toBe(true);
     // host-services.md §aiProviders: a client MUST ignore an unknown mode, so a
     // mode outside the named vocabulary is an advert no client can read.
     const SPEC_MODES = ['apiKey', 'oauth-pkce', 'oauth-device', 'none', 'subscription'];
-    for (const m of r.json.aiProviders.authModes) expect(SPEC_MODES, `authModes '${m}'`).toContain(m);
-    expect(r.json.aiProviders.authModes).toContain('apiKey');
+    for (const m of authModes) expect(SPEC_MODES, `authModes '${m}'`).toContain(m);
+    expect(authModes).toContain('apiKey');
     const rec = r.json?.extensions?.['openwop-app.ai-providers'];
     expect(rec, 'the host-scoped record carries the per-provider detail').toBeDefined();
-    expect(Array.isArray(rec.subscriptionProviders)).toBe(true);
+    expect(Array.isArray(rec?.subscriptionProviders)).toBe(true);
   });
 
   // ADR 0812 P3c-0: "the v1 root is UNMOVED" was deleted with the v1 discovery

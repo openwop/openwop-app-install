@@ -10,6 +10,13 @@
  *
  * Mirrors the node-executions (`recursionLimit`) breach contract; see
  * RFCS/0058-run-execution-bounds.md §C and spec/v1/run-options.md §runTimeoutMs.
+ *
+ * Sabotage witnessed red (8f grade-tests wave 2): the strictly-past boundary
+ * wait removed (`8fw2g3-to-boundary`, the #3222 fix), the breach kind renamed
+ * (`-to-breach-event`), the failure code changed (`-to-code`), the v2 `run`
+ * section ignored (`-to-v2-section`), the recursion cap off by one
+ * (`-to-recursion-r2`), and an in-budget run treated as breached
+ * (`-to-inbudget`).
  */
 
 import { describe, expect, it, beforeAll, vi } from 'vitest';
@@ -140,8 +147,13 @@ describe('RFC 0058 — runTimeoutMs (run-duration bound)', () => {
     const result = await executeRun(storage, run, oneNode('wf.timeout.v2', 'test.slow'));
     expect(result.status).toBe('failed');
     const events = await storage.listEvents(run.runId);
-    expect((events.find((e) => e.type === 'cap.breached')!.payload as { kind?: string; limit?: number }))
-      .toMatchObject({ kind: 'run-duration', limit: 20 });
+    const types = events.map((e) => e.type);
+    const payload = events.find((e) => e.type === 'cap.breached')!.payload as { kind?: string; limit?: number; observed?: number };
+    expect(payload).toMatchObject({ kind: 'run-duration', limit: 20 });
+    expect(payload.observed).toBeGreaterThan(20);
+    // §C ordering holds for the v2 section too.
+    expect(types.indexOf('cap.breached')).toBeGreaterThanOrEqual(0);
+    expect(types.indexOf('cap.breached')).toBeLessThan(types.indexOf('run.failed'));
     expect((events.find((e) => e.type === 'run.failed')!.payload as { error: { code: string } }).error.code).toBe('run_timeout');
   });
 
@@ -150,12 +162,15 @@ describe('RFC 0058 — runTimeoutMs (run-duration bound)', () => {
     const twoNodes: WorkflowDefinition = {
       workflowId: 'wf.recursion.v2',
       nodes: [{ nodeId: 'a', typeId: 'test.fast' }, { nodeId: 'b', typeId: 'test.fast' }],
-      edges: [{ from: 'a', to: 'b' }],
-    } as unknown as WorkflowDefinition;
+      edges: [{ edgeId: 'e1', sourceNodeId: 'a', targetNodeId: 'b' }],
+    };
     const result = await executeRun(storage, run, twoNodes);
     expect(result.status).toBe('failed');
     const events = await storage.listEvents(run.runId);
-    expect((events.find((e) => e.type === 'cap.breached')!.payload as { kind?: string }).kind).toBe('node-executions');
+    // a → b is a real linear edge, so `a` is execution #1 and the cap breaches
+    // at `b` (execution #2 against a limit of 1).
+    expect(events.find((e) => e.type === 'cap.breached')!.payload).toEqual({ kind: 'node-executions', nodeId: 'b', limit: 1, observed: 2 });
+    expect(events.filter((e) => e.type === 'node.completed').map((e) => e.nodeId)).toEqual(['a']);
     expect((events.find((e) => e.type === 'run.failed')!.payload as { error: { code: string } }).error.code).toBe('recursion_limit_exceeded');
   });
 

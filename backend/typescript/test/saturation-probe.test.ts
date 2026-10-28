@@ -1,6 +1,26 @@
 /**
  * `observability/saturationProbe.ts` — the pool-wait and event-loop-lag signals
- * EVID-3 could not be decided without.
+ * EVID-3 could not be decided without, plus the worst-stall account EVID-6 added
+ * (#4687: what the process was doing during the stall — CPU, a blocking call,
+ * or a platform pause).
+ *
+ * Timers: the POOL probe is pure `setInterval`, so its two cases run on fake
+ * timers and assert exact windows. The four LAG cases that run the live probe
+ * (`event_loop_lag is logged…` and the two `accountOf` cases) are an HONEST
+ * CEILING on the real clock: they measure real `performance.now`, `cpuUsage`
+ * and event-loop utilisation across a real stall, which fake timers cannot
+ * produce; they poll for the line against a deadline rather than sleeping a
+ * fixed time.
+ *
+ * Sabotage witnessed red (8f grade-tests wave 2): every window reported
+ * (`8fw2g3-sat-pressured`), every sample counted as waiting (`-sat-samplesw`),
+ * the caller map unbounded (`-sat-bound`), the top callers sorted ascending
+ * (`-sat-sort`), callers recorded while a connection was free
+ * (`-sat-busyonly`), connect not restored (`-sat-restore`), the probe's own
+ * frame not skipped (`-sat-noise`), a NaN window reported (`-sat-nan`), the
+ * worst stall not kept (`-sat-worst`) or not reset (`-sat-worstreset`), CPU
+ * mis-scaled (`-sat-cpu`), active time dropped (`-sat-active`), and the lag
+ * not recorded (`-sat-lagrecord`).
  */
 import os from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -25,7 +45,8 @@ function captureLogs(): { lines: () => Array<Record<string, unknown>>; restore: 
 }
 const wait = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-afterEach(() => { vi.restoreAllMocks(); });
+afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
+const POOL_TIMERS = { toFake: ['setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'] as const };
 
 describe('pool pressure window', () => {
   it('reports nothing when no caller waited, however busy the pool was', () => {
@@ -47,23 +68,25 @@ describe('pool pressure window', () => {
 
 describe('probes', () => {
   it('pg_pool_pressure is logged for a window in which a caller queued, and not for a quiet one', async () => {
+    vi.useFakeTimers({ toFake: [...POOL_TIMERS.toFake] });
     const cap = captureLogs();
     const pool: { -readonly [K in keyof PoolGauges]: PoolGauges[K] } = { totalCount: 4, idleCount: 4, waitingCount: 0 };
+    // Samples every 5 ms, reports every 40 ms (the sampler is created first, so at a
+    // shared instant the sample lands before the report).
     const probe = startPoolPressureProbe(pool, 4, { sampleMs: 5, reportMs: 40 });
     try {
-      await wait(70); // one quiet window
+      vi.advanceTimersByTime(40); // window 1 (0, 40]: quiet
       const quiet = cap.lines().filter((l) => l.msg === 'pg_pool_pressure');
       pool.idleCount = 0; pool.waitingCount = 5;
-      await wait(30);
+      vi.advanceTimersByTime(20); // samples at 45..60 see 5 waiting
       pool.idleCount = 4; pool.waitingCount = 0;
-      await wait(60);
+      vi.advanceTimersByTime(20); // samples at 65..80 are quiet; report at 80
+      vi.advanceTimersByTime(40); // window 3 (80, 120]: quiet again
       const after = cap.lines().filter((l) => l.msg === 'pg_pool_pressure');
       cap.restore();
       expect(quiet).toHaveLength(0);
-      // The 30 ms of pressure may straddle one report edge: one line, or two.
-      expect(after.length).toBeGreaterThanOrEqual(1);
-      expect(after.length).toBeLessThanOrEqual(2);
-      for (const line of after) expect(line).toMatchObject({ poolMax: 4, maxWaiting: 5, maxInUse: 4 });
+      expect(after).toHaveLength(1);
+      expect(after[0]).toMatchObject({ poolMax: 4, maxWaiting: 5, samplesWaiting: 4, samples: 8, maxInUse: 4 });
     } finally { probe.stop(); cap.restore(); }
   });
 
@@ -121,30 +144,41 @@ describe('pool pressure — WHO asked while the pool was full', () => {
     for (let i = 0; i < 3; i += 1) w.callerWaited('c < d');
     for (let i = 0; i < 100; i += 1) w.callerWaited(`unique-${i}`); // overflows into '(other)'
     const line = w.flush();
-    expect(line?.topCallers?.[0]).toEqual({ caller: '(other)', waits: 38 });
-    expect(line?.topCallers).toContainEqual({ caller: 'a < b', waits: 7 });
-    expect(line?.topCallers?.length).toBe(5);
+    // 64 distinct call sites are kept (a < b, c < d, unique-0..61); the other 38
+    // share '(other)'. Most frequent first; ties keep first-seen order; five kept.
+    expect(line?.topCallers).toEqual([
+      { caller: '(other)', waits: 38 },
+      { caller: 'a < b', waits: 7 },
+      { caller: 'c < d', waits: 3 },
+      { caller: 'unique-0', waits: 1 },
+      { caller: 'unique-1', waits: 1 },
+    ]);
     expect(w.flush()).toBeNull(); // cleared
   });
 
   it('the wrapped connect records a caller ONLY while every connection is busy, and stop() restores it', async () => {
+    vi.useFakeTimers({ toFake: [...POOL_TIMERS.toFake] });
     const cap = captureLogs();
     const calls: number[] = [];
     const original = (..._a: never[]): unknown => { calls.push(1); return 'conn'; };
     const pool = { totalCount: 4, idleCount: 1, waitingCount: 0, connect: original };
+    // The sampler never ticks inside this case (1 s), so only the wrapped connect can
+    // make a window pressured.
     const probe = startPoolPressureProbe(pool, 4, { sampleMs: 1000, reportMs: 40 });
     try {
       expect(pool.connect()).toBe('conn'); // a free connection: nothing recorded
-      await wait(60);
+      vi.advanceTimersByTime(40);
       expect(cap.lines().filter((l) => l.msg === 'pg_pool_pressure')).toHaveLength(0);
       pool.idleCount = 0;
       function busyCaller(): unknown { return pool.connect(); }
       busyCaller(); busyCaller();
-      await wait(60);
+      vi.advanceTimersByTime(40);
       const lines = cap.lines().filter((l) => l.msg === 'pg_pool_pressure');
       cap.restore();
       expect(lines).toHaveLength(1);
+      expect(lines[0]).toMatchObject({ poolMax: 4, maxWaiting: 0, samplesWaiting: 0, samples: 0, maxInUse: 0 });
       const top = lines[0]!.topCallers as Array<{ caller: string; waits: number }>;
+      expect(top).toHaveLength(1);
       expect(top[0]!.waits).toBe(2);
       expect(top[0]!.caller).toContain('busyCaller');
       expect(calls).toHaveLength(3); // every call still reached the real connect

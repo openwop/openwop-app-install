@@ -78,6 +78,12 @@ import { MANIFEST_FAST_PATH_SERVED } from './sideEffectFloor.generated.js';
  * v1 families — unambiguous senders/writers only; read verbs stay live.
  */
 const SIDE_EFFECTING_TYPE_PATTERNS: readonly RegExp[] = [
+  // ADR 0942 recovery: this gate has reviewed recorded-outcome semantics.
+  // A completed source serves its decision (including a veto outcome); an
+  // unfinished source fails replay_source_missing. Branch forks still create
+  // fresh waits. Keep its gate role for builder safety and declare the manifest
+  // capability too. This resolves ONE gate; the generic gate holdback stays.
+  /^feature\.campaign-orchestration\.nodes\.autonomy-gate$/,
   // ADR 0673 D1 — the workflow-author WRITE nodes, SCOPED to the three that may be served.
   // `draft` is deliberately EXCLUDED: it calls `ctx.callAI`, so the generator holds it back
   // as an `ai-invocation-log`, and every arm of `isSideEffectingNode` below is decisive —

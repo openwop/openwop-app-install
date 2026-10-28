@@ -48,7 +48,7 @@ describe('ADR 0927 D2 — demo-agency-ops seeder', () => {
       expect(client!.displayName).toContain('(synthetic)');
       const assets = await listAssets(TENANT, c.orgId);
       expect(assets).toHaveLength(1);
-      const page = await getPage(TENANT, c.orgId, assets[0].locator.pageId);
+      const page = await getPage(TENANT, c.orgId, (assets[0].locator as { pageId: string }).pageId);
       expect(page?.status).toBe('published');
       // The workspace owner can approve and write for the demo client.
       expect((await listMembers(TENANT, c.orgId)).some((m) => m.subject === 'user:demo-owner' && m.roles.includes('admin'))).toBe(true);

@@ -3,11 +3,24 @@
  * harness's OIDC issuer. The guard is a pure function of the env; the last leg pins
  * that `main()` actually calls it, because a guard nothing invokes is the
  * gate-that-cannot-fail this repo keeps rediscovering.
+ *
+ * Tracker TST-BAB-6. Red when (sabotage-witnessed, wave 60): single-label hosts,
+ * CGNAT, IPv4-mapped IPv6, site-local IPv6 or trailing-dot internal names pass;
+ * a public `fd…` hostname is read as a ULA; a Postgres DSN stops marking a
+ * deployment; the suite audience is accepted; `main()` stops exiting on a refusal.
+ * CEILING: the `main()` leg reads source — calling `main()` would exit the worker.
+ * Since ADR 0981 D3 `main()` reaches this guard through `serverStartupErrors()`
+ * (`host/startupChecks.ts`), so the last leg proves both halves: the collector
+ * returns this guard's refusal for a deployed env, and `main()` exits when the
+ * collector returns anything. Sabotage-witnessed (2026-10-26): dropping
+ * `process.exit(1)` after the collector reds the second; dropping this guard from
+ * the collector reds the first.
  */
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { oidcTrustRootStartupError } from '../src/host/oidcTrustGuard.js';
+import { serverStartupErrors } from '../src/host/startupChecks.js';
 
 const PROD = {
   K_SERVICE: 'openwop-app-backend',
@@ -73,9 +86,19 @@ describe('oidcTrustRootStartupError', () => {
     expect(oidcTrustRootStartupError({ ...PROD, OPENWOP_OIDC_ISSUER: 'https://fdauth.example.com' })).toBeNull();
   });
 
-  it('main() calls it and exits on a refusal', () => {
-    const src = readFileSync(resolve(import.meta.dirname, '..', 'src', 'index.ts'), 'utf8');
-    const main = src.slice(src.indexOf('async function main('));
-    expect(main).toMatch(/const trustRootError = oidcTrustRootStartupError\(\);\s*if \(trustRootError\) \{\s*log\.error\([^\n]*\);\s*process\.exit\(1\);/);
+  describe('main() calls it and exits on a refusal', () => {
+    afterEach(() => { vi.unstubAllEnvs(); });
+
+    it('the startup collector returns this guard\'s refusal for a deployed env', () => {
+      vi.stubEnv('K_SERVICE', 'openwop-app-backend');
+      vi.stubEnv('OPENWOP_OIDC_ISSUER', 'http://host.docker.internal:18102');
+      expect(serverStartupErrors('memory://')).toContainEqual(expect.stringMatching(/ADR 0745 D4/));
+    });
+
+    it('main() exits when the collector returns anything', () => {
+      const src = readFileSync(resolve(import.meta.dirname, '..', 'src', 'index.ts'), 'utf8');
+      const main = src.slice(src.indexOf('async function main('));
+      expect(main).toMatch(/const startupErrors = serverStartupErrors\(config\.storageDsn\);\s*if \(startupErrors\.length > 0\) \{[\s\S]{0,300}?process\.exit\(1\);/);
+    });
   });
 });

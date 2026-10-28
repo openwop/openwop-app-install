@@ -124,6 +124,48 @@ export async function dispatchConversions(ctx) {
   return { status: 'success', outputs: { outcome: 'delivered', sent: out.sent, dropped: out.dropped, held: out.held, expired: out.expired } };
 }
 
+/** ADR 0952 D6 (P7) — push the org's product feed (generated from the commerce
+ * catalog) to Meta Catalog or Google Merchant Center. role side-effect: a REPLAY
+ * fork serves the recorded outcome and sends nothing. Only items whose content
+ * changed are sent; items that left the catalog are removed from the platform.
+ * `unsupported` until the push is sandbox-verified; `disabled` until the org
+ * turns its feed on. */
+export async function pushCatalogFeed(ctx) {
+  const cc = ensureConnectors(ctx);
+  const i = ctx.inputs ?? {};
+  const orgId = str(i.orgId);
+  const platform = str(i.platform) || 'meta';
+  if (!orgId) return { status: 'failed', error: { code: 'validation_error', message: 'orgId is required.' } };
+  if (typeof cc.pushCatalog !== 'function') {
+    return { status: 'failed', error: { code: 'host_capability_missing', message: 'campaign-connectors pushCatalog unavailable — update the feature (ADR 0952 D6).' } };
+  }
+  const out = await cc.pushCatalog({ orgId, platform });
+  if (out.outcome === 'no_acting_user') return { status: 'failed', error: { code: 'no_acting_user', message: 'The catalog push runs as a person (their ad and merchant connections); this run has no acting user.' } };
+  if (out.outcome === 'invalid') return { status: 'failed', error: { code: 'validation_error', message: out.error } };
+  if (out.outcome === 'no_connection') return { status: 'failed', error: { code: 'no_connection', message: `No ${platform === 'google' ? 'Google Merchant' : 'Meta'} connection for the run owner.` } };
+  if (out.outcome === 'not_configured') return { status: 'failed', error: { code: 'not_configured', message: `Catalog push is not configured: ${out.missing}.` } };
+  if (out.outcome === 'commerce_off') return { status: 'failed', error: { code: 'commerce_off', message: 'The store is not serving (commerce is off for this workspace), so its catalog is not pushed; the platform catalog is left as it was.' } };
+  // ADR 0942 — a catalog push is `ads.publish`: the policy refused it, or a person
+  // must approve this exact content. Under a campaign policy the run WAITS on that
+  // approval (the publish-ad-variants pattern); its decision resumes this node,
+  // which re-runs the push under the same content key (approved ⇒ pushed).
+  if (out.outcome === 'refused') return { status: 'failed', error: { code: out.error, message: out.error === 'autonomy_blocked' ? 'The campaign autonomy policy blocks publishing this catalog.' : `The publishing policy refuses this catalog push (${out.error}).` } };
+  if (out.outcome === 'requires_approval') {
+    if (out.autonomy && typeof ctx.suspend === 'function') {
+      await ctx.suspend({ kind: 'external-event', key: `approval:${out.approvalId}`, approvalId: out.approvalId });
+      return { status: 'failed', error: { code: 'publish_approval_pending', message: `Catalog publish approval ${out.approvalId} was not decided when this step resumed.` } };
+    }
+    return { status: 'failed', error: { code: 'publish_approval_pending', message: `Publishing this catalog needs approval (${out.approvalId}). Approve it in the Approvals inbox, then re-run: the same changes then publish.` } };
+  }
+  // Never success-with-nothing: an unverified push and a push where every item
+  // failed are typed failures; a partial push succeeds and names its failures.
+  if (out.outcome === 'unsupported') return { status: 'failed', error: { code: 'connector_not_configured', message: `The ${platform === 'google' ? 'Google Merchant' : 'Meta Catalog'} push has not been verified against a sandbox account yet.` } };
+  if (out.outcome === 'pushed' && out.failed > 0 && out.sent === 0 && out.removed === 0) {
+    return { status: 'failed', error: { code: 'push_failed', message: `All ${out.failed} catalog item(s) were refused: ${out.failures?.[0]?.error ?? 'unknown error'}.` } };
+  }
+  return { status: 'success', outputs: out };
+}
+
 export async function audienceSync(ctx) {
   const cc = ensureConnectors(ctx);
   const i = ctx.inputs ?? {};
@@ -164,6 +206,7 @@ export const nodes = {
   'feature.campaign-connectors.nodes.sync': sync,
   'feature.campaign-connectors.nodes.audience-sync': audienceSync,
   'feature.campaign-connectors.nodes.dispatch-conversions': dispatchConversions,
+  'feature.campaign-connectors.nodes.push-catalog-feed': pushCatalogFeed,
 };
 
 export default nodes;

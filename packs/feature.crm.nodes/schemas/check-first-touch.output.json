@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.crm.nodes/1.15.0/check-first-touch.output.json",
+  "title": "CrmCheckFirstTouchOutput",
+  "type": "object",
+  "required": [
+    "success",
+    "touched"
+  ],
+  "properties": {
+    "success": {
+      "type": "boolean",
+      "const": true
+    },
+    "touched": {
+      "type": "boolean"
+    },
+    "firstTouchAt": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false
+}

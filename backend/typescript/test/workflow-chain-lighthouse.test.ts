@@ -19,10 +19,11 @@ import {
 } from '../src/host/workflowChainPackLoader.js';
 import { buildGraph, freshSnapshot, evaluateTrigger } from '../src/executor/scheduler.js';
 
+let loadErrors: unknown[] = [];
 beforeAll(() => {
   _resetChainRegistryForTest();
-  const { errors } = loadWorkflowChainPacks({ roots: defaultWorkflowChainPackRoots() });
-  expect(errors).toEqual([]);
+  // Asserted in the discovery CASE: a failing hook would skip every case.
+  loadErrors = loadWorkflowChainPacks({ roots: defaultWorkflowChainPackRoots() }).errors;
 });
 
 const PACK = 'core.openwop.workflows.lighthouse';
@@ -51,6 +52,7 @@ const KNOWN_TYPEIDS = new Set([
 
 describe('lighthouse pack — discovery', () => {
   it('loads all five lighthouse chains from the vendored pack', () => {
+    expect(loadErrors).toEqual([]);
     for (const id of CHAINS) {
       const entry = getChain(id);
       expect(entry, id).not.toBeNull();
@@ -79,9 +81,13 @@ describe('lighthouse pack — expansion (RFC 0013, frozen + validated)', () => {
   };
 
   it.each(CHAINS)('%s expands to a validated definition with a deterministic id', (id) => {
-    const def = expandChain(getChain(id)!.chain, { params: sampleParams[id]! });
+    const chain = getChain(id)!.chain;
+    const def = expandChain(chain, { params: sampleParams[id]! });
     expect(def.workflowId).toMatch(new RegExp(`^${id.replace('.', '\\.')}:[0-9a-f]{12}$`));
-    expect(def.nodes.length).toBeGreaterThan(0);
+    expect(def.nodes).toHaveLength(chain.dag.nodes.length);
+    // Deterministic: the same (chain, params) re-expands byte-identically, which
+    // is what lets a `:fork` replay the same DAG (header claim).
+    expect(expandChain(chain, { params: sampleParams[id]! })).toEqual(def);
     // node ids rewritten with the collision-free prefix; typeIds preserved verbatim
     for (const n of def.nodes) {
       expect(n.nodeId.startsWith(id.replace(/\./g, '_') + '_')).toBe(true);
@@ -136,6 +142,13 @@ describe('lighthouse pack — expansion (RFC 0013, frozen + validated)', () => {
  * folded to `skipped`. The fix routes the content THROUGH the gate
  * (`draft.content → approve.artifact → send.text`) so the effect node has
  * exactly one, conditioned, incoming edge.
+ *
+ * TWIN NOTE (grade-tests wave 64): this harness HAND-WRITES the gate's outputs.
+ * For the `email-send` effects of lead-triage and post-meeting the behavioural
+ * witness is `workflow-chain-email-reject-witness.test.ts` (REAL gate handler +
+ * forward simulation; probe 8fw5g5-lh-send-cover reds it too). The `notify`
+ * effect of account-brief is covered ONLY here (that file enumerates email-send
+ * nodes). Kept whole: approval-egress tests are protected.
  */
 describe('lighthouse pack — a REJECTED review cannot reach the side effect', () => {
   const EFFECTS = new Set([

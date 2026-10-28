@@ -43,6 +43,14 @@ import {
 const log = createLogger('email.sendApproval');
 const ADMIN_SCOPE = 'host:members:manage';
 
+/** Template contentHash alone cannot identify a sender/audience repin. */
+export function emailSendReviewHash(review: NonNullable<PendingApproval['emailSend']>): string {
+  return createHash('sha256').update(JSON.stringify([
+    review.campaignId, review.templateId, review.templateVersion, review.contentHash,
+    review.senderAddress, review.audienceHash, review.subject, review.body, review.format ?? 'text',
+  ])).digest('hex');
+}
+
 /** The row's id for this campaign's review cycle. JSON, not a `:` join (ids contain
  *  `:`); `createdAt` because a deleted campaign re-created at one id restarts its cycle. */
 export function sendReviewApprovalId(tenantId: string, campaign: Pick<Campaign, 'campaignId' | 'createdAt'>, cycle: number): string {
@@ -69,6 +77,7 @@ async function audienceLabel(tenantId: string, campaign: Campaign): Promise<stri
  */
 export async function submitForReview(
   tenantId: string, orgId: string, campaignId: string, submittedBy: string | undefined,
+  causedBy?: string,
 ): Promise<{ campaign: Campaign; approval: PendingApproval }> {
   const campaign = await getCampaign(tenantId, orgId, campaignId);
   if (!campaign) throw new OpenwopError('not_found', 'Campaign not found.', 404, { campaignId });
@@ -90,6 +99,7 @@ export async function submitForReview(
     templateName: tpl.name, subject: version.subject, body: version.body, ...(version.format ? { format: version.format } : {}),
   };
   const estimated = await estimateRecipients(tenantId, campaign);
+  emailSend.reviewHash = emailSendReviewHash(emailSend);
   if (estimated !== undefined) emailSend.estimatedRecipients = estimated;
   const proposal = `Send email campaign "${tpl.name}" (${emailSend.audienceLabel}) from ${pin.senderAddress}`;
   const refs = {
@@ -97,19 +107,22 @@ export async function submitForReview(
     ...(settings?.approverGroupRefs ? { approverGroupRefs: settings.approverGroupRefs } : {}),
   };
   const submitters = submittedBy ? [submittedBy] : [];
+  // Cause only narrows separation of duties. It is never an actor or recipient.
+  const submitterCauses = !submittedBy && causedBy ? [causedBy] : [];
 
   // A resubmit while in review repins the open row and the mirrored pin.
   if (campaign.status === 'in_review' && campaign.review) {
-    const repinned = await repinEmailSendApproval(campaign.review.approvalId, { emailSend, proposal, submitters, ...refs });
+    const repinned = await repinEmailSendApproval(campaign.review.approvalId, { emailSend, proposal, submitters, submitterCauses, ...refs });
     if (repinned) {
       const moved = await updateCampaignRow(tenantId, orgId, campaignId, (cur) =>
-        cur.status === 'in_review' && cur.review?.approvalId === repinned.approvalId
+        cur.status === 'in_review' && cur.review?.approvalId === repinned.approvalId && cur.review.cycle === campaign.review!.cycle
+          && samePin(cur.review.pin, campaign.review!.pin)
           ? { ...cur, review: { ...cur.review, pin, submittedAt: new Date().toISOString(), ...(submittedBy ? { submittedBy } : {}) } }
           : null);
-      if (moved) return { campaign: moved.after, approval: repinned };
+      if (moved?.after.status === 'in_review' && moved.after.review?.approvalId === repinned.approvalId
+        && moved.after.review.cycle === campaign.review.cycle && samePin(moved.after.review.pin, pin)) return { campaign: moved.after, approval: repinned };
     }
-    // The row was decided or vanished under us — fall through to a fresh cycle from draft.
-    await returnToDraft(tenantId, orgId, campaignId, campaign.review.approvalId, 'Closed automatically — superseded by a new submission.');
+    throw new OpenwopError('conflict', 'The review changed during resubmission. Reload and submit again.', 409, { reason: 'concurrent_change', campaignId });
   }
 
   const base = (await getCampaign(tenantId, orgId, campaignId)) ?? campaign;
@@ -118,27 +131,39 @@ export async function submitForReview(
   const approvalId = sendReviewApprovalId(tenantId, base, cycle);
   // Row FIRST (CAS on the deterministic id), campaign second: a campaign can then never
   // be `in_review` without its row. If the campaign moved meanwhile, the row is closed.
-  let created = await createEmailSendApprovalOnce({ tenantId, orgId, approvalId, emailSend, proposal, submitters, ...refs });
+  let created = await createEmailSendApprovalOnce({ tenantId, orgId, approvalId, emailSend, proposal, submitters, submitterCauses, ...refs });
   if (!created.created) {
     const row = created.approval;
     const ours = row.kind === 'email-campaign-send' && row.tenantId === tenantId && row.emailSend?.campaignId === campaignId && row.status === 'pending';
     if (ours) {
-      await repinEmailSendApproval(row.approvalId, { emailSend, proposal, submitters, ...refs });
+      const repinned = await repinEmailSendApproval(row.approvalId, { emailSend, proposal, submitters, submitterCauses, ...refs });
+      if (!repinned) throw new OpenwopError('conflict', 'The review changed during submission. Reload and submit again.', 409, { reason: 'concurrent_change', campaignId });
+      created = { approval: repinned, created: false };
     } else {
       log.warn('email_review_id_taken', { tenantId, campaignId, approvalId, heldBy: row.kind, status: row.status });
-      created = await createEmailSendApprovalOnce({ tenantId, orgId, approvalId: `appr:email:${createHash('sha256').update(`${approvalId}:${Date.now()}:${Math.random()}`).digest('hex').slice(0, 40)}`, emailSend, proposal, submitters, ...refs });
+      created = await createEmailSendApprovalOnce({ tenantId, orgId, approvalId: `appr:email:${createHash('sha256').update(`${approvalId}:${Date.now()}:${Math.random()}`).digest('hex').slice(0, 40)}`, emailSend, proposal, submitters, submitterCauses, ...refs });
     }
   }
   const approval = created.approval;
   const moved = await updateCampaignRow(tenantId, orgId, campaignId, (cur) =>
     (cur.status === 'draft' || cur.status === 'sent') && (cur.review?.cycle ?? 0) === cycle - 1
       ? { ...cur, status: 'in_review', review: { cycle, approvalId: approval.approvalId, pin, fromStatus, submittedAt: new Date().toISOString(), ...(submittedBy ? { submittedBy } : {}) } }
-      : null);
-  if (!moved || moved.after.status !== 'in_review' || moved.after.review?.approvalId !== approval.approvalId) {
-    await resolveApproval(approval.approvalId, { status: 'rejected', note: 'Closed automatically — the campaign changed while it was being submitted.', chainOutcome: 'superseded' });
+      : null).catch(async (error: unknown) => {
+        // A lost acknowledgement can follow a committed mirror. Preserve it,
+        // including a subsequent decision/send on that same review generation.
+        const current = await getCampaign(tenantId, orgId, campaignId);
+        if (current?.review?.approvalId === approval.approvalId && current.review.cycle === cycle && samePin(current.review.pin, pin)) {
+          return { before: base, after: current };
+        }
+        if (created.created) await resolveApproval(approval.approvalId, { status: 'rejected', note: 'Closed automatically — submission mirror failed.', chainOutcome: 'superseded' }, approval);
+        throw error;
+      });
+  if (!moved || !['in_review', 'approved', 'sending', 'sent'].includes(moved.after.status) || moved.after.review?.approvalId !== approval.approvalId
+    || moved.after.review.cycle !== cycle || !samePin(moved.after.review.pin, pin)) {
+    if (created.created) await resolveApproval(approval.approvalId, { status: 'rejected', note: 'Closed automatically — the campaign changed while it was being submitted.', chainOutcome: 'superseded' }, approval);
     throw new OpenwopError('conflict', 'The campaign changed while it was being submitted. Reload it and submit again.', 409, { reason: 'concurrent_change', campaignId });
   }
-  await notifyReviewRequested(approval, submittedBy);
+  if (moved.after.status === 'in_review') await notifyReviewRequested(approval, submittedBy);
   return { campaign: moved.after, approval };
 }
 
@@ -171,7 +196,7 @@ export async function emailSelfApprovalBlocked(tenantId: string, orgId: string, 
   if (approval.kind !== 'email-campaign-send' || approval.status !== 'pending') return false;
   if (!(await emailApprovalGateOn(tenantId))) return false;
   return selfApprovalBlockedCore({
-    tenantId, approvalId: approval.approvalId, decidedBy, logTag: 'email_review', submitters: approval.submitters ?? [],
+    tenantId, approvalId: approval.approvalId, decidedBy, logTag: 'email_review', submitters: [...(approval.submitters ?? []), ...(approval.submitterCauses ?? [])],
     otherApproverExists: async (decider, exclude) => {
       if (await hasDistinctScopeHolder(tenantId, ADMIN_SCOPE, decider, { orgId, alsoExclude: exclude })) return true;
       const named = await resolveEligibleApprovers(refsOf(approval), { tenantId, orgId }, { includeDelegates: false });
@@ -187,7 +212,7 @@ export async function emailSelfApprovalBlocked(tenantId: string, orgId: string, 
 }
 
 async function decideEmailSend(
-  tenantId: string, approvalId: string, outcome: 'approved' | 'rejected', opts: { decidedByUserId?: string; note?: string },
+  tenantId: string, approvalId: string, outcome: 'approved' | 'rejected', opts: { decidedByUserId?: string; note?: string; expectedContentHash?: string },
 ): Promise<{ approval: PendingApproval; changed: boolean } | null> {
   const approval = await getApproval(approvalId);
   if (!approval || approval.tenantId !== tenantId || approval.kind !== 'email-campaign-send' || !approval.emailSend) return null;
@@ -209,11 +234,15 @@ async function decideEmailSend(
   const campaign = await getCampaign(tenantId, orgId, campaignId);
   if (!campaign || campaign.status !== 'in_review' || campaign.review?.approvalId !== approvalId) {
     const why = !campaign ? 'the campaign was deleted' : `the campaign is \`${campaign.status}\` and is no longer under this review`;
-    await resolveApproval(approvalId, { status: 'rejected', note: `Closed automatically — ${why}.`, chainOutcome: 'superseded' });
+    await resolveApproval(approvalId, { status: 'rejected', note: `Closed automatically — ${why}.`, chainOutcome: 'superseded' }, approval);
     throw new OpenwopError('conflict', `This review was closed automatically: ${why}.`, 409, { reason: 'review_closed', campaignId });
   }
 
   if (outcome === 'approved') {
+    if (!approval.emailSend.reviewHash || approval.emailSend.reviewHash !== emailSendReviewHash(approval.emailSend)
+      || opts.expectedContentHash !== approval.emailSend.reviewHash) {
+      throw new OpenwopError('conflict', 'This send review changed or was not displayed. Reload the review before approving.', 409, { reason: 'stale_review', campaignId });
+    }
     // Approve what you see: the template version, sender and audience definition on the
     // row must still be what the campaign would send. Checked BEFORE the CAS, so a stale
     // review consumes nothing; the submitter resubmits. A REJECT is never blocked.
@@ -233,23 +262,37 @@ async function decideEmailSend(
     }
   }
 
-  const lock = await resolveApproval(approvalId, { status: outcome, decidedBy, ...(opts.note !== undefined ? { note: opts.note } : {}) });
+  const lock = await resolveApproval(approvalId, { status: outcome, decidedBy, ...(opts.note !== undefined ? { note: opts.note } : {}) }, approval);
   if (!lock) return null;
   if (!lock.changed) return { approval: lock.approval, changed: false };
 
   const now = new Date().toISOString();
+  const isOurDecision = (row: Campaign | null): boolean => !!row?.review && row.review.approvalId === approvalId
+    && row.review.cycle === campaign.review!.cycle && samePin(row.review.pin, campaign.review!.pin)
+    && row.review.outcome === (outcome === 'approved' ? 'approved' : 'changes_requested')
+    && row.review.decidedBy === decidedBy && row.review.decidedAt === now;
+  const canReopen = (row: Campaign | null): boolean => row?.status === 'in_review'
+    && row.review?.approvalId === approvalId && row.review.cycle === campaign.review!.cycle;
   const moved = await updateCampaignRow(tenantId, orgId, campaignId, (cur) =>
-    cur.status === 'in_review' && cur.review?.approvalId === approvalId
+    cur.status === 'in_review' && cur.review?.approvalId === approvalId && cur.review.cycle === campaign.review!.cycle
+      && samePin(cur.review.pin, campaign.review!.pin)
       ? {
           ...cur,
           status: outcome === 'approved' ? 'approved' : 'draft',
           review: { ...cur.review, outcome: outcome === 'approved' ? 'approved' : 'changes_requested', decidedBy, decidedAt: now, ...(opts.note ? { note: opts.note } : {}) },
         }
-      : null).catch((e: unknown) => { void reopenApproval(approvalId); throw e; });
-  if (!moved || moved.after.review?.approvalId !== approvalId || moved.after.status === 'in_review') {
+      : null).catch(async (error: unknown) => {
+        const current = await getCampaign(tenantId, orgId, campaignId);
+        if (isOurDecision(current)) return { before: campaign, after: current! };
+        // An unreadable or already closed subject is ambiguous: retain the
+        // resolved row rather than reviving a review after a committed effect.
+        if (canReopen(current)) await reopenApproval(approvalId, lock.approval);
+        throw error;
+      });
+  if (!moved || !isOurDecision(moved.after)) {
     // The campaign left this review between the re-read and the write: undo the resolve
     // so the row never claims a decision the campaign did not take.
-    await reopenApproval(approvalId);
+    if (canReopen(moved?.after ?? null)) await reopenApproval(approvalId, lock.approval);
     throw new OpenwopError('conflict', 'The campaign changed while this decision was being recorded. Reload and decide again.', 409, { reason: 'review_closed', campaignId });
   }
   return { approval: lock.approval, changed: true };

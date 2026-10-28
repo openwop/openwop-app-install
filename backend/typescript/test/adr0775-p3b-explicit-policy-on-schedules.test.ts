@@ -5,6 +5,16 @@
  * approval, and approving that approval fires the job through the daemon's own
  * recipe. The autonomy level, allowlist and connection readiness stay
  * heartbeat-only, so a plain schedule of an agent at `review` still runs.
+ *
+ * Red when (wave 60 probes, tracker TST-BRC-2): the verdict stops mapping
+ * `permissions.never` or `hitl`; a hitl slot files a second approval; an approved
+ * proposal is held again; or the verdict starts holding on the autonomy level.
+ *
+ * Double guard, recorded: a held approval whose agent was paused since is refused by
+ * `approvalDecision.ts`'s front `!entry.enabled` check (before the lock) AND by the
+ * schedule-job branch, where `fireJob`'s `agent-paused` skip maps to `agent_paused`
+ * and reopens the approval. Dropping either alone stays green; the front check is
+ * witnessed alone by `adr0775-p3-autonomous-dispatch-paused.test.ts`.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -37,7 +47,7 @@ beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'p3b', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  deps = { storage: app.locals.storage, hostSuite: app.locals.hostSuite } as unknown as StartRunDeps;
+  deps = { storage: app.locals.storage, hostSuite: app.locals.hostSuite };
   await new Promise<void>((res) => {
     server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
   });

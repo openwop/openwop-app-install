@@ -28,6 +28,11 @@ export interface ApproverRefs {
   approverGroupRefs?: readonly string[];
   /** accessControl role refs — expanded to effective-holder subjects. */
   approverRoleRefs?: readonly string[];
+  /** ADR 0942 D7 — `false` turns ADR 0198 delegation OFF for this gate: active
+   *  delegates are neither eligible nor notified. Read ONLY here (the single
+   *  resolver); every caller builds its refs through `gateApproverRefs` /
+   *  `policyApproverRefs`, so the flag cannot be dropped on one lane. */
+  allowDelegation?: boolean;
 }
 
 export interface EligibleApprovers {
@@ -90,9 +95,10 @@ export async function resolveEligibleApprovers(
   // never chain (we expand from the ref-resolved principals, not recursively).
   // Notification fan-out inherits delegates automatically because it resolves
   // through this same function. Open gates skip it (everyone is eligible as
-  // themselves; coverage adds nothing).
+  // themselves; coverage adds nothing). ADR 0942 D7: a gate with
+  // `allowDelegation: false` skips it too.
   const delegates: Record<string, string[]> = {};
-  if (!openGate && subjects.size > 0 && (opts.includeDelegates ?? true)) {
+  if (!openGate && subjects.size > 0 && (opts.includeDelegates ?? true) && refs.allowDelegation !== false) {
     const { byPrincipal } = await activeDelegations(ctx.tenantId);
     if (byPrincipal.size > 0) {
       for (const principal of [...subjects]) {
@@ -208,7 +214,7 @@ export async function isEligibleApprover(
   // form). `viaPrincipals` feeds `consumeVoteIdentity` — a rule-3 approver
   // votes AS a principal, never as themselves.
   const full = await resolveEligibleApprovers(
-    { approverRefs: directSubjects, approverGroupRefs: groupRefs, approverRoleRefs: roleRefs },
+    { approverRefs: directSubjects, approverGroupRefs: groupRefs, approverRoleRefs: roleRefs, ...(refs.allowDelegation === false ? { allowDelegation: false } : {}) },
     ctx,
   );
   const viaPrincipals = new Set<string>();
@@ -326,4 +332,25 @@ export function gateAclOf(interruptData: unknown): { declared: boolean; subjects
   const groupRefs = strings(data.approverGroupRefs);
   const roleRefs = strings(data.approverRoleRefs);
   return { declared: subjects.length + groupRefs.length + roleRefs.length > 0, subjects, groupRefs, roleRefs };
+}
+
+/** ADR 0942 D7 — THE refs builder for an approval interrupt's data (every lane:
+ *  eligibility, the token lane, notification, the review projection). */
+export function gateApproverRefs(interruptData: unknown): ApproverRefs {
+  const acl = gateAclOf(interruptData);
+  const noDelegation = (interruptData as { allowDelegation?: unknown } | null | undefined)?.allowDelegation === false;
+  return {
+    approverRefs: acl.subjects, approverGroupRefs: acl.groupRefs, approverRoleRefs: acl.roleRefs,
+    ...(noDelegation ? { allowDelegation: false } : {}),
+  };
+}
+
+/** ADR 0942 D7 — the same for a PendingApproval row's `policy`. */
+export function policyApproverRefs(policy: { approverRefs?: readonly string[]; approverGroupRefs?: readonly string[]; approverRoleRefs?: readonly string[]; allowDelegation?: boolean } | undefined): ApproverRefs {
+  return {
+    ...(policy?.approverRefs ? { approverRefs: policy.approverRefs } : {}),
+    ...(policy?.approverGroupRefs ? { approverGroupRefs: policy.approverGroupRefs } : {}),
+    ...(policy?.approverRoleRefs ? { approverRoleRefs: policy.approverRoleRefs } : {}),
+    ...(policy?.allowDelegation === false ? { allowDelegation: false } : {}),
+  };
 }

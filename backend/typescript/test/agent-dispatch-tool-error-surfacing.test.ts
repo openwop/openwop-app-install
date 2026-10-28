@@ -17,6 +17,13 @@
  *
  * Pure-unit: drives `runAgentDispatchLive` with injected mocks (no provider, no
  * boot), modelled on `agent-dispatch-tool-loop.test.ts`.
+ *
+ * Tracker TST-BKX-6. Red when the returned `errorCode` or the content-derived
+ * `code`/`error` is ignored, a capability gate records `durationMs`, the SR-1
+ * scrub is dropped, the thrown message is lost, or a validation failure stops
+ * carrying `invalid_args` — each sabotage-witnessed (w65). (The last case and
+ * the validation case overlap tool-loop › "validates args BEFORE execution";
+ * kept: protected wire file.)
  */
 
 import { afterEach, describe, expect, it } from 'vitest';

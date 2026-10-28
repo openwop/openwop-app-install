@@ -61,12 +61,38 @@ describe('ConsentToggle — a failed read is not an absent feature', () => {
   });
 
   it('200 shows the checkbox reflecting the granted state', async () => {
-    getExtractionGrant.mockResolvedValue({ granted: true, updatedAt: '2026-07-25' });
+    getExtractionGrant.mockResolvedValue({ granted: true, updatedAt: '2026-07-25', available: true });
     render(<ProfileMemoryTab />);
     expect(await screen.findByText(CONSENT_LABEL)).toBeTruthy();
     const box = screen.getByRole('checkbox');
     expect(box).toBeInstanceOf(HTMLInputElement);
     expect(box instanceof HTMLInputElement && box.checked).toBe(true);
+    // ADR 0982 D7 — the hint says when it runs and what it reads, not "during chats".
+    expect(screen.getByText(/only chats in your personal workspace/i)).toBeTruthy();
+    expect(screen.getByText(/each time you start a new chat/i)).toBeTruthy();
+    // MAE2UX-6 — the disclosure is the box's accessible description, not a nearby paragraph.
+    expect(box.getAttribute('aria-describedby') && document.getElementById(box.getAttribute('aria-describedby')!)?.textContent).toMatch(/personal workspace/);
+  });
+
+  it('ADR 0982 D2 — an account that can never extract sees why, and no checkbox', async () => {
+    getExtractionGrant.mockResolvedValue({ granted: false, updatedAt: null, available: false, unavailableReason: 'no-personal-workspace' });
+    render(<ProfileMemoryTab />);
+    expect(await screen.findByText(/needs a personal workspace/i)).toBeTruthy();
+    expect(screen.getByText(CONSENT_LABEL)).toBeTruthy();
+    expect(screen.queryByRole('checkbox')).toBeNull();
+  });
+
+  it('an unavailable account still holding a grant can turn it OFF (code-review #4)', async () => {
+    getExtractionGrant.mockResolvedValue({ granted: true, updatedAt: '2026-07-25', available: false, unavailableReason: 'no-personal-workspace' });
+    render(<ProfileMemoryTab />);
+    expect(await screen.findByRole('button', { name: 'Turn off' })).toBeTruthy();
+  });
+
+  it('ADR 0982 D2 — an anonymous visitor is told to sign in, and gets no checkbox', async () => {
+    getExtractionGrant.mockResolvedValue({ granted: false, updatedAt: null, available: false, unavailableReason: 'sign-in' });
+    render(<ProfileMemoryTab />);
+    expect(await screen.findByText(/Sign in to let your assistant learn/i)).toBeTruthy();
+    expect(screen.queryByRole('checkbox')).toBeNull();
   });
 
   it('a non-404 failure surfaces the control as UNKNOWN — never hidden', async () => {

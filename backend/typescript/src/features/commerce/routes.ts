@@ -6,10 +6,12 @@
  * key is configured the supplied paymentIntentId is VERIFIED against Stripe
  * (LEAK-11); keyless keeps the honest demo posture. Public storefront = later phase.
  */
+import { resolveProductMedia } from './productMedia.js';
+import { serveUrl as assetServeUrl } from '../media/mediaStorage.js';
 import type { Request, Response } from 'express';
 import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
-import { authorizeOrgScope, requireString, optionalString, publicBaseUrl } from '../featureRoute.js';
+import { authorizeOrgScope, requireOrgScope, requireString, optionalString, publicBaseUrl } from '../featureRoute.js';
 import type { Scope } from '../../host/accessControlService.js';
 import type { User } from '../users/usersService.js';
 import { getContact, ensureContact } from '../crm/contactsService.js';
@@ -38,6 +40,9 @@ import { subscribeToProduct, listProductSubscriptions, cancelSubscription, runSu
 import { sendError } from '../../middleware/errorEnvelope.js';
 import { mintOneClickToken, verifyOneClickToken, ONE_CLICK_WINDOW_MS } from './oneClickToken.js';
 import { resolveStorefrontSettlement, settlementStamp } from '../commerce-connect/storefrontSettlement.js';
+import { resolvePublishedFunnelStep, getFunnel, type Funnel } from '../funnels/funnelsService.js';
+import { mintFunnelOfferToken, verifyFunnelOfferToken, offerParentValid, currentOfferStep, claimOfferDecision, settleOfferDecision, getOfferDecision, registerOfferParentReader, OFFER_STEP_KINDS } from '../funnels/offerDecisions.js';
+import { isNonRootWorkspaceOrg } from '../../host/accessControlService.js';
 import { resolveOne } from '../../host/featureToggles/service.js';
 
 const FEATURE = { toggleId: 'commerce', label: 'E-Commerce' };
@@ -102,7 +107,15 @@ const authz = async (req: Request, scope: Scope): Promise<Ctx> => {
   return ctx;
 };
 
+/** The public viewer URL of a funnel step (ADR 0948 P2c), `?step=` being its index. */
+function funnelStepUrl(base: string, orgId: string, r: { funnel: Funnel; checkoutIx: number }): string {
+  return `${base}/fn/${encodeURIComponent(orgId)}/${encodeURIComponent(r.funnel.slug)}?step=${r.checkoutIx}`;
+}
+
 export function registerCommerceRoutes(deps: RouteDeps): void {
+  // ADR 0948 P2c — funnels derives an offer step's routing outcome from the paid
+  // parent order; commerce owns orders, so it lends the read (funnels never imports it).
+  registerOfferParentReader(async (tenantId, orgId, orderId) => getOrder(tenantId, orgId, orderId));
   const { app } = deps;
 
   // ── Products ──
@@ -219,7 +232,7 @@ export function registerCommerceRoutes(deps: RouteDeps): void {
       // one: the owner records an offline payment. A `pi_` id is still verified with
       // the host key, so ADR 0875 D3's binding holds on every lane.
       const current = await getOrder(ctx.tenantId, ctx.orgId, req.params.orderId);
-      const lane = current?.settlement?.kind ?? (await resolveStorefrontSettlement(ctx.tenantId)).kind;
+      const lane = current?.settlement?.kind ?? (await resolveStorefrontSettlement(ctx.tenantId, ctx.orgId)).kind;
       const offline = lane === 'demo' && !paymentIntentId.startsWith('pi_');
       // ADR 0875 (grade-ux COM2UX-2) — on a live host an order is paid by ITS Stripe
       // payment. A hand-recorded `manual:` id used to reach Stripe as an intent id and
@@ -303,6 +316,16 @@ export function registerCommerceRoutes(deps: RouteDeps): void {
   });
 
   // ── Stock movements (gap plan §5C C5) — the auditable inventory ledger ──
+  // ADR 0945 P5 — the product's own photos as grounded-creative sources (the
+  // Product shots panel). An unresolvable image is the typed 422, so the
+  // panel can say which photo to re-attach rather than silently drop it.
+  app.get(`${BASE}/products/:productId/media`, async (req, res, next) => {
+    try {
+      const ctx = await authz(req, 'workspace:read');
+      const sources = await resolveProductMedia({ tenantId: ctx.tenantId, orgId: ctx.orgId, productId: req.params.productId });
+      res.json({ sources: sources.map((s) => ({ assetId: s.assetId, role: s.role, sha256: s.sha256, serveUrl: assetServeUrl(s.serveToken) })) });
+    } catch (err) { next(err); }
+  });
   app.get(`${BASE}/products/:productId/movements`, async (req, res, next) => {
     try { const ctx = await authz(req, 'workspace:read'); res.json({ movements: await listStockMovements(ctx.tenantId, ctx.orgId, req.params.productId) }); } catch (err) { next(err); }
   });
@@ -393,7 +416,7 @@ export function registerCommerceRoutes(deps: RouteDeps): void {
       // ADR 0877 D2 — the ONE charge gate: platform (operator tenants), the tenant's
       // own Connect account, or demo. Never a bare key. Resolved BEFORE conversion so
       // the order records the lane its checkout opens on (grade-code CC2CD-3).
-      const settlement = await resolveStorefrontSettlement(org.tenantId);
+      const settlement = await resolveStorefrontSettlement(org.tenantId, req.params.orgId);
       const out = await acceptQuote(org.tenantId, req.params.orgId, req.params.quoteId, { actor: 'public:quote-accept', settlement: settlementStamp(settlement) });
       if (!out) throw new OpenwopError('not_found', 'Quote not found.', 404, {});
       if (settlement.kind !== 'demo') {
@@ -442,7 +465,7 @@ export function registerCommerceRoutes(deps: RouteDeps): void {
       const ctx = await authz(req, 'workspace:write');
       const b = (req.body ?? {}) as Record<string, unknown>;
       // ADR 0877 D2 — a live Stripe subscription only on a lane that may take money.
-      const settlement = await resolveStorefrontSettlement(ctx.tenantId).catch(() => null);
+      const settlement = await resolveStorefrontSettlement(ctx.tenantId, ctx.orgId).catch(() => null);
       const charge = settlement && settlement.kind !== 'demo' ? settlement.charge : null;
       const idempotencyKey = idempotencyKeyOf(req, b);
       // ADR 0875 D9 — the same contact check every order route makes (a foreign
@@ -464,7 +487,7 @@ export function registerCommerceRoutes(deps: RouteDeps): void {
       // ADR 0877 (architect H1) — the manual cycle is the demo clock for a store on the
       // DEMO lane (no Connect account yet), exactly as on a keyless host. A store that
       // may take live money still refuses it (ADR 0875 D9 / H2).
-      if (sub && (sub.paymentMode === 'live' || sub.stripeSubscriptionId || sub.degradedFromLive || (await resolveStorefrontSettlement(ctx.tenantId)).kind !== 'demo')) {
+      if (sub && (sub.paymentMode === 'live' || sub.stripeSubscriptionId || sub.degradedFromLive || (await resolveStorefrontSettlement(ctx.tenantId, ctx.orgId)).kind !== 'demo')) {
         throw new OpenwopError('validation_error', 'This subscription is billed by Stripe; its cycles are placed by the paid invoice, not by hand.', 409, { code: 'live_subscription' });
       }
       const order = await runSubscriptionCycle(ctx.tenantId, ctx.orgId, req.params.subscriptionId);
@@ -545,6 +568,32 @@ export function registerCommerceRoutes(deps: RouteDeps): void {
       // ADR 0294 P3 contract — the funnel provenance stamp, wired here (0296):
       // both ids or nothing; createOrder re-validates + bounds.
       const rawFunnel = (b.funnel ?? undefined) as { funnelId?: unknown; stepId?: unknown } | undefined;
+      // ADR 0948 D2 — a checkout that names a funnel step sells what that step
+      // OFFERS: the step must be the checkout of a published funnel of this org,
+      // and every bump must be one of its offered bumps. Before this, a visitor
+      // could attach any active product as an "order bump". Without a funnel ref
+      // the plain storefront keeps today's behaviour.
+      // ADR 0948 P2c — and it sells EXACTLY the offer: one main line, one of the
+      // offered products, quantity 1; bumps distinct, each offered, quantity 1.
+      // Prices are always the catalog's (createOrder); nothing the page posts but
+      // ids and the choice of product reaches the order.
+      let funnelReturn: { funnel: Funnel; checkoutIx: number } | undefined;
+      if (rawFunnel !== undefined) {
+        const step = await resolvePublishedFunnelStep(tenantId, req.params.orgId, rawFunnel, ['checkout']);
+        const offered = new Set(step.offer?.bumpProductIds ?? []);
+        const unoffered = lines.find((l) => l.origin === 'bump' && !offered.has(l.productId));
+        if (unoffered) throw new OpenwopError('validation_error', 'That add-on is not offered on this checkout.', 400, { code: 'bump_not_offered', field: 'bumps' });
+        const bumpLines = lines.filter((l) => l.origin === 'bump');
+        if (bumpLines.some((l) => l.quantity !== 1) || new Set(bumpLines.map((l) => l.productId)).size !== bumpLines.length) {
+          throw new OpenwopError('validation_error', 'Each add-on can be added once.', 400, { code: 'bump_not_offered', field: 'bumps' });
+        }
+        const main = lines.filter((l) => l.origin !== 'bump');
+        if (main.length !== 1 || main[0]!.quantity !== 1 || !(step.offer?.productIds ?? []).includes(main[0]!.productId)) {
+          throw new OpenwopError('validation_error', 'That product is not offered on this checkout.', 400, { code: 'product_not_offered', field: 'lines' });
+        }
+        const funnel = await getFunnel(tenantId, req.params.orgId, String((rawFunnel as { funnelId?: unknown }).funnelId).trim());
+        if (funnel) funnelReturn = { funnel, checkoutIx: funnel.steps.findIndex((st) => st.stepId === step.stepId) };
+      }
       // ADR 0297 D2 — affiliate ref capture: only a code that references a REAL
       // affiliate in this org attributes (junk refs are silently dropped — a
       // public surface must not be a validation oracle for affiliate codes).
@@ -569,7 +618,7 @@ export function registerCommerceRoutes(deps: RouteDeps): void {
 
       // ADR 0877 D1/D2 — decided BEFORE the order exists, so the order records the
       // lane it was opened on (M5) and the checkout below cannot pick a different one.
-      const settlement = await resolveStorefrontSettlement(tenantId);
+      const settlement = await resolveStorefrontSettlement(tenantId, req.params.orgId);
       const order = await createOrder({
         // grade-code B6: NO PII in the actor — it lands in audit rows + webhook fan-out.
         // The contact link (below) carries identity; the actor stays opaque.
@@ -612,8 +661,18 @@ export function registerCommerceRoutes(deps: RouteDeps): void {
           metadata: { orderId: order.orderId, tenantId, orgId: req.params.orgId },
           // ADR 0875 D2 — `oc` is the one-click capability: only the browser that
           // completed THIS checkout lands on this URL.
-          successUrl: `${base}/store/${encodeURIComponent(req.params.orgId)}?order=${encodeURIComponent(order.orderId)}&paid=1&oc=${encodeURIComponent(mintOneClickToken(tenantId, req.params.orgId, order.orderId))}`,
-          cancelUrl: `${base}/store/${encodeURIComponent(req.params.orgId)}?order=${encodeURIComponent(order.orderId)}&canceled=1`,
+          // ADR 0948 P2c — a funnel checkout returns to its own checkout step, and the
+          // offer capability (`ft`, bound to this order AND funnel) rides the URL
+          // FRAGMENT: never sent to a server, never in a Referer or request log.
+          ...(funnelReturn
+            ? {
+              successUrl: `${funnelStepUrl(base, req.params.orgId, funnelReturn)}&paid=1#order=${encodeURIComponent(order.orderId)}&ft=${encodeURIComponent(mintFunnelOfferToken(tenantId, req.params.orgId, order.orderId, funnelReturn.funnel.funnelId))}`,
+              cancelUrl: `${funnelStepUrl(base, req.params.orgId, funnelReturn)}&canceled=1`,
+            }
+            : {
+              successUrl: `${base}/store/${encodeURIComponent(req.params.orgId)}?order=${encodeURIComponent(order.orderId)}&paid=1&oc=${encodeURIComponent(mintOneClickToken(tenantId, req.params.orgId, order.orderId))}`,
+              cancelUrl: `${base}/store/${encodeURIComponent(req.params.orgId)}?order=${encodeURIComponent(order.orderId)}&canceled=1`,
+            }),
           ...(customerId ? { customerId, setupFutureUsage: 'off_session' as const } : {}),
         });
         res.status(201).json({ orderId: order.orderId, total: order.total, taxTotal: order.taxTotal ?? 0, shippingCost: order.shippingCost ?? 0, charge: orderChargeTotal(order), currency: order.currency, mode: 'live', checkoutUrl: session.url });
@@ -662,16 +721,26 @@ export function registerCommerceRoutes(deps: RouteDeps): void {
   app.get(`${BASE}/payments`, async (req, res, next) => {
     try {
       const ctx = await authz(req, 'workspace:read');
-      const s = await resolveStorefrontSettlement(ctx.tenantId);
+      const s = await resolveStorefrontSettlement(ctx.tenantId, ctx.orgId);
       // The SAME subject the charge gate resolves (tenant only): a per-user cohort
       // must not tell an owner Connect is available while their store stays demo
       // (grade-code CC2CD-9 / grade-ux CC2UX-4).
       const connect = await resolveOne('commerce-connect', { tenantId: ctx.tenantId }).catch(() => null);
+      const clientOrg = isNonRootWorkspaceOrg(ctx.tenantId, ctx.orgId);
+      // ADR 0948 P0b — whether THIS caller can onboard the client org, by the same
+      // predicate the onboard route enforces (owner scope + the Connect toggle),
+      // so the page never offers a button whose only outcome is a refusal.
+      const canOnboardClient = clientOrg && !!connect?.enabled
+        && await requireOrgScope(req, 'host:org:manage').then(() => true, () => false);
       res.json({
         settlement: s.kind,
         ...(s.kind === 'demo' ? { reason: s.reason } : {}),
         ...(s.kind === 'connect' ? { applicationFeePct: s.applicationFeePct } : {}),
         connectAvailable: !!connect?.enabled,
+        // ADR 0948 P0b — a client org onboards its OWN account (the org-scoped
+        // Commerce Connect routes), never through the agency's Connect page.
+        clientOrg,
+        ...(clientOrg ? { canOnboardClient } : {}),
       });
     } catch (err) { next(err); }
   });
@@ -725,22 +794,54 @@ export function registerCommerceRoutes(deps: RouteDeps): void {
       const org = await publicStoreOrg(req.params.orgId);
       const tenantId = org.tenantId;
       const orgId = req.params.orgId;
-      const b = (req.body ?? {}) as { productId?: unknown; quantity?: unknown; funnel?: unknown; oc?: unknown };
+      const b = (req.body ?? {}) as { productId?: unknown; quantity?: unknown; funnel?: unknown; oc?: unknown; ft?: unknown };
       const productId = requireString(b.productId, 'productId');
+      const rawFunnel = (b.funnel ?? undefined) as { funnelId?: unknown; stepId?: unknown } | undefined;
       const rawQty = b.quantity === undefined ? 1 : Number(b.quantity);
-      if (!Number.isInteger(rawQty) || rawQty < 1 || rawQty > ONE_CLICK_MAX_QUANTITY) {
-        throw new OpenwopError('validation_error', `quantity must be a whole number from 1 to ${ONE_CLICK_MAX_QUANTITY}.`, 400, { field: 'quantity' });
+      // ADR 0948 P2c (architect H2) — a funnel offer is ONE of the offered product:
+      // the holder of a leaked capability must not be able to buy ten.
+      const maxQty = rawFunnel !== undefined ? 1 : ONE_CLICK_MAX_QUANTITY;
+      if (!Number.isInteger(rawQty) || rawQty < 1 || rawQty > maxQty) {
+        throw new OpenwopError('validation_error', `quantity must be a whole number from 1 to ${maxQty}.`, 400, { field: 'quantity' });
       }
       const quantity = rawQty;
 
-      // ADR 0875 D2 — the capability from the parent's success URL, bound to
-      // (tenant, org, order), inside the post-purchase window. Every refusal is
-      // the same 404 as an unknown order, so the route is no oracle.
       const parent = await getOrder(tenantId, orgId, req.params.orderId);
-      if (!parent || parent.status !== 'paid' || !verifyOneClickToken(tenantId, orgId, parent.orderId, b.oc)
-        || Date.now() - Date.parse(parent.paidAt ?? parent.updatedAt ?? parent.createdAt) > ONE_CLICK_WINDOW_MS) {
-        throw new OpenwopError('not_found', 'Order not found.', 404, {});
+      let funnelOffer: { funnel: Funnel; stepId: string } | undefined;
+      if (rawFunnel !== undefined) {
+        // ADR 0948 P2c — a funnel purchase is extended only through its funnel's
+        // offer capability (`ft`, bound to this order AND funnel, open for
+        // FUNNEL_OFFER_WINDOW_MS after payment). `oc` is never accepted here.
+        const funnelId = typeof rawFunnel.funnelId === 'string' ? rawFunnel.funnelId.trim() : '';
+        if (!offerParentValid(tenantId, orgId, parent, funnelId, b.ft)) throw new OpenwopError('not_found', 'Order not found.', 404, {});
+        const step = await resolvePublishedFunnelStep(tenantId, orgId, rawFunnel, OFFER_STEP_KINDS);
+        if (step.offer?.oneClickProductId !== productId) {
+          throw new OpenwopError('validation_error', 'That product is not offered on this step.', 400, { code: 'one_click_not_offered', field: 'productId' });
+        }
+        const funnel = await getFunnel(tenantId, orgId, funnelId);
+        if (!funnel) throw new OpenwopError('not_found', 'Order not found.', 404, {});
+        funnelOffer = { funnel, stepId: step.stepId };
+        // A second click on an accepted offer returns that purchase (no second
+        // charge), before any limit could answer it differently.
+        const already = await getOfferDecision(tenantId, parent.orderId, funnelId, step.stepId);
+        if (already?.decision === 'accepted' && already.childOrderId) {
+          const prior = await getOrder(tenantId, orgId, already.childOrderId);
+          res.status(200).json({ orderId: already.childOrderId, status: prior?.status ?? 'paid', duplicate: true });
+          return;
+        }
+      } else {
+        // ADR 0875 D2 — the capability from the parent's success URL, bound to
+        // (tenant, org, order), inside the post-purchase window. Every refusal is
+        // the same 404 as an unknown order, so the route is no oracle.
+        if (!parent || parent.status !== 'paid' || !verifyOneClickToken(tenantId, orgId, parent.orderId, b.oc)
+          || Date.now() - Date.parse(parent.paidAt ?? parent.updatedAt ?? parent.createdAt) > ONE_CLICK_WINDOW_MS) {
+          throw new OpenwopError('not_found', 'Order not found.', 404, {});
+        }
+        // ADR 0948 P2c (architect L3) — a funnel purchase never falls back to the
+        // storefront capability, which has no per-step single use.
+        if (parent.funnelRef) throw new OpenwopError('not_found', 'Order not found.', 404, {});
       }
+      if (!parent) throw new OpenwopError('not_found', 'Order not found.', 404, {});
       if (!parent.contactId) throw new OpenwopError('validation_error', 'This purchase has no saved payment profile.', 400, {});
       // Architect B1 — only the method captured from THIS purchase, never "the
       // contact's" card (the contact is whatever a typed email resolved to).
@@ -751,51 +852,94 @@ export function registerCommerceRoutes(deps: RouteDeps): void {
       if (children.filter((c) => c.status !== 'canceled').length >= 3) {
         throw new OpenwopError('validation_error', 'One-click chain limit reached for this purchase.', 400, { code: 'chain_limit' });
       }
-      // Duplicate guard: an accepted offer for the same product returns the
-      // existing child (refresh/double-click can never double-charge).
-      const dup = children.find((c) => c.status !== 'canceled' && c.items.some((i) => i.productId === productId && i.origin === 'upsell'));
-      if (dup) { res.status(200).json({ orderId: dup.orderId, status: dup.status, duplicate: true }); return; }
+      if (!funnelOffer) {
+        // Duplicate guard: an accepted offer for the same product returns the
+        // existing child (refresh/double-click can never double-charge).
+        const dup = children.find((c) => c.status !== 'canceled' && c.items.some((i) => i.productId === productId && i.origin === 'upsell'));
+        if (dup) { res.status(200).json({ orderId: dup.orderId, status: dup.status, duplicate: true }); return; }
+      }
 
       // ADR 0877 (architect H3) — the saved card was consented to under the PARENT's
       // merchant (the platform, or the tenant's connected account). A child charged
       // under a different lane would be a merchant-initiated charge the cardholder
       // never agreed to, so a lane change since the parent is the uniform 404.
       // A pre-0877 parent carries no stamp; every live one of those was platform.
-      const settlement = await resolveStorefrontSettlement(tenantId);
+      const settlement = await resolveStorefrontSettlement(tenantId, orgId);
       const parentLane = parent.settlement ?? { kind: 'platform' as const };
       const now = settlementStamp(settlement);
       if (now.kind !== parentLane.kind || now.destinationAccountId !== parentLane.destinationAccountId) {
         throw new OpenwopError('not_found', 'Order not found.', 404, {});
       }
-      const rawFunnel = (b.funnel ?? undefined) as { funnelId?: unknown; stepId?: unknown } | undefined;
-      const child = await createOrder({
-        tenantId, orgId, createdBy: 'public:one-click', settlement: now,
-        contactId: parent.contactId, buyerVerified: false, activeOnly: true,
-        parentOrderId: parent.orderId,
-        // provenance: the explicit upsell step when supplied, else the parent's stamp
-        ...(rawFunnel ? { funnelRef: rawFunnel } : parent.funnelRef ? { funnelRef: parent.funnelRef } : {}),
-        lines: [{ productId, quantity, origin: 'upsell' }],
-      });
+
+      // ADR 0948 P2c — the step's ONE decision, claimed after every cheap refusal and
+      // before any order or charge. Only the step the funnel's own routing reaches
+      // now may be claimed, so a downsell is closed while its upsell is undecided or
+      // charging, and a replay or an accept after a decline finds the step taken.
+      let claim: Awaited<ReturnType<typeof claimOfferDecision>> = null;
+      if (funnelOffer) {
+        const { funnel, stepId } = funnelOffer;
+        const current = await currentOfferStep(tenantId, funnel, parent.funnelRef!.stepId, parent.orderId);
+        if (current?.stepId !== stepId) throw new OpenwopError('not_found', 'Order not found.', 404, {});
+        claim = await claimOfferDecision(tenantId, orgId, parent.orderId, funnel.funnelId, stepId, 'charging');
+        if (!claim) throw new OpenwopError('not_found', 'Order not found.', 404, {});
+      }
+
+      let child: Awaited<ReturnType<typeof createOrder>>;
+      try {
+        child = await createOrder({
+          tenantId, orgId, createdBy: 'public:one-click', settlement: now,
+          contactId: parent.contactId, buyerVerified: false, activeOnly: true,
+          parentOrderId: parent.orderId,
+          // provenance: the explicit upsell step when supplied, else the parent's stamp
+          ...(rawFunnel ? { funnelRef: rawFunnel } : parent.funnelRef ? { funnelRef: parent.funnelRef } : {}),
+          lines: [{ productId, quantity, origin: 'upsell' }],
+        });
+      } catch (err) {
+        // Nothing was charged: the offer could not be bought, so it routes as declined.
+        if (claim) await settleOfferDecision(claim, 'declined').catch(() => undefined);
+        throw err;
+      }
+      const settle = async (decision: 'charging' | 'accepted' | 'declined'): Promise<void> => {
+        if (claim) await settleOfferDecision(claim, decision, child.orderId).catch((e) => log.error('funnel_offer_settle_failed', { orderId: child.orderId, error: String(e) }));
+      };
 
       if (settlement.kind === 'demo') {
         // Keyless demo posture — the child order exists, honestly unpaid.
+        await settle('accepted');
         res.status(201).json({ orderId: child.orderId, status: child.status, mode: 'demo' });
         return;
       }
       const stripeKey = await liveStripeKeyFor(tenantId);
-      const outcome = await createStripeOffSessionPaymentIntent(settlement.charge, {
-        customerId: saved.stripeCustomerId, paymentMethodId: saved.paymentMethodId,
-        feeBaseMinor: toStripeMinorUnits(child.total, child.currency),
-        amountMinor: toStripeMinorUnits(orderChargeTotal(child), child.currency), currency: child.currency,
-        metadata: { orderId: child.orderId, tenantId, orgId },
-        idempotencyKey: `oneclick:${parent.orderId}:${productId}`,
-      });
+      let outcome: Awaited<ReturnType<typeof createStripeOffSessionPaymentIntent>>;
+      try {
+        outcome = await createStripeOffSessionPaymentIntent(settlement.charge, {
+          customerId: saved.stripeCustomerId, paymentMethodId: saved.paymentMethodId,
+          feeBaseMinor: toStripeMinorUnits(child.total, child.currency),
+          amountMinor: toStripeMinorUnits(orderChargeTotal(child), child.currency), currency: child.currency,
+          metadata: { orderId: child.orderId, tenantId, orgId },
+          // ADR 0948 P2c (architect H3) — per STEP on the funnel path: an upsell and
+          // its downsell may offer the same product, and must not share a key.
+          idempotencyKey: funnelOffer ? `oneclick:${parent.orderId}:${funnelOffer.funnel.funnelId}:${funnelOffer.stepId}` : `oneclick:${parent.orderId}:${productId}`,
+        });
+      } catch (err) {
+        if (!claim) throw err;
+        // ADR 0948 P2c (architect H1) — the charge may have gone through. Keep the
+        // child (and its stock) alive for the webhook, which marks it paid by the
+        // intent's metadata, and keep the step `charging`: it routes as the end of
+        // the offers, never as a silent downsell after a possible charge.
+        log.error('funnel_one_click_charge_unknown', { orderId: child.orderId, error: err instanceof Error ? err.message : String(err) });
+        await extendReservationForSca(tenantId, orgId, child.orderId).catch(() => undefined);
+        await settle('charging');
+        res.status(202).json({ orderId: child.orderId, pending: true });
+        return;
+      }
       if (outcome.outcome === 'succeeded') {
         await markAsPaid(tenantId, orgId, child.orderId, outcome.paymentIntentId, { actor: 'public:one-click', stripeKey });
+        await settle('accepted');
         res.status(201).json({ orderId: child.orderId, status: 'paid', paid: true });
         return;
       }
-      if (outcome.outcome === 'requires_action') {
+      if (outcome.outcome === 'requires_action' && !claim) {
         // SCA challenge — the chain never silently drops revenue: the SPA
         // confirms on-session with this clientSecret; the webhook flips paid.
         // GC-OC-2: keep the child's stock reservation alive through the
@@ -805,8 +949,73 @@ export function registerCommerceRoutes(deps: RouteDeps): void {
         return;
       }
       // Declined — release the child (stock restored) so the funnel can downsell.
+      // ADR 0948 P2c (architect Q4): the funnel viewer has no on-page confirm, so a
+      // bank challenge there is a decline too; nothing can complete it.
       await cancelOrder(tenantId, orgId, child.orderId, { actor: 'system:one-click-declined' }).catch(() => undefined);
-      res.status(402).json({ declined: true, reason: outcome.reason });
+      await settle('declined');
+      res.status(402).json({ declined: true, reason: outcome.outcome === 'requires_action' ? 'authentication_required' : outcome.reason });
+    } catch (err) { next(err); }
+  });
+
+  /** ADR 0948 P2c — the shared checks of the offer-step routes: a paid funnel parent,
+   *  its capability, and a published upsell/downsell step of that funnel. */
+  async function offerStepContext(req: Request): Promise<{ tenantId: string; orgId: string; parent: NonNullable<Awaited<ReturnType<typeof getOrder>>>; funnel: Funnel; stepId: string }> {
+    const org = await publicStoreOrg(req.params.orgId);
+    const tenantId = org.tenantId;
+    const orgId = req.params.orgId;
+    const b = (req.body ?? {}) as { funnel?: unknown; ft?: unknown };
+    const ref = (b.funnel ?? {}) as { funnelId?: unknown; stepId?: unknown };
+    const funnelId = typeof ref.funnelId === 'string' ? ref.funnelId.trim() : '';
+    const parent = await getOrder(tenantId, orgId, req.params.orderId);
+    if (!offerParentValid(tenantId, orgId, parent, funnelId, b.ft) || !parent) throw new OpenwopError('not_found', 'Order not found.', 404, {});
+    const step = await resolvePublishedFunnelStep(tenantId, orgId, ref, OFFER_STEP_KINDS);
+    const funnel = await getFunnel(tenantId, orgId, funnelId);
+    if (!funnel) throw new OpenwopError('not_found', 'Order not found.', 404, {});
+    return { tenantId, orgId, parent, funnel, stepId: step.stepId };
+  }
+
+  // ADR 0948 P2c — "No thanks" on an upsell/downsell: records the step's ONE decision
+  // as declined (no order, no charge), so the funnel routes on and the offer cannot
+  // be accepted later through a replayed capability.
+  app.post('/host/openwop-app/public-store/:orgId/orders/:orderId/funnel-decline', async (req, res, next) => {
+    try {
+      const { tenantId, orgId, parent, funnel, stepId } = await offerStepContext(req);
+      const already = await getOfferDecision(tenantId, parent.orderId, funnel.funnelId, stepId);
+      if (already?.decision === 'declined') { res.json({ declined: true, duplicate: true }); return; }
+      const current = await currentOfferStep(tenantId, funnel, parent.funnelRef!.stepId, parent.orderId);
+      if (current?.stepId !== stepId) throw new OpenwopError('not_found', 'Order not found.', 404, {});
+      if (!(await claimOfferDecision(tenantId, orgId, parent.orderId, funnel.funnelId, stepId, 'declined'))) {
+        throw new OpenwopError('not_found', 'Order not found.', 404, {});
+      }
+      res.json({ declined: true });
+    } catch (err) { next(err); }
+  });
+
+  // ADR 0948 P2c — the viewer, back from Stripe, asks whether the purchase is paid yet
+  // (the webhook may lag the redirect) and whether this step's offer is open. Same
+  // capability check as the routes it gates; a bad capability is the uniform 404.
+  app.post('/host/openwop-app/public-store/:orgId/orders/:orderId/funnel-offer', async (req, res, next) => {
+    try {
+      const org = await publicStoreOrg(req.params.orgId);
+      const tenantId = org.tenantId;
+      const orgId = req.params.orgId;
+      const b = (req.body ?? {}) as { funnel?: unknown; ft?: unknown };
+      const ref = (b.funnel ?? {}) as { funnelId?: unknown; stepId?: unknown };
+      const funnelId = typeof ref.funnelId === 'string' ? ref.funnelId.trim() : '';
+      const parent = await getOrder(tenantId, orgId, req.params.orderId);
+      if (!parent || parent.funnelRef?.funnelId !== funnelId) throw new OpenwopError('not_found', 'Order not found.', 404, {});
+      // Before the webhook lands the parent is still pending: the capability is
+      // checked against the order and funnel alone, and the answer is "not yet".
+      if (parent.status === 'pending') {
+        if (!verifyFunnelOfferToken(tenantId, orgId, parent.orderId, funnelId, b.ft)) throw new OpenwopError('not_found', 'Order not found.', 404, {});
+        res.json({ paid: false, open: false });
+        return;
+      }
+      if (!offerParentValid(tenantId, orgId, parent, funnelId, b.ft)) throw new OpenwopError('not_found', 'Order not found.', 404, {});
+      const funnel = await getFunnel(tenantId, orgId, funnelId);
+      const current = funnel ? await currentOfferStep(tenantId, funnel, parent.funnelRef!.stepId, parent.orderId) : null;
+      const stepId = typeof ref.stepId === 'string' ? ref.stepId : '';
+      res.json({ paid: true, open: Boolean(current && current.stepId === stepId) });
     } catch (err) { next(err); }
   });
 

@@ -56,7 +56,9 @@ export const campaignBriefFeature: BackendFeature = {
       }
     });
   },
-  surface: { id: 'campaign-brief', build: buildCampaignBriefSurface },
+  // The writes a run makes on a brief need the bar their routes set; reads stay at
+  // membership. Rows named by id are scoped inside the surface (`mayUseOrg`).
+  surface: { id: 'campaign-brief', build: buildCampaignBriefSurface, orgPolicy: { methodScopes: { setKernel: 'workspace:write', persistVoc: 'workspace:write', persistAngles: 'workspace:write', persistTargeting: 'workspace:write' } } },
   requiredPacks: [
     'feature.campaign-brief.nodes',
     'vendor.openwop-app.campaign-brief.agents',

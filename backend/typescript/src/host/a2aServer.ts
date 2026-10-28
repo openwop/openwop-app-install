@@ -24,7 +24,7 @@
  */
 
 import { runAgentDispatch, AgentNotFoundError } from './agentDispatch.js';
-import { getAgentRegistry } from '../executor/agentRegistry.js';
+import { isA2aDispatchable } from './a2aCard.js';
 import { classifyA2aOutcome, recordA2aRequest } from '../observability/metricSeams.js';
 import {
   getA2aTask,
@@ -109,7 +109,8 @@ function agentExists(agentId: string): boolean {
   // DID let a2a peers dispatch any tenant's user agent — a cross-tenant hole
   // this closes, intentionally. The agent card advertises pack agents only
   // (synthesizeAgentCard) so the wire claim matches dispatchability.
-  return getAgentRegistry().has(agentId);
+  // ADR 0962 D8 — and only the agents the card lists (one predicate).
+  return isA2aDispatchable(agentId);
 }
 
 /**
@@ -223,6 +224,9 @@ async function dispatchA2aRequest(
           await upsertA2aTask({ taskId, runId: taskId, ...carry, state: 'working' });
         }
 
+        // ADR 0962 D8 — the non-durable lane refuses an unlisted agent exactly as
+        // it refuses an unknown one, so a hidden id is not probeable.
+        if (!durable && !agentExists(agentId)) throw new AgentNotFoundError(agentId);
         const r = runAgentDispatch({
           agentId,
           task,

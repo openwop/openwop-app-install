@@ -20,6 +20,8 @@
  *   drop the edit-accept arm                                -> leg 4 alone
  *   drop resolvedActionFields from the emitted payload      -> leg 1 alone
  *   return the action for NON-approval kinds too            -> leg 5 alone
+ * Re-witnessed in /grade-tests wave 58 (probes act-refine, act-scope, act-edit,
+ * act-kind). Tracker TST-BGF-13.
  */
 import { describe, expect, it } from 'vitest';
 import { validateResumeValue, resolvedActionFields } from '../src/routes/interrupts.js';
@@ -29,7 +31,10 @@ const APPROVAL = (actions: string[]) => ({ kind: 'approval', data: { actions } }
 const ALL = ['accept', 'reject', 'refine', 'edit-accept'];
 
 function refusalOf(fn: () => void): OpenwopError | null {
-  try { fn(); return null; } catch (e) { return e as OpenwopError; }
+  try { fn(); return null; } catch (e) {
+    expect(e, 'every refusal here is a typed OpenwopError').toBeInstanceOf(OpenwopError);
+    return e instanceof OpenwopError ? e : null;
+  }
 }
 
 describe('RFC 0183 §A.2 — an action whose payload is missing is refused, not recorded', () => {
@@ -60,6 +65,7 @@ describe('RFC 0183 §A.2 — an action whose payload is missing is refused, not 
       const err = refusalOf(() => validateResumeValue(APPROVAL(ALL), { action: 'refine', refineFeedback: fb }));
       expect(err, `refineFeedback ${JSON.stringify(fb)} must be refused`).not.toBeNull();
       expect(err?.httpStatus).toBe(400);
+      expect(String(err?.message)).toMatch(/refineFeedback\.scope MUST be one of \[whole, section, items\]/);
     }
     for (const scope of ['whole', 'section', 'items']) {
       expect(() => validateResumeValue(APPROVAL(ALL), { action: 'refine', refineFeedback: { scope } }),
@@ -93,6 +99,16 @@ describe('RFC 0183 §A.2 — an action whose payload is missing is refused, not 
     expect(() => validateResumeValue({ kind: 'external-event', data: {} }, { action: 'refine' })).not.toThrow();
   });
 
+  it('6. an approval gate that does not OFFER refine is unaffected by the new rule', () => {
+    // The pre-existing allowed-actions refusal still fires first, with its own
+    // message — the new rule must not change which error a caller sees when
+    // the action was never on offer.
+    const err = refusalOf(() => validateResumeValue(APPROVAL(['accept', 'reject']), { action: 'refine' }));
+    expect(err?.httpStatus).toBe(400);
+    expect(String(err?.message)).toMatch(/MUST be one of/);
+    expect(String(err?.message)).not.toMatch(/refineFeedback/);
+  });
+
   it('7. an approval resolution DOES carry the action, and only the payload its action takes', () => {
     expect(resolvedActionFields('approval', { action: 'accept' })).toEqual({ action: 'accept' });
     expect(resolvedActionFields('approval', { action: 'refine', refineFeedback: { scope: 'whole' } }))
@@ -104,15 +120,5 @@ describe('RFC 0183 §A.2 — an action whose payload is missing is refused, not 
       .toEqual({ action: 'refine', refineFeedback: { scope: 'whole' } });
     // No action supplied -> nothing stamped.
     expect(resolvedActionFields('approval', {})).toEqual({});
-  });
-
-  it('6. an approval gate that does not OFFER refine is unaffected by the new rule', () => {
-    // The pre-existing allowed-actions refusal still fires first, with its own
-    // message — the new rule must not change which error a caller sees when
-    // the action was never on offer.
-    const err = refusalOf(() => validateResumeValue(APPROVAL(['accept', 'reject']), { action: 'refine' }));
-    expect(err?.httpStatus).toBe(400);
-    expect(String(err?.message)).toMatch(/MUST be one of/);
-    expect(String(err?.message)).not.toMatch(/refineFeedback/);
   });
 });

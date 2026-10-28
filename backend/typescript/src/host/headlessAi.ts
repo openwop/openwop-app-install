@@ -33,6 +33,7 @@ import { getClassDefault, getDefaultModel } from '../providers/catalog.js';
 import { createLogger } from '../observability/logger.js';
 import { nativeSearchSatisfies, nativeSearchSuitability } from './webSearchCapability.js';
 import { registerCredentialRefConsumer } from './credentialRefRegistry.js';
+import { createVertexEmbed, VERTEX_EMBEDDING_MAX_DIMS, VERTEX_EMBEDDING_MODELS } from './vertexEmbedder.js';
 
 const log = createLogger('host.headlessAi');
 
@@ -162,6 +163,27 @@ export async function setHeadlessAiDefault(
   if (input.preferForText !== undefined && typeof input.preferForText !== 'boolean') {
     throw new OpenwopError('validation_error', 'preferForText MUST be a boolean.', 400, { field: 'preferForText' });
   }
+  const spec = await validateHeadlessSpec(scope, input);
+  const row: HeadlessAiDefault = {
+    tenantId: scope.tenantId,
+    ...spec,
+    ...(input.preferForText === true ? { preferForText: true } : {}),
+    updatedBy: scope.actorId ?? 'unknown',
+    updatedAt: now,
+  };
+  await defaults.put(row);
+  return row;
+}
+
+/**
+ * A `{provider, model, credentialRef}` checked the way a saved default is: a known
+ * provider, a bounded model, and a ref that is one of THIS tenant's stored secrets
+ * (no IDOR) and resolves now. Shared by the saved default and a caller-chosen spec.
+ */
+async function validateHeadlessSpec(
+  scope: SecretScope,
+  input: { provider?: unknown; model?: unknown; credentialRef?: unknown },
+): Promise<{ provider: HeadlessProvider; model: string; credentialRef: string }> {
   if (typeof input.provider !== 'string' || !(HEADLESS_PROVIDERS as readonly string[]).includes(input.provider)) {
     throw new OpenwopError('validation_error', `provider MUST be one of: ${HEADLESS_PROVIDERS.join(', ')}.`, 400, { field: 'provider' });
   }
@@ -180,17 +202,7 @@ export async function setHeadlessAiDefault(
   if (!(await resolveSecret(input.credentialRef, scope))) {
     throw new OpenwopError('validation_error', 'credentialRef does not currently resolve to a usable key.', 400, { field: 'credentialRef' });
   }
-  const row: HeadlessAiDefault = {
-    tenantId: scope.tenantId,
-    provider: input.provider as HeadlessProvider,
-    model: input.model.trim(),
-    credentialRef: input.credentialRef,
-    ...(input.preferForText === true ? { preferForText: true } : {}),
-    updatedBy: scope.actorId ?? 'unknown',
-    updatedAt: now,
-  };
-  await defaults.put(row);
-  return row;
+  return { provider: input.provider as HeadlessProvider, model: input.model.trim(), credentialRef: input.credentialRef };
 }
 
 /** Clear the tenant's headless AI default. */
@@ -256,8 +268,9 @@ export async function resolveHeadlessAi(
   return (await resolveHeadlessAiDescribed(tenantId, modality, options))?.dispatch ?? null;
 }
 
-/** Which ladder step resolved a headless dispatch (ADR 0821 D5 numbering). */
-export type HeadlessRoute = 'byok-preferred' | 'managed' | 'byok-default';
+/** Which ladder step resolved a headless dispatch (ADR 0821 D5 numbering).
+ *  `byok-chosen` is outside the ladder: the caller named the key and model. */
+export type HeadlessRoute = 'byok-preferred' | 'managed' | 'byok-default' | 'byok-chosen';
 
 /** A resolved headless dispatch plus WHO it calls — never the key (SR-1). */
 export interface DescribedHeadlessDispatch {
@@ -266,6 +279,37 @@ export interface DescribedHeadlessDispatch {
   /** Absent on the managed step: the operator fixes that model, not this tenant. */
   model?: string;
   route: HeadlessRoute;
+}
+
+/**
+ * A dispatch on a BYOK `{provider, model, credentialRef}` the CALLER chose rather
+ * than the tenant's saved default (ADR 0945 P2 judge check: the person testing
+ * the judge picks which of their keys and models to test). Validated like a
+ * saved default (`validateHeadlessSpec`), and the provider must take `modality`
+ * input. Throws a typed 400/422 instead of returning null, because the caller
+ * named a spec and deserves to hear what is wrong with it. SR-1: the key stays
+ * inside the closure.
+ */
+export async function resolveHeadlessAiForSpec(
+  scope: SecretScope,
+  input: { provider?: unknown; model?: unknown; credentialRef?: unknown },
+  modality: HeadlessModality,
+): Promise<DescribedHeadlessDispatch> {
+  const { provider, model, credentialRef } = await validateHeadlessSpec(scope, input);
+  if (!providerSupports(provider, modality)) {
+    throw new OpenwopError('validation_error', `${provider} does not accept ${modality} input here.`, 422, { field: 'provider' });
+  }
+  const apiKey = await resolveSecret(credentialRef, scope);
+  if (!apiKey) throw new OpenwopError('validation_error', 'credentialRef does not currently resolve to a usable key.', 400, { field: 'credentialRef' });
+  return {
+    provider,
+    model,
+    route: 'byok-chosen',
+    dispatch: async (messages, opts) => {
+      const r = await dispatchChat({ provider: provider as ProviderId, model, apiKey, messages: messages as ChatMessage[], maxTokens: opts.maxTokens, ...signalFor(opts) });
+      return r.completion ?? '';
+    },
+  };
 }
 
 /**
@@ -321,6 +365,33 @@ export async function resolveHeadlessAiDescribed(
   }
   return null;
 }
+
+/** ADR 0904 D7 — the tenant's OWN key for a text op that must never draw the managed
+ *  allowance (KB contextual enrichment is a per-chunk cost the tenant opts into). The
+ *  BYOK default, whatever `preferForText` says, with the provider's `quick` class model;
+ *  null when there is no default or its key does not resolve now — the caller refuses.
+ *  Same SR-1 closure discipline: the key never leaves this module. */
+export async function resolveByokTextDescribed(tenantId: string): Promise<DescribedHeadlessDispatch | null> {
+  if (byokTextOverride) return byokTextOverride(tenantId);
+  const def = await getHeadlessAiDefault(tenantId);
+  if (!def) return null;
+  const apiKey = await resolveSecret(def.credentialRef, { tenantId });
+  if (!apiKey) return null;
+  const provider = def.provider;
+  const model = getClassDefault(provider, 'quick') ?? def.model;
+  return {
+    provider,
+    model,
+    route: 'byok-default',
+    dispatch: async (messages, opts) => {
+      const r = await dispatchChat({ provider: provider as ProviderId, model, apiKey, messages: messages as ChatMessage[], maxTokens: opts.maxTokens, ...signalFor(opts) });
+      return r.completion ?? '';
+    },
+  };
+}
+let byokTextOverride: ((tenantId: string) => Promise<DescribedHeadlessDispatch | null>) | null = null;
+/** Test seam for `resolveByokTextDescribed` (no provider key in CI). */
+export function __setByokTextForTest(fn: typeof byokTextOverride): void { byokTextOverride = fn; }
 
 /** ADR 0821 D5 — step 0 of the ladder: the opted-in BYOK default for text, or null
  *  (not opted in / no default / key does not resolve now ⇒ the managed step runs).
@@ -470,6 +541,9 @@ export type HeadlessEmbedder = {
    *  document side did not change (OpenAI has no input type; Cohere always indexed
    *  `search_document`). */
   embedVersion?: 'q1';
+  /** ADR 0904 D1 — `host` when the OPERATOR pays (the Vertex arm), else the tenant's
+   *  BYOK key. Provenance only; never a permission. */
+  funding?: 'byok' | 'host';
 };
 
 /** ADR 0904 D2 — which providers' document vectors changed with `inputType`. */
@@ -494,6 +568,7 @@ export async function resolveHeadlessEmbedder(tenantId: string, dimensions: numb
   return {
     model,
     provider,
+    funding: 'byok',
     ...(embedVersion ? { embedVersion } : {}),
     embed: async (texts, inputType = 'document') => {
       const out: number[][] = [];
@@ -533,6 +608,7 @@ export async function resolveHeadlessEmbedderForSpec(
   return {
     model,
     provider,
+    funding: 'byok',
     ...(embedVersion ? { embedVersion } : {}),
     embed: async (texts, inputType = 'document') => {
       const out: number[][] = [];
@@ -563,4 +639,66 @@ export async function resolveHeadlessEmbedderForSpecMaybeTest(tenantId: string, 
     return base ? { ...base, provider: spec.provider, model: spec.model || EMBEDDING_MODELS[spec.provider] || base.model, ...(embedVersion ? { embedVersion } : {}) } : null;
   }
   return resolveHeadlessEmbedderForSpec(tenantId, spec, dimensions);
+}
+
+// ── ADR 0904 D1 / P5 — the operator host embedder arm (Track 2: inert unless configured) ──
+// Resolution order for a collection's embedder (kbService `resolveCollectionEmbedder`):
+// per-collection spec → explicit `provider` (tenant BYOK) → explicit `local` → THIS
+// operator arm when the collection made no choice → `local-hash-v1`. Off unless
+// `OPENWOP_KB_HOST_EMBEDDER` is set; never for an `anon:` tenant; optionally limited to
+// the tenants in `OPENWOP_KB_HOST_EMBEDDER_TENANTS` (comma list) for a staged rollout.
+// The kb feature refuses to boot with it set and no daily embed cap (architect A3).
+
+export interface HostEmbedderConfig { provider: 'vertex'; model: string }
+
+/** Parse `OPENWOP_KB_HOST_EMBEDDER` (`vertex:gemini-embedding-001`). Unset ⇒ null; a value
+ *  this host cannot serve THROWS, so a typo is a boot failure rather than a silent off. */
+export function parseHostEmbedderConfig(env: NodeJS.ProcessEnv = process.env): HostEmbedderConfig | null {
+  const raw = env.OPENWOP_KB_HOST_EMBEDDER?.trim();
+  if (!raw) return null;
+  const parts = raw.split(':');
+  const [provider, model] = parts;
+  if (parts.length !== 2 || provider !== 'vertex' || !model || !VERTEX_EMBEDDING_MODELS.has(model)) {
+    throw new Error(`OPENWOP_KB_HOST_EMBEDDER='${raw}' is not supported (supported: ${[...VERTEX_EMBEDDING_MODELS].map((m) => `vertex:${m}`).join(', ')}).`);
+  }
+  return { provider: 'vertex', model };
+}
+
+/** Is the operator arm offered to this tenant at all? (Config, anon and allowlist only —
+ *  whether the metadata server answers is the embed call's problem.) */
+export function hostEmbedderEligible(tenantId: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  let cfg: HostEmbedderConfig | null;
+  try { cfg = parseHostEmbedderConfig(env); } catch { return false; }
+  if (!cfg || tenantId.startsWith('anon:')) return false;
+  const allow = env.OPENWOP_KB_HOST_EMBEDDER_TENANTS?.split(',').map((t) => t.trim()).filter(Boolean);
+  return !allow || allow.length === 0 || allow.includes(tenantId);
+}
+
+let hostEmbedderOverride: ((tenantId: string, dimensions: number) => Promise<HeadlessEmbedder | null>) | null = null;
+let hostEmbeddingAdmission: ((tenantId: string, text: string) => Promise<boolean>) | null = null;
+/** KB owns the existing daily counter; the shared provider invokes that owner
+ * for every transport attempt, including use outside the KB service. */
+export function registerHostEmbeddingAdmission(admit: (tenantId: string, text: string) => Promise<boolean>): void {
+  hostEmbeddingAdmission = admit;
+}
+/** Test seam for the operator arm (no metadata server in CI). */
+export function __setHostEmbedderForTest(fn: typeof hostEmbedderOverride): void { hostEmbedderOverride = fn; }
+
+/** The operator-funded embedder for `tenantId`, or null when the arm is off/ineligible. */
+export async function resolveHostEmbedder(tenantId: string, dimensions: number): Promise<HeadlessEmbedder | null> {
+  if (!hostEmbedderEligible(tenantId)) return null;
+  const beforeAttempt = async (text: string): Promise<void> => {
+    if (!hostEmbeddingAdmission || !await hostEmbeddingAdmission(tenantId, text)) throw new Error('host_embedding_budget_unavailable');
+  };
+  if (hostEmbedderOverride) {
+    const fake = await hostEmbedderOverride(tenantId, dimensions);
+    return fake && { ...fake, funding: 'host', embed: async (texts, inputType) => {
+      for (const text of texts) await beforeAttempt(text);
+      return fake.embed(texts, inputType);
+    } };
+  }
+  const cfg = parseHostEmbedderConfig()!;
+  if (dimensions > VERTEX_EMBEDDING_MAX_DIMS) return null;
+  const { embed } = createVertexEmbed(cfg.model, dimensions, { beforeAttempt });
+  return { model: cfg.model, provider: cfg.provider, funding: 'host', embedVersion: 'q1', embed: (texts, inputType = 'document') => embed(texts, inputType) };
 }

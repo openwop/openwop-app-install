@@ -137,6 +137,36 @@ operator action). Required stops live in **one SSoT manifest** (`RELEASES.md` +
 machine-readable `releases.json`) that `/cut-app-release` reads and the upgrade docs render.
 Default: **no required stops.**
 
+### D2a — Rolling safety is a separate manifest field (added 2026-10-24)
+
+> **Correction to D2, from the gap-closure program (ADR 0970, plan section 01,
+> S01-R2).** D2 gave the manifest one constraint, `requiredStop`, and RELEASES.md's
+> policy then listed a non-rolling-safe migration as a reason to set it. Those are
+> different things. A required stop means "land on this version before going past
+> it". A non-rolling-safe release means "the previous binary cannot run against this
+> schema", which binds anyone who crosses it, including an upgrade that skips past
+> it, since its migrations replay on boot. v0.2.0 was the second kind (an
+> `invocation_log` column rename), was recorded `requiredStop: false` correctly,
+> and had nowhere to record what it did need. The rationale of D2 stands; this adds
+> the missing field.
+
+- **`rollingSafe: boolean`** (required on every entry) and **`rollingUnsafeReason`**
+  (required when false, null otherwise).
+- **`scripts/upgrade-plan.mjs`** is the upgrade tool D2 anticipated: it validates the
+  manifest and plans `<from> → <to>` as hops ending at each required stop or the
+  target, each hop saying whether the old binary must stop, which migrations replay
+  and which `breakingConfig` actions apply. A downgrade is refused (D3).
+- **`check-migration-integrity.mjs`** (the release gate) refuses an invalid manifest,
+  including the v0.2.0 contradiction: a release whose notes say it is not
+  rolling-safe while the field says it is.
+- **Still open (S01-R2's last clause):** the running app does not yet refuse to
+  start when its binary is older than a non-rolling-safe schema it finds (a blind
+  rollback without a restore). Today's runner simply skips migrations it does not
+  know. Refusing every newer schema would break the rolling deploys D2 relies on,
+  so that guard needs a per-migration compatibility marker in `__schema_version`.
+  That is a schema change with its own decision, recorded as a follow-up, not done
+  here.
+
 ### D3 — Forward-only; rollback = redeploy prior image + restore DB backup
 No down-migrations (the runner is forward-only and stays that way — reversibility is a
 maintenance tax and unsafe for data migrations; WordPress/Postgres/GitLab all effectively
@@ -270,6 +300,8 @@ Migrations, versioning, release artifacts, and the skill are all host-internal. 
 | 3 — app-migration runner (`host/appMigrations.ts`) | implemented | `test/app-version-migrations.test.ts` — order, forward-only, idempotent, counter |
 | 4 — `/cut-app-release` skill (`.claude`+`.agents/skills/cut-app-release/`, `scripts/{bump-version,check-migration-integrity}.mjs`) | implemented | `check-migration-integrity.mjs` runs green |
 | 5 — operator upgrade docs (`DEPLOY.md` § Upgrading) | implemented | n/a (docs) |
+| D2a — `rollingSafe` field, `scripts/upgrade-plan.mjs` planner + validator, release-gate check (2026-10-24) | implemented | `test/upgrade-plan.test.ts` — real manifest validates; the v0.2.0 contradiction is caught; every source→target pair plans; required-stop split; downgrade refused; CLI |
+| D2a follow-up — boot refuses an older binary on a non-rolling-safe schema | open | — |
 
 ## References
 

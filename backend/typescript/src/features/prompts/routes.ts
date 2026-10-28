@@ -1,7 +1,8 @@
 /**
  * Prompt-library routes (ADR 0116 Phase 1) — host-extension, org-scoped + RBAC.
  * `/v1/host/openwop-app/prompts/orgs/:orgId/entries` CRUD, gated by `authorizeOrgScope`:
- *   list/get → workspace:read · create/update/delete → workspace:write.
+ *   list/get → workspace:read · create/update/delete → workspace:write; and on top
+ *   of that a PRIVATE entry is its owner's on every lane (ADR 0993 D2).
  * Tenant+org IDOR-guarded (uniform 404); a dangling `promptRef` is rejected.
  *
  * @see docs/adr/0116-prompt-library.md
@@ -40,9 +41,11 @@ export function registerPromptLibraryRoutes(deps: RouteDeps): void {
     } catch (err) { next(err); }
   });
 
-  // ADR 0116 Phase 2 — render a library entry: resolve its `promptRef` template +
-  // substitute variables (`composePromptTemplate`). The `/`-insertion (Phase 3)
-  // calls this. Read-gated; untrusted bindings are fenced by the composer.
+  // ADR 0116 Phase 2 — render a library entry: resolve it (`resolveEntryBody`) and
+  // substitute `{{var}}`. The `/`-insertion (ADR 0993 D1) calls this and puts the
+  // result in the member's own composer for review. Read-gated. CORRECTED (ADR 0993
+  // D9): this said "untrusted bindings are fenced by the composer"; `renderEntry` is
+  // a plain substitution and fences nothing (see its comment).
   app.post(`${BASE}/:entryId/render`, async (req, res, next) => {
     try {
       const { user, orgId, tenantId } = await requireOrgScope(req, 'workspace:read');
@@ -55,15 +58,23 @@ export function registerPromptLibraryRoutes(deps: RouteDeps): void {
   app.patch(`${BASE}/:entryId`, async (req, res, next) => {
     try {
       const { user, orgId, tenantId } = await requireOrgScope(req, 'workspace:write');
-      const entry = await updateEntry(tenantId, orgId, req.params.entryId, user.userId, (req.body ?? {}) as Record<string, unknown>);
+      const body = { ...((req.body ?? {}) as Record<string, unknown>) };
+      // ADR 0993 D3 — `If-Match: "<revision>"` is the header spelling of `expectedRevision`.
+      const rawIfMatch = req.headers['if-match'];
+      if (body.expectedRevision === undefined && rawIfMatch !== undefined) {
+        const ifMatch = /^(?:W\/)?"?(\d+)"?$/.exec(String(rawIfMatch).trim());
+        if (!ifMatch) throw new OpenwopError('validation_error', '`If-Match` must carry the entry revision, e.g. "3".', 400, { field: 'If-Match' });
+        body.expectedRevision = Number(ifMatch[1]);
+      }
+      const entry = await updateEntry(tenantId, orgId, req.params.entryId, user.userId, body);
       res.json({ entry });
     } catch (err) { next(err); }
   });
 
   app.delete(`${BASE}/:entryId`, async (req, res, next) => {
     try {
-      const { orgId, tenantId } = await requireOrgScope(req, 'workspace:write');
-      await deleteEntry(tenantId, orgId, req.params.entryId);
+      const { user, orgId, tenantId } = await requireOrgScope(req, 'workspace:write');
+      await deleteEntry(tenantId, orgId, req.params.entryId, user.userId); // ADR 0993 D2 — a private entry is its owner's
       res.status(204).end();
     } catch (err) { next(err); }
   });

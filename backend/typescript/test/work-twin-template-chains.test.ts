@@ -21,8 +21,13 @@
  *  - every node reference is exactly pinned (ADR 0766);
  *  - the real executor runs a draft template to completion and a gated one to
  *    its gate under the BARE node id.
+ *
+ * Sabotage-witnessed (grade-tests wave 64): a changed node typeId breaks the
+ * golden hash (8fw5g5-wttc-hash); `internal:false` on one chain; resolving the
+ * head instead of the pinned revision; dropping the boot `recordRevision`; and a
+ * wrong sub-chain bind each red their case.
  */
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { readFileSync, mkdtempSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -129,9 +134,16 @@ describe('ADR 0775 P2a — the migrated templates resolve, same id, byte-identic
 
   it('a run stamped before the migration resolves its pinned revision, not just the head', async () => {
     const id = 'tmpl.intake-triage.escalation-routing';
-    // recordRevision is fire-and-forget at registration; wait for the row.
-    for (let i = 0; i < 50 && !(await getRevision(id, GOLDEN[id]!)); i++) await new Promise((r) => setTimeout(r, 20));
-    const run = { runId: 'run-pre-p2a', workflowId: id, tenantId: 'demo', metadata: { definitionRevision: GOLDEN[id] } } as unknown as RunRecord;
+    // recordRevision is fire-and-forget at registration; wait for the row, and
+    // FAIL (naming it) if it never lands rather than proceeding to read the head.
+    await vi.waitFor(async () => {
+      expect(await getRevision(id, GOLDEN[id]!), `revision ${id}@${GOLDEN[id]} never recorded`).not.toBeNull();
+    }, { timeout: 2000, interval: 20 });
+    const at = '2026-10-01T00:00:00.000Z';
+    const run: RunRecord = {
+      runId: 'run-pre-p2a', workflowId: id, tenantId: 'demo', status: 'completed', inputs: {},
+      metadata: { definitionRevision: GOLDEN[id] }, configurable: {}, createdAt: at, updatedAt: at,
+    };
     const catalog = { getWorkflow: async (wid: string) => { const d = getChainBackedWorkflow(wid); return d ? { workflowId: wid, definition: d } : null; } };
     const resolved = await resolveRunDefinition(run, catalog);
     expect(resolved?.resolvedFrom).toBe('revision');
@@ -183,14 +195,24 @@ describe('ADR 0775 P2a — the pack', () => {
 
   it('every approvals.* template carries a core.approvalGate', () => {
     const approvals = WORKFLOW_TEMPLATE_CHAIN_IDS.filter((id) => id.startsWith('tmpl.approvals.'));
-    expect(approvals.length).toBeGreaterThan(0);
+    // Measured: exactly these four (P2b).
+    expect([...approvals].sort()).toEqual([
+      'tmpl.approvals.dual-approver',
+      'tmpl.approvals.manager-plus-compliance',
+      'tmpl.approvals.single-approver',
+      'tmpl.approvals.threshold-based',
+    ]);
     for (const id of approvals) expect(defOf(id).nodes.some((n) => n.typeId === 'core.approvalGate'), id).toBe(true);
   });
 
   it('composition is closed: every core.subWorkflow binds a template in the pack', () => {
     const binds = WORKFLOW_TEMPLATE_CHAIN_IDS.flatMap((id) => defOf(id).nodes.filter((n) => n.typeId === 'core.subWorkflow').map((n) => [id, (n.config as { workflowId?: unknown }).workflowId] as const));
     // post-meeting-follow-up → action-extraction (P2a), approval-chase → single-approver (P2b)
-    expect(binds.length).toBeGreaterThanOrEqual(2);
+    // Measured: the pack carries exactly two `subChainRef`s.
+    expect(binds.map(([id, child]) => `${id}→${String(child)}`).sort()).toEqual([
+      'tmpl.finance.approval-chase→tmpl.approvals.single-approver',
+      'tmpl.meeting-ops.post-meeting-follow-up→tmpl.meeting-ops.action-extraction',
+    ]);
     for (const [id, child] of binds) expect(WORKFLOW_TEMPLATE_CHAIN_IDS, id).toContain(child as string);
   });
 
@@ -211,7 +233,7 @@ describe('ADR 0775 P2a — the real executor runs the migrated definitions', () 
   const newRun = async (workflowId: string): Promise<RunRecord> => {
     const now = new Date().toISOString();
     const run: RunRecord = {
-      runId: `run-${Math.random().toString(36).slice(2)}`, workflowId, tenantId: 'demo', status: 'pending',
+      runId: `run-${workflowId}`, workflowId, tenantId: 'demo', status: 'pending',
       inputs: { topic: 'Q2 planning' }, metadata: {}, configurable: {}, createdAt: now, updatedAt: now,
     };
     await (await storageP).insertRun(run);

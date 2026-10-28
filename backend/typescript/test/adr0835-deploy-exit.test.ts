@@ -11,6 +11,14 @@
  * The adapter legs stub `fetch` and the egress guard: a refusal must happen
  * BEFORE a token is minted, so "fetch was never called" is the oracle. The
  * surface legs boot the app for real orgs, members and roles.
+ *
+ * TST-BWA-3 (grade-tests w62): every surface refusal now records the export first, so
+ * the ONLY thing between the caller and a deploy is the check the case names (before,
+ * a skipped authority check was still refused by the export-provenance 404). Red when:
+ * a verb drops `assertNamespacedService`; the image prefix check loses its `/` or length
+ * rule; the runtime-SA requirement or pin is removed; the resolver falls back to mock;
+ * the actor / `host:app-deploy:manage` / approval / export-hash / status-org checks are
+ * skipped; the namespace hash drops the tenant or the org; a failed deploy is not re-driven.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -31,6 +39,7 @@ import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { makeCloudRunAdapter } from '../src/features/app-builder/deploy/adapter.js';
 import { buildAppBuilderSurface } from '../src/features/app-builder/surface.js';
+import type { DeploymentRecord } from '../src/features/app-builder/deploy/deployService.js';
 
 const HASH = 'b'.repeat(64);
 const NS = 'owa-0123456789ab-shop';
@@ -115,16 +124,18 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-function client(): { post: (p: string, b?: unknown) => Promise<{ status: number; body: any }> } {
+interface Reply<T> { status: number; body: T }
+function client(): { post: <T>(p: string, b?: unknown) => Promise<Reply<T>> } {
   let cookie = '';
   return {
-    post: async (path, body) => {
+    post: async <T>(path: string, body?: unknown): Promise<Reply<T>> => {
       const res = await fetch(`${BASE}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-      for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]!; }
-      return { status: res.status, body: await res.json().catch(() => undefined) };
+      for (const ck of getSetCookies(res.headers)) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]!; }
+      return { status: res.status, body: (await res.json().catch(() => undefined)) as T };
     },
   };
 }
+type LoginBody = { user: { userId: string } };
 
 const H = '/host/openwop-app';
 
@@ -132,12 +143,12 @@ const H = '/host/openwop-app';
  *  EDITOR is `editor` of A (it can run workflows — `runs:create`). */
 async function fixture() {
   const tenantId = `org:deploy835-${Date.now()}-${n++}`;
-  const login = async (who: string) => { const c = client(); const id: string = (await c.post(`${H}/test/login`, { email: `d835-${who}-${n++}@acme.test`, tenantId })).body.user.userId; return { c, id }; };
+  const login = async (who: string) => { const c = client(); const id = (await c.post<LoginBody>(`${H}/test/login`, { email: `d835-${who}-${n++}@acme.test`, tenantId })).body.user.userId; return { c, id }; };
   const owner = await login('o');
   const admin = await login('a');
   const editor = await login('e');
-  const orgA: string = (await owner.c.post(`${H}/orgs`, { name: 'Apps' })).body.orgId;
-  const orgB: string = (await owner.c.post(`${H}/orgs`, { name: 'Other' })).body.orgId;
+  const orgA = (await owner.c.post<{ orgId: string }>(`${H}/orgs`, { name: 'Apps' })).body.orgId;
+  const orgB = (await owner.c.post<{ orgId: string }>(`${H}/orgs`, { name: 'Other' })).body.orgId;
   for (const [who, roles] of [[admin, ['admin']], [editor, ['editor']]] as const) {
     const add = await owner.c.post(`${H}/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'M', subject: who.id, roles });
     expect(add.status, JSON.stringify(add.body)).toBe(201);
@@ -145,9 +156,11 @@ async function fixture() {
   return { tenantId, adminId: admin.id, editorId: editor.id, orgA, orgB };
 }
 
-type Deploy = (a: Record<string, unknown>) => Promise<{ deployment: { status: string; cloudRunService?: string; orgId: string } }>;
-const deployAs = (tenantId: string, actingUserId?: string): Deploy =>
-  buildAppBuilderSurface({ tenantId, runId: 'run-835', ...(actingUserId ? { actingUserId } : {}) }).deployApp as Deploy;
+type Deploy = (a: Record<string, unknown>) => Promise<{ deployment: DeploymentRecord }>;
+const deployAs = (tenantId: string, actingUserId?: string): Deploy => {
+  const fn = buildAppBuilderSurface({ tenantId, runId: 'run-835', ...(actingUserId ? { actingUserId } : {}) }).deployApp!;
+  return async (a) => (await fn(a)) as { deployment: DeploymentRecord };
+};
 const args = (orgId: string, service = 'shop') => ({ orgId, service, image: 'us-docker.pkg.dev/operator/apps/shop:1', exportHash: HASH, envKeys: [], approval: { action: 'approve' } });
 /** Record HASH as one of `tenantId`'s exports (the provenance a deploy must cite). */
 async function exported(tenantId: string): Promise<void> {
@@ -158,17 +171,20 @@ async function exported(tenantId: string): Promise<void> {
 describe('ADR 0835 D1 — the deploy surface needs a person with host:app-deploy:manage', () => {
   it('refuses a run with no acting user (a schedule or webhook cannot publish to the internet)', async () => {
     const f = await fixture();
-    await expect(deployAs(f.tenantId)(args(f.orgA))).rejects.toMatchObject({ code: 'forbidden' });
+    await exported(f.tenantId); // provenance in place: only the actor check stands between
+    await expect(deployAs(f.tenantId)(args(f.orgA))).rejects.toMatchObject({ code: 'forbidden', message: expect.stringContaining('needs a person behind the run') });
   });
 
   it('refuses an Editor — runs:create is not deploy authority', async () => {
     const f = await fixture();
-    await expect(deployAs(f.tenantId, f.editorId)(args(f.orgA))).rejects.toMatchObject({ httpStatus: 403 });
+    await exported(f.tenantId); // provenance in place: only the deploy-authority check stands between
+    await expect(deployAs(f.tenantId, f.editorId)(args(f.orgA))).rejects.toMatchObject({ code: 'forbidden_scope', httpStatus: 403, message: 'Missing required scope: host:app-deploy:manage' });
   });
 
   it('refuses an admin of org A deploying as org B, and an empty org', async () => {
     const f = await fixture();
-    await expect(deployAs(f.tenantId, f.adminId)(args(f.orgB))).rejects.toMatchObject({ httpStatus: 403 });
+    await exported(f.tenantId); // provenance in place: only the org-membership check stands between
+    await expect(deployAs(f.tenantId, f.adminId)(args(f.orgB))).rejects.toMatchObject({ code: 'forbidden_scope', httpStatus: 403 });
     await expect(deployAs(f.tenantId, f.adminId)(args(''))).rejects.toMatchObject({ code: 'validation_error' });
   });
 
@@ -199,6 +215,9 @@ describe('ADR 0835 D1 — the deploy surface needs a person with host:app-deploy
     expect(b.deployment.cloudRunService, 'the same name in another tenant is another service').not.toBe(a.deployment.cloudRunService);
     const { namespacedServiceName } = await import('../src/features/app-builder/deploy/deployService.js');
     expect(namespacedServiceName(f.tenantId, f.orgB, 'shop'), 'and in another org of the same tenant').not.toBe(a.deployment.cloudRunService);
+    // The tenant is in the hash on its own: the SAME org id in two tenants is two services
+    // (org ids differ between tenants, so the assertions above cannot show this half).
+    expect(namespacedServiceName(f.tenantId, 'org-same', 'shop')).not.toBe(namespacedServiceName(g.tenantId, 'org-same', 'shop'));
   });
 });
 
@@ -226,8 +245,8 @@ describe('ADR 0835 AB2-CD-2/5 — a failed deploy is retried; a record is read b
     await exported(f.tenantId);
     const a = await deployAs(f.tenantId, f.adminId)(args(f.orgA, 'stat-app'));
     // The editor is in org A (allowed); a fresh member of NO org is refused.
-    const outsider: string = (await client().post(`${H}/test/login`, { email: `d835-x-${n++}@acme.test`, tenantId: f.tenantId })).body.user.userId;
-    const status = (actingUserId: string) => (buildAppBuilderSurface({ tenantId: f.tenantId, runId: 'r', actingUserId }).deploymentStatus as (a: Record<string, unknown>) => Promise<unknown>)({ deployKey: (a.deployment as unknown as { deployKey: string }).deployKey });
+    const outsider = (await client().post<LoginBody>(`${H}/test/login`, { email: `d835-x-${n++}@acme.test`, tenantId: f.tenantId })).body.user.userId;
+    const status = (actingUserId: string) => buildAppBuilderSurface({ tenantId: f.tenantId, runId: 'r', actingUserId }).deploymentStatus!({ deployKey: a.deployment.deployKey });
     await expect(status(f.editorId)).resolves.toMatchObject({ deployment: { orgId: f.orgA } });
     await expect(status(outsider)).rejects.toMatchObject({ httpStatus: 403 });
   });

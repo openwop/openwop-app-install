@@ -78,9 +78,16 @@ export interface MemoryBrowserProps {
    * component then says nothing rather than implying zero.
    */
   recallOnlyCount?: number;
+  /**
+   * ADR 0982 (MAE2UX-4) — the delete confirm's body for a given note, when the caller has something
+   * truer to say than the generic copy (a learned fact will not be re-learned). The caller owns the
+   * copy so it lives in the caller's LAZY namespace, not this eager area catalog. Return undefined
+   * to keep the generic body.
+   */
+  confirmBodyFor?: (note: SubjectMemoryNote) => string | undefined;
 }
 
-export function MemoryBrowser({ list, add, remove, addDisabledReason, addPlaceholder, emptyBody, readOnly = false, recallOnlyCount }: MemoryBrowserProps): JSX.Element {
+export function MemoryBrowser({ list, add, remove, addDisabledReason, addPlaceholder, emptyBody, readOnly = false, recallOnlyCount, confirmBodyFor }: MemoryBrowserProps): JSX.Element {
   const { t, i18n } = useTranslation('memory');
   const [notes, setNotes] = useState<SubjectMemoryNote[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -206,7 +213,12 @@ export function MemoryBrowser({ list, add, remove, addDisabledReason, addPlaceho
                   {nNote.source === 'auto-extract' ? (
                     <span className="chip chip--ai u-fs-12" title={t('autoLearnedTitle')}>{t('autoLearned')}</span>
                   ) : null}
-                  {nNote.contentTrust === 'untrusted' ? (
+                  {/* ADR 0982 (MAE2UX-3) — a learned note is untrusted BY CONSTRUCTION, and the
+                      Auto-learned chip's own title already says "treated as unverified". The
+                      external chip's title says "Imported from an external source", which is false
+                      for a fact inferred from the person's own words, so it is shown only for
+                      untrusted notes of any OTHER source (ADR 0601 copied third-party text). */}
+                  {nNote.contentTrust === 'untrusted' && nNote.source !== 'auto-extract' ? (
                     <span className="chip chip--warning u-fs-12" title={t('externalUnverifiedTitle')}>{t('externalUnverified')}</span>
                   ) : null}
                   <span className="muted u-fs-12">{t('learnedOn', { date: formatMemoryDate(nNote.createdAt, i18n.language) })}</span>
@@ -220,7 +232,9 @@ export function MemoryBrowser({ list, add, remove, addDisabledReason, addPlaceho
                   disabled={busy}
                   onClick={() => {
                     void (async () => {
-                      if (await confirm({ title: t('removeMemory'), body: t('removeMemoryConfirmBody'), danger: true })) await onRemove(nNote.id);
+                      // MAE2UX-4 — the caller may say what else deleting this note does (ADR 0982 D6).
+                      const body = confirmBodyFor?.(nNote) ?? t('removeMemoryConfirmBody');
+                      if (await confirm({ title: t('removeMemory'), body, danger: true })) await onRemove(nNote.id);
                     })();
                   }}
                 >

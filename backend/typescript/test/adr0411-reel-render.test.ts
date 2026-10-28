@@ -4,6 +4,12 @@
  * whose mediaAssetId is the generated video's Media token, with a real brand
  * snapshot and empty image layers). The async video call + Media-asset
  * registration ride the `generate-reel` node (P3a wiring) over this core.
+ *
+ * TST-BQR-13. The prompt is asserted as a hand-written literal, so dropping or
+ * reordering ANY production field (title, direction label, scene, composition,
+ * camera, lighting, message) reds it. Red also when a reel render loses its
+ * video mediaAssetId, gains image layers, mis-names its template, or stops
+ * recording the honest no-brand-kit degradation.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
@@ -24,10 +30,10 @@ describe('ADR 0411 P3 — reel render core', () => {
       directions: [{ label: 'Bold & bright' }],
     });
     const prompt = reelPromptForBrief(brief, 0);
-    expect(prompt).toContain('Summer Launch');
-    expect(prompt).toContain('a beach at golden hour');
-    expect(prompt).toContain('Camera: low angle');
-    expect(prompt).toContain('Lighting: warm');
+    expect(prompt).toBe(
+      'Summer Launch. Bold & bright. a beach at golden hour. Composition: wide shot. '
+      + 'Camera: low angle. Lighting: warm. Message: aspirational escape',
+    );
   });
 
   it('storeReelRender persists a reel-marked render (video mediaAssetId, real brand snapshot, empty layers)', async () => {
@@ -41,7 +47,10 @@ describe('ADR 0411 P3 — reel render core', () => {
     expect(render.reel?.durationSeconds).toBe(8);
     expect(render.mediaAssetId).toBe('media:vid-1'); // the video's Media token
     expect(render.layerAssets).toEqual({});           // a reel has no composed image layers
-    expect(render.brand.fontFamilies).toBeTruthy();    // real snapshot (degrades to neutral defaults)
+    // Real snapshot: no brand kit in this org ⇒ neutral defaults + an honest warning.
+    expect(render.brand.brandId).toBeUndefined();
+    expect(render.warnings.map((w) => w.code)).toContain('no-brand-kit');
+    expect(render.brand.fontFamilies.sans.length).toBeGreaterThan(0);
     expect(render.templateId).toBe('reel-9x16');
     expect(render.compositeHash).toMatch(/^[0-9a-f]{64}$/); // real sha256 provenance
   });

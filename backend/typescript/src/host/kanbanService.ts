@@ -37,6 +37,9 @@ import { createLogger } from '../observability/logger.js';
 import { ERASED, subjectKeyForms } from './subjectErasureRedaction.js';
 import { getRetentionHold } from './retentionHold.js';
 
+/** Opaque hold state shared by restore, selection and erasure (ADR 0963 D3). */
+export const RESTORE_NOTE_MARK = '[auto:run-restore]';
+
 /** A column on a board. When `triggerWorkflowId` is set, any card moved
  *  into this column starts that workflow (unless the card overrides it
  *  with its own `workflowId`). A "To Do" column is the canonical
@@ -2070,7 +2073,7 @@ export function pickRunIdFor(card: Pick<KanbanCard, 'id' | 'version' | 'createdA
   return `kanban-pick-run-${key}`;
 }
 
-function isPreconditionFailure(err: unknown): boolean {
+export function isPreconditionFailure(err: unknown): boolean {
   return (err as { code?: unknown } | null)?.code === 'kanban_card_precondition_failed';
 }
 
@@ -2127,6 +2130,10 @@ export async function releaseCardClaim(input: {
   lastRunStatus?: KanbanCardRunStatus | null;
   /** Written in the SAME CAS as the move (a restore's reason note). */
   blockerNote?: string;
+  /** ADR 0963 A1 — when set, the release lands only if the fresh card's note is
+   *  still this one, so a note composed from a snapshot cannot overwrite a
+   *  person's edit. `undefined` and `''` compare equal (both mean "no note"). */
+  expectedBlockerNote?: string;
 }): Promise<boolean> {
   try {
     await applyBoardCommand({
@@ -2139,7 +2146,8 @@ export async function releaseCardClaim(input: {
         lastRunStatus: input.lastRunStatus ?? null,
         ...(input.blockerNote !== undefined ? { blockerNote: input.blockerNote } : {}),
       },
-      precondition: (fresh) => fresh.lastRunId === input.runId && fresh.columnId === input.workingColumnId,
+      precondition: (fresh) => fresh.lastRunId === input.runId && fresh.columnId === input.workingColumnId
+        && (!('expectedBlockerNote' in input) || (fresh.blockerNote ?? '') === (input.expectedBlockerNote ?? '')),
     });
     return true;
   } catch (err) {
@@ -2257,32 +2265,38 @@ export async function eraseSubjectKanban(tenantId: string, subjectKey: string): 
     if (next.ownerSubject?.kind === 'user' && forms.has(next.ownerSubject.id)) next.ownerSubject = { kind: 'user', id: ERASED };
     await boards.put(next);
   }
-  for (const card of await cards.list()) {
-    if (!boardIds.has(card.boardId)) continue; // cross-tenant / orphaned — never touch
-    const mine = (card.assigneeId !== undefined && forms.has(card.assigneeId))
-      || (card.createdBy !== undefined && forms.has(card.createdBy));
-    // ADR 0829 P4 — a handoff note is the ASSIGNER's free text, and its decisions
-    // can name other people. The assigner may be neither creator nor assignee, so
-    // the note is checked on its own: erased when the subject wrote it, is named in
-    // it, or the card is otherwise theirs.
-    const noteTouches = card.handoff !== undefined && (
-      (card.handoffBy !== undefined && forms.has(card.handoffBy))
-      || card.handoff.decisions.some((d) => d.decidedBy !== undefined && forms.has(d.decidedBy)));
-    if (!mine && noteTouches) {
-      const next: KanbanCard = { ...card, tenantId, updatedAt: nowIso() };
+  for (const listed of await cards.list()) {
+    if (!boardIds.has(listed.boardId)) continue;
+    let settled = false;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const card = await cards.get(listed.id);
+      if (!card || !boardIds.has(card.boardId)) { settled = true; break; }
+      const board = await boards.get(card.boardId);
+      if (!board || board.tenantId !== tenantId) { settled = true; break; }
+      const mine = (card.assigneeId !== undefined && forms.has(card.assigneeId))
+        || (card.createdBy !== undefined && forms.has(card.createdBy));
+      // A handoff may name the subject even when another person owns the card.
+      const noteTouches = card.handoff !== undefined && (
+        (card.handoffBy !== undefined && forms.has(card.handoffBy))
+        || card.handoff.decisions.some((d) => d.decidedBy !== undefined && forms.has(d.decidedBy)));
+      if (!mine && !noteTouches) { settled = true; break; }
+      const next: KanbanCard = { ...card, tenantId, updatedAt: nowIso(), version: (card.version ?? 0) + 1 };
+      if (mine) {
+        next.title = ERASED;
+        if (next.assigneeId !== undefined && forms.has(next.assigneeId)) next.assigneeId = ERASED;
+        if (next.createdBy !== undefined && forms.has(next.createdBy)) next.createdBy = ERASED;
+        if (next.description !== undefined) next.description = ERASED;
+        if (next.assignmentReason !== undefined) next.assignmentReason = ERASED;
+        // Erase ALL prose (including machine run ids), retaining only the
+        // opaque hold bit so erasure cannot authorize autonomous execution.
+        if (next.blockerNote !== undefined) next.blockerNote = card.blockerNote?.includes(RESTORE_NOTE_MARK)
+          ? `${ERASED}\n${RESTORE_NOTE_MARK}` : ERASED;
+      }
       delete next.handoff; delete next.handoffBy; delete next.handoffAt;
-      await cards.put(next);
-      continue;
+      if (await cards.compareAndSwap(card, next)) { settled = true; break; }
+      // A restore/edit may have arrived. Re-read and recompute from its row.
     }
-    if (!mine) continue;
-    const next: KanbanCard = { ...card, tenantId, title: ERASED, updatedAt: nowIso() };
-    if (next.assigneeId !== undefined && forms.has(next.assigneeId)) next.assigneeId = ERASED;
-    if (next.createdBy !== undefined && forms.has(next.createdBy)) next.createdBy = ERASED;
-    if (next.description !== undefined) next.description = ERASED;
-    if (next.assignmentReason !== undefined) next.assignmentReason = ERASED;
-    if (next.blockerNote !== undefined) next.blockerNote = ERASED;
-    if (next.handoff !== undefined) { delete next.handoff; delete next.handoffBy; delete next.handoffAt; } // ADR 0829 P4
-    await cards.put(next);
+    if (!settled) throw new Error('kanban_subject_erasure_conflict');
   }
 }
 

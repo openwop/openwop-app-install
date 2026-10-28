@@ -40,7 +40,7 @@ describe('runChatToolLoop (shared observe→act core)', () => {
     expect(res.finalText).toBe('First principles means reasoning from irreducible facts.');
     expect(res.error).toBeUndefined();
     expect(executeTool).toHaveBeenCalledTimes(1);
-    expect(executeTool).toHaveBeenCalledWith({ name: 'search', input: { q: 'musk' } });
+    expect(executeTool).toHaveBeenCalledWith({ name: 'search', input: { q: 'musk' }, callId: 'c1' });
     expect(res.events.some((e) => e.type === 'agent.toolCalled' && e.toolName === 'search')).toBe(true);
     expect(res.events.some((e) => e.type === 'agent.toolReturned' && e.status === 'ok')).toBe(true);
   });
@@ -175,8 +175,11 @@ describe('runConversationAgentToolTurn — falls back (null) without regressing'
 
 describe('runChatToolLoop — per-turn budget (Phase 3)', () => {
   it('bounds the loop at maxRounds even if the model never stops calling tools', async () => {
+    // Distinct arguments each round: an IDENTICAL repeat is answered without
+    // re-running (ADR 0975 D6, pinned in adr0975-tool-loop-repeat-guard).
+    let round = 0;
     const callAIWithTools = vi.fn<(req: AiToolCallRequest) => Promise<AiToolCallResult>>()
-      .mockResolvedValue({ content: 'still working', toolCalls: [{ id: 'c', name: 'search', input: {} }] });
+      .mockImplementation(async () => ({ content: 'still working', toolCalls: [{ id: `c${round}`, name: 'search', input: { page: round++ } }] }));
     const executeTool = vi.fn().mockResolvedValue({ content: 'r' });
     const res = await runChatToolLoop(
       { provider: 'anthropic', model: 'm', credentialRef: 'r', systemPrompt: 'sp', messages: [], tools: [tool('search')], agentId: 'a', persona: 'P', maxRounds: 2 },

@@ -19,6 +19,8 @@
  * they need a richer subset of platform spec data + asset metadata.
  */
 
+import { AD_POLICY_RULES } from './contentRules.generated.mjs';
+
 function makeLog(ctx) {
   const fn = typeof ctx?.log === 'function' ? ctx.log : null;
   return {
@@ -31,102 +33,9 @@ function makeLog(ctx) {
 
 /* ─── BUILT_IN_RULES ────────────────────────────────────── */
 
-const BUILT_IN_RULES = [
-  {
-    id: 'claims-guarantee',
-    name: 'Unqualified Guarantees',
-    description: 'Detects unqualified guarantee language without disclaimers',
-    category: 'claims',
-    severity: 'high',
-    platforms: [],
-    autoResolvable: false,
-    patterns: ['\\b(100%|guaranteed|risk[- ]?free|no[- ]?risk|money[- ]?back)\\b'],
-    keywords: ['guarantee', 'guaranteed', 'risk-free', 'no risk'],
-    recommendation: 'Add appropriate disclaimers or qualify the guarantee claim.',
-    enabled: true,
-  },
-  {
-    id: 'claims-income',
-    name: 'Income Claims',
-    description: 'Detects income or earnings claims that may be unsubstantiated',
-    category: 'claims',
-    severity: 'critical',
-    platforms: [],
-    autoResolvable: false,
-    patterns: [
-      '\\b(earn|make|income|salary|revenue)\\s+\\$?\\d',
-      '\\$\\d[\\d,]*\\s*(per|a|every|each)\\s*(day|week|month|year|hour)',
-    ],
-    keywords: [],
-    recommendation: 'Remove specific income claims or provide verifiable substantiation.',
-    enabled: true,
-  },
-  {
-    id: 'claims-superlative',
-    name: 'Unsubstantiated Superlatives',
-    description: 'Detects superlative claims that may require evidence',
-    category: 'claims',
-    severity: 'medium',
-    platforms: [],
-    autoResolvable: false,
-    patterns: ['\\b(best|#1|number one|top[- ]?rated|fastest|cheapest|most popular)\\b'],
-    keywords: ['best', 'number one', '#1', 'top rated'],
-    recommendation: 'Qualify the claim with context (e.g., "one of the best") or provide supporting evidence.',
-    enabled: true,
-  },
-  {
-    id: 'trademark-competitor',
-    name: 'Competitor Brand Mentions',
-    description: 'Flags use of competitor brand names in ad copy',
-    category: 'trademark',
-    severity: 'medium',
-    platforms: ['meta', 'google'],
-    autoResolvable: false,
-    patterns: [],
-    keywords: [],
-    recommendation: 'Review whether competitor brand mention complies with platform trademark policies.',
-    enabled: true,
-  },
-  {
-    id: 'prohibited-before-after',
-    name: 'Before/After Claims',
-    description: 'Detects before/after claims prohibited on some platforms',
-    category: 'prohibited_content',
-    severity: 'high',
-    platforms: ['meta'],
-    autoResolvable: false,
-    patterns: ['\\b(before\\s+and\\s+after|transformation|results\\s+in\\s+\\d+\\s+days)\\b'],
-    keywords: ['before and after', 'transformation'],
-    recommendation: 'Meta prohibits before/after imagery and claims for personal attributes.',
-    enabled: true,
-  },
-  {
-    id: 'prohibited-urgency-scam',
-    name: 'Deceptive Urgency',
-    description: 'Detects manipulative urgency language that may violate policies',
-    category: 'prohibited_content',
-    severity: 'medium',
-    platforms: [],
-    autoResolvable: false,
-    patterns: ['\\b(act now|last chance|expires (today|tonight|soon)|only \\d+ left|limited time)\\b'],
-    keywords: [],
-    recommendation: 'Ensure urgency claims are truthful. If using countdown language, it must reflect real deadlines.',
-    enabled: true,
-  },
-  {
-    id: 'targeting-discrimination',
-    name: 'Discriminatory Language',
-    description: 'Detects language that implies discriminatory targeting',
-    category: 'targeting',
-    severity: 'critical',
-    platforms: [],
-    autoResolvable: false,
-    patterns: ['\\b(only for (men|women|whites|blacks)|not for (disabled|elderly))\\b'],
-    keywords: [],
-    recommendation: 'Remove discriminatory language. Ad platforms prohibit targeting based on protected characteristics.',
-    enabled: true,
-  },
-];
+// ADR 0946 P1 — the ONE rule list, generated from the host content-rules
+// library (it was duplicated verbatim in vendor.myndhyve.ads-creative-validate).
+const BUILT_IN_RULES = AD_POLICY_RULES;
 
 /* ─── helpers ──────────────────────────────────────────── */
 

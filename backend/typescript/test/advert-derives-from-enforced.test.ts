@@ -16,10 +16,19 @@
  * The derivation is the mechanism; these are the FLOOR. They exist for the one
  * failure derivation alone cannot catch: an import that silently resolves to
  * `undefined` compares equal to nothing and ships the field empty or absent.
+ *
+ * Gap H97 (docs/steward/AGRADE-CLOSING-STATE.md); the v2 `limits` family is
+ * ADR 0670's advert. Tracker TST-BKW-1. Red when `discovery.ts` re-types the
+ * advert as a literal (`maxRunDurationMs: 600_000`) or the dispatch lease stops
+ * deriving from the ceiling (`+ 60_000`) — sabotage-witnessed (w65).
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { RUN_DURATION_CEILING_MS, RUN_DISPATCH_LEASE_MS } from '../src/executor/executor.js';
+import { buildV2Advertisement } from '../src/routes/discovery.js';
+import type { AppConfig } from '../src/index.js';
+
+const CONFIG: AppConfig = { port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false };
 
 describe('H97 — advertise/enforce agree by construction', () => {
   it('the enforced ceiling is a positive finite number (the undefined-import floor)', () => {
@@ -41,6 +50,11 @@ describe('H97 — advertise/enforce agree by construction', () => {
   });
 
   it('discovery.ts advertises the CONSTANT, never a re-typed literal', () => {
+    // Behaviour: the published v2 advert carries the enforced number.
+    const doc = buildV2Advertisement(CONFIG) as { limits?: { maxRunDurationMs?: unknown } };
+    expect(doc.limits?.maxRunDurationMs).toBe(RUN_DURATION_CEILING_MS);
+    // Source: a literal EQUAL to the constant would pass the leg above, so the
+    // spelling is pinned too.
     const src = readFileSync(new URL('../src/routes/discovery.ts', import.meta.url), 'utf8');
     const line = src.split('\n').find((l) => /^\s*maxRunDurationMs:/.test(l));
     expect(line, 'no `maxRunDurationMs:` advert found — this test would pass vacuously').toBeDefined();

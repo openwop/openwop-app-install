@@ -10,6 +10,16 @@
  *      acknowledgedRisk is rejected (validation_error); WITH consent the value is
  *      stored at user scope and NOT echoed; tenant/workspace stay
  *      credential_scope_forbidden regardless of consent (§B.8 unconditional).
+ *
+ * §B.8 has TWO guards that share one code (`byok/subscriptionCredentialScope.ts`):
+ * the scope-FIELD guard (`assertSubscriptionScopeAllowed`) and the STORAGE-tenant
+ * guard (`assertSubscriptionStorageTenant`). A value-bearing tenant bind that
+ * slipped past the first is refused by the second with the same 403, so each
+ * case asserts the exact MESSAGE of the guard its title names (round-1 probe
+ * 8fw2g1-aor-scope-consent was vacuous on the code alone). The storage guard reads
+ * the caller's PERSONAL tenant, never the active one: the shared-workspace case
+ * puts the two apart, so reading `req.tenantId` instead goes red
+ * (8fw2g1-aor-active-tenant was vacuous while every login collapsed them).
  */
 
 import { describe, expect, it, beforeAll, afterAll, afterEach } from 'vitest';
@@ -17,6 +27,7 @@ import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
 import { resolveSecret, clearAllSecrets } from '../src/byok/secretResolver.js';
+import { advertisedProviderAuthModes } from '../src/aiProviders/aiProvidersHost.js';
 import { getSetCookies } from './headerCookies.js';
 import { configureKmsClient, createLocalAesKmsClient } from '../src/byok/kmsEncryption.js';
 import { randomBytes } from 'node:crypto';
@@ -60,6 +71,18 @@ afterEach(async () => {
 
 const BIND = '/host/openwop-app/credentials/bind';
 const post = (path: string, body: unknown) => fetch(`${BASE}${path}`, { method: 'POST', headers: H, body: JSON.stringify(body) });
+
+/** The two §B.8 refusals share `credential_scope_forbidden`; their messages differ. */
+const SCOPE_FIELD_MSG = /must bind at user scope; tenant\/workspace binding is forbidden/;
+const STORAGE_TENANT_MSG = /can only be stored in your own signed-in \(user-scoped\) tenant/;
+
+function errMessage(json: unknown): string | undefined {
+  const j = json as { message?: unknown; error?: unknown };
+  if (typeof j?.message === 'string') return j.message;
+  const e = j?.error as { message?: unknown } | undefined;
+  if (e && typeof e.message === 'string') return e.message;
+  return undefined;
+}
 
 function errCode(json: unknown): string | undefined {
   const j = json as { error?: unknown; code?: unknown };
@@ -118,7 +141,6 @@ describe('RFC 0121 AT-OWN-RISK — discovery advertisement (two-gate)', () => {
     expect(subscriptionProviders).toEqual(['openai']);
     expect(modes).toContain('subscription');
     expect(modes).toContain('apiKey');
-    const { advertisedProviderAuthModes } = await import('../src/aiProviders/aiProvidersHost.js');
     const src = advertisedProviderAuthModes();
     expect(src.authModes.openai).toEqual(['apiKey', 'subscription']);
     expect(src.byok).toContain('openai'); // §B.7 force-include
@@ -152,7 +174,7 @@ describe('RFC 0121 AT-OWN-RISK — bind seam consent gate (ADR 0180)', () => {
     });
     expect(login.status).toBe(201);
     let cookie = '';
-    for (const ck of getSetCookies(login.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
+    for (const ck of getSetCookies(login.headers)) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
     expect(cookie).not.toBe('');
 
     const secret = 'sk-personal-secret-xyz';
@@ -171,17 +193,51 @@ describe('RFC 0121 AT-OWN-RISK — bind seam consent gate (ADR 0180)', () => {
     expect(await resolveSecret('subscription:openai', { tenantId: 'default' })).toBeNull();
   });
 
+  it('stored at the PERSONAL tenant, never the ACTIVE shared workspace the session is in', async () => {
+    // `sharedWorkspace: true` puts the session's ACTIVE tenant (a ws: the user
+    // founds, so is a member of) apart from its PERSONAL tenant
+    // `user:<sha256(subject)[0..32]>` (routes/authTestSeam.ts). The literal below is
+    // that hash of the fixed subject, computed by hand.
+    const ACTIVE = 'ws:rfc0121-active-shared';
+    const PERSONAL = 'user:3f6d3b6295238e76cdab12c3b3b72256';
+    const login = await fetch(`${BASE}/host/openwop-app/test/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ subject: 'oidc:rfc0121-active-owner', email: 'rfc0121-active@x.test', tenantId: ACTIVE, sharedWorkspace: true }),
+    });
+    expect(login.status).toBe(201);
+    let cookie = '';
+    for (const ck of getSetCookies(login.headers)) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
+    expect(cookie).not.toBe('');
+
+    const secret = 'sk-personal-not-shared-123';
+    const res = await fetch(`${BASE}${BIND}`, {
+      method: 'POST', headers: { 'content-type': 'application/json', cookie },
+      body: JSON.stringify({ provider: 'openai', mode: 'subscription', scope: 'user', acknowledgedRisk: true, value: secret }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ bound: true, scope: 'user', credentialRef: 'subscription:openai' });
+    expect(await resolveSecret('subscription:openai', { tenantId: PERSONAL })).toBe(secret);
+    expect(await resolveSecret('subscription:openai', { tenantId: ACTIVE })).toBeNull();
+    expect(await resolveSecret('subscription:openai', { tenantId: 'default' })).toBeNull();
+  });
+
   it('tenant scope stays credential_scope_forbidden EVEN WITH consent (§B.8 unconditional)', async () => {
     const res = await post(BIND, { provider: 'openai', mode: 'subscription', scope: 'tenant', acknowledgedRisk: true, value: 'sk-secret' });
     expect(res.status).toBe(403);
-    expect(errCode(await res.json())).toBe('credential_scope_forbidden');
+    const json = await res.json();
+    expect(errCode(json)).toBe('credential_scope_forbidden');
+    // The SCOPE-FIELD guard refused it, not the storage guard further down.
+    expect(errMessage(json)).toMatch(SCOPE_FIELD_MSG);
     expect(await resolveSecret('subscription:openai', { tenantId: 'default' })).toBeNull();
   });
 
   it('workspace scope stays credential_scope_forbidden even with consent', async () => {
     const res = await post(BIND, { provider: 'openai', mode: 'subscription', scope: 'workspace', acknowledgedRisk: true, value: 'sk-secret' });
     expect(res.status).toBe(403);
-    expect(errCode(await res.json())).toBe('credential_scope_forbidden');
+    const json = await res.json();
+    expect(errCode(json)).toBe('credential_scope_forbidden');
+    expect(errMessage(json)).toMatch(SCOPE_FIELD_MSG);
+    expect(await resolveSecret('subscription:openai', { tenantId: 'default' })).toBeNull();
   });
 
   it('user-scope bind with NO value stays the acquisition-free scope-rail probe → 200', async () => {
@@ -206,7 +262,10 @@ describe('RFC 0121 AT-OWN-RISK — bind seam consent gate (ADR 0180)', () => {
       body: JSON.stringify({ provider: 'openai', mode: 'subscription', scope: 'user', acknowledgedRisk: true, value: secret }),
     });
     expect(res.status).toBe(403);
-    expect(errCode(await res.json())).toBe('credential_scope_forbidden');
+    const json = await res.json();
+    expect(errCode(json)).toBe('credential_scope_forbidden');
+    // The STORAGE guard refused it (an anon: personal tenant is not user:).
+    expect(errMessage(json)).toMatch(STORAGE_TENANT_MSG);
     // Fail-closed: the rejected anon bind wrote nothing to the shared/anon scope.
     expect(await resolveSecret('subscription:openai', { tenantId: 'default' })).toBeNull();
   });
@@ -230,7 +289,8 @@ describe('ADR 0756 — anthropic + google are prohibited on the at-own-risk path
     });
     expect(login.status).toBe(201);
     let cookie = '';
-    for (const ck of getSetCookies(login.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
+    for (const ck of getSetCookies(login.headers)) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
+    expect(cookie).not.toBe('');
     for (const provider of ['anthropic', 'google']) {
       const res = await fetch(`${BASE}${BIND}`, {
         method: 'POST', headers: { 'content-type': 'application/json', cookie },
@@ -275,7 +335,6 @@ describe('ADR 0757 — GitHub Copilot (the cleared provider) on the booted host'
       expect(providers).toContain('github.copilot');
       expect(subscriptionProviders).toContain('github.copilot');
       expect(modes).toContain('subscription');
-      const { advertisedProviderAuthModes } = await import('../src/aiProviders/aiProvidersHost.js');
       const src = advertisedProviderAuthModes();
       expect(src.byok).toContain('github.copilot'); // §B.7
       expect(src.authModes['github.copilot']).toEqual(['subscription']);
@@ -292,7 +351,9 @@ describe('ADR 0757 — GitHub Copilot (the cleared provider) on the booted host'
     try {
       const pasted = await post(BIND, { provider: 'github.copilot', mode: 'subscription', scope: 'user', acknowledgedRisk: true, value: 'ghp_broadscope' });
       expect(pasted.status).toBe(400);
-      expect(errCode(await pasted.json())).toBe('validation_error');
+      const json = await pasted.json();
+      expect(errCode(json)).toBe('validation_error');
+      expect(errMessage(json)).toMatch(/is connected through its sign-in flow, not a pasted token/);
       const probe = await post(BIND, { provider: 'github.copilot', mode: 'subscription', scope: 'user' });
       expect(probe.status).toBe(200);
     } finally {
@@ -317,12 +378,17 @@ describe('ADR 0757 — GitHub Copilot (the cleared provider) on the booted host'
     const url = `${BASE}/host/openwop-app/subscription/github.copilot/authorize`;
     const dark = await fetch(url, { method: 'POST', headers: H, body: '{}' });
     expect(dark.status).toBe(404);
+    expect(errCode(await dark.json())).toBe('host_capability_missing');
     configure();
     try {
-      // The admin `dev-token` principal's personal tenant is `default`, not `user:` (§B.8 storage rail).
+      // The admin `dev-token` bearer carries NO personal tenant (requestSubject.ts
+      // personalTenantOf: undefined for wildcard-bearer callers), so the storage
+      // rail refuses it.
       const res = await fetch(url, { method: 'POST', headers: H, body: '{}' });
       expect(res.status).toBe(403);
-      expect(errCode(await res.json())).toBe('credential_scope_forbidden');
+      const json = await res.json();
+      expect(errCode(json)).toBe('credential_scope_forbidden');
+      expect(errMessage(json)).toMatch(STORAGE_TENANT_MSG);
     } finally {
       unconfigure();
     }

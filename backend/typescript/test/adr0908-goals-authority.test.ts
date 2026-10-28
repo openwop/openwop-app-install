@@ -27,6 +27,17 @@
  *   D8  bounds stop the continuation at fire time, not only the judge.
  *   D9  closed-world create — unadvertised judges/modes, malformed bounds and a
  *       client-written `armRef` were stored.
+ *
+ * Tracker TST-BJM. Red when (probe-witnessed, w65): the workspace:write floor goes;
+ * a foreign or unknown run binds; the caller's cost replaces the host-stamped one; a
+ * closed goal's job fires; a breached bound does not close the goal at fire time; the
+ * verifier accepts another enrollment's snapshot. The cross-tenant snapshot refusal
+ * is held FOUR times in `registerKicktodoGoalVerifier` (progressService.ts): the
+ * ref-tenant compare, the goal-tenant `getEnrollment`, the goal-binding check
+ * (`enrollment.goalId !== goal.id` — a foreign enrollment always belongs to a foreign
+ * goal) and the goal-tenant `getEvidence`. Any one alone refuses, so the cross-tenant
+ * case is probed by breaking all four in one edit (w65 r3); the goal-binding check
+ * alone is witnessed by the same-tenant "another enrollment's" case.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -36,6 +47,7 @@ import { createAgentToolProvider } from '../src/host/agentToolProvider.js';
 import { getJob } from '../src/host/schedulingService.js';
 import { fireJob } from '../src/host/scheduleDaemon.js';
 import type { StartRunDeps } from '../src/host/runStarter.js';
+import type { HostAdapterSuite } from '../src/host/index.js';
 import { buildFeatureSurfaces } from '../src/host/featureSurfaces.js';
 import { issueApiKey } from '../src/features/developer-keys/apiKeyService.js';
 import { eraseGoalsForSubject, ensureDemoGoal, FIXTURE_GOAL_ID, __test as goalsStore } from '../src/features/goals/goalsService.js';
@@ -60,7 +72,7 @@ beforeAll(async () => {
   delete process.env.OPENWOP_DEMO_MODE;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   storage = app.locals.storage as Storage;
-  deps = { storage, hostSuite: app.locals.hostSuite } as unknown as StartRunDeps;
+  deps = { storage, hostSuite: app.locals.hostSuite as HostAdapterSuite };
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   registerGoalVerifier('g908:v', async () => ({ satisfied: true, confidence: 1, runId: 'run-g908' }));
   for (const id of ['users', 'kicktodo-core']) {
@@ -70,7 +82,15 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res { status: number; body: any }
+/** The goal wire shape and the other bodies these cases read (local narrow types). */
+interface GoalWire { id: string; state: string; objective?: string; owner: { tenant: string; principal?: string }; progress?: { contributingRunIds?: string[] }; bounds?: Record<string, unknown> }
+interface ResBody {
+  id?: string; state?: string; owner?: GoalWire['owner']; progress?: GoalWire['progress']; bounds?: GoalWire['bounds'];
+  goals?: GoalWire[]; goal?: GoalWire; goalId?: string;
+  user?: { userId: string }; memberId?: string;
+  error?: string; message?: string;
+}
+interface Res { status: number; body: ResBody }
 function client(bearer?: string) {
   let cookie = '';
   return async (method: string, path: string, body?: unknown): Promise<Res> => {
@@ -81,7 +101,7 @@ function client(bearer?: string) {
     });
     const h = res.headers as { getSetCookie?: () => string[] };
     for (const c of (typeof h.getSetCookie === 'function' ? h.getSetCookie() : [])) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]!; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    return { status: res.status, body: res.status === 204 ? {} : ((await res.json().catch(() => ({}))) as ResBody) };
   };
 }
 type Client = ReturnType<typeof client>;
@@ -93,14 +113,14 @@ async function owner(): Promise<{ c: Client; userId: string; tenant: string }> {
   T = `org:g908-${Date.now()}-${n++}`;
   const r = await c('POST', '/host/openwop-app/test/login', { email: `owner-${n++}@g908.test`, tenantId: T });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  return { c, userId: r.body.user.userId as string, tenant: T };
+  return { c, userId: r.body.user!.userId, tenant: T };
 }
 /** A second person in the CURRENT tenant, as a real member with `role`. */
 async function member(own: Client, role: 'editor' | 'viewer'): Promise<{ c: Client; userId: string }> {
   const c = client();
   const r = await c('POST', '/host/openwop-app/test/login', { email: `${role}-${n++}@g908.test`, tenantId: T });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  const userId = r.body.user.userId as string;
+  const userId = r.body.user!.userId;
   const add = await own('POST', `/host/openwop-app/orgs/${encodeURIComponent(T)}/members`, { displayName: role, subject: userId, roles: [role] });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
   return { c, userId };
@@ -117,10 +137,12 @@ describe('D1 — every goal mutation needs workspace:write', () => {
     const o = await owner();
     const viewer = await member(o.c, 'viewer');
     const editor = await member(o.c, 'editor');
-    expect((await viewer.c('POST', G(), BOUNDED)).status).toBe(403);
+    const refused = await viewer.c('POST', G(), BOUNDED);
+    expect(refused.status).toBe(403);
+    expect(refused.body.error).toBe('forbidden_scope');
     const ok = await editor.c('POST', G(), BOUNDED);
     expect(ok.status, JSON.stringify(ok.body)).toBe(200);
-    expect(ok.body.owner.principal).toBe(editor.userId);
+    expect(ok.body.owner?.principal).toBe(editor.userId);
   });
 
   it('a viewer cannot abandon, edit, bind to or judge a principal-less goal; an editor can abandon it', async () => {
@@ -157,6 +179,7 @@ describe('D2 — arming a continuation is a scheduler write', () => {
     const id = await tenantGoal(o.tenant);
     const r = await viewer.c('POST', G(id, '/arm'), { workflowId: 'openwop-app.kicktodo.daily-loop', cronExpr: '0 9 * * *' });
     expect(r.status).toBe(403);
+    expect(r.body.error).toBe('forbidden_scope');
     expect(await getJob(continuationJobId(o.tenant, id))).toBeNull();
   });
 
@@ -214,10 +237,11 @@ describe('D3 — the judge reads only the goal\'s own evidence', () => {
     const fresh = await enrollment(o.c);
     const borrowed = await o.c('POST', G(fresh.goalId, '/evaluate'), { snapshotRef: done.ref, snapshotHash: done.hash });
     expect(borrowed.status, JSON.stringify(borrowed.body)).toBeGreaterThanOrEqual(400);
+    expect(JSON.stringify(borrowed.body)).toMatch(/does not belong to this goal/);
     expect((await getGoal(o.tenant, fresh.goalId))?.state).toBe('active');
     const own = await o.c('POST', G(done.goalId, '/evaluate'), { snapshotRef: done.ref, snapshotHash: done.hash });
     expect(own.status, JSON.stringify(own.body)).toBe(200);
-    expect(own.body.goal.state).toBe('satisfied');
+    expect(own.body.goal?.state).toBe('satisfied');
   });
 
   it('another tenant\'s snapshot is never read for a verdict', async () => {
@@ -227,6 +251,7 @@ describe('D3 — the judge reads only the goal\'s own evidence', () => {
     const fresh = await enrollment(b.c);
     const r = await b.c('POST', G(fresh.goalId, '/evaluate'), { snapshotRef: done.ref, snapshotHash: done.hash });
     expect(r.status, JSON.stringify(r.body)).toBeGreaterThanOrEqual(400);
+    expect(JSON.stringify(r.body)).toMatch(/does not belong to this goal/);
     expect((await getGoal(b.tenant, fresh.goalId))?.state).toBe('active');
   });
 });
@@ -292,7 +317,7 @@ describe('D5 — a contributing run is a real run of this tenant, and its cost i
     await storage.insertRun({ ...run, metadata: { ...(run.metadata ?? {}), costUsd: 3 } });
     const r = await o.c('POST', G(id, '/runs'), { runId: run.runId, costUsd: 0 });
     expect(r.status, JSON.stringify(r.body)).toBe(200);
-    expect(r.body.progress.contributingRunIds).toEqual([run.runId]);
+    expect(r.body.progress?.contributingRunIds).toEqual([run.runId]);
     expect(r.body.state).toBe('bound-exceeded');
   });
 });
@@ -383,7 +408,7 @@ describe('D2b — the scheduler route cannot write a goal\'s continuation job', 
     expect(nr.status, JSON.stringify(nr.body)).toBe(403);
     const created = await key('POST', G(), BOUNDED);
     expect(created.status, JSON.stringify(created.body)).toBe(200);
-    expect(created.body.owner.principal).toBe(editor.userId);
+    expect(created.body.owner?.principal).toBe(editor.userId);
     const id = created.body.id as string;
     expect((await key('POST', G(id, '/arm'), { workflowId: WF, cronExpr: '0 9 * * *' })).status).toBe(200);
     // The job acts as the KEY, as the scheduler POST stamps it (GL2CD-2): never as
@@ -497,7 +522,7 @@ describe('closing grades — GL2CD-1/5, GL2UX-2/6, GL2CD-4', () => {
     const o = await owner();
     const id = (await o.c('POST', G(), BOUNDED)).body.id as string;
     const done = await o.c('POST', G(id, '/evaluate'), { snapshotRef: 'r', snapshotHash: 'h' });
-    expect(done.body.goal.state).toBe('satisfied');
+    expect(done.body.goal?.state).toBe('satisfied');
     expect((await o.c('POST', G(id, '/resume'))).status).toBe(409);
     expect((await o.c('POST', G(id, '/pause'))).status).toBe(409);
     const ab = await o.c('POST', G(id, '/abandon'));
@@ -533,7 +558,7 @@ describe('closing grades — GL2CD-1/5, GL2UX-2/6, GL2CD-4', () => {
 
   it('a gate that throws refuses the slot under its error reason, not a verdict', async () => {
     registerScheduledJobFireGate('g908-throws', { owns: (j) => j.jobId.startsWith('g908throw:'), gate: async () => { throw new Error('storage down'); }, refusal: 'dispatch-error' });
-    const job: ScheduledJob = { jobId: 'g908throw:1', tenantId: 't', cronExpr: '* * * * *', lastFiredTick: null, enabled: true } as ScheduledJob;
+    const job: ScheduledJob = { jobId: 'g908throw:1', tenantId: 't', cronExpr: '* * * * *', lastFiredTick: null, enabled: true };
     expect(await scheduledJobFireRefusal(job, Date.now())).toBe('dispatch-error');
   });
 });

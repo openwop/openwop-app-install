@@ -19,10 +19,18 @@
  *
  * BORN RED: with the guard removed, leg 1's resolve returns 2xx and the parent's
  * downstream node runs.
+ *
+ * Sabotage-witnessed (wave 64): the guard itself (8fw5g1-sm-guard → legs 1–3), the
+ * shared choke point (sm-choke → legs 1–2), the MCP lane's own check (sm-mcp → leg 3),
+ * and both halves of the precision rule — the child lookup (sm-precision-lookup) and
+ * the `parentRunId` comparison (sm-precision-parent-r2 → leg 5, which now points the
+ * look-alike's marker at a REAL run that is not its child; with a nonexistent id the
+ * `!child` arm answered first and the comparison was never reached).
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { bootPlanningApp, makeClient, enableToggle, uniqEmail, type Client } from './planningHarness.js';
 import { registerWorkflow } from '../src/host/workflowsRegistry.js';
+import type { Principal } from '../src/types.js';
 import { tryDurableStorage } from '../src/host/durable/durableStore.js';
 import { createHostAdapterSuite } from '../src/host/index.js';
 import { __resolveAndResumeForTests } from '../src/routes/interrupts.js';
@@ -96,11 +104,9 @@ async function suspendedParent(c: Client): Promise<{ runId: string; mirrorId: st
   return { runId, mirrorId: mirror.interruptId, childRunId: toWireRunId(bareChild, tenantId) };
 }
 
-const nodeRan = async (runId: string, nodeId: string): Promise<boolean> => {
-  const snap = await tryDurableStorage()!.getRun(bareRunId(runId));
-  const nodes = (snap as unknown as { nodeStates?: Record<string, { status?: string }> }).nodeStates ?? {};
-  return nodes[nodeId]?.status === 'completed';
-};
+/** The node event types the run log holds for `nodeId` (the executor's own record of what ran). */
+const nodeEvents = async (runId: string, nodeId: string): Promise<string[]> =>
+  (await tryDurableStorage()!.listEvents(bareRunId(runId))).filter((e) => e.nodeId === nodeId && e.type.startsWith('node.')).map((e) => e.type);
 
 describe('SECURITY — the parent mirror of a sub-workflow gate is not decidable', () => {
   it('leg 1: the node route refuses it, and nothing downstream runs', async () => {
@@ -110,7 +116,10 @@ describe('SECURITY — the parent mirror of a sub-workflow gate is not decidable
     expect(r.status, JSON.stringify(r.body)).toBe(409);
     expect(JSON.stringify(r.body)).toContain('subworkflow_child_mirror');
     expect(await status(c, runId)).toBe('waiting-approval');
-    expect(await nodeRan(runId, 'after'), 'the fabricated completion let the parent run on').toBe(false);
+    // Control: the reader sees the parent's node events (the sub-workflow node started and suspended).
+    expect(await nodeEvents(runId, 'sub')).toContain('node.suspended');
+    expect(await nodeEvents(runId, 'sub'), 'the mirror was not completed').not.toContain('node.completed');
+    expect(await nodeEvents(runId, 'after'), 'the fabricated completion let the parent run on').toEqual([]);
   });
 
   it('leg 2: the shared resolve choke point refuses it too', async () => {
@@ -127,8 +136,9 @@ describe('SECURITY — the parent mirror of a sub-workflow gate is not decidable
     const c = await owner();
     const { mirrorId } = await suspendedParent(c);
     const storage = tryDurableStorage()!;
-    // `principal`: the lane refuses before any principal-dependent step (test-only cast).
-    const out = await resumeInterrupt({ storage, hostSuite: createHostAdapterSuite({ storage }), principal: {} as never }, mirrorId, { action: 'approve' });
+    // `principal`: the lane refuses before any principal-dependent step; a minimal real one.
+    const principal: Principal = { principalId: 'test:mcp', tenants: [], token: '' };
+    const out = await resumeInterrupt({ storage, hostSuite: createHostAdapterSuite({ storage }), principal }, mirrorId, { action: 'approve' });
     expect(out.kind).toBe('failed');
     // The lane says WHY (without its own check it would report "already resolved").
     expect((out as { text?: string }).text ?? '').toMatch(/sub-workflow/);
@@ -149,12 +159,22 @@ describe('SECURITY — the parent mirror of a sub-workflow gate is not decidable
 
   it('leg 5: a plain interrupt that merely copies the marker data stays resolvable', async () => {
     const c = await owner();
+    // The marker names a REAL run that is not this interrupt's child, so the guard reaches
+    // its `parentRunId` comparison (a nonexistent id would be answered by `!child` first).
+    const other = `test.mirror.other.${n++}`;
+    registerWorkflow({ workflowId: other, nodes: [{ nodeId: 'a', typeId: 'core.noop', config: {} }], edges: [] });
+    const otherRun = await c.post('/runs', { workflowId: other, inputs: {} });
+    expect(otherRun.status, JSON.stringify(otherRun.body)).toBe(201);
+    const realNotMine = bareRunId(otherRun.body.runId as string);
+    expect(await tryDurableStorage()!.getRun(realNotMine), 'precondition: the named run exists').not.toBeNull();
     const wf = `test.mirror.lookalike.${n++}`;
-    registerWorkflow({ workflowId: wf, nodes: [{ nodeId: 'ask', typeId: 'core.interrupt', config: { kind: 'approval', data: { childRunId: 'run-not-mine', childInterruptNodeId: 'x', childStatus: 'waiting-approval' } } }], edges: [] });
+    registerWorkflow({ workflowId: wf, nodes: [{ nodeId: 'ask', typeId: 'core.interrupt', config: { kind: 'approval', data: { childRunId: realNotMine, childInterruptNodeId: 'x', childStatus: 'waiting-approval' } } }], edges: [] });
     const started = await c.post('/runs', { workflowId: wf, inputs: {} });
+    expect(started.status, JSON.stringify(started.body)).toBe(201);
     const runId = started.body.runId as string;
     await waitFor(c, runId, (s) => s.startsWith('waiting'));
     const r = await c.post(`/runs/${runId}/interrupts/ask`, { resumeValue: { action: 'approve' } });
     expect(r.status, JSON.stringify(r.body)).toBeLessThan(300);
+    expect(await waitFor(c, runId, (s) => TERMINAL.includes(s)), 'the resolved look-alike resumes and finishes').toBe('completed');
   });
 });

@@ -6,6 +6,17 @@
  * per-tenant isolation. Uses synthetic req/res so the cap is exercised against
  * a STABLE key (each real anon HTTP request gets a distinct tenant, which would
  * never trip the cap).
+ *
+ * FIXTURE CEILING (named, /grade-tests wave 61): `mockReq` / `mockRes` are
+ * Express doubles and carry the file's only two casts (`as unknown as
+ * Request/Response`) — an honest ceiling, since a real `Request` cannot be built
+ * without a socket. Their INPUT is typed (`MockReqInput`), so a misspelled field
+ * is a tsc error rather than a silently-ignored property; every other request
+ * shape is built through them, with no further casts.
+ *
+ * Module state is reset per case (`_resetSseStreamCounts`, the RFC 0247 wire
+ * cache), and every env override is restored in `finally`, so the file passes
+ * in any order. Sabotage-witnessed by 8fw3g1-sse-*.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -13,16 +24,27 @@ import type { Request, Response } from 'express';
 import { openSseChannel, boundedLifetimeMs, _resetSseStreamCounts } from '../src/host/sseChannel.js';
 import { resetRfc0247WireCache, maxStreamAgeSec, rfc0247WireAvailable } from '../src/host/streamAgeCapability.js';
 
-function mockReq(opts: string | { tenantId?: string; tenants?: string[]; destroyed?: boolean; query?: Record<string, string> } = {}): Request & { _close: () => void } {
-  const o = typeof opts === 'string' ? { tenantId: opts } : opts;
+interface MockReqInput {
+  tenantId?: string;
+  tenants?: string[];
+  destroyed?: boolean;
+  query?: Record<string, string>;
+  /** Request headers (looked up case-insensitively, as Express does). */
+  headers?: Record<string, string>;
+  path?: string;
+}
+
+function mockReq(opts: string | MockReqInput = {}): Request & { _close: () => void } {
+  const o: MockReqInput = typeof opts === 'string' ? { tenantId: opts } : opts;
   const closeCbs: Array<() => void> = [];
+  const lower = Object.fromEntries(Object.entries(o.headers ?? {}).map(([k, v]) => [k.toLowerCase(), v]));
   return {
     tenantId: o.tenantId,
     principal: o.tenants ? { principalId: 'p', tenants: o.tenants } : undefined,
     destroyed: o.destroyed ?? false,
     query: o.query ?? {},
-    path: '/test/events',
-    header: () => undefined,
+    path: o.path ?? '/test/events',
+    header: (name: string) => lower[name.toLowerCase()],
     socket: { remoteAddress: '127.0.0.1', destroyed: o.destroyed ?? false },
     on: (event: string, cb: () => void) => { if (event === 'close') closeCbs.push(cb); },
     _close: () => closeCbs.forEach((c) => c()),
@@ -265,12 +287,8 @@ describe('sseChannel onClose', () => {
 
 describe('ADR 0876 — streams that arrive through the front door', () => {
   const STREAM_BASE = 'https://backend-123.us-central1.run.app';
-  function viaReq(headers: Record<string, string>): Request & { _close: () => void } {
-    const req = mockReq('tenant-F') as unknown as Record<string, unknown>;
-    const lower = Object.fromEntries(Object.entries(headers).map(([k, v]) => [k.toLowerCase(), v]));
-    req.header = (name: string) => lower[name.toLowerCase()];
-    req.path = '/host/openwop-app/kanban/boards/b/events';
-    return req as unknown as Request & { _close: () => void };
+  function viaReq(headers: Record<string, string>, query?: Record<string, string>): Request & { _close: () => void } {
+    return mockReq({ tenantId: 'tenant-F', headers, path: '/host/openwop-app/kanban/boards/b/events', ...(query ? { query } : {}) });
   }
   // The Firebase Hosting hop as MEASURED: Host is the run.app service, the
   // forwarded host is the public domain.
@@ -326,16 +344,19 @@ describe('ADR 0876 — streams that arrive through the front door', () => {
   // ADR 0897 — Firebase Hosting retries an upstream that has not completed in
   // 60 s; an opted-in stream on that hop completes under it (a long poll).
   it('an opted-in wire stream on the hop is bounded under 60 s; without opt-in it is not', () => {
+    const saved = process.env.OPENWOP_SSE_MAX_AGE_MS;
     resetRfc0247WireCache(true);
-    const optedIn = viaReq(FIREBASE_HOP) as unknown as Record<string, unknown>;
-    optedIn.query = { resumable: 'true' };
-    expect(boundedLifetimeMs(optedIn as unknown as Request, { boundWhen: 'resumable' }, () => 0)).toBe(50_000);
-    expect(boundedLifetimeMs(optedIn as unknown as Request, { boundWhen: 'resumable' }, () => 0.999999)).toBe(45_000);
-    expect(boundedLifetimeMs(viaReq(FIREBASE_HOP), { boundWhen: 'resumable' }, () => 0)).toBe(0);
-    // With the default off the host advertises nothing, so it bounds nothing.
-    process.env.OPENWOP_SSE_MAX_AGE_MS = '0';
-    expect(boundedLifetimeMs(optedIn as unknown as Request, { boundWhen: 'resumable' }, () => 0)).toBe(0);
-    delete process.env.OPENWOP_SSE_MAX_AGE_MS;
-    resetRfc0247WireCache();
+    try {
+      const optedIn = viaReq(FIREBASE_HOP, { resumable: 'true' });
+      expect(boundedLifetimeMs(optedIn, { boundWhen: 'resumable' }, () => 0)).toBe(50_000);
+      expect(boundedLifetimeMs(optedIn, { boundWhen: 'resumable' }, () => 0.999999)).toBe(45_000);
+      expect(boundedLifetimeMs(viaReq(FIREBASE_HOP), { boundWhen: 'resumable' }, () => 0)).toBe(0);
+      // With the default off the host advertises nothing, so it bounds nothing.
+      process.env.OPENWOP_SSE_MAX_AGE_MS = '0';
+      expect(boundedLifetimeMs(optedIn, { boundWhen: 'resumable' }, () => 0)).toBe(0);
+    } finally {
+      if (saved === undefined) delete process.env.OPENWOP_SSE_MAX_AGE_MS; else process.env.OPENWOP_SSE_MAX_AGE_MS = saved;
+      resetRfc0247WireCache();
+    }
   });
 });

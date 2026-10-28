@@ -210,6 +210,14 @@ describe('CALL-SITE RATCHET — every handler of fenced text is classified', () 
         + 'unfenced deterministic-score issue text, and `maxLength` is measured and reported, never '
         + 'applied. Pinned by `features/brand/__tests__/promptCatalogParity.test.ts`.',
     },
+    'features/campaign-ops/clientContext.ts': {
+      kind: 'PRODUCES',
+      why:
+        'ADR 0944 D5 — builds the per-client context block from fenced sections (`fenceUntrustedItems`, '
+        + 'and the brand voice through `resolveVoice`). The budget drops WHOLE sections in a fixed order '
+        + 'and never slices the rendered block, so no fence can be cut open. Pinned by '
+        + '`test/adr0944-p2-client-context.test.ts` (the budget case).',
+    },
     'host/toModelToolResult.ts': {
       kind: 'PRODUCES',
       why: 'The single builder of a model-facing tool result: it fences (and, since ADR 0604, compacts before fencing). It never shortens.',
@@ -321,6 +329,24 @@ describe('CALL-SITE RATCHET — every handler of fenced text is classified', () 
         + '`truncateFencedContent`. (`topK` bounds how many hits are composed, not '
         + 'the length of a fenced string.)',
     },
+    'features/kb/contextualEnrichment.ts': {
+      kind: 'PRODUCES',
+      why:
+        'ADR 0904 P4 — builds the enrichment prompt: the document text is bounded to '
+        + '`ENRICH_DOC_CHARS` while it is still RAW, then it and the chunk are each wrapped '
+        + 'in `fenceUntrustedBlock`. Nothing shortens a string after it is fenced. The '
+        + 'other `slice` in the file bounds the MODEL OUTPUT (`validatePrefix`), which '
+        + 'is never fenced text and is refused outright if it echoes a fence marker.',
+    },
+    'features/memory-auto-extract/memoryExtractor.ts': {
+      kind: 'PRODUCES',
+      why:
+        'ADR 0982 D3 — fences the person\'s own chat turns via `neutralizeUntrusted` + '
+        + '`fenceUntrustedItems` before the extraction prompt. The 8,000-char input budget '
+        + '(`selectUserTurns`) drops WHOLE raw turns, oldest first, BEFORE fencing, so no fenced '
+        + 'string is ever shortened. The file contains no `slice`/`substring` at all. The model '
+        + 'reply is parsed closed-world, never fenced or cut. Pinned by `test/memory-extractor.test.ts`.',
+    },
     'host/agentToolProvider.ts': {
       kind: 'EXEMPT',
       why: 'Defines executeTool and calls toModelToolResult to BUILD the result; the fence is applied there, and this file imposes no length bound.',
@@ -337,15 +363,16 @@ describe('CALL-SITE RATCHET — every handler of fenced text is classified', () 
     // path used to claim that its per-row `contentTrust` stamp fenced hostile
     // content; it does not (nothing reads a chat message's `meta.contentTrust`), and
     // the corrected comments cite the seam that ACTUALLY fences the one model-facing
-    // path. Citing it is the whole point of the correction — so the honest answer to
-    // this ratchet is EXEMPT-because-prose, not deleting the citation.
+    // path (the conversation-search tool). ADR 0992 kept the citation when it
+    // rewrote the importer: dropping it once made the docblock claim imported text
+    // never reaches a model, which was false (code-review CR-1).
     'features/chat-export/importService.ts': {
       kind: 'EXEMPT',
-      why: 'Mentions toModelToolResult only in a correction note explaining that the REAL fence is the search tool\'s own contentTrust declaration, not this file\'s row stamp. Imports nothing from the seam, never builds or shortens a fenced string.',
+      why: 'Mentions toModelToolResult only to name the REAL fence on the one model-facing path (the search tool\'s own contentTrust declaration), not this file\'s row stamp. Imports nothing from the seam, never builds or shortens a fenced string.',
     },
     'features/chat-export/routes.ts': {
       kind: 'EXEMPT',
-      why: 'Same correction note as importService.ts — names the seam to retire a false claim about row-level fencing. No fenced string is produced or truncated here.',
+      why: 'A correction note names the seam to retire a false claim about row-level fencing. No fenced string is produced or truncated here.',
     },
   };
 

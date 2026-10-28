@@ -11,8 +11,10 @@
  * this way — an operator wires a live provider at install/activate time), so per
  * the established `exec-ops`/`csm-ops` convention this drives the REAL executor to
  * a genuine `completed` state for every upstream node, then asserts the HONEST
- * FAILURE contract at the AI node (`error.code === 'provider_not_supported'`)
- * rather than forcing completion.
+ * FAILURE contract at the AI node (since P3 the chain freezes a real provider,
+ * so a credential-less tenant fails with `openwop-app.byok_required`) rather
+ * than forcing completion. The fan-in fix is asserted on the expanded edges
+ * (two named ports into `digest`), because run events carry no node inputs.
  *
  * MODE CHOSEN — `data-ops.content-router`: no AI/connector node sits in the path
  * (`core.flow.router` → `feature.notifications.nodes.notify`, which
@@ -130,7 +132,7 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+interface Res<T = unknown> { status: number; body: T }
 interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res> }
 function client(): Client {
   let cookie = '';
@@ -164,17 +166,17 @@ async function pollRun(owner: Client, runId: string): Promise<RunSnapshot> {
     const r = await owner.get(`/runs/${runId}`);
     expect(r.status, JSON.stringify(r.body)).toBe(200);
     snap = r.body as RunSnapshot;
-    if (snap.status === 'completed' || snap.status === 'failed' || snap.status === 'cancelled' || snap.status.startsWith('waiting')) break;
+    if (snap.status === 'completed' || snap.status === 'failed' || snap.status === 'cancelled' || snap.status.startsWith('waiting')) return snap;
     await new Promise((res) => setTimeout(res, 25));
   }
-  return snap;
+  throw new Error(`run ${runId} did not settle after 80 polls (25 ms apart): ${JSON.stringify(snap)}`);
 }
 
 interface BundleEvent { type?: string; nodeId?: string; payload?: Record<string, unknown> }
 async function bundleEvents(owner: Client, runId: string): Promise<BundleEvent[]> {
   const b = await owner.get(`/runs/${runId}/debug-bundle`);
   expect(b.status, JSON.stringify(b.body)).toBe(200);
-  return (b.body.events as BundleEvent[]) ?? [];
+  return (b.body as { events?: BundleEvent[] }).events ?? [];
 }
 function completedOutputs(events: BundleEvent[], nodeSuffix: string): Record<string, unknown> {
   const ev = events.find((e) => e.type === 'node.completed' && e.nodeId?.endsWith(`_${nodeSuffix}`));
@@ -196,9 +198,18 @@ describe('data-ops.rollup — real reads, honest missing-credential failure (fan
     const expanded = expandChain(found!.chain, { params });
     registerWorkflow(expanded);
 
+    // The fan-in fix itself, on the definition that is run below. Run events
+    // carry no node inputs (`node.started` is `{nodeId, typeId}`), so the
+    // port assignment is asserted on the expanded edges: two edges into
+    // `digest` landing on DISTINCT named ports. A bare `→ digest` edge has no
+    // `targetInput` and the scheduler clobbers both onto `input`.
+    const digestId = expanded.nodes.find((nd) => nd.nodeId.endsWith('_digest'))!.nodeId;
+    const intoDigest = (expanded.edges ?? []).filter((e) => e.targetNodeId === digestId);
+    expect(intoDigest.map((e) => e.targetInput).sort()).toEqual(['list', 'total']);
+
     const create = await owner.post('/runs', { workflowId: expanded.workflowId, inputs: params });
     expect(create.status, JSON.stringify(create.body)).toBe(201);
-    const runId = create.body.runId as string;
+    const runId = (create.body as { runId: string }).runId;
 
     const snap = await pollRun(owner, runId);
     expect(snap.status).toBe('failed');
@@ -234,7 +245,7 @@ describe('data-ops.content-router — real conditional routing (ADR 0201, param-
     registerWorkflow(expanded);
     const create = await owner.post('/runs', { workflowId: expanded.workflowId, inputs: params });
     expect(create.status, JSON.stringify(create.body)).toBe(201);
-    const runId = create.body.runId as string;
+    const runId = (create.body as { runId: string }).runId;
     const snap = await pollRun(owner, runId);
     expect(snap.status, `run did not complete cleanly: ${JSON.stringify(snap)}`).toBe('completed');
     return bundleEvents(owner, runId);

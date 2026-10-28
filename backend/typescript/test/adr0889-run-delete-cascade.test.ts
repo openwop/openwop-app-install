@@ -1,5 +1,5 @@
 /**
- * ADR 0889 grade remediation EVD-2 — a run's captured tool calls retire WITH the run.
+ * ADR 0889 grade remediation EVD-2 — a run's captured tool calls retire WITH the run (TST-BPA).
  *
  * Why this exists: D9 / A8 said a capture is "erased with its run", and it was not.
  * `deleteRun` and `pruneTerminalRuns` hand-list the run-keyed rows, and the
@@ -9,8 +9,17 @@
  * restated in `storage/runKvKeys.ts` are pinned to what the wrapper writes) on
  * both adapters, then deletes through both delete paths.
  *
- * Sabotage-witnessed: removing the `toolBoundaryKeyPatterns` loop from either
- * adapter's `deleteRun` (or `pruneTerminalRuns`) reds the matching case.
+ * Red when (sabotage-witnessed, wave 65): the `toolBoundaryKeyPatterns` loop is removed
+ * from either adapter's `deleteRun` or `pruneTerminalRuns` (the matching case), the
+ * capture-index pattern is dropped, or the call pattern stops being tenant-keyed
+ * ("deleteRun removes…"). The first case witnesses the fixture itself: the rows the
+ * other cases delete are exactly what the real wrapper writes.
+ *
+ * ADR 0984 D7: the fixture also records two calls through the REAL exact recorder
+ * (a live eval trial's as-executed record, its counter) and freezes one task's
+ * a copy another eval run froze from it, all keyed `<tenant>:#x:<runId>:`, and a
+ * copy the run itself froze from another source (`<tenant>:#x:<src>:#frozen:<runId>:`).
+ * Dropping either pattern from `toolBoundaryKeyPatterns` reds both delete cases.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
@@ -26,7 +35,7 @@ import { openPostgresStorage } from '../src/storage/postgres/index.js';
 import type { Storage } from '../src/storage/storage.js';
 import type { RunRecord } from '../src/types.js';
 import { __resetHostExtPersistence, initHostExtPersistence } from '../src/host/hostExtPersistence.js';
-import { listCapturedRuns, listRunBoundary, maybeCaptureExecuteTool, setCaptureSetting } from '../src/host/evals/toolBoundary.js';
+import { freezeRecordedFixtures, maybeCaptureExecuteTool, maybeRecordExactCalls, setCaptureSetting } from '../src/host/evals/toolBoundary.js';
 
 const AGENT = 'eval.cascade-agent';
 const OLD = '2026-01-01T00:00:00.000Z';
@@ -53,15 +62,22 @@ async function recordCapture(tenantId: string, runId: string): Promise<void> {
   const exec = await maybeCaptureExecuteTool(async () => ({ content: '{"ok":true}' }), { tenantId, runId, agentId: AGENT });
   await exec({ name: 'crm:lookup', input: { email: 'pat@example.com' } } as Parameters<typeof exec>[0]);
   await exec({ name: 'crm:update', input: { id: 'c-1' } } as Parameters<typeof exec>[0]);
-  // Non-vacuous: the wrapper wrote both calls, the per-run counter and the index.
-  expect((await listRunBoundary(tenantId, runId)).map((r) => r.tool)).toEqual(['crm:lookup', 'crm:update']);
-  expect((await listCapturedRuns(tenantId, AGENT)).map((r) => r.runId)).toEqual([runId]);
+  const record = (await maybeRecordExactCalls({ tenantId, runId, agentId: AGENT }))!(async () => ({ content: '{"ok":true}' }));
+  await record({ name: 'crm:lookup', input: { email: 'pat@example.com' }, callId: 'c1' });
+  await record({ name: 'crm:update', input: { id: 'c-1' }, callId: 'c2' });
+  const entries = [{ tool: 'crm:lookup', args: { email: 'pat@example.com' }, argsMatch: 'exact' as const, response: '{"ok":true}' }];
+  // A copy another eval run froze FROM this run (keyed under this source) …
+  await freezeRecordedFixtures(tenantId, `eval-of-${runId}`, { t: { sourceRunId: runId, anchorAt: OLD, entries } });
+  // … and a copy THIS run froze from another source (keyed under that source, deleted with this run).
+  await freezeRecordedFixtures(tenantId, runId, { t: { sourceRunId: `src-of-${runId}`, anchorAt: OLD, entries } });
+  // What the wrapper wrote is witnessed by the first case (a hook assertion would skip
+  // the cases instead of failing one).
   const rows = [
     ...(await scratch.kvList(`hostext:agent:tool-boundary:${tenantId}:${runId}:`)),
+    ...(await scratch.kvList(`hostext:agent:tool-boundary:${tenantId}:#x:${runId}:`)),
+    ...(await scratch.kvList(`hostext:agent:tool-boundary:${tenantId}:#x:src-of-${runId}:#frozen:${runId}:`)),
     ...(await scratch.kvList(`hostext:agent:tool-boundary-run:${tenantId}:`)).filter((r) => r.key.endsWith(`:${runId}`)),
   ];
-  expect(rows.some((r) => r.key.endsWith(':#cap'))).toBe(true);
-  expect(rows).toHaveLength(4); // two calls + counter + index
   written.set(`${tenantId}|${runId}`, rows.map((r) => ({ key: r.key, value: r.value })));
   __resetHostExtPersistence();
   await scratch.close();
@@ -90,6 +106,25 @@ async function present(s: Storage, keys: string[]): Promise<string[]> {
   for (const k of keys) if ((await s.kvGet(k)) !== null) out.push(k);
   return out;
 }
+
+describe('EVD-2 — the fixture is what production writes', () => {
+  it('the real wrappers wrote two calls, the run counter and the capture index (and D7: two exact calls, their counter, a frozen set) for every (tenant, run)', () => {
+    expect(written.size).toBe(8);
+    for (const [k, all] of written) {
+      const d7 = all.filter((r) => r.key.includes(':#x:'));
+      const rows = all.filter((r) => !r.key.includes(':#x:'));
+      expect(rows.map((r) => r.key.split(':').slice(0, 3).join(':')).sort(), k).toEqual([
+        'hostext:agent:tool-boundary', 'hostext:agent:tool-boundary', 'hostext:agent:tool-boundary', 'hostext:agent:tool-boundary-run',
+      ]);
+      expect(rows.filter((r) => r.key.endsWith(':#cap')), k).toHaveLength(1);
+      // The two call rows carry the two tools, in call order.
+      const tools = rows.filter((r) => !r.key.endsWith(':#cap') && r.key.startsWith('hostext:agent:tool-boundary:'))
+        .sort((a, b) => a.key.localeCompare(b.key)).map((r) => (JSON.parse(r.value) as { tool: string }).tool);
+      expect(tools, k).toEqual(['crm:lookup', 'crm:update']);
+      expect(d7.map((r) => (JSON.parse(r.value) as { kind: string }).kind).sort(), k).toEqual(['exact', 'exact', 'exact-cap', 'frozen', 'frozen']);
+    }
+  });
+});
 
 describe.each(backends)('EVD-2 — %s: deleting a run deletes its captured tool calls', (name) => {
   it('deleteRun removes the run\'s calls, counter and capture index; other runs (and the same id in another tenant) survive', async () => {

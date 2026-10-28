@@ -16,6 +16,11 @@ import { OpenwopError } from '../src/types.js';
  * It was invisible from the source. A scan of `appendEvent({ type: '…' })`
  * literals returns ten well-formed names, because the corrupting write goes
  * through a VARIABLE. Only the data showed it.
+ *
+ * Tracker TST-BGF-7. Red when `normaliseEmitArgs` admits an empty type, drops the
+ * `kind` or `data` spelling, lets a stray positional payload win, or stops
+ * refusing an object that names no type. Each refusal asserts its own message,
+ * because every refusal throws the same class.
  */
 describe('ADR 0675 — ctx.emit argument normalisation', () => {
   it('passes the positional form through unchanged', () => {
@@ -31,9 +36,6 @@ describe('ADR 0675 — ctx.emit argument normalisation', () => {
     );
     expect(out.type).toBe('node.progress');
     expect(out.payload).toEqual({ phase: 'retry', attempt: 1, status: 503 });
-    // The regression in one line: the type must be the NAME, never the envelope.
-    expect(typeof out.type).toBe('string');
-    expect(out.type).not.toContain('{');
   });
 
   it('accepts `{ kind, payload }` — the a2a/agents spelling', () => {
@@ -48,11 +50,13 @@ describe('ADR 0675 — ctx.emit argument normalisation', () => {
     for (const bad of [42, null, undefined, [], { data: { no: 'name' } }, { type: 42 }]) {
       expect(() => normaliseEmitArgs(bad, undefined), `should refuse ${JSON.stringify(bad) ?? 'undefined'}`)
         .toThrow(OpenwopError);
+      expect(() => normaliseEmitArgs(bad, undefined)).toThrow(/corrupts the `events\.type` column/);
     }
   });
 
   it('REFUSES an empty string — a nameless event is not a named one', () => {
     expect(() => normaliseEmitArgs('', {})).toThrow(OpenwopError);
+    expect(() => normaliseEmitArgs('', {})).toThrow(/^ctx\.emit: the event type must be a non-empty string\.$/);
   });
 
   it('the object form wins over a stray positional payload rather than merging', () => {

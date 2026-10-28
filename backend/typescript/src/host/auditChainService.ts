@@ -43,6 +43,7 @@
  * Retries are bounded; genuine exhaustion (pathological same-instant contention)
  * throws rather than looping forever.
  */
+import { canonicalize } from './canonicalJson.js';
 import { createHash } from 'node:crypto';
 import { DurableCollection } from './hostExtPersistence.js';
 
@@ -100,22 +101,9 @@ const heads = new DurableCollection<AuditHead>(
 
 // ── canonicalization + hashing ──────────────────────────────────────────────
 
-/** Recursively sort object keys (arrays keep order) so serialization is stable. */
-function sortValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(sortValue);
-  if (value !== null && typeof value === 'object') {
-    const obj = value as Record<string, unknown>;
-    const out: Record<string, unknown> = {};
-    for (const k of Object.keys(obj).sort()) out[k] = sortValue(obj[k]);
-    return out;
-  }
-  return value;
-}
-
-/** Deterministic JSON with stably-sorted keys — the hashed, verifiable form. */
-export function canonicalize(value: unknown): string {
-  return JSON.stringify(sortValue(value));
-}
+// `canonicalize` lives in the pure `canonicalJson.ts` (ADR 0946 P2) and is
+// re-exported here for existing importers; the move is byte-identical.
+export { canonicalize };
 
 function computeEntryHash(e: {
   tenantId: string;
@@ -267,6 +255,32 @@ export async function listChain(tenantId: string): Promise<AuditEntry[]> {
     if (entry) out.push(entry);
   }
   return out;
+}
+
+/** Point reads in flight at once in {@link listChainTail}. Parallel, so a long
+ *  tail is not N serial round trips; bounded, so one review cannot take the
+ *  whole connection pool. */
+export const CHAIN_TAIL_BATCH = 50;
+
+/** The newest entries of a tenant's chain, newest first, reading at most
+ *  `maxScan` of them (point reads down from the head, {@link CHAIN_TAIL_BATCH}
+ *  at a time). `more` says older entries were not read. For a review screen,
+ *  which must not walk a long chain on every load. It is NOT a verification:
+ *  a partial read proves nothing about the chain, and `verifyChain` and the
+ *  export still read it whole. */
+export async function listChainTail(tenantId: string, maxScan: number): Promise<{ entries: AuditEntry[]; more: boolean }> {
+  const head = await heads.get(tenantId);
+  if (!head) return { entries: [], more: false };
+  const stop = Math.max(0, head.seq - Math.max(1, Math.floor(maxScan)) + 1);
+  const out: AuditEntry[] = [];
+  for (let top = head.seq; top >= stop; top -= CHAIN_TAIL_BATCH) {
+    const seqs: number[] = [];
+    for (let seq = top; seq >= Math.max(stop, top - CHAIN_TAIL_BATCH + 1); seq--) seqs.push(seq);
+    for (const entry of await Promise.all(seqs.map((seq) => entries.get(`${tenantId}:${seq}`)))) {
+      if (entry) out.push(entry);
+    }
+  }
+  return { entries: out, more: stop > 0 };
 }
 
 /** Test-only — force the head pointer to a stale value to simulate the

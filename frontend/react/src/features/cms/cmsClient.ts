@@ -3,6 +3,7 @@
  * Section assets are Media-Library tokens (the editor offers the org's media
  * assets via `listMediaAssets`).
  */
+import type { GateReport } from '../experiments/GateChecklist.js';
 import { authedHeaders, config, fetchOpts } from '../../client/config.js';
 
 export interface Org { orgId: string; name: string }
@@ -489,7 +490,17 @@ export interface ExperimentResults {
    *  stamped before stamps were server-derived (ADR 0651 D3), `dropped` = rows whose
    *  stamp was refused at ingest (stopped/unknown experiment, no session). */
   unattributed?: { legacy: number; dropped: number };
+  /** ADR 0949 P0 — optional so a response from an older backend still renders. */
+  health?: LegacyResultHealth;
+  /** ADR 0949 P0 — every `significant` was withheld because the split is broken. */
+  significanceWithheld?: 'srm';
 }
+/** ADR 0949 P0 — the split check and the fixed-horizon notice on a legacy result. */
+export interface LegacyResultHealth {
+  srm: { chiSquare: number; pValue: number; mismatch: boolean; alpha: number } | null;
+  stopEarly: 'fixed_horizon_do_not_stop_early';
+}
+
 export interface PromoteResult { experiment: PageExperiment; pendingApproval: boolean; page: Page | null }
 
 const expBase = (orgId: string, pageId: string): string => `${base(orgId)}/pages/${encodeURIComponent(pageId)}/experiments`;
@@ -517,6 +528,11 @@ export async function stopExperiment(orgId: string, pageId: string, experimentId
 export async function promoteExperiment(orgId: string, pageId: string, experimentId: string, variantKey: string): Promise<PromoteResult> {
   const res = await fetch(`${expBase(orgId, pageId)}/${encodeURIComponent(experimentId)}/promote`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify({ variantKey }) }));
   return asJson<PromoteResult>(res, 'promoteExperiment');
+}
+/** ADR 0950 P0 — the promotion gate checklist (read-only). */
+export async function experimentGates(orgId: string, pageId: string, experimentId: string): Promise<GateReport> {
+  const res = await fetch(`${expBase(orgId, pageId)}/${encodeURIComponent(experimentId)}/gates`, fetchOpts({ headers: authedHeaders() }));
+  return asJson<GateReport>(res, 'experimentGates');
 }
 export async function experimentResults(orgId: string, pageId: string, experimentId: string): Promise<ExperimentResults> {
   const res = await fetch(`${expBase(orgId, pageId)}/${encodeURIComponent(experimentId)}/results`, fetchOpts({ headers: authedHeaders() }));

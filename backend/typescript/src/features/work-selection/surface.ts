@@ -31,10 +31,9 @@ export function buildWorkSelectionSurface(scope: BundleScope): FeatureSurface {
      * Delegates to `readBoardRanking` — the SAME predicate the agent tool uses
      * (ADR 0308): one helper, so the surface and the tool cannot drift into
      * disagreeing about who may see a board. Returns `{ ranked: [] }` for an
-     * unknown OR cross-tenant board without distinguishing them.
+     * unknown OR cross-tenant board without distinguishing them. ADR 0963 D3 adds
+     * `held`: To Do cards the loop will not pick until a person releases them.
      */
-    preview: async (args) => ({
-      ranked: await readBoardRanking(tenantId, str(args.boardId) ?? '', Date.now(), scope.actingUserId),
-    }),
+    preview: async (args) => ({ ...(await readBoardRanking(tenantId, str(args.boardId) ?? '', Date.now(), scope.actingUserId)) }),
   };
 }

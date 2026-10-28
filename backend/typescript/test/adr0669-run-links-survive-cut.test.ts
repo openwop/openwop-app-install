@@ -17,19 +17,22 @@
  * and the projector moved together, and the create/fork legs now also pin that
  * the URL's id IS the projected `runId`.)
  *
- * So the `/v1` literals in `runs.ts` reach the wire only in a pre-cut major-1
- * response, which is correct. Rewriting them at the source would BREAK the
- * projector, which finds the id by matching `/v1/runs/`. This test pins the
- * behaviour so a change to either seam is caught. Its pre-cut control (a
- * major-1 response DID carry `/v1/interrupts/`) went with major 1 in ADR 0812
- * P3c; the gated leg asserts the run is actually `waiting…`, so its "no `/v1`"
- * cannot pass because no gate opened.
+ * The pre-cut control (a major-1 response DID carry `/v1/interrupts/`) went
+ * with major 1 in ADR 0812 P3c. The gated leg asserts the run is actually
+ * `waiting…`, so its "no `/v1`" cannot pass because no gate opened.
+ *
+ * DOUBLE GUARD on the gated snapshot: `callbackUrl` is minted unversioned
+ * (`routes/runs.ts`) AND `closeV2Snapshot` drops `interrupt` entirely (the closed
+ * v2 snapshot declares no such property). So the leg asserts the closure itself:
+ * `interrupt` is absent from the major-2 body.
+ *
+ * Tracker TST-BGF-3. Red when: `runWireUrls` mints a `/v1` or un-projected
+ * address on create or fork; or `closeV2Snapshot` stops dropping undeclared keys.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from '../src/index.js';
-import { projectBoundId } from '../src/host/boundIdProjection.js';
 
 let server: http.Server; let base = '';
 beforeAll(async () => {
@@ -71,7 +74,11 @@ describe('ADR 0669 — run links survive the cut', () => {
       // ADR 0812 P4 slice 2b — the URL is minted in its final form at the source
       // (`runWireUrls`), no longer rewritten by the projector, so pin that it names
       // the SAME id the projected `runId` does, in its RFC 0184 path-segment form.
-      expect(statusPath).toBe(`/runs/${projectBoundId(String(created.json.runId))}`);
+      // Literal shape, not `projectBoundId` (the function `runWireUrls` itself uses):
+      // the bound id `default/<opaque>` projects to `default~2F<opaque>`.
+      const runId = String(created.json.runId);
+      expect(runId.startsWith('default/')).toBe(true);
+      expect(statusPath).toBe(`/runs/default~2F${runId.slice('default/'.length)}`);
 
       await waitFor(statusPath, terminal);
       const snap = await call('GET', statusPath);
@@ -82,7 +89,9 @@ describe('ADR 0669 — run links survive the cut', () => {
       expect(fork.status).toBe(201);
       expect(fork.text).not.toMatch(/\/v1\//);
       expect(new URL(String(fork.json.eventsUrl)).pathname).toMatch(/^\/runs\/.+\/events$/);
-      expect(new URL(String(fork.json.eventsUrl)).pathname).toBe(`/runs/${projectBoundId(String(fork.json.runId))}/events`);
+      const forkId = String(fork.json.runId);
+      expect(forkId.startsWith('default/')).toBe(true);
+      expect(new URL(String(fork.json.eventsUrl)).pathname).toBe(`/runs/default~2F${forkId.slice('default/'.length)}/events`);
 
       // An open approval gate: the snapshot carries no `/v1/interrupts/` callback.
       const gated = await call('POST', '/runs', { workflowId: 'conformance-approval', inputs: {} });
@@ -93,6 +102,8 @@ describe('ADR 0669 — run links survive the cut', () => {
       expect(gatedSnap.status).toBe(200);
       expect(String(gatedSnap.json.status)).toMatch(/^waiting/);
       expect(gatedSnap.text).not.toMatch(/\/v1\//);
+      // The closed v2 snapshot carries no `interrupt` at all (the outer guard).
+      expect(gatedSnap.json).not.toHaveProperty('interrupt');
     }
   });
 });

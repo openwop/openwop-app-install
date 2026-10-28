@@ -1,6 +1,6 @@
 # ADR 0960 — Campaign command center
 
-Status: Proposed
+Status: Accepted (P0–P2 implemented 2026-10-20)
 
 Date: 2026-10-19. Program: Campaign Studio (ADRs 0941–0962), Tier 5 capstone.
 Source: the program brief (session 66). Net-new feature, not a MyndHyve port.
@@ -217,6 +217,86 @@ Polling at 10 s for the snapshot; SSE only for the one run whose graph is open
 | P3 | Spend, experiments, alerts, team panels (D5) as owners ship | Each panel shows `unavailable` honestly when its owner is off |
 | P4 | Presence (D6), dashboard tile (D7), Producer agent read tool | Tool shares the route predicate (one helper) and fails empty without an actor |
 
+> **Correction (2026-10-20, P0 build).** As built, the P0 snapshot differs from
+> the D1 sketch in four measured ways:
+> - **Gates are run interrupts only.** The campaign-scoped approvals (ADR 0942's
+>   spend and review approvals, which carry `campaignId`) are not on `main` yet,
+>   and a `PendingApproval.runId` is the run a CLAIM started, not the run
+>   waiting, so it cannot be joined to the index. They join in P3 with 0942.
+> - **Nodes carry `nodeId` and status only, and only for live runs.** There is
+>   no persisted per-node state; the snapshot folds `node.started|completed|
+>   failed|suspended` from each live run's event log (capped at 2000 events per
+>   run, 100 nodes overall, with `truncated` flags). `label` and `agent` need the
+>   run's definition, which P1's graph view resolves anyway, so they move to P1.
+>   A terminal run's nodes are on its run page. The event read is from the
+>   start of the log, so a run past 2000 events shows `nodesTruncated` rather
+>   than its latest statuses; P1's live overlay (the SSE stream) is the
+>   authority for one open run.
+> - **Runs are verified, not just indexed.** Each index row is re-read by id and
+>   kept only when the stored run's ADR 0941 tag still names this campaign and
+>   client org (the index is written by a post-insert hook; the run row is the
+>   authority).
+> - **The interrupt `token` is never returned** (it is a bearer capability for
+>   `POST /interrupts/{token}`); a test scans the whole payload for it.
+> - `autonomy`, `playbook`, `spend` and `experiments` are returned as
+>   `unavailable: '<owner toggle>'` until their owners (0942, 0959, 0952,
+>   0949) are on `main`.
+
+> **Correction (2026-10-20, P1 build) — how D3 is built.** MEASURED: the
+> builder store is a zustand SINGLETON that saves itself (local storage + the
+> debounced backend write-through), and `loadFromSaved` also touches
+> module-level sync state, so loading a run's definition into it would clobber
+> the user's draft. D3's "render the builder canvas with editing disabled" is
+> therefore built as an **isolated store instance**: the store's initializer is
+> exported once (`builderStoreInitializer`); the builder keeps its singleton
+> unchanged; `builder/store/readOnlyBuilderStore.ts` makes an instance whose
+> every graph-writing action (and `persist`) is a no-op, loaded by a pure state
+> set. `BuilderCanvas` and `BaseNode` read through `CanvasStoreContext` (no
+> provider ⇒ the singleton, so the builder is byte-identical; its 379 tests
+> pass unchanged). `readOnly` disables drag, connect, delete, rename and the
+> keyboard hints. The overlay reducer was NOT extracted: the instance reuses the
+> builder's own `applyRunEvent`; `runs/liveRunOverlay.ts` is the subscription
+> (event log, then the live stream, de-duplicated by sequence).
+>
+> The graph needs the definition the run EXECUTED, and no endpoint returned it:
+> `GET …/campaigns/:campaignId/command/runs/:runId/definition` resolves it with
+> `resolveRunDefinition` (pinned revision, else head), only for a run of this
+> campaign (index + tag) behind the same org read. The builder's workflow GET was
+> not used: it is ownership-scoped (the chain-backed campaign spine is not
+> tenant-owned) and may differ from the pinned revision.
+>
+> Placement: P1 adds a **Command section on the existing campaign detail**, not a
+> new tab, because the campaign detail route (ADR 0941 P3) is not on `main`;
+> it moves under that route when it lands. The section and the graph are lazy
+> (entry chunk unchanged in content; +~50 B of preload map for the new chunks).
+
+> **Correction (2026-10-20, P2 build).** Built as D4 says, with three measured
+> details.
+> - **"Matched" is not `divergedAtSeq === null`.** A replay fork's
+>   `run.started` names the fork's own caller as owner, so `:diff` always
+>   differs at seq 0 even when every step matched. The cockpit reads a replay as
+>   matched when the only event difference is `run.started` and the state diff
+>   is empty (`replayMatched`, `ReplayPanel.tsx`). The backend witness pins
+>   exactly that shape.
+> - **Replay uses the existing `:fork` (mode `replay`), and no cockpit fork route
+>   was added.** The fork route's run access is tenant-scoped (C-G2, pre-existing).
+>   The cockpit only offers replay on runs from its own verified snapshot, so it
+>   widens nothing.
+> - **Branch fork is disabled with its reason** until ADR 0942's
+>   `forkPosture: 'attended'` is on `main` (D4.3).
+>
+> Exit witness: a replay fork of a campaign run with a side-effecting
+> ad-launch node made zero new ad-launch calls. The fork keeps the campaign tag
+> and shows in the snapshot as role `fork`.
+
+### Implementation record
+
+| Phase | Commit | What landed | Tests |
+|---|---|---|---|
+| P0 | (this PR) | `features/campaign-orchestration/commandService.ts` (`buildCommandSnapshot`: index → verified runs, live-node fold, open interrupts without tokens, `unavailable` sections, caps); route `GET /v1/host/openwop-app/campaign-orchestration/campaigns/:campaignId/command` (toggle + `loadCampaignScoped` read, uniform 404). No new toggle, no store. | `test/adr0960-p0-command-snapshot.test.ts` (4, three sabotage witnesses) |
+| P1 | (this PR) | Store factory + `CanvasStoreContext` + read-only instance (`readOnlyBuilderStore.ts`); `BuilderCanvas`/`BaseNode` read through the context, `readOnly` disables edits; `runs/liveRunOverlay.ts`; `runs/RunGraphView.tsx` (lazy); campaign-scoped run-definition route; `CommandSection` (lazy) with gates, runs, graph, handoff map, inspector; 4 locales | `runs/__tests__/readOnlyRunGraph.test.tsx` (4, three witnesses), `commandSection.test.tsx` (4, two witnesses), `adr0960-p0-command-snapshot.test.ts` +1 (definition route, witnessed as a pair of guards); builder suite 379/379 unchanged |
+| P2 | (this PR) | `ReplayPanel` (lazy, in `CommandSection`): "Replay this run" = existing `:fork` mode `replay`, one per click, then `:diff` read as matched/diverged; branch fork disabled with its reason; `diffRuns` kept out of the eager runs client; 4 locales | `test/adr0960-p2-replay-from-cockpit.test.ts` (zero new ad-launch calls, tag kept, role `fork`, diff shape; sabotage-witnessed), `replayPanel.test.tsx` (4, two witnesses) |
+
 ## Alternatives weighed
 
 - **A new campaign run viewer.** Fastest to build, but forks the run detail page
@@ -251,3 +331,52 @@ metadata key.
 
 - **ROADMAP:** `| 0960 | Campaign command center | campaign-orchestration (extends; no new pack) | live run graph (builder overlay, read-only) + agent/human node status, gates + owners + SLA, spend vs cap, experiments, alerts, ledger/drift, presence; replay-this-decision + fork-from-here via :fork/:diff | deps 0941, 0942, 0943, 0926, 0829, 0831, 0852, 0855, 0949, 0950, 0952; integrates with 0961 | Tier 5 | 🔵 Proposed |`
 - **FEATURES (Future features):** `| campaign-orchestration (Command tab) | Campaign command center | One live cockpit per campaign: who (agent or person) is on each step, what is waiting on whom, spend vs cap, experiments and alerts, with replay and fork from any decision. | rides campaign-orchestration (OFF) | tenant | ADR 0960 |`
+
+
+### Recovery composition review — 2026-10-25 (validation pending)
+
+Track A: host application work on existing run, chain, graph and scope seams.
+No wire field/capability, executor, scheduler, second chat or second graph
+renderer is introduced. Both original histories remain ancestors. The canonical
+CampaignDetailPage owns the lazy cockpit/autopilot sections; recovery preserves
+the current campaign list, policy editor, veto panel and client-report work.
+
+An independent autopilot stage must retain the initiating run's frozen goal,
+autonomy policy and attended branch-fork posture. The internal run starter now
+accepts a source-run ID, reads it in the same tenant and uses only the existing
+registered inherited-metadata projectors before normal contributors run. It
+does not set executor parentRunId (the gated stage remains independent), trust
+caller-supplied decision blobs, or delegate change-set approval authority.
+Absent/foreign parents refuse before reservation or insertion. Normal starters
+retain their reserved-key strip. New regression cases cover this inheritance
+and a forged retargeting argument.
+
+The graph buffers stream events until its initial log read finishes, then
+folds the merged sequence in order through the builder's existing reducer.
+A late older poll cannot rewind a completed node. Snapshot and definition
+requests ignore superseded replies; failed refreshes retain the last good
+view with an announced failure. Replay state belongs to the selected run,
+and an obsolete fork response cannot start a background poll for it. Both
+diff handles use the existing binding helper. The branch-fork action remains
+unavailable; this source recovery adds no external-effect permission.
+
+These fixes and their regression cases are prepared but not executed while
+PR #5207 owns the single guarded heavy-work slot. Generated censuses will be
+regenerated and reviewed afterward, followed by focused and canonical gates.
+Later autopilot stages and the cockpit's unintegrated projections remain open.
+
+
+### Recovery qualification — 2026-10-25
+
+Native backend typecheck and 20 focused runtime files (238 cases) pass,
+including the real MCP request replay, immutable stage decision inheritance,
+client binding and privacy refusals, and existing spend/veto/fork fences.
+Pack-surface parity passes all six cases. The regenerated floor adds only
+start-stage and mcp-request-change to the served side-effect set; there are
+377 floor entries, 334 served, 43 undischarged and zero unresolved. No waiver
+is added. Frontend lint, canonical build, test types and 16 focused files
+(97 cases) pass, including public navigation and client-switch state. The
+public shell now loads only on public routes, retaining 1,095 bytes of entry
+budget headroom. Whole-slot peaks were 4.56 GiB backend and 3.27 GiB frontend,
+with no swap growth or resource stop. Full composed canonical CI remains
+required before merge; this qualification makes no production change.

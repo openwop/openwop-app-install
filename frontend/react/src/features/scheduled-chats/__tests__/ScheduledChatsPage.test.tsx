@@ -20,7 +20,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, within } from '@testing-library/react';
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
-vi.mock('../../../client/scheduledChatsClient.js', () => ({ listOrgs: vi.fn(), listScheduledChats: vi.fn(), deleteScheduledChat: vi.fn(), setScheduledChatEnabled: vi.fn() }));
+vi.mock('../../../client/scheduledChatsClient.js', () => ({
+  listOrgs: vi.fn(), listScheduledChats: vi.fn(), deleteScheduledChat: vi.fn(), setScheduledChatEnabled: vi.fn(),
+  listMyChatSchedules: vi.fn(), setMyChatScheduleEnabled: vi.fn(), deleteMyChatSchedule: vi.fn(),
+}));
 let enabled = true;
 let loading = false;
 // The real hook returns SEVEN fields. This mock returned four, and the three it
@@ -32,9 +35,13 @@ vi.mock('../../../featureToggles/FeatureAccessContext.js', async (orig) => ({
   ...(await orig<typeof import('../../../featureToggles/FeatureAccessContext.js')>()),
   useFeatureAccess: () => makeFeatureAccess({ enabled, status: enabled ? 'on' : 'off', loading }),
 }));
-import { listOrgs, listScheduledChats, type ScheduledChat } from '../../../client/scheduledChatsClient.js';
-import { ScheduledChatsPage } from '../ScheduledChatsPage.js';
+import { MemoryRouter } from 'react-router-dom';
+import { listOrgs, listScheduledChats, listMyChatSchedules, setMyChatScheduleEnabled, type ScheduledChat, type ChatSchedule } from '../../../client/scheduledChatsClient.js';
+import { ScheduledChatsPage as Page } from '../ScheduledChatsPage.js';
 const mockOrgs = vi.mocked(listOrgs); const mockList = vi.mocked(listScheduledChats);
+const mockMine = vi.mocked(listMyChatSchedules); const mockMineToggle = vi.mocked(setMyChatScheduleEnabled);
+/** The page links to the chat and to each conversation, so it renders under a router. */
+const ScheduledChatsPage = (): JSX.Element => <MemoryRouter><Page /></MemoryRouter>;
 /** The table row that shows `agentId` (each fixture row has its own agent). */
 const rowOf = (agentId: string): HTMLElement => {
   const row = screen.getByText(agentId).closest('tr');
@@ -42,7 +49,13 @@ const rowOf = (agentId: string): HTMLElement => {
   return row;
 };
 const c = (chatId: string, over: Partial<ScheduledChat> = {}): ScheduledChat => ({ chatId, agentId: 'iris', prompt: 'p', conversationId: 'cv', cronExpr: '0 9 * * *', enabled: true, ...over });
-beforeEach(() => { enabled = true; loading = false; mockOrgs.mockReset(); mockList.mockReset(); mockOrgs.mockResolvedValue([{ orgId: 'o1', name: 'Acme' }]); });
+const m = (jobId: string, over: Partial<ChatSchedule> = {}): ChatSchedule => ({ jobId, kind: 'recurring', agentId: 'iris', prompt: 'p', conversationId: 'cv', cronExpr: '0 9 * * *', enabled: true, ...over });
+beforeEach(() => {
+  enabled = true; loading = false;
+  mockOrgs.mockReset(); mockList.mockReset(); mockMine.mockReset(); mockMineToggle.mockReset();
+  mockOrgs.mockResolvedValue([{ orgId: 'o1', name: 'Acme' }]);
+  mockMine.mockResolvedValue([]);
+});
 afterEach(cleanup);
 describe('ScheduledChatsPage (ADR 0125 Phase 3b)', () => {
   it('renders scheduled chats with active/inert status', async () => {
@@ -70,10 +83,15 @@ describe('ScheduledChatsPage (ADR 0125 Phase 3b)', () => {
     render(<ScheduledChatsPage />);
     expect(await screen.findByText('Pause')).toBeTruthy();
   });
-  it('shows the empty state', async () => {
+  it('shows the empty states, and names chat as the way to create one (ADR 0985 D7)', async () => {
     mockList.mockResolvedValue([]);
     render(<ScheduledChatsPage />);
-    expect(await screen.findByText('No scheduled chats yet.')).toBeTruthy();
+    expect(await screen.findByText('No workspace schedules.')).toBeTruthy();
+    expect(await screen.findByText('Nothing scheduled from your chats yet.')).toBeTruthy();
+    // The old copy told people to "Create a scheduled chat" on a page with no create action.
+    expect(screen.queryByText(/Create a scheduled chat/)).toBeNull();
+    // Every way in names chat.
+    expect(screen.getAllByRole('button', { name: /Open chat/ }).length).toBe(3); // header + both empty states
   });
   // (The "disabled → no fetch" test was removed: scheduled-chats graduated to always-on in
   // the ADR 0134 toggle graduation, so the component hardcodes access.enabled = true.)
@@ -109,5 +127,64 @@ describe('ScheduledChatsPage (ADR 0125 Phase 3b)', () => {
     render(<ScheduledChatsPage />);
     expect(await screen.findByText('Scheduled chats are off for this workspace.')).toBeTruthy();
     expect(mockOrgs).not.toHaveBeenCalled();
+  });
+
+  // ── ADR 0985 ────────────────────────────────────────────────────────────────
+  it('lists schedules created from chat, with prompt, cadence, timezone and a conversation link', async () => {
+    mockList.mockResolvedValue([]);
+    mockMine.mockResolvedValue([m('recurring:1', { agentId: 'host:iris', agentName: 'Iris', prompt: 'Summarize the inbox', cronExpr: '0 9 * * 1-5', timezone: 'America/New_York', conversationId: 'conv-9' })]);
+    render(<ScheduledChatsPage />);
+    const row = (await screen.findByText('Iris')).closest('tr')!;
+    expect(within(row).getByText('Summarize the inbox')).toBeTruthy();
+    expect(within(row).getByText(/^Weekdays at /)).toBeTruthy();
+    expect(within(row).getByText('America/New_York')).toBeTruthy();
+    expect(within(row).queryByText('host:iris')).toBeNull(); // the name, not the raw id
+    expect(within(row).getByRole('link', { name: 'Open conversation with Iris' }).getAttribute('href')).toBe('/chat?conversation=conv-9');
+  });
+
+  it('a skipped slot does not read as a healthy Active: its reason is shown', async () => {
+    mockList.mockResolvedValue([c('a', { agentId: 'iris', workflowId: 'wf', lastSkip: { reason: 'target-refused', at: '2026-10-26T09:00:00Z' } })]);
+    render(<ScheduledChatsPage />);
+    const row = (await screen.findByText('iris')).closest('tr')!;
+    expect(within(row).getByText('Skipped')).toBeTruthy();
+    expect(within(row).queryByText('Active')).toBeNull(); // grade-ux SC2UX-1: not a footnote under "Active"
+    expect(within(row).getByText(/^Last run skipped: its reply could not be posted/)).toBeTruthy();
+  });
+
+  it('a spent follow-up reads Missed and offers only Delete', async () => {
+    mockList.mockResolvedValue([]);
+    mockMine.mockResolvedValue([m('followup:1', { kind: 'followup', cronExpr: 'once', agentName: 'Iris', spent: true, lastSkip: { reason: 'target-refused', at: '2026-10-26T09:00:00Z' } })]);
+    render(<ScheduledChatsPage />);
+    const row = (await screen.findByText('Iris')).closest('tr')!;
+    expect(within(row).getByText('Missed')).toBeTruthy();
+    expect(within(row).getByText('Once')).toBeTruthy();
+    expect(within(row).queryByText('Pause')).toBeNull();
+    expect(within(row).getByText('Delete')).toBeTruthy();
+  });
+
+  it('a paused schedule whose creator was erased explains itself and offers no Resume', async () => {
+    mockList.mockResolvedValue([c('a', { agentId: 'iris', workflowId: 'wf', enabled: false, createdBy: 'erased:subject' })]);
+    render(<ScheduledChatsPage />);
+    const row = (await screen.findByText('iris')).closest('tr')!;
+    expect(within(row).getByText(/creator|created it was removed/)).toBeTruthy();
+    expect(within(row).queryByText('Resume')).toBeNull();
+  });
+
+  it('an unscheduled row says so and offers no Resume', async () => {
+    mockList.mockResolvedValue([c('a', { agentId: 'iris', workflowId: 'wf', enabled: false, unscheduled: true })]);
+    render(<ScheduledChatsPage />);
+    const row = (await screen.findByText('iris')).closest('tr')!;
+    expect(within(row).getByText('Not scheduled')).toBeTruthy();
+    expect(within(row).queryByText('Resume')).toBeNull();
+    expect(within(row).getByText('Delete')).toBeTruthy();
+  });
+
+  it('pausing a chat-created schedule goes through its own door', async () => {
+    mockList.mockResolvedValue([]);
+    mockMine.mockResolvedValue([m('recurring:7', { agentName: 'Iris' })]);
+    mockMineToggle.mockResolvedValue(m('recurring:7', { enabled: false }));
+    render(<ScheduledChatsPage />);
+    (await screen.findByRole('button', { name: 'Pause the schedule for Iris' })).click();
+    await vi.waitFor(() => expect(mockMineToggle).toHaveBeenCalledWith('recurring:7', false));
   });
 });

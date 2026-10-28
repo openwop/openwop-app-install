@@ -1,6 +1,6 @@
 {
   "name": "vendor.openwop-app.funnels.agents",
-  "version": "1.0.2",
+  "version": "1.2.0",
   "kind": "node",
   "description": "Funnels feature agent pack — a Funnel Architect persona whose tools are feature.funnels.nodes over ctx.features.funnels. Reviews funnels and their per-step stats, drafts new funnels and step edits — drafts stay UNPUBLISHED for human review (public-surface change, the promotions firewall). Tool-allowlisted to the funnels surface only. Driven through the ONE chat.",
   "author": "OpenWOP App",
@@ -20,7 +20,7 @@
         "openwop:funnels.list",
         "openwop:funnels.get",
         "openwop:funnels.step-stats",
-        "openwop:funnels.draft"
+        "openwop:funnels.draft", "openwop:funnels.blueprints", "openwop:funnels.generate", "openwop:campaign-brief.get-brief", "openwop:cms.get-page"
       ],
       "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
       "confidence": { "defaultThreshold": 0.6 }

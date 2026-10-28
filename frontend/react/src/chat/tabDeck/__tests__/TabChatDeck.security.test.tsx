@@ -23,6 +23,11 @@ import type { BYOKActiveConfig } from '../../../byok/lib/useBYOKConfig.js';
  */
 
 let mockUid: string | null = 'A';
+// ADR 0978 D4 — the deck resolves the active workspace before it restores.
+vi.mock('../../../client/workspaceClient.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../client/workspaceClient.js')>()),
+  listMyWorkspaces: async () => ({ workspaces: [], active: 'ws-test', personal: 'ws-test' }),
+}));
 vi.mock('../TabSession.js', () => ({
   TabSession: ({ sessionId }: { sessionId: string }) => <div data-testid="tabsession" data-sid={sessionId} />,
 }));
@@ -69,32 +74,40 @@ const Surface = () => (
 beforeEach(() => { localStorage.clear(); mockUid = 'A'; vi.useFakeTimers(); });
 afterEach(() => { vi.useRealTimers(); cleanup(); });
 
+// ADR 0978 D4 — the deck first resolves the workspace (a few microtasks), THEN
+// restores/bootstraps, THEN the debounced save fires.
+async function settle(): Promise<void> {
+  await act(async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); });
+  await act(async () => { vi.advanceTimersByTime(500); });
+}
+
 describe('TabChatDeck — per-user persistence isolation', () => {
   it('does NOT write user A\'s tabs under user B\'s key when the identity switches in-page', async () => {
     const { rerender } = render(<Surface />);
     // A's deck bootstraps a tab; flush the debounced save.
-    await act(async () => { await Promise.resolve(); vi.advanceTimersByTime(500); });
-    const aTabs = loadTabDeck('A')?.tabs.map((t) => t.sessionId) ?? [];
+    await settle();
+    const aTabs = loadTabDeck('A@ws-test')?.tabs.map((t) => t.sessionId) ?? [];
     expect(aTabs.length).toBeGreaterThan(0); // A persisted its working set
 
     // Switch identity in-page (no reload): mock uid → B and re-render. The key change
     // remounts the deck fresh from B's (empty) key.
     mockUid = 'B';
     rerender(<Surface />);
-    await act(async () => { await Promise.resolve(); vi.advanceTimersByTime(500); });
+    await settle();
 
     // Literal keys — never computed with tabDeckKey, which is part of what is under test.
-    expect(localStorage.getItem('openwop-app.chat.tabdeck:A')).not.toBeNull();
-    const bRaw = localStorage.getItem('openwop-app.chat.tabdeck:B');
+    // ADR 0978 D4: the subject is `${uid}@${workspace}` (the workspace is mocked as ws-test).
+    expect(localStorage.getItem('openwop-app.chat.tabdeck:A@ws-test')).not.toBeNull();
+    const bRaw = localStorage.getItem('openwop-app.chat.tabdeck:B@ws-test');
     expect(bRaw).not.toBeNull(); // B persisted its own fresh deck (so the checks below read something)
-    const bTabs = loadTabDeck('B')?.tabs.map((t) => t.sessionId) ?? [];
+    const bTabs = loadTabDeck('B@ws-test')?.tabs.map((t) => t.sessionId) ?? [];
     // B's key must contain ONLY B's own (fresh) tabs — never any of A's ids.
     for (const aId of aTabs) {
       expect(bRaw ?? '').not.toContain(aId);
       expect(bTabs).not.toContain(aId);
     }
     // A's key is untouched by the switch.
-    expect(loadTabDeck('A')?.tabs.map((t) => t.sessionId)).toEqual(aTabs);
+    expect(loadTabDeck('A@ws-test')?.tabs.map((t) => t.sessionId)).toEqual(aTabs);
   });
 
   it('ChatTab keys the deck on the uid, so an identity switch remounts it fresh', () => {
@@ -110,7 +123,7 @@ describe('TabChatDeck — per-user persistence isolation', () => {
   it('a logged-out (no uid) deck persists nothing', async () => {
     mockUid = null;
     render(<Surface />);
-    await act(async () => { await Promise.resolve(); vi.advanceTimersByTime(500); });
+    await settle();
     expect(localStorage.length).toBe(0); // saveTabDeck no-ops without a subject
   });
 });

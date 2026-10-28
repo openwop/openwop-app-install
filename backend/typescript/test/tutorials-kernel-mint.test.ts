@@ -14,6 +14,12 @@
  * This is the program's THIRD instance of "built, tested, and not reachable",
  * and the second where a mock was the thing hiding it. So this test uses the
  * real service end-to-end and asserts on ROWS, never on a call count.
+ *
+ * Sabotage witnesses (grade-tests w63): `extensionKinds: []` in seedTutorials →
+ * the first describe red; dropping `phases` from the ext bag → the round-trip
+ * case red; a non-string `localizable` field → the field-table case red.
+ * The two field-table cases overlap "seeds REAL ROWS" (a rogue type makes the
+ * mint throw) on purpose: they are the tripwire that names the offending field.
  */
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
@@ -83,10 +89,14 @@ describe('ADR 0488 D1 — the mint actually succeeds against the real kernel', (
   });
 });
 
+/** The field table read through its widest honest shape (an assignment, not a
+ *  cast): the `as const` tuple would otherwise narrow `bad` below to `never`. */
+const FIELDS: ReadonlyArray<{ key: string; type: string; localizable?: boolean }> = TUTORIAL_FIELDS;
+
 describe('ADR 0488 D1 — the field table stays inside what the kernel accepts', () => {
   it('every declared field type is a built-in OR the registered extension kind', () => {
     const allowed = new Set<string>([...FIELD_TYPES, TUTORIAL_DOC_KIND]);
-    const rogue = (TUTORIAL_FIELDS as readonly { key: string; type: string }[]).filter((f) => !allowed.has(f.type));
+    const rogue = FIELDS.filter((f) => !allowed.has(f.type));
     expect(
       rogue.map((f) => `${f.key}:${f.type}`),
       'A field type outside the closed vocabulary makes mintSystemType throw, which '
@@ -99,8 +109,7 @@ describe('ADR 0488 D1 — the field table stays inside what the kernel accepts',
   });
 
   it('`localizable` is only claimed on string fields (the kernel rejects it elsewhere)', () => {
-    const bad = (TUTORIAL_FIELDS as readonly { key: string; type: string; localizable?: boolean }[])
-      .filter((f) => f.localizable === true && f.type !== 'string');
+    const bad = FIELDS.filter((f) => f.localizable === true && f.type !== 'string');
     expect(bad.map((f) => f.key)).toEqual([]);
   });
 
@@ -113,7 +122,8 @@ describe('the tutorial-doc validator bounds what it cannot type', () => {
   const validate = (v: unknown): unknown => getFieldKindValidator(TUTORIAL_DOC_KIND)!.validate(v, { key: 'phases', label: 'Phases', type: TUTORIAL_DOC_KIND, required: true });
 
   it('accepts plain JSON content', () => {
-    expect(validate([{ id: 'p1', steps: [{ id: 's1', title: 'x' }] }])).toBeDefined();
+    const doc = [{ id: 'p1', steps: [{ id: 's1', title: 'x', done: false, n: 2, note: null }] }];
+    expect(validate(doc)).toEqual([{ id: 'p1', steps: [{ id: 's1', title: 'x', done: false, n: 2, note: null }] }]);
   });
 
   it('rejects values that would not survive a storage round-trip', () => {

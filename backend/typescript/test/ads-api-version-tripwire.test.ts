@@ -13,6 +13,8 @@
  * run the ads adapter suites. Do NOT push a date out without reading the source.
  */
 import { afterEach, describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   ADS_API_VERSIONS, LINKEDIN_VERSION, googleApiBase, metaApiBase, tiktokApiBase, type AdsApiVersionPin,
 } from '../src/host/adsAdapter.js';
@@ -69,5 +71,25 @@ describe('ADR 0907 D0 — ad-platform API version tripwire', () => {
     expect(dueRows([{ ...base, sunset: '2027-06-01' }], now)).toEqual([]);           // well clear
     expect(dueRows([{ ...base, basis: 'estimated', sunset: '2027-06-01', reviewBy: '2026-12-01' }], now)).toHaveLength(1);
     expect(dueRows([{ ...base, sunset: 'soon' }], now)).toHaveLength(1);
+  });
+
+  // ADR 0952 defect P7 — the meta-ads connection pack authorized against Graph
+  // v19.0 (expired 2026-05-21) while the adapter called v25.0. The OAuth
+  // endpoints a SERVED ads pack declares must carry the version the adapter pins.
+  // Only `examples/connection-packs/*-ads` are served; the conformance fixture
+  // and inline test samples are not, and are deliberately not checked here.
+  it('every served ads connection pack OAuth endpoint carries the pinned API version', () => {
+    const root = join(__dirname, '..', '..', '..', 'examples', 'connection-packs');
+    const read = (slug: string): { authorize: string; token: string } =>
+      (JSON.parse(readFileSync(join(root, slug, 'pack.json'), 'utf8')) as { provider: { auth: { endpoints: { authorize: string; token: string } } } }).provider.auth.endpoints;
+    const meta = read('meta-ads');
+    expect(meta.authorize).toContain(`/${ADS_API_VERSIONS.meta.version}/`);
+    expect(meta.token).toContain(`/${ADS_API_VERSIONS.meta.version}/`);
+    expect(read('tiktok-ads').token).toContain(`/${ADS_API_VERSIONS.tiktok.version}/`);
+    // Google and LinkedIn OAuth endpoints are unversioned; nothing to pin.
+    for (const slug of ['google-ads', 'linkedin-ads']) {
+      const e = read(slug);
+      expect(`${e.authorize} ${e.token}`).not.toMatch(/\/v\d+\.\d+\//);
+    }
   });
 });

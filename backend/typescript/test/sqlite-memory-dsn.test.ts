@@ -13,7 +13,15 @@
  *
  * The file-creation assertions run under a THROWAWAY cwd, because a cwd-relative
  * `resolve()` is precisely the defect — the cwd is the probe, not incidental
- * setup. It is restored in a `finally`.
+ * setup. It is restored in a `finally`. Every storage a case opens is closed
+ * before the case ends (a still-open `plain.db` handle used to be live when its
+ * directory was removed).
+ *
+ * DOUBLE GUARD (named, /grade-tests wave 61): `sqlite://:memory:` is mapped by
+ * its own line in `resolveSqliteTarget` AND by the `sqlite://` branch, which
+ * strips the scheme and compares the rest with the sentinel. Deleting either
+ * alone still yields `:memory:` (8fw3g1-sql-sqlitememory, vacuous by design);
+ * the `memory://` and unknown-scheme mappings are witnessed (8fw3g1-sql-*).
  */
 
 import { describe, expect, it } from 'vitest';
@@ -47,6 +55,7 @@ describe('sqlite in-memory DSN handling (H18)', () => {
       expect(await storage.kvGet('h18')).toBe('in-memory');
       // The literal name the defect produced, checked against the scratch cwd.
       expect(existsSync('memory:')).toBe(false);
+      await storage.close();
     });
     expect(leftBehind).toEqual([]);
   });
@@ -58,6 +67,8 @@ describe('sqlite in-memory DSN handling (H18)', () => {
     expect(await a.kvGet('h18:independence')).toBe('a');
     // A shared FILE would make this visible in `b`; a private `:memory:` cannot.
     expect(await b.kvGet('h18:independence')).toBeNull();
+    await a.close();
+    await b.close();
   });
 
   it('every in-memory spelling normalises to the sqlite sentinel', () => {
@@ -86,8 +97,12 @@ describe('sqlite in-memory DSN handling (H18)', () => {
       const storage = openSqliteStorage(plain);
       await storage.kvSet('h18:durable', 'yes');
       expect(existsSync(plain)).toBe(true);
-      // Durable: a second open of the same path sees the first open's write.
-      expect(await openSqliteStorage(plain).kvGet('h18:durable')).toBe('yes');
+      await storage.close();
+      // Durable: a second open of the same path sees the first open's write,
+      // after the first handle is CLOSED (so the read is not a shared handle's).
+      const reopened = openSqliteStorage(plain);
+      expect(await reopened.kvGet('h18:durable')).toBe('yes');
+      await reopened.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -99,6 +114,8 @@ describe('sqlite in-memory DSN handling (H18)', () => {
       const viaSentinel = await openStorage(':memory:');
       await viaDsn.kvSet('h18:routing', 'dsn');
       expect(await viaSentinel.kvGet('h18:routing')).toBeNull();
+      await viaDsn.close();
+      await viaSentinel.close();
     });
     expect(leftBehind).toEqual([]);
   });

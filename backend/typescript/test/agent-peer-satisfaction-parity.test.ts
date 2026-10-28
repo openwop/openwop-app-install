@@ -7,6 +7,10 @@
  * and every facet it claims is on that family's record. A satisfier that says
  * "yes" to a family the host does not advertise is the same dishonest wire claim
  * as advertising it, one layer in.
+ *
+ * TST-BNA-4. Red when: the facet check is dropped (`facets.every` → true), a v1
+ * key accepts facets, an unadvertised family (`fs`) joins the table, or a facet
+ * whose advertised value is `false` is counted as satisfied (w65 probes).
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
@@ -31,8 +35,23 @@ describe('NP-V2-7 — the v2 satisfier is a subset of the v2 advertisement', () 
       const record = advertised[family];
       expect(record, `the satisfier claims v2 family "${family}", which the v2 document does not advertise`).toBeTruthy();
       for (const facet of facets) {
-        expect((record as Record<string, unknown>)[facet], `claimed facet ${family}.${facet} is not on the advertised record`).toBeDefined();
+        const value = (record as Record<string, unknown>)[facet];
+        expect(value, `claimed facet ${family}.${facet} is not on the advertised record`).toBeDefined();
+        // A facet advertised as `false` is a NON-claim (capabilities.md §2).
+        expect(value, `claimed facet ${family}.${facet} is advertised as false`).not.toBe(false);
       }
+    }
+  });
+
+  it('a facet the record advertises as false is never satisfied', () => {
+    const falseFacets: Array<[string, string]> = [];
+    for (const family of v2SatisfiedFamilies().keys()) {
+      const record = advertised[family] as Record<string, unknown> | undefined;
+      for (const [k, v] of Object.entries(record ?? {})) if (v === false) falseFacets.push([family, k]);
+    }
+    expect(falseFacets.length, 'positive control: the gate config advertises at least one false facet').toBeGreaterThan(0);
+    for (const [family, facet] of falseFacets) {
+      expect(hostSatisfies(family, [facet]), `${family}.${facet} is advertised false`).toBe(false);
     }
   });
 

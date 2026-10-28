@@ -87,8 +87,12 @@ export const APPROVAL_AUDIENCE: Record<ApprovalKind, Audience> = {
   'commission-statement': { orgScope: 'host:commissions:manage' },
   // ADR 0924 D4 — the client org's approvers (the `agency` policy).
   'campaign-change-set': { orgScope: 'approvals:respond' },
+  // ADR 0959 D7 — agency admins: the row's org is the workspace ROOT.
+  'playbook-rollout': { orgScope: 'host:members:manage' },
   // ADR 0905 D3 — org admins, plus the org's configured email approvers.
   'email-campaign-send': { orgScopeOrApproverRefs: 'host:members:manage' },
+  // ADR 0948 P1b — the org's writers: the bar the human publish route sets.
+  'funnel-publish': { orgScope: 'workspace:write' },
 
   // ── not expressible as an org scope ───────────────────────────────────────
   'commerce-listing-publish': { superadminTenant: true },
@@ -107,6 +111,8 @@ export const APPROVAL_AUDIENCE: Record<ApprovalKind, Audience> = {
   // of org A read and could decide org B's drafted reply to org B's customer.
   'assistant-action': { orgScopeWhenOrg: 'workspace:write' },
   'campaign-spend': null,
+  // ADR 0945 × 0942 — a client's creative: seen by writers on that client's org.
+  'creative-publish-review': { orgScopeWhenOrg: 'workspace:write' },
   'commerce-spend': null,
   'contact-merge': null,
   'warehouse-load': null,

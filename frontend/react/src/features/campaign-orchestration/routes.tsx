@@ -8,6 +8,7 @@ import type { FeatureRoute } from '../../chrome/featureTypes.js';
 import type { FrontendFeature } from '../registry.js';
 
 const CampaignStudioPage = lazy(() => import('./CampaignStudioPage.js').then((m) => ({ default: m.CampaignStudioPage })));
+const CampaignDetailPage = lazy(() => import('./CampaignDetailPage.js').then((m) => ({ default: m.CampaignDetailPage })));
 
 const routes: FeatureRoute[] = [
   {
@@ -25,6 +26,15 @@ const routes: FeatureRoute[] = [
       hiddenWhenFeature: 'campaigns',
     },
     hubTab: { hub: 'campaigns', order: 2, featureId: 'campaign-orchestration' },
+  },
+  {
+    // ADR 0941 D5 — the campaign detail, two segments under the console. Its
+    // parent is `/campaigns`, which is reachable whenever this feature is on
+    // (the `/campaign-studio` hub is gated by the separate `campaigns` toggle).
+    path: '/campaign-studio/campaigns/:campaignId',
+    element: <CampaignDetailPage />,
+    tier: 'workspace', archetype: 'detail',
+    parentPath: '/campaigns',
   },
 ];
 

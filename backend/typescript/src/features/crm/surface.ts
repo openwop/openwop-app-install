@@ -59,6 +59,19 @@ import {
 } from './contactsService.js';
 import { isWorkspaceMember } from '../../host/accessControlService.js';
 import { convertContact as svcConvertContact } from './convertService.js';
+import { gradeLeadForRun, modelAt } from './leadIntel/grading.js';
+import { readLeadEvidence } from './leadIntel/evidence.js';
+import { getChainBackedWorkflow } from '../../host/chainBackedWorkflows.js';
+import { definitionHashOf } from '../../host/definitionHash.js';
+import { wrapForLLMPrompt } from '../../host/promptInjectionGuard.js';
+import { recordAssessment as svcRecordAssessment, validateAssessment } from './leadIntel/assessment.js';
+import { routeLead as svcRouteLead } from './leadIntel/routing.js';
+import { checkFirstTouch as svcCheckFirstTouch, clockContinues, fireSlaRung } from './leadIntel/speedToLead.js';
+import { LEAD_INTEL_RUN_STAMP, LEAD_INTEL_TOGGLE, QUALIFY_LEAD_WORKFLOW_ID, ROUTE_LEAD_WORKFLOW_ID } from './leadIntel/constants.js';
+import { freezeQualificationRead, getQualificationRead, getLeadBindingId, getPendingGrade, getLeadGrade, getLeadRoutingDecision, getPendingLeadRoute } from './leadIntel/leadStore.js';
+import { assertLeadDispatchMatches } from './leadIntel/runReservation.js';
+import { resolveOne } from '../../host/featureToggles/service.js';
+import { hostExtStorage } from '../../host/hostExtPersistence.js';
 import { createBookingLink as svcCreateBookingLink, type BookingLinkStatus } from './entities/bookingLinks.js';
 import { assertBookingOwnerEligible } from './bookingService.js';
 import { listBookings as svcListBookings, type BookingStatus } from './entities/bookings.js';
@@ -104,12 +117,13 @@ const projectOne = (o: object | null): Record<string, unknown> | null => (o ? pr
  *   inside the node's per-message catch (architect A5, filed as `CRM2-D1`).
  */
 export const CRM_SURFACE_READS = [
-  'listCompanies', 'getCompany', 'listDeals', 'getDeal', 'listTasks', 'segmentVocabulary', 'validateSegment',
+  'checkFirstTouch', 'listCompanies', 'getCompany', 'listDeals', 'getDeal', 'listTasks', 'segmentVocabulary', 'validateSegment',
   'listSegmentMembers', 'suppressionSummary', 'listBookings', 'getSignatureStatus', 'findContactByEmail', 'getContact',
+  'qualificationEvidence',
 ] as const;
 export const CRM_SURFACE_ORG_WRITERS = [
   'convertContact', 'createCompany', 'createDeal', 'moveDealStage', 'createTask', 'completeTask', 'logActivity',
-  'createBookingLink', 'requestSignature',
+  'createBookingLink', 'requestSignature', 'gradeLead', 'routeLead', 'slaRung', 'recordAssessment', 'leadEvidence',
 ] as const;
 export const CRM_SURFACE_TENANT_WRITERS = [
   'createContact', 'updateContactStage', 'updateContactOwner', 'persistSegment', 'recordContactTriage',
@@ -123,6 +137,95 @@ export const CRM_SURFACE_POLICY: FeatureSurfaceOrgPolicy = {
   methodScopes: Object.fromEntries(CRM_SURFACE_ORG_WRITERS.map((m) => [m, 'workspace:write' as const])),
   tenantMethodScopes: Object.fromEntries(CRM_SURFACE_TENANT_WRITERS.map((m) => [m, 'workspace:write' as const])),
 };
+
+/**
+ * ADR 0954 — the gates every lead-intelligence surface op shares: the
+ * `crm.lead-intelligence` sub-toggle AND `crm` (ADR 0941 D5), a run, and the
+ * run's host-written lead stamp naming THIS client and lead (`wrong_client`
+ * otherwise). Returns the run id.
+ */
+async function assertLeadRun(tenantId: string, runId: string | undefined, orgId: string, contactId: string, routingEpoch: number): Promise<string> {
+  const [parent, sub] = await Promise.all([resolveOne('crm', { tenantId }), resolveOne(LEAD_INTEL_TOGGLE, { tenantId })]);
+  if (!parent?.enabled || !sub?.enabled) {
+    throw new OpenwopError('forbidden', 'Lead intelligence is not enabled for this workspace.', 403, { reason: 'feature_disabled', feature: LEAD_INTEL_TOGGLE });
+  }
+  if (!runId) throw new OpenwopError('validation_error', 'Lead operations run inside a run.', 400, {});
+  const run = await hostExtStorage().getRun(runId);
+  const stamp = (run?.tenantId === tenantId ? (run.metadata as Record<string, unknown> | undefined)?.[LEAD_INTEL_RUN_STAMP] : undefined) as { orgId?: unknown; contactId?: unknown; bindingId?: unknown; routingEpoch?: unknown } | undefined;
+  if (!run || run.workflowId !== ROUTE_LEAD_WORKFLOW_ID || !stamp || stamp.orgId !== orgId || stamp.contactId !== contactId
+    || stamp.routingEpoch !== routingEpoch || stamp.bindingId !== await getLeadBindingId(tenantId, orgId, contactId)) {
+    throw new OpenwopError('forbidden_scope', 'This run was not started for this lead.', 403, { reason: 'wrong_client' });
+  }
+  // Historical decisions confer read/replay only. A new assignment needs the
+  // current reserved run AND that run's own frozen-model grade.
+  if (!(await getLeadRoutingDecision(tenantId, orgId, contactId, routingEpoch))) {
+    const pending = await getPendingLeadRoute(tenantId, orgId, contactId);
+    if (!pending || pending.runId !== runId || pending.pin.routingEpoch !== routingEpoch) {
+      throw new OpenwopError('forbidden_scope', 'This run no longer owns routing for this lead.', 403, { reason: 'routing_superseded' });
+    }
+    assertLeadDispatchMatches(run, tenantId, orgId, contactId, pending.pin);
+    const grade = await getLeadGrade(tenantId, orgId, contactId);
+    if (grade?.runId !== runId || grade.modelId !== pending.pin.modelId || grade.modelVersion !== pending.pin.modelVersion || grade.modelHash !== pending.pin.modelHash) {
+      throw new OpenwopError('conflict', 'This routing run has no current matching grade.', 409, { reason: 'routing_grade_superseded' });
+    }
+  }
+  return runId;
+}
+
+/** Qualification uses the same primary reservation as grade dispatch, including
+ * its exact definition, immutable model, live binding and initiating principal. */
+async function qualificationFrame(tenantId: string, runId: string | undefined, orgId: string, contactId: string, args: Record<string, unknown>) {
+  const [parent, sub] = await Promise.all([resolveOne('crm', { tenantId }), resolveOne(LEAD_INTEL_TOGGLE, { tenantId })]);
+  if (!parent?.enabled || !sub?.enabled) throw new OpenwopError('forbidden', 'Lead intelligence is disabled.', 403, { reason: 'feature_disabled' });
+  if (!runId) throw new OpenwopError('validation_error', 'Qualification runs inside an admitted run.', 400, {});
+  const run = await hostExtStorage().getRun(runId);
+  const replay = run?.forkMode === 'replay' && typeof run.parentRunId === 'string';
+  let authorityRun = run;
+  let read: Awaited<ReturnType<typeof getQualificationRead>> = null;
+  if (replay) {
+    authorityRun = await hostExtStorage().getRun(run.parentRunId!);
+    const seen = new Set([runId]);
+    for (let depth = 0; depth < 64 && authorityRun; depth++) {
+      if (seen.has(authorityRun.runId) || authorityRun.tenantId !== tenantId || authorityRun.workflowId !== QUALIFY_LEAD_WORKFLOW_ID) break;
+      seen.add(authorityRun.runId);
+      read = await getQualificationRead(tenantId, orgId, contactId, authorityRun.runId);
+      if (read) break;
+      if (authorityRun.forkMode !== 'replay' || !authorityRun.parentRunId) break;
+      authorityRun = await hostExtStorage().getRun(authorityRun.parentRunId);
+    }
+    if (!read) throw new OpenwopError('conflict', 'Recorded qualification evidence is unavailable.', 409, { reason: 'replay_source_missing' });
+  }
+  const authorityRunId = authorityRun?.runId ?? runId;
+  const pending = replay && read ? { runId: authorityRunId, pin: read.pin } : await getPendingGrade(tenantId, orgId, contactId);
+  const definition = getChainBackedWorkflow(QUALIFY_LEAD_WORKFLOW_ID);
+  if (!run || !authorityRun || !pending || pending.runId !== authorityRunId || !pending.pin.qualification || !definition
+    || run.workflowId !== QUALIFY_LEAD_WORKFLOW_ID || definitionHashOf(definition) !== pending.pin.definitionHash) {
+    throw new OpenwopError('forbidden_scope', 'This run has no current qualification reservation.', 403, { reason: 'wrong_client' });
+  }
+  assertLeadDispatchMatches(authorityRun, tenantId, orgId, contactId, pending.pin);
+  if ((args.modelId !== undefined && args.modelId !== pending.pin.modelId) || (args.modelVersion !== undefined && args.modelVersion !== pending.pin.modelVersion)) {
+    throw new OpenwopError('forbidden_scope', 'The model differs from the admitted run.', 403, { reason: 'model_pin_mismatch' });
+  }
+  const model = await modelAt(tenantId, orgId, pending.pin.modelId, pending.pin.modelVersion);
+  if (model.contentHash !== pending.pin.modelHash) throw new OpenwopError('forbidden_scope', 'The frozen scoring model changed.', 403, { reason: 'model_pin_mismatch' });
+  return { runId, authorityRunId, replay, replaySourceRunId: run?.parentRunId, pin: pending.pin, content: model.content, definition };
+}
+
+/** Bind erasable text to the safe completed-read event in this admitted history. */
+async function recordedQualificationRead(tenantId: string, orgId: string, contactId: string, frame: Awaited<ReturnType<typeof qualificationFrame>>) {
+  const read = await getQualificationRead(tenantId, orgId, contactId, frame.authorityRunId);
+  const nodes = frame.definition.nodes.filter((node) => node.typeId.split('@')[0] === 'feature.crm.nodes.lead-evidence');
+  if (!read || nodes.length !== 1) throw new OpenwopError('conflict', 'The recorded evidence is unavailable.', 409, { reason: 'evidence_read_missing' });
+  const events = await hostExtStorage().listEvents(frame.replay ? frame.replaySourceRunId! : frame.runId, { fromSeq: 0, limit: 2000 });
+  const event = events.find((ev) => ev.type === 'node.completed' && ev.nodeId === nodes[0]!.nodeId);
+  const outputs = event?.payload as { outputs?: { evidence?: Array<{ ref?: unknown; fingerprint?: unknown }> } } | undefined;
+  const recorded = outputs?.outputs?.evidence;
+  if (!Array.isArray(recorded) || recorded.length !== read.evidence.length
+    || recorded.some((item) => !read.evidence.some((e) => item.ref === e.ref && item.fingerprint === e.fingerprint))) {
+    throw new OpenwopError('conflict', 'No matching completed evidence read exists in this admitted run history.', 409, { reason: 'evidence_read_missing' });
+  }
+  return { read, events };
+}
 
 export function buildCrmSurface(scope: BundleScope): FeatureSurface {
   const tenantId = scope.tenantId;
@@ -314,6 +417,133 @@ export function buildCrmSurface(scope: BundleScope): FeatureSurface {
       const variant = args.variant === 'basic' || args.variant === 'enriched' ? args.variant : null;
       const outcome = await recordContactTriageResult(tenantId, contactId, scope.runId, { variant, score, priority });
       return { success: true, recorded: outcome === 'recorded', outcome };
+    },
+
+    /** ADR 0954 D2 — grade one lead for THIS run. Org write tier via the seam
+     *  (`args.orgId`); the `crm.lead-intelligence` sub-toggle is AND-ed with `crm`
+     *  here, and the run's host-written lead stamp must name the same client and
+     *  contact (a run started for client A cannot grade client B's lead). Writes
+     *  only when this run is the one the dispatch stamped (`superseded` otherwise). */
+    gradeLead: async (args) => {
+      const orgId = requireStr(args.orgId, 'orgId');
+      const contactId = requireStr(args.contactId, 'contactId');
+      const [parent, sub] = await Promise.all([resolveOne('crm', { tenantId }), resolveOne(LEAD_INTEL_TOGGLE, { tenantId })]);
+      if (!parent?.enabled || !sub?.enabled) {
+        throw new OpenwopError('forbidden', 'Lead intelligence is not enabled for this workspace.', 403, { reason: 'feature_disabled', feature: LEAD_INTEL_TOGGLE });
+      }
+      if (!scope.runId) throw new OpenwopError('validation_error', 'gradeLead runs inside a run.', 400, {});
+      const run = await hostExtStorage().getRun(scope.runId);
+      const stamp = (run?.tenantId === tenantId ? (run.metadata as Record<string, unknown> | undefined)?.[LEAD_INTEL_RUN_STAMP] : undefined) as { orgId?: unknown; contactId?: unknown; bindingId?: unknown; modelId?: unknown; modelVersion?: unknown; modelHash?: unknown; definitionHash?: unknown } | undefined;
+      if (!stamp || stamp.orgId !== orgId || stamp.contactId !== contactId) {
+        throw new OpenwopError('forbidden_scope', 'This run was not started to grade this lead.', 403, { reason: 'wrong_client' });
+      }
+      if (typeof stamp.bindingId !== 'string' || !stamp.bindingId || typeof stamp.modelId !== 'string' || !stamp.modelId || typeof stamp.modelVersion !== 'number'
+        || !Number.isInteger(stamp.modelVersion) || stamp.modelVersion < 0 || typeof stamp.modelHash !== 'string'
+        || !/^[a-f0-9]{64}$/.test(stamp.modelHash) || typeof stamp.definitionHash !== 'string' || !/^[a-f0-9]{64}$/.test(stamp.definitionHash)
+        || (args.modelId !== undefined && args.modelId !== stamp.modelId)
+        || (args.modelVersion !== undefined && args.modelVersion !== stamp.modelVersion)) {
+        throw new OpenwopError('forbidden_scope', 'This run has no matching frozen scoring model.', 403, { reason: 'model_pin_mismatch' });
+      }
+      const { outcome, grade } = await gradeLeadForRun({
+        tenantId, orgId, contactId, runId: scope.runId,
+        pinned: { bindingId: stamp.bindingId, modelId: stamp.modelId, version: stamp.modelVersion, contentHash: stamp.modelHash },
+      });
+      return { success: true, outcome, recorded: outcome === 'recorded', band: grade.band, score: grade.score, modelId: grade.modelId, modelVersion: grade.modelVersion, truncated: grade.truncated };
+    },
+
+    /** Freeze evidence on the existing erasable primary; persist only hashes in
+     * the node event. This is an org writer, not an unrecorded read cache. */
+    leadEvidence: async (args) => {
+      const orgId = requireStr(args.orgId, 'orgId'); const contactId = requireStr(args.contactId, 'contactId');
+      const frame = await qualificationFrame(tenantId, scope.runId, orgId, contactId, { modelId: args.modelId, modelVersion: args.modelVersion });
+      if (frame.replay) throw new OpenwopError('conflict', 'The replay engine must serve the completed evidence outcome.', 409, { reason: 'replay_source_missing' });
+      const evidence = await readLeadEvidence(tenantId, orgId, contactId);
+      if (!evidence) throw new OpenwopError('not_found', 'Lead not found.', 404, {});
+      const frozen = await freezeQualificationRead(tenantId, orgId, contactId, frame.runId, frame.pin, evidence);
+      if (!frozen) throw new OpenwopError('conflict', 'Qualification was superseded or erased.', 409, {});
+      return { success: true, modelId: frame.pin.modelId, modelVersion: frame.pin.modelVersion, criteria: frame.content.criteria,
+        evidence: frozen.evidence.map(({ kind, ref, fingerprint }) => ({ kind, ref, fingerprint })), refs: frozen.evidence.map((e) => e.ref) };
+    },
+
+    /** Raw text is transient model input, owned and erased on the grade primary.
+     * A strict replay reads the exact source snapshot; branch forks cannot write. */
+    qualificationEvidence: async (args) => {
+      const orgId = requireStr(args.orgId, 'orgId'); const contactId = requireStr(args.contactId, 'contactId');
+      const frame = await qualificationFrame(tenantId, scope.runId, orgId, contactId, { modelId: args.modelId, modelVersion: args.modelVersion });
+      const { read } = await recordedQualificationRead(tenantId, orgId, contactId, frame);
+      return { criteria: frame.content.criteria, evidenceBlock: wrapForLLMPrompt({ contentTrust: 'untrusted', source: 'crm.lead-evidence', eventType: 'lead.evidence',
+        payload: read.evidence.map((e) => `[${e.ref}] (${e.kind}) ${e.label}: ${e.text}`).join('\n') || '(no evidence)' }) };
+    },
+
+    recordAssessment: async (args) => {
+      const orgId = requireStr(args.orgId, 'orgId'); const contactId = requireStr(args.contactId, 'contactId');
+      const frame = await qualificationFrame(tenantId, scope.runId, orgId, contactId, { modelId: args.modelId, modelVersion: args.modelVersion });
+      const { read, events } = await recordedQualificationRead(tenantId, orgId, contactId, frame);
+      const fresh = frame.replay ? new Map(read.evidence.map((e) => [e.ref, e.fingerprint]))
+        : new Map((await readLeadEvidence(tenantId, orgId, contactId) ?? []).map((e) => [e.ref, e.fingerprint]));
+      const readRefs = new Set(read.evidence.map((e) => e.ref));
+      const live = new Set(read.evidence.filter((e) => fresh.get(e.ref) === e.fingerprint).map((e) => e.ref));
+      const checked = validateAssessment(frame.content.criteria, args.assessment, readRefs, live);
+      if (!checked.ok) return { success: true, ok: false, errors: checked.errors };
+      if (frame.replay) {
+        const node = frame.definition.nodes.find((n) => n.typeId.split('@')[0] === 'feature.crm.nodes.assess-lead');
+        const event = events.find((ev) => ev.type === 'node.completed' && ev.nodeId === node?.nodeId);
+        const result = (event?.payload as { outputs?: { outcome?: unknown; answers?: unknown; adjustment?: unknown } } | undefined)?.outputs;
+        if (!result || !['recorded', 'replayed', 'superseded'].includes(String(result.outcome)) || typeof result.answers !== 'number'
+          || !['none', 'pending'].includes(String(result.adjustment))) throw new OpenwopError('conflict', 'The source assessment outcome is unavailable.', 409, { reason: 'replay_source_missing' });
+        return { success: true, ok: true, outcome: result.outcome, answers: result.answers, adjustment: result.adjustment };
+      }
+      const { outcome, assessment } = await svcRecordAssessment({ tenantId, orgId, contactId, runId: frame.runId, modelId: frame.pin.modelId,
+        modelVersion: frame.pin.modelVersion, modelHash: frame.pin.modelHash, ...checked.value }, frame.pin);
+      return { success: true, ok: true, outcome, answers: assessment?.answers.length ?? 0, adjustment: assessment?.adjustment ?? 'none' };
+    },
+
+    /** ADR 0954 D5 — route one lead for THIS run. Same gates as `gradeLead` (the
+     *  sub-toggle AND `crm`, the run's lead stamp naming this client and lead,
+     *  `workspace:write` on the client through the seam). Ledgered on
+     *  (contactId, routingEpoch), so a re-execution returns the recorded choice. */
+    routeLead: async (args) => {
+      const orgId = requireStr(args.orgId, 'orgId');
+      const contactId = requireStr(args.contactId, 'contactId');
+      const routingEpoch = typeof args.routingEpoch === 'number' && Number.isInteger(args.routingEpoch) && args.routingEpoch > 0 ? args.routingEpoch : 0;
+      if (!routingEpoch) throw new OpenwopError('validation_error', '`routingEpoch` must be a positive integer.', 400, { field: 'routingEpoch' });
+      const runId = await assertLeadRun(tenantId, scope.runId, orgId, contactId, routingEpoch);
+      // Exclusions come only from the host's frozen source-child stamp, never
+      // from node args or caller metadata. The primary compares the same hash.
+      const stamp = (await hostExtStorage().getRun(runId))?.metadata?.[LEAD_INTEL_RUN_STAMP] as Record<string, unknown> | undefined;
+      const rawHashes = stamp?.excludeOwnerHashes;
+      if (rawHashes !== undefined && (!Array.isArray(rawHashes) || rawHashes.length > 20 || rawHashes.some((h) => typeof h !== 'string' || !/^[a-f0-9]{64}$/.test(h)))) throw new OpenwopError('forbidden_scope', 'The routing exclusions are invalid.', 403, { reason: 'routing_exclusion_mismatch' });
+      const excludeOwnerHashes = rawHashes as string[] | undefined;
+      const { decision, replayed } = await svcRouteLead({ tenantId, orgId, contactId, routingEpoch, runId, excludeOwnerHashes });
+      return {
+        success: true, replayed, chosen: decision.chosen, unassigned: decision.chosen === null, ruleId: decision.ruleId, strategy: decision.strategy, policyVersion: decision.policyVersion, skipped: decision.skipped.length,
+        // ADR 0954 D6 — the first-touch clock's inputs, frozen in this node's recorded output.
+        sla: decision.sla ?? null,
+      };
+    },
+
+    /** ADR 0954 D6 — has the routed owner touched the lead since assignment
+     *  in this routing round (an owner activity, or a booking)? A READ. */
+    checkFirstTouch: async (args) => {
+      const orgId = requireStr(args.orgId, 'orgId');
+      const contactId = requireStr(args.contactId, 'contactId');
+      const routingEpoch = typeof args.routingEpoch === 'number' && Number.isInteger(args.routingEpoch) ? args.routingEpoch : 0;
+      await assertLeadRun(tenantId, scope.runId, orgId, contactId, routingEpoch);
+      const out = await svcCheckFirstTouch(tenantId, orgId, contactId, routingEpoch);
+      return { success: true, touched: out.touched, ...(out.firstTouchAt ? { firstTouchAt: out.firstTouchAt } : {}) };
+    },
+
+    /** ADR 0954 D6 — fire one speed-to-lead rung (1 remind, 2 escalate or
+     *  re-route, 3 report), once per (routing round, rung). */
+    slaRung: async (args) => {
+      const orgId = requireStr(args.orgId, 'orgId');
+      const contactId = requireStr(args.contactId, 'contactId');
+      const routingEpoch = typeof args.routingEpoch === 'number' && Number.isInteger(args.routingEpoch) ? args.routingEpoch : 0;
+      const runId = await assertLeadRun(tenantId, scope.runId, orgId, contactId, routingEpoch);
+      const rung = args.rung === 1 || args.rung === 2 || args.rung === 3 ? args.rung : null;
+      if (!rung) throw new OpenwopError('validation_error', '`rung` is 1, 2 or 3.', 400, { field: 'rung' });
+      const out = await fireSlaRung({ tenantId, orgId, contactId, routingEpoch, rung, runId, ...(scope.orgScopeSubject ? { causedBy: scope.orgScopeSubject } : {}) });
+      return { success: true, rung, outcome: out.outcome, fired: out.fired, continueClock: clockContinues(out.outcome), sla: (await getLeadRoutingDecision(tenantId, orgId, contactId, routingEpoch))?.sla ?? null };
     },
 
     /** Tombstone-guarded (mergedInto refused, mirrors `routes.ts`). */

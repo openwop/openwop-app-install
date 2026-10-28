@@ -19,8 +19,8 @@
  *      `cms-chain-execution.test.ts` and `workflow-chain-exec-ops-
  *      execution.test.ts` document), so a real run genuinely CANNOT complete
  *      past the first AI node. Per the `exec-ops` precedent this test asserts
- *      the HONEST FAILURE contract (`status:'failed'`, `error.code:
- *      'provider_not_supported'`) rather than forcing completion — but proves
+ *      the HONEST FAILURE contract (`status:'failed'`; since P3
+ *      `error.code: 'openwop-app.byok_required'`) rather than forcing completion — but proves
  *      the thing that matters most: `audience` (`feature.crm.nodes.list-
  *      companies`) and `page` (`feature.cms.nodes.list-pages`) are BOTH
  *      independent, non-AI root reads that run for real before the AI nodes
@@ -128,6 +128,9 @@ import { buildFeatureSurfaces } from '../src/host/featureSurfaces.js';
 import { getChain, expandChain } from '../src/host/workflowChainPackLoader.js';
 import { registerWorkflow } from '../src/host/workflowsRegistry.js';
 import { makeSuspendFn, SuspendSignal } from '../src/executor/suspendSignal.js';
+import { buildGraph, buildNodeInputs, freshSnapshot } from '../src/executor/scheduler.js';
+import { buildNodeCtxInputs } from '../src/executor/nodeCtxInputs.js';
+import { interpolateRunInputs } from '../src/executor/runInputInterpolation.js';
 
 let BASE: string;
 let server: http.Server;
@@ -179,6 +182,29 @@ async function ownerOrg(): Promise<{ owner: Client; orgId: string; tenantId: str
 const crmPath = (orgId: string, suffix = ''): string => `/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}${suffix}`;
 const cmsPath = (orgId: string, suffix = ''): string => `/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${suffix}`;
 
+/** A SECOND org in the SAME tenant, with its own company + published page. The
+ *  BUG-B claim is "org-scoped", and a read that ignored `orgId` and returned the
+ *  whole tenant would also contain the first org's records — only an org-B
+ *  record that must be ABSENT can tell the two apart (waves 20–21: the
+ *  same-tenant non-member pattern). */
+async function seedOtherOrg(owner: Client): Promise<{ otherCompanyId: string; otherPageId: string }> {
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Other Org' });
+  expect(org.status, JSON.stringify(org.body)).toBe(201);
+  const otherOrgId = (org.body as { orgId: string }).orgId;
+  const company = await owner.post(crmPath(otherOrgId, '/companies'), { name: 'Other Org Co' });
+  expect(company.status, JSON.stringify(company.body)).toBe(201);
+  const page = await owner.post(cmsPath(otherOrgId, '/pages'), { title: 'Other Org Page', sections: [{ type: 'hero', data: { heading: 'Other' } }] });
+  expect(page.status, JSON.stringify(page.body)).toBe(201);
+  const otherPageId = (page.body as { pageId: string }).pageId;
+  expect((await owner.post(cmsPath(otherOrgId, `/pages/${otherPageId}/publish`))).status).toBe(200);
+  // Positive control: org B's records are real and readable through org B.
+  const listed = await owner.get(crmPath(otherOrgId, '/companies'));
+  expect(listed.status).toBe(200);
+  const otherCompanyId = (company.body as { companyId: string }).companyId;
+  expect(JSON.stringify(listed.body)).toContain(otherCompanyId);
+  return { otherCompanyId, otherPageId };
+}
+
 interface RunSnapshot { status: string; error?: { code: string; message: string } }
 async function pollRun(owner: Client, runId: string): Promise<RunSnapshot> {
   let snap: RunSnapshot = { status: 'pending' };
@@ -186,10 +212,10 @@ async function pollRun(owner: Client, runId: string): Promise<RunSnapshot> {
     const r = await owner.get(`/runs/${runId}`);
     expect(r.status, JSON.stringify(r.body)).toBe(200);
     snap = r.body as RunSnapshot;
-    if (snap.status === 'completed' || snap.status === 'failed' || snap.status === 'cancelled' || snap.status.startsWith('waiting')) break;
+    if (snap.status === 'completed' || snap.status === 'failed' || snap.status === 'cancelled' || snap.status.startsWith('waiting')) return snap;
     await new Promise((res) => setTimeout(res, 25));
   }
-  return snap;
+  throw new Error(`run ${runId} did not settle after 80 polls (25 ms apart): ${JSON.stringify(snap)}`);
 }
 
 interface BundleEvent { type?: string; nodeId?: string; payload?: Record<string, unknown> }
@@ -220,6 +246,7 @@ describe('marketing.campaign-launch — real executor, honest failure at the AI 
     // list-pages` can actually see it.
     const publish = await owner.post(cmsPath(orgId, `/pages/${pageId}/publish`));
     expect(publish.status, JSON.stringify(publish.body)).toBe(200);
+    const { otherCompanyId, otherPageId } = await seedOtherOrg(owner);
 
     const found = getChain('marketing.campaign-launch');
     expect(found, 'marketing.campaign-launch chain must be loaded at boot').toBeTruthy();
@@ -227,7 +254,12 @@ describe('marketing.campaign-launch — real executor, honest failure at the AI 
     const expanded = expandChain(found!.chain, { params });
     registerWorkflow(expanded);
 
-    const create = await owner.post('/runs', { workflowId: expanded.workflowId, inputs: params });
+    // The run inputs deliberately OMIT `orgId`: the source nodes read
+    // `{...config, ...inputs}` (`packs/feature.crm.nodes` `args()`), so passing
+    // `orgId` as a run input too would hide a missing config binding (probe
+    // 8fw5g3-mkt-audience-org came back VACUOUS for exactly that reason). The
+    // BUG-B fix is the FROZEN config `orgId`; this makes it the only source.
+    const create = await owner.post('/runs', { workflowId: expanded.workflowId, inputs: { brief: params.brief } });
     expect(create.status, JSON.stringify(create.body)).toBe(201);
     const runId = (create.body as { runId: string }).runId;
 
@@ -249,10 +281,12 @@ describe('marketing.campaign-launch — real executor, honest failure at the AI 
     const audienceOutputs = completedOutputs(events, 'audience');
     const companies = audienceOutputs.companies as Array<{ companyId: string }>;
     expect(companies.map((c) => c.companyId)).toContain(companyId);
+    expect(companies.map((c) => c.companyId), 'org B\'s company leaked into org A\'s audience').not.toContain(otherCompanyId);
 
     const pageOutputs = completedOutputs(events, 'page');
     const pages = pageOutputs.pages as Array<{ pageId: string }>;
     expect(pages.map((p) => p.pageId)).toContain(pageId);
+    expect(pages.map((p) => p.pageId), 'org B\'s page leaked into org A\'s page read').not.toContain(otherPageId);
 
     // Failed at copy or creative (both AI, no provider) — never reached the
     // review gate or launch.
@@ -281,16 +315,6 @@ beforeAll(async () => {
   miniNodes = { ...crmMod.nodes, ...cmsMod.nodes, ...aiMod.nodes, ...chatMod.nodes };
 });
 
-/** Resolve `{{inputs.name}}` config tokens from the run params — the harness
- *  equivalent of the executor's per-run variable interpolation (`cms-chain-
- *  execution.test.ts`'s `resolveConfig`). */
-function resolveConfig(config: Record<string, unknown> | undefined, params: Record<string, string>): Record<string, unknown> {
-  return Object.fromEntries(Object.entries(config ?? {}).map(([k, v]) => [
-    k,
-    typeof v === 'string' ? v.replace(/\{\{inputs\.([a-zA-Z0-9_]+)\}\}/g, (_m, name: string) => params[name] ?? '') : v,
-  ]));
-}
-
 interface WalkOutcome {
   results: Record<string, NodeResult>;
   /** The port-keyed inputs map BUILT for each node before invoking its impl —
@@ -300,58 +324,51 @@ interface WalkOutcome {
 }
 
 /**
- * Walk the expanded chain definition with the SAME port semantics as the real
- * scheduler's `buildNodeInputs` (`executor/scheduler.ts`) + the SAME single-
- * key "Back-compat" unwrap as the real executor (`executor/executor.ts`,
- * `Object.keys(mergedInputsByPort).length === 1 && 'input' in
- * mergedInputsByPort`) — reproduced here, not approximated, so a fan-in node's
- * built inputs in this harness are EXACTLY what the real executor would build.
+ * Walk the expanded chain definition through the REAL scheduler pieces —
+ * `buildGraph` / `freshSnapshot` (topological order) / `buildNodeInputs` from
+ * `executor/scheduler.ts`, the executor's `buildNodeCtxInputs` single-key
+ * unwrap (`executor/nodeCtxInputs.ts`) and `interpolateRunInputs` for
+ * `{{inputs.*}}` config tokens. Grade-tests wave 64: this used to RE-IMPLEMENT
+ * all three by hand, so a scheduler port-handling regression stayed green here.
  * `ctx.callAI` is the only faked host primitive; `ctx.suspend` is the REAL
- * `executor/suspendSignal.js` mechanism.
+ * `executor/suspendSignal.js` mechanism. A node runs only once every upstream
+ * source COMPLETED (a suspended/failed branch never makes its successors ready).
  */
 async function walkChain(
   chainId: string,
   params: Record<string, string>,
+  runInputs: Record<string, string>,
   deps: { features: Record<string, unknown>; callAI: (args: unknown) => Promise<{ content: string }> },
 ): Promise<WalkOutcome> {
   const chain = getChain(chainId)!.chain;
   const def = expandChain(chain, { params });
-  const outputs = new Map<string, Record<string, unknown>>();
-  const state = new Map<string, 'completed' | 'other'>();
+  const graph = buildGraph(def);
+  const snap = freshSnapshot(def);
   const results: Record<string, NodeResult> = {};
   const inputsByShortId: Record<string, Record<string, unknown>> = {};
   const shortId = (nodeId: string): string => nodeId.slice(nodeId.lastIndexOf('_') + 1);
+  const byId = new Map(def.nodes.map((nd) => [nd.nodeId, nd] as const));
 
-  for (const node of def.nodes) {
-    const inbound = (def.edges ?? []).filter((e) => e.targetNodeId === node.nodeId);
-    if (inbound.length > 0 && !inbound.every((e) => state.get(e.sourceNodeId) === 'completed')) continue; // an upstream branch never completed (suspended/failed) — this node never becomes ready
+  for (const nodeId of snap.order) {
+    const node = byId.get(nodeId)!;
+    const inbound = graph.incoming.get(nodeId) ?? [];
+    if (inbound.length > 0 && !inbound.every((e) => snap.nodeState.get(e.sourceNodeId) === 'completed')) continue;
 
-    const builtInputs: Record<string, unknown> = {};
-    if (inbound.length === 0) {
-      builtInputs.input = params;
-    } else {
-      for (const e of inbound) {
-        const src = outputs.get(e.sourceNodeId) ?? {};
-        const sourcePort = e.sourceOutput ?? 'output';
-        const targetPort = e.targetInput ?? 'input';
-        builtInputs[targetPort] = Object.prototype.hasOwnProperty.call(src, sourcePort) ? src[sourcePort] : src;
-      }
-    }
-    const shortNodeId = shortId(node.nodeId);
+    const builtInputs = buildNodeInputs(nodeId, graph, snap, runInputs);
+    const shortNodeId = shortId(nodeId);
     inputsByShortId[shortNodeId] = builtInputs;
-    const ctxInputs: unknown = Object.keys(builtInputs).length === 1 && 'input' in builtInputs ? builtInputs.input : builtInputs;
 
     const impl = miniNodes[node.typeId];
     expect(impl, `node impl for ${node.typeId}`).toBeTruthy();
     let result: NodeResult;
     try {
       result = await impl!({
-        nodeId: node.nodeId,
-        inputs: ctxInputs,
-        config: resolveConfig(node.config, params),
+        nodeId,
+        inputs: buildNodeCtxInputs(builtInputs, {}),
+        config: interpolateRunInputs((node.config ?? {}) as Record<string, unknown>, runInputs),
         features: deps.features,
         callAI: deps.callAI,
-        suspend: makeSuspendFn(node.nodeId, undefined),
+        suspend: makeSuspendFn(nodeId, undefined),
       });
     } catch (err) {
       if (err instanceof SuspendSignal) {
@@ -361,8 +378,12 @@ async function walkChain(
       }
     }
     results[shortNodeId] = result;
-    state.set(node.nodeId, result.status === 'success' ? 'completed' : 'other');
-    if (result.status === 'success') outputs.set(node.nodeId, result.outputs ?? {});
+    if (result.status === 'success') {
+      snap.nodeState.set(nodeId, 'completed');
+      snap.nodeOutputs.set(nodeId, result.outputs ?? {});
+    } else {
+      snap.nodeState.set(nodeId, 'failed');
+    }
   }
   return { results, inputsByShortId };
 }
@@ -382,6 +403,7 @@ describe('marketing.campaign-launch — mini-scheduler (real crm/cms reads + rea
     // so `feature.cms.nodes.list-pages` can actually see it.
     const publish = await owner.post(cmsPath(orgId, `/pages/${pageId}/publish`));
     expect(publish.status, JSON.stringify(publish.body)).toBe(200);
+    const { otherCompanyId, otherPageId } = await seedOtherOrg(owner);
 
     const features = buildFeatureSurfaces({ tenantId, runId: 'run:mktgchain-mini' });
     let aiCalls = 0;
@@ -391,15 +413,18 @@ describe('marketing.campaign-launch — mini-scheduler (real crm/cms reads + rea
     };
 
     const params = { brief: 'Q3 launch for the analytics add-on', orgId };
-    const { results, inputsByShortId } = await walkChain('marketing.campaign-launch', params, { features, callAI });
+    // Run inputs omit `orgId` (see the real-executor case): the frozen config is the only org source.
+    const { results, inputsByShortId } = await walkChain('marketing.campaign-launch', params, { brief: params.brief }, { features, callAI });
 
     expect(results.audience?.status).toBe('success');
     const companies = results.audience?.outputs?.companies as Array<{ companyId: string }>;
     expect(companies.map((c) => c.companyId)).toContain(companyId);
+    expect(companies.map((c) => c.companyId)).not.toContain(otherCompanyId);
 
     expect(results.page?.status).toBe('success');
     const pages = results.page?.outputs?.pages as Array<{ pageId: string }>;
     expect(pages.map((p) => p.pageId)).toContain(pageId);
+    expect(pages.map((p) => p.pageId)).not.toContain(otherPageId);
 
     expect(results.copy?.status).toBe('success');
     expect(results.creative?.status).toBe('success');

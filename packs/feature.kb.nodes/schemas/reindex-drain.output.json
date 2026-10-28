@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/feature.kb.nodes/1.2.1/reindex-drain.output.json",
+  "$id": "https://packs.openwop.dev/feature.kb.nodes/1.3.0/reindex-drain.output.json",
   "title": "KbReindexDrainOutput",
   "type": "object",
   "required": [

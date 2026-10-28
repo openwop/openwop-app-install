@@ -3,6 +3,12 @@
  * resolver (ADR 0881). A thread is exactly as visible as its deck; a slide
  * thread needs its slide to still be in the deck; the `slides` entitlement is
  * the owning feature; deleting the deck prunes every thread on it.
+ *
+ * Tracker TST-BHH-1. Red when (sabotage-witnessed, wave 62): a resourceId with more
+ * than one `#` or a slide no longer in the deck resolves; a non-slides canvas
+ * resolves as a slides thread; an owned deck's thread skips the owner read check;
+ * the target's feature is not `slides`; the deck-deleted hook skips slide decks; or
+ * the render tool stops keeping input slide ids / minting never-reused ones.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -32,14 +38,16 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+interface Wire { user: { userId: string }; orgId: string; id: string; error?: string; message?: string }
+interface Res<T = Wire> { status: number; body: T }
 interface Client { userId: string; get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; patch: (p: string, b?: unknown) => Promise<Res> }
 async function login(tenantId: string, who: string): Promise<Client> {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    const out: unknown = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    return { status: res.status, body: out as Wire }; // wire JSON, typed by the shape above
   };
   const r = await call('POST', '/host/openwop-app/test/login', { email: `${who}-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status).toBe(201);
@@ -54,7 +62,7 @@ const deck = (title: string, ids: string[]) => ({
 async function world() {
   const tenantId = `org:adr0886-cm-${Date.now()}-${n++}`;
   const owner = await login(tenantId, 'own');
-  const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId as string;
+  const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
   const canvas = await createCanvasForTenant(tenantId, { canvasTypeId: 'canvas.slides', name: 'Pitch', initialState: deck('Pitch', ['cover', 'ask']) });
   const C = `/host/openwop-app/comments/orgs/${encodeURIComponent(orgId)}/comments`;
   const thread = (resourceId: string): string => `${C}?resourceType=canvas_slides&resourceId=${encodeURIComponent(resourceId)}`;
@@ -90,12 +98,16 @@ describe('ADR 0886 D5 — canvas_slides comment threads', () => {
   it('a non-slides canvas id is not a slides thread (type-pinned)', async () => {
     const w = await world();
     const doc = await createCanvasForTenant(w.tenantId, { canvasTypeId: 'canvas.document', name: 'Doc', initialState: { title: 'Doc', content: { type: 'doc', content: [] } } });
-    expect((await w.owner.post(w.C, { resourceType: 'canvas_slides', resourceId: doc.canvasId, body: 'x' })).status).toBe(404);
+    const r = await w.owner.post(w.C, { resourceType: 'canvas_slides', resourceId: doc.canvasId, body: 'x' });
+    expect(r.status).toBe(404);
+    expect(r.body.error).toBe('not_found');
+    // Positive control: the same caller posts on a real slides deck.
+    expect((await w.owner.post(w.C, { resourceType: 'canvas_slides', resourceId: w.canvasId, body: 'x' })).status).toBe(201);
   });
 
   it("a private project's deck threads are refused to a non-member org reader", async () => {
     const w = await world();
-    const projectId = (await w.owner.post('/host/openwop-app/projects', { orgId: w.orgId, name: 'Secret' })).body.id as string;
+    const projectId = (await w.owner.post('/host/openwop-app/projects', { orgId: w.orgId, name: 'Secret' })).body.id;
     expect((await w.owner.patch(`/host/openwop-app/projects/${projectId}/visibility`, { visibility: 'private' })).status).toBe(200);
     const owned = await createCanvasForTenant(w.tenantId, {
       canvasTypeId: 'canvas.slides', name: 'Board', ownerSubject: { kind: 'project', id: projectId }, initialState: deck('Board', ['s1']),
@@ -106,7 +118,7 @@ describe('ADR 0886 D5 — canvas_slides comment threads', () => {
     expect((await w.owner.post(w.C, { resourceType: 'canvas_slides', resourceId: `${owned.canvasId}#s1`, body: 'ok' })).status).toBe(201);
     expect((await viewer.get(w.thread(`${owned.canvasId}#s1`))).status).toBe(404);
     // A viewer is refused a post either way (no write scope → 403); the read is the visibility witness.
-    expect([403, 404]).toContain((await viewer.post(w.C, { resourceType: 'canvas_slides', resourceId: `${owned.canvasId}#s1`, body: 'x' })).status);
+    expect((await viewer.post(w.C, { resourceType: 'canvas_slides', resourceId: `${owned.canvasId}#s1`, body: 'x' })).status).toBe(403);
   });
 
   it('turning slides off closes its threads; deleting the deck prunes them', async () => {
@@ -169,5 +181,10 @@ describe('ADR 0886 D5 — the render tool keeps slide ids, so threads stay on th
       deck: { title: 'D', slides: [{ id: 'slide-1', layout: 'title', title: 'A' }, { id: 'slide-1', layout: 'title', title: 'B' }] },
     } });
     expect(dup.isError, dup.content).not.toBe(true);
+    const deduped = JSON.parse((await tools.executeTool({ name: SLIDES_GET_DESIGN_TOOL_ID, input: { orgId: w.orgId, canvasId } })).content) as { deck: { slides: { id: string; title: string }[] } };
+    const [a, b] = deduped.deck.slides;
+    expect(a!.id).toBe('slide-1');
+    expect(b!.id).toMatch(/^slide-[0-9a-f]{8}$/);
+    expect(b!.id).not.toBe(a!.id);
   });
 });

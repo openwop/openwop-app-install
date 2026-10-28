@@ -22,8 +22,16 @@
  *       server-chosen ref: the client body can no longer name a vault secret.
  *   D7  ending a walkie session is tenant-bound (it dropped buffers by raw id).
  *   D8  the agent work snapshot in the instructions is fenced as untrusted text.
+ *
+ * (TST-BPD) Red when (each sabotage-witnessed, wave 65): `requireVoiceTurn` stops
+ * asking `runs:create` (D1); `/tool-call` stops comparing the session's opener (D2);
+ * `/session` mints for an openai-realtime tenant (D3); the sideband's
+ * `refuseIfRevoked` lets a lapsed authority through, or stops recording why (D4,
+ * VOX2-F3); a walkie session answers a caller other than its opener (M5);
+ * `/held-approvals/resolve` stops asking `approvals:respond` (M4); walkie erasure
+ * deletes rows of another subject.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
@@ -132,6 +140,7 @@ describe('VOX2-F1 — the RFC 0105/0106 speech seams need runs:create', () => {
     it(`${path}: control — the wildcard bearer (the certifying credential's lane) is not refused by the gate`, async () => {
       const res = await asAdmin('POST', path, body);
       expect(res.status).not.toBe(403);
+      expect(res.headers.get('www-authenticate')).toBeNull();
     });
   }
 });
@@ -141,6 +150,7 @@ describe('D2 — a host-issued realtime session answers only its opener', () => 
     const id = issueRealtimeSession('default', undefined, { userId: 'user-the-opener' });
     const res = await asAdmin('POST', `${RT}/tool-call`, { sessionId: id, name: 'anything', userApproved: true });
     expect(res.status).toBe(403);
+    expect(((await res.json()) as { message?: string }).message).toBe('A valid realtime session (from POST /session) is required.');
   });
   it('control: the opener itself is served (mint over HTTP, tool-call as the same caller)', async () => {
     await setSecret('rt-gemini-d2', 'gk-test', { tenantId: 'default' });
@@ -156,7 +166,9 @@ describe('D2 — a host-issued realtime session answers only its opener', () => 
   });
   it('a row minted with no subject answers no subject-bearing caller (fail-closed for pre-D2 rows)', async () => {
     const id = issueRealtimeSession('default', undefined, {});
-    expect((await asAdmin('POST', `${RT}/tool-call`, { sessionId: id, name: 'anything' })).status).toBe(403);
+    const res = await asAdmin('POST', `${RT}/tool-call`, { sessionId: id, name: 'anything' });
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { message?: string }).message).toBe('A valid realtime session (from POST /session) is required.');
   });
 });
 
@@ -322,14 +334,19 @@ describe('D8 — the work snapshot is fenced as untrusted text', () => {
 
 describe('M5 — a walkie session answers only its opener', () => {
   it("another caller in the tenant cannot append to, commit or speak on the opener's session", async () => {
-    const open = await asKey(await key(['runs:create', 'workspace:write']), 'POST', VS, {});
+    const opener = await key(['runs:create', 'workspace:write']);
+    const open = await asKey(opener, 'POST', VS, {});
     expect(open.status).toBe(201);
     const { session } = (await open.json()) as { session: { sessionId: string } };
     const other = await key(['runs:create', 'workspace:write']);
     const chunk = Buffer.from('x').toString('base64');
-    expect((await asKey(other, 'POST', `${VS}/${session.sessionId}/audio`, { audioChunk: chunk })).status).toBe(404);
-    expect((await asKey(other, 'POST', `${VS}/${session.sessionId}/commit`, {})).status).toBe(404);
-    expect((await asKey(other, 'POST', `${VS}/${session.sessionId}/speak`, { text: 'hi' })).status).toBe(404);
+    for (const [verb, payload] of [['audio', { audioChunk: chunk }], ['commit', {}], ['speak', { text: 'hi' }]] as const) {
+      const res = await asKey(other, 'POST', `${VS}/${session.sessionId}/${verb}`, payload);
+      expect(res.status, verb).toBe(404);
+      expect(((await res.json()) as { message?: string }).message, verb).toBe('Voice session not found.');
+    }
+    // … and the opener itself is still served on the same session (the refusal was about WHO).
+    expect((await asKey(opener, 'POST', `${VS}/${session.sessionId}/audio`, { audioChunk: chunk })).status).toBe(202);
   });
 });
 
@@ -362,30 +379,30 @@ describe('D8 — the instruction budget never cuts a fence', () => {
 });
 
 describe('grade-code VOX2CD-1 — each lane keeps its own presence rule (snapshots from REAL request shapes)', () => {
-  const req = (over: Record<string, unknown>): ExpressRequest => ({ tenantId: TENANT, ...over }) as unknown as ExpressRequest;
+  const req = (over: Partial<ExpressRequest>): ExpressRequest => ({ tenantId: TENANT, ...over }) as ExpressRequest;
   it("an owk_ key on its issuer's tenant holds (it was hung up as 'not a member')", async () => {
     const { key } = await issueApiKey({ tenantId: TENANT, name: 'vox2cd1', createdBy: 'user:adr0893', scopes: ['runs:create', 'workspace:write'] });
-    const snap = snapshotVoiceAuthority(req({ principal: { principalId: `apikey:${key.keyId}`, tenants: [TENANT], auth: { kind: 'api-key', issuer: 'user:adr0893', scopes: ['runs:create'] } } }));
+    const snap = snapshotVoiceAuthority(req({ principal: { token: '', principalId: `apikey:${key.keyId}`, tenants: [TENANT], auth: { kind: 'api-key', issuer: 'user:adr0893', scopes: ['runs:create'] } } }));
     expect(snap.lane).toBe('api-key');
     expect(await voiceAuthorityHolds(snap)).toEqual({ ok: true });
   });
   it('a deployment env key holds (operator credential, no membership)', async () => {
-    const snap = snapshotVoiceAuthority(req({ principal: { principalId: 'bearer:abcd1234', tenants: [TENANT], auth: { kind: 'env-key' } } }));
+    const snap = snapshotVoiceAuthority(req({ principal: { token: '', principalId: 'bearer:abcd1234', tenants: [TENANT], auth: { kind: 'env-key' } } }));
     expect(snap.lane).toBe('env-key');
     expect(await voiceAuthorityHolds(snap)).toEqual({ ok: true });
   });
   it('a revoked / unknown key does not hold', async () => {
-    const snap = snapshotVoiceAuthority(req({ principal: { principalId: 'apikey:no-such-key', tenants: [TENANT], auth: { kind: 'api-key', issuer: 'user:adr0893', scopes: [] } } }));
+    const snap = snapshotVoiceAuthority(req({ principal: { token: '', principalId: 'apikey:no-such-key', tenants: [TENANT], auth: { kind: 'api-key', issuer: 'user:adr0893', scopes: [] } } }));
     // VOX2-F3: the key's own liveness is asked first, so the lapse is named for it.
     expect(await voiceAuthorityHolds(snap)).toEqual({ ok: false, reason: 'credential_revoked' });
   });
   it('a cookie user in their OWN personal workspace holds without a member row', async () => {
-    const snap = snapshotVoiceAuthority(req({ tenantId: 'user:adr0893-home', personalTenant: 'user:adr0893-home', userId: 'u-home', principal: { principalId: 'user:u-home', tenants: ['user:adr0893-home'] } }));
+    const snap = snapshotVoiceAuthority(req({ tenantId: 'user:adr0893-home', personalTenant: 'user:adr0893-home', userId: 'u-home', principal: { token: '', principalId: 'user:u-home', tenants: ['user:adr0893-home'] } }));
     expect(snap.lane).toBe('session');
     expect(await voiceAuthorityHolds(snap)).toEqual({ ok: true });
   });
   it('a cookie user acting in a shared workspace they are not a member of does not hold', async () => {
-    const snap = snapshotVoiceAuthority(req({ tenantId: 'ws:adr0893-other', personalTenant: 'user:adr0893-home', userId: 'u-home', principal: { principalId: 'user:u-home', tenants: ['ws:adr0893-other'] } }));
+    const snap = snapshotVoiceAuthority(req({ tenantId: 'ws:adr0893-other', personalTenant: 'user:adr0893-home', userId: 'u-home', principal: { token: '', principalId: 'user:u-home', tenants: ['ws:adr0893-other'] } }));
     expect(await voiceAuthorityHolds(snap)).toEqual({ ok: false, reason: 'not_a_member' });
   });
 });
@@ -449,7 +466,7 @@ describe('grade-code VOX2CD-4 — the live loop ends a revoked call: one hang-up
       await setVoice('off');
       for (const h of handlers.get('message') ?? []) h({ data: JSON.stringify({ type: 'response.function_call_arguments.done', name: 'x', call_id: 'fc_t', arguments: '{}' }) });
       for (const h of handlers.get('message') ?? []) h({ data: JSON.stringify({ type: 'conversation.item.input_audio_transcription.completed', transcript: 'still talking' }) });
-      await new Promise((r) => setTimeout(r, 100));
+      await vi.waitFor(() => { expect(closed).toBe(1); });
       expect(hangups).toHaveLength(1);
       expect(closed).toBe(1);
       expect(sent.some((d) => d.includes('"tools":[]') && d.includes('session.update'))).toBe(true);
@@ -478,10 +495,10 @@ describe('M5 / DSAR — a walkie row names its opener, so erasure removes it', (
 
 describe('VOX2-F3 — a bearer- or key-opened call re-checks its OWN credential on every event', () => {
   const call = { type: 'response.function_call_arguments.done', name: 'anything', call_id: 'fc_vox2f3', arguments: '{}' };
-  const req = (over: Record<string, unknown>): ExpressRequest => ({ tenantId: TENANT, ...over }) as unknown as ExpressRequest;
+  const req = (over: Partial<ExpressRequest>): ExpressRequest => ({ tenantId: TENANT, ...over }) as ExpressRequest;
   const keyOpened = async (name: string) => {
     const { key } = await issueApiKey({ tenantId: TENANT, name, createdBy: 'user:adr0893', scopes: ['runs:create'] });
-    const snap = snapshotVoiceAuthority(req({ principal: { principalId: `apikey:${key.keyId}`, tenants: [TENANT], auth: { kind: 'api-key', issuer: 'user:adr0893', scopes: ['runs:create'] } } }));
+    const snap = snapshotVoiceAuthority(req({ principal: { token: '', principalId: `apikey:${key.keyId}`, tenants: [TENANT], auth: { kind: 'api-key', issuer: 'user:adr0893', scopes: ['runs:create'] } } }));
     return { key, snap };
   };
   /** What the OIDC bearer lane leaves on `req` (no cookie riding along). */

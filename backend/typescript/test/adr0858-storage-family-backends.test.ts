@@ -13,6 +13,11 @@
  *   - the dropped limits stay dropped;
  *   - every backend's document validates against the vendored v2 schema;
  *   - a new registered adapter for one of these surfaces reds until it is mapped.
+ *
+ * Tracker TST-BFA-9. Red when: the memory presign facet ignores the test seam; durable sql is
+ * named postgres or durable queueBus gains a backend name; pgvector maps to
+ * another enum; the probed families stop reaching the document; a dropped limit
+ * comes back.
  */
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { readdirSync, readFileSync } from 'node:fs';
@@ -29,7 +34,7 @@ import { STORAGE_FAMILIES, v2AdvertisedStorageFamilies, storageFamilyFacets } fr
 type Rec = Record<string, unknown>;
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const V2 = join(ROOT, 'schemas', 'v2');
-const CONFIG = { port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false } as AppConfig;
+const CONFIG: AppConfig = { port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false };
 
 const ENV_KEYS = [
   'OPENWOP_SURFACE_BACKEND', 'OPENWOP_SURFACE_SQL', 'OPENWOP_SURFACE_VECTOR', 'OPENWOP_SURFACE_QUEUEBUS',
@@ -59,7 +64,7 @@ function withEnv(env: Partial<Record<(typeof ENV_KEYS)[number], string>>): Rec {
 
 function validator() {
   const ajv = new Ajv2020({ strict: false, allErrors: true });
-  (addFormats as unknown as (a: unknown) => void)(ajv);
+  addFormats(ajv);
   for (const f of readdirSync(V2)) {
     if (!f.endsWith('.json')) continue;
     try { ajv.addSchema(JSON.parse(readFileSync(join(V2, f), 'utf8')) as Rec, f); } catch { /* sibling's own test */ }

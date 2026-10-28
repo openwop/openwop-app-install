@@ -4,6 +4,19 @@
  * sqlite backend: signed successful delivery, exponential-backoff retry through
  * to dead-letter, and the claim lease that makes the queue crash-recoverable /
  * multi-instance-safe.
+ *
+ * ADR 0747 — the worker signs with the SUBSCRIPTION's secret at send time, not
+ * the copy on the queue row (which may be stale after a rotation). The
+ * signature case gives the row and the subscription DIFFERENT secrets so the
+ * two are distinguishable (round 1 used 'shh' for both).
+ * The lease is asserted on BOTH claim queries: the plain LIMIT query and the
+ * RFC 0215 lane query the worker uses with `onePerSubscription` (they carry
+ * separate copies of the lease clause; round-1 probe dq-lease-lane was vacuous
+ * when only the first was exercised).
+ * Witnessed: scheme re-check bypassed → the http:// case red; dev flag ignored →
+ * its case red; the OpenWOP-* signature or webhook-id diverging → their cases
+ * red; redirects followed → the signed-POST case red; off-by-one dead-letter or
+ * no backoff → their cases red.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHmac } from 'node:crypto';
@@ -137,6 +150,8 @@ describe('durable webhook delivery queue', () => {
     // RFC 0093 §A.1-A.2 — every delivery refuses redirects and rides the
     // egress-guard dispatcher (pinned-resolution re-validation).
     expect(init!.redirect).toBe('error');
+    // The egress dispatcher is not exported, so presence is the most this file
+    // can pin; its pinned-resolution behaviour is the egress-guard suite's claim.
     expect(init!.dispatcher).toBeDefined();
 
     // Terminal: nothing more is due, even far in the future.
@@ -159,10 +174,12 @@ describe('durable webhook delivery queue', () => {
   });
 
   it('ADR 0538 / RFC 0165 §C.1 — the X-openwop-Signature verifies per webhooks.md, and the OpenWOP-* family verifies the SAME bytes', async () => {
-    const secret = 'shh';
+    const secret = 'shh'; // the SUBSCRIPTION's secret (beforeEach) — the one the subscriber holds
     const payload = JSON.stringify({ type: 'run.completed', runId: 'r1' });
     const fetchSpy = fetchMock.mockResolvedValue(new UndiciResponse(null, { status: 200 }));
-    await storage.enqueueWebhookDelivery(makeDelivery({ deliveryId: 'sig', secret, payload }));
+    // The row carries a DIFFERENT, stale secret: a signer reading the row would
+    // produce a signature the subscriber cannot verify.
+    await storage.enqueueWebhookDelivery(makeDelivery({ deliveryId: 'sig', secret: 'stale-row-secret', payload }));
 
     await processDueWebhookDeliveries(storage, 'worker-a', T0);
     const headers = (fetchSpy.mock.calls[0]![1]!.headers ?? {}) as Record<string, string>;
@@ -228,6 +245,19 @@ describe('durable webhook delivery queue', () => {
     // Once the lease expires, another instance re-claims it.
     const reclaim = await storage.claimDueWebhookDeliveries('worker-b', T0 + leaseMs + 1, leaseMs, 10);
     expect(reclaim.map((d) => d.deliveryId)).toEqual(['lease']);
+    expect(reclaim[0]!.claimedBy).toBe('worker-b');
+  });
+
+  it('the RFC 0215 lane claim (onePerSubscription) honours the same lease', async () => {
+    await storage.enqueueWebhookDelivery(makeDelivery({ deliveryId: 'lease-lane' }));
+    const leaseMs = 30_000;
+    const lane = { onePerSubscription: true } as const;
+
+    const first = await storage.claimDueWebhookDeliveries('worker-a', T0, leaseMs, 10, lane);
+    expect(first.map((d) => d.deliveryId)).toEqual(['lease-lane']);
+    expect(await storage.claimDueWebhookDeliveries('worker-b', T0 + 5_000, leaseMs, 10, lane)).toEqual([]);
+    const reclaim = await storage.claimDueWebhookDeliveries('worker-b', T0 + leaseMs + 1, leaseMs, 10, lane);
+    expect(reclaim.map((d) => d.deliveryId)).toEqual(['lease-lane']);
     expect(reclaim[0]!.claimedBy).toBe('worker-b');
   });
 });

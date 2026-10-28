@@ -579,7 +579,11 @@ async function selectAuthorizedConnection(input: ConnectionSelectInput): Promise
   const all = (await tenantRows(input.tenantId)).filter((c) => c.provider === input.provider && c.status === 'active');
   // Most-specific ordering: user (acting) → org → workspace.
   const userConn = ownConnection(all, input.actingUserId, await actingUserIds(input.tenantId, input.actingUserId));
-  const orgConn = input.orgId ? all.find((c) => c.orgId === input.orgId) : all.find((c) => c.orgId);
+  // A host-attributed send has no human whose org credentials it may use.
+  // Do not let an unrelated org row shadow its workspace connection. Explicit
+  // org requests still fail closed below rather than fall through on denial.
+  const orgConn = input.orgId ? all.find((c) => c.orgId === input.orgId)
+    : input.actingUserId ? all.find((c) => c.orgId) : undefined;
   const wsConn = all.find((c) => !c.userId && !c.orgId);
   const chosen = userConn ?? orgConn ?? wsConn;
   if (!chosen) return null;

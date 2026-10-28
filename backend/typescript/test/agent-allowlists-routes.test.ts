@@ -3,6 +3,14 @@
  * Drives the real app: super-admin gate on every route, list dispatchable agents,
  * read manifest/override/effective + tool catalog, upsert + clear an override
  * (full-replace), validation, and a 404 for an unknown/invisible agent.
+ *
+ * Tracker TST-BKW-2. The superadmin gate is witnessed with an AUTHENTICATED
+ * non-superadmin (an anonymous cookie session, cookies ON): with cookies off the
+ * auth middleware answered 401 before the route's gate ran, so the old case
+ * could not fail. Red when `requireSuperadmin` stops gating (403 message), the
+ * tool-id / array validation is dropped (exact messages), `effective` stops
+ * unioning the ADR 0315 default-on baseline, the default-on list changes, the
+ * clear-twice 404 or the unknown-agent 404 goes — each sabotage-witnessed (w65).
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -17,7 +25,11 @@ describe('agent-allowlists admin routes (sqlite memory app)', () => {
 
   beforeAll(async () => {
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
-    process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
+    process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
+    // Cookies ON: a bearer-less request becomes an anonymous (non-superadmin)
+    // session that REACHES the route, so the superadmin refusal is observable.
+    delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
+    delete process.env.OPENWOP_SUPERADMIN_TENANTS;
     const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
     await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   });
@@ -31,9 +43,20 @@ describe('agent-allowlists admin routes (sqlite memory app)', () => {
     return { status: res.status, body: raw as T };
   }
 
-  it('rejects a non-super-admin caller (no bearer ⇒ not 200)', async () => {
-    const r = await call('GET', `${ADMIN}/agents`, undefined, false);
-    expect([401, 403]).toContain(r.status);
+  it('rejects a non-super-admin caller on every route (403, the superadmin refusal)', async () => {
+    const REFUSAL = 'Agent tool-allowlist administration requires a superadmin principal.';
+    const enc = encodeURIComponent('core.openwop.agents.supervisor.default');
+    const legs: Array<[string, string, unknown]> = [
+      ['GET', `${ADMIN}/agents`, undefined],
+      ['GET', `${ADMIN}/agents/${enc}`, undefined],
+      ['PUT', `${ADMIN}/agents/${enc}`, { toolAllowlist: ['openwop:x'] }],
+      ['DELETE', `${ADMIN}/agents/${enc}`, undefined],
+    ];
+    for (const [method, path, body] of legs) {
+      const r = await call<{ error?: string; message?: string }>(method, path, body, false);
+      expect(r.status, `${method} ${path}`).toBe(403);
+      expect(r.body.message, `${method} ${path}`).toBe(REFUSAL);
+    }
   });
 
   it('lists dispatchable agents with their manifest allowlist', async () => {
@@ -93,8 +116,13 @@ describe('agent-allowlists admin routes (sqlite memory app)', () => {
   it('validates the override body (bad tool id and non-array → 400)', async () => {
     const list = await call<{ agents: Array<{ agentId: string }> }>('GET', `${ADMIN}/agents`);
     const enc = encodeURIComponent(list.body.agents[0]!.agentId);
-    expect((await call('PUT', `${ADMIN}/agents/${enc}`, { toolAllowlist: ['not-a-tool-id'] })).status).toBe(400);
-    expect((await call('PUT', `${ADMIN}/agents/${enc}`, { toolAllowlist: 'nope' })).status).toBe(400);
+    const badId = await call<{ error?: string; message?: string }>('PUT', `${ADMIN}/agents/${enc}`, { toolAllowlist: ['not-a-tool-id'] });
+    expect(badId.status).toBe(400);
+    expect(badId.body).toMatchObject({ error: 'validation_error', message: 'Invalid tool id `not-a-tool-id` — expected `openwop:<id>`.' });
+    // A string is refused by the ARRAY check, not char-by-char by the tool-id check.
+    const notArray = await call<{ error?: string; message?: string }>('PUT', `${ADMIN}/agents/${enc}`, { toolAllowlist: 'nope' });
+    expect(notArray.status).toBe(400);
+    expect(notArray.body).toMatchObject({ error: 'validation_error', message: '`toolAllowlist` MUST be an array of tool ids.' });
   });
 
   it('404s an unknown agent on read and write (no existence leak)', async () => {

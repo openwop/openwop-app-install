@@ -75,6 +75,8 @@ function fakeAdapter(
     getMetrics: async () => ({ outcome: 'unsupported', platform: 'meta' }),
     getAccountMetrics: async (args) => { reads.push(args); return read(args); },
     updateBudget: async () => ({ outcome: 'unsupported', platform: 'meta' }),
+    setDeliveryStatus: async () => ({ outcome: 'unsupported', platform: 'meta' }),
+    getCampaignBudget: async () => ({ outcome: 'no_connection' }),
   };
   return { adapter, reads };
 }

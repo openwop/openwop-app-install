@@ -44,8 +44,18 @@ describe('v2 webhooks.retryPolicy is the worker policy', () => {
   });
 
   it('"exponential" is true of the worker: each retry waits strictly longer, below the cap', () => {
+    // "Strictly longer" alone is also true of a LINEAR backoff (probe
+    // 8fw4g4-whr-linear-backoff, vacuous), so assert the RATIO: below the cap
+    // every retry waits exactly twice the previous one (measured: 2 s, 4 s, 8 s,
+    // 16 s, 32 s for attempts 1–5).
+    let checked = 0;
     for (let n = 1; n < WEBHOOK_MAX_ATTEMPTS; n += 1) {
       expect(webhookBackoffMs(n + 1), `attempt ${n + 1} vs ${n}`).toBeGreaterThan(webhookBackoffMs(n));
+      if (webhookBackoffMs(n + 1) < 300_000) {
+        expect(webhookBackoffMs(n + 1), `attempt ${n + 1} doubles attempt ${n}`).toBe(2 * webhookBackoffMs(n));
+        checked += 1;
+      }
     }
+    expect(checked, 'the ratio was checked across every advertised retry').toBe(WEBHOOK_MAX_ATTEMPTS - 1);
   });
 });

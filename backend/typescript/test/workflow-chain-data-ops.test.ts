@@ -9,10 +9,19 @@
  * with conditional edges: ADR 0201 made expandChain propagate + map the wire
  * EdgeCondition → the host executor's {path,op,value}, so a router's matched
  * `branches` labels gate the downstream edges (content-router chain).
+ *
+ * Wave 64: the typeId check reads the packs' own manifests (was a hand-copied set).
+ * Cut as covered (each covering case confirmed red by probe): the isolated
+ * `evaluateCondition` case (by "ONLY the matched branch is released", 8fw5g1-do-router-low)
+ * and the aggregate-numeric / aggregate-text node cases (by
+ * workflow-chain-data-ops-execution "sums + formats the REAL items array",
+ * 8fw5g1-do-agg-sum-cover / -text-cover). Sabotage-witnessed: router conditions, the
+ * approval-gated upsert edge, the upsert operationId param, aggregate-table.
  */
 
 import { beforeAll, describe, expect, it } from 'vitest';
 import { dirname, join } from 'node:path';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
   loadWorkflowChainPacks,
@@ -22,11 +31,10 @@ import {
   _resetChainRegistryForTest,
 } from '../src/host/workflowChainPackLoader.js';
 // The flow-pack node implementations (the executable contract these chains ride).
-import {
-  aggregateNumericNode,
-  aggregateTextNode,
-  aggregateTableNode,
-} from '../../../packs/core.openwop.flow/index.mjs';
+// aggregate-numeric / aggregate-text run for real in workflow-chain-data-ops-execution
+// ("sums + formats the REAL items array"); only aggregate-table (to-table is not
+// executed there) is exercised here.
+import { aggregateTableNode } from '../../../packs/core.openwop.flow/index.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const IN_TREE_ROOT = join(__dirname, '..', '..', '..', 'examples', 'workflow-chain-packs');
@@ -40,17 +48,20 @@ beforeAll(() => {
 const PACK = 'core.openwop.workflows.data-ops';
 const CHAINS = ['data-ops.rollup', 'data-ops.to-table', 'data-ops.records-to-system', 'data-ops.content-router'];
 
-const KNOWN_TYPEIDS = new Set([
-  'core.flow.aggregate-numeric',
-  'core.flow.aggregate-text',
-  'core.flow.aggregate-table',
-  'core.flow.router',
-  'core.flow.noop',
-  'core.ai.chatCompletion',
-  'core.chat.approvalGate',
-  'core.openwop.http.openapi-call',
-  'feature.notifications.nodes.notify',
-]);
+/**
+ * The SSoT for "registered": every node typeId a node pack in the repo's `packs/`
+ * declares (`pack.json` → `nodes[].typeId`). Read, never hand-copied — a copied list
+ * stayed green when a pack dropped a node.
+ */
+const PACKS_ROOT = join(__dirname, '..', '..', '..', 'packs');
+const KNOWN_TYPEIDS = new Set(
+  readdirSync(PACKS_ROOT, { withFileTypes: true })
+    .filter((d) => d.isDirectory() && existsSync(join(PACKS_ROOT, d.name, 'pack.json')))
+    .flatMap((d) => {
+      const manifest = JSON.parse(readFileSync(join(PACKS_ROOT, d.name, 'pack.json'), 'utf8')) as { nodes?: Array<{ typeId?: unknown }> };
+      return (manifest.nodes ?? []).map((n) => n.typeId).filter((t): t is string => typeof t === 'string');
+    }),
+);
 
 describe('data-ops pack — discovery + typeIds', () => {
   it('loads all chains with the Data Ops category', () => {
@@ -81,18 +92,6 @@ describe('data-ops.content-router — edge conditions map wire→host + gate (AD
     expect(conds).toContainEqual({ path: 'branches', op: 'contains', value: 'high' });
     expect(conds).toContainEqual({ path: 'branches', op: 'contains', value: 'low' });
     expect(conds).toContainEqual({ path: 'branches', op: 'contains', value: 'normal' });
-  });
-
-  it('the mapped conditions gate via the REAL executor evaluateCondition', async () => {
-    const { evaluateCondition } = await import('../src/executor/scheduler.js');
-    const chain = getChain('data-ops.content-router')!.chain;
-    const def = expandChain(chain, { params: { record: { priority: 'high' } } });
-    const highEdge = (def.edges ?? []).find((e) => e.condition?.value === 'high')!;
-    const lowEdge = (def.edges ?? []).find((e) => e.condition?.value === 'low')!;
-    // Router emitted branches:['high'] → only the high edge's condition holds.
-    const routerOut = { branches: ['high'], value: { priority: 'high' } };
-    expect(evaluateCondition(highEdge.condition!, routerOut)).toBe(true);
-    expect(evaluateCondition(lowEdge.condition!, routerOut)).toBe(false);
   });
 
   it('ONLY the matched branch is released when the router runs (ADR 0208 control-flow — ECR-5)', async () => {
@@ -139,16 +138,6 @@ describe('data-ops pack — the aggregator node CONTRACT the chains depend on', 
   // These chains are only honest if the aggregate nodes actually reduce an
   // items array as the templates assume. Exercise the real implementations.
   const items = [{ name: 'Widget', amount: 9.5 }, { name: 'Gadget', amount: 20 }];
-
-  it('aggregate-numeric sums the amountField (rollup depends on this)', async () => {
-    const out = await aggregateNumericNode({ inputs: { items }, config: { op: 'sum', path: 'amount' } });
-    expect(out.outputs).toEqual({ result: 29.5, count: 2 });
-  });
-
-  it('aggregate-text formats each record via the line template (rollup depends on this)', async () => {
-    const out = await aggregateTextNode({ inputs: { items }, config: { template: '- {{name}}: {{amount}}', separator: '\n' } });
-    expect(out.outputs.text).toBe('- Widget: 9.5\n- Gadget: 20');
-  });
 
   it('aggregate-table extracts the named columns (to-table depends on this)', async () => {
     const out = await aggregateTableNode({ inputs: { items }, config: { columns: [{ path: 'name' }, { path: 'amount' }] } });

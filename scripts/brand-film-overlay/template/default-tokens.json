@@ -1,0 +1,153 @@
+{
+  "$description": "openwop-app's film identity (DESIGN.md \u00a76.1): this repo's overlay on the upstream brand-film default, applied by scripts/sync-brand-film.sh. A film scaffolded here renders in openwop's identity; anything a brand leaves out inherits from it.",
+  "brand": {
+    "name": "OpenWOP",
+    "sources": [
+      "openwop-app DESIGN.md \u00a76.1 (Video: the film identity)",
+      "openwop-app frontend/react/public/design-tokens.json",
+      "openwop-app frontend/react/src/brand/defaults.ts (fontsHref)",
+      "openwop-app frontend/react/public/OpenWOP.svg"
+    ],
+    "fontsHref": "https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400..700&family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500&display=swap",
+    "fontFiles": [],
+    "substitutions": {},
+    "logo": {
+      "onStage": "assets/logo-on-stage.svg",
+      "onCard": "assets/logo-on-card.svg",
+      "widthPx": 120,
+      "rule": "Use the supplied files. Never redraw, recolour or crop a mark; no logo means the brand name set in the headline face."
+    },
+    "signature": {
+      "openingCard": "Stage (ink) ground, a two-line headline in the headline face at openingLine size, one accent word (accent-on-stage). Complete from frame 0.",
+      "sceneLabel": "Numbered mono label, '01 \u00b7 where we started', in stage-muted with the number in accent-on-stage.",
+      "sceneTitle": "One line at sceneTitle size; at most one accent word or phrase.",
+      "proof": "Pictures first. A command card or screenshot may appear, small, as evidence; anything shown as output is real output.",
+      "endCard": "Card (paper) ground: one line at endCardLine size, one sentence, the page URL."
+    },
+    "pronunciations": [
+      {
+        "written": "OpenWOP",
+        "spoken": "open wop"
+      },
+      {
+        "written": "openwop.dev",
+        "spoken": "open wop dot dev"
+      }
+    ]
+  },
+  "video": {
+    "canvas": {
+      "width": 1920,
+      "height": 1080,
+      "fps": 30,
+      "marginLeftPx": 160
+    },
+    "type": {
+      "headline": "serif",
+      "body": "sans",
+      "label": "mono",
+      "sizesPxAt1080p": {
+        "openingLine": 120,
+        "sceneTitle": 76,
+        "endCardLine": 160,
+        "bodyMin": 23,
+        "bodyMax": 36,
+        "monoLabelMin": 20,
+        "monoLabelMax": 26,
+        "readableFloor": 20
+      }
+    },
+    "story": {
+      "durationSecondsMin": 45,
+      "durationSecondsMax": 75,
+      "beats": [
+        "problem",
+        "stakes",
+        "turn",
+        "proof",
+        "payoff"
+      ]
+    },
+    "voice": {
+      "maxWordsPerSentence": 18,
+      "narrator": {
+        "provider": "ElevenLabs",
+        "model": "eleven_v4",
+        "voiceName": "Christopher - Smooth, calm and very English",
+        "voiceId": "G17SuINrv2H9FC6nvetn"
+      }
+    },
+    "motion": {
+      "revealMsMin": 400,
+      "revealMsMax": 800,
+      "primaryMovementsAtOnce": 1
+    },
+    "sound": {
+      "narrationLufs": -16,
+      "ceilingDbtp": -1.5,
+      "effectsBelowVoiceDb": 12,
+      "effects": [
+        "tick",
+        "sweep",
+        "chime",
+        "refuse",
+        "wait",
+        "pop"
+      ],
+      "musicDefault": "none"
+    },
+    "accessibility": {
+      "minTextContrast": 4.5,
+      "captions": "required",
+      "autoplay": false
+    },
+    "color": {
+      "stage": "#1a1a17",
+      "stage-text": "#f4f1ea",
+      "stage-muted": "#a8a39a",
+      "stage-rule": "#4a4842",
+      "card": "#f4f1ea",
+      "card-text": "#1a1a17",
+      "card-muted": "#4a4842",
+      "card-faint": "#66624f",
+      "accent": "oklch(58% 0.13 40)",
+      "accent-on-stage": "oklch(72% 0.13 40)",
+      "accent-on-card": "oklch(46% 0.15 40)"
+    },
+    "fontFamily": {
+      "headline": "\"Bricolage Grotesque\", \"Bricolage Grotesque Fallback\", ui-sans-serif, system-ui, sans-serif",
+      "body": "\"Geist\", \"Geist Fallback\", ui-sans-serif, system-ui, sans-serif",
+      "label": "\"Geist Mono\", ui-monospace, \"SF Mono\", Menlo, monospace"
+    }
+  },
+  "contrast": [
+    [
+      "stage-text",
+      "stage"
+    ],
+    [
+      "stage-muted",
+      "stage"
+    ],
+    [
+      "accent-on-stage",
+      "stage"
+    ],
+    [
+      "card-text",
+      "card"
+    ],
+    [
+      "card-muted",
+      "card"
+    ],
+    [
+      "card-faint",
+      "card"
+    ],
+    [
+      "accent-on-card",
+      "card"
+    ]
+  ]
+}

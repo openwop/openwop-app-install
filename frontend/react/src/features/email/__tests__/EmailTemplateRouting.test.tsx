@@ -27,7 +27,10 @@ const client = vi.hoisted(() => ({
   listOrgs: vi.fn(), listTemplates: vi.fn(), getTemplate: vi.fn(), createTemplate: vi.fn(),
   updateTemplate: vi.fn(), deleteTemplate: vi.fn(), previewMarkdown: vi.fn(),
   listCampaigns: vi.fn(), createCampaign: vi.fn(), deleteCampaign: vi.fn(), sendCampaign: vi.fn(),
-  listSends: vi.fn(), listSegments: vi.fn(),
+  listSends: vi.fn(), listSegments: vi.fn(), listTopics: async () => ({ topics: [], max: 20 }),
+  // ADR 0955 — the sending-health card and the SMS segment hint.
+  getSendingHealth: async () => ({ state: null, window: { sent: 0, hardBounces: 0, complaints: 0 }, thresholds: { minSends: 500, complaintRate: 0.001, hardBounceRate: 0.02 }, canResume: false }),
+  smsSegments: () => 1,
   listTemplateVersions: vi.fn(async () => []), diffTemplateVersion: vi.fn(), restoreTemplateVersion: vi.fn(),
   TemplateVersionConflictError: class extends Error {},
   getEmailSettings: vi.fn(), putEmailSettings: vi.fn(), getProviderStatus: vi.fn(),

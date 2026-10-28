@@ -13,6 +13,11 @@
  * It had no symptom. Orphaned counters are unreadable, nothing errors, and the
  * teardown reports success. So the test has to assert the ABSENCE of rows nobody
  * would have noticed the presence of.
+ *
+ * Tracker TST-BGF-11. Red when `usageBucketMatchersForTenant` stops escaping
+ * `_`/`%`, drops the per-subject LIKE leg or the exact tenant row; when
+ * `managedUsageBucket` puts the subject in clear; or when a personal tenant gains
+ * a reserved bucket.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { managedUsageBucket, usageBucketMatchersForTenant } from '../src/providers/managedUsageScope.js';

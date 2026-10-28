@@ -5,6 +5,11 @@
  *
  * Laid out as the corpus vendors it (`conformance-fixtures/frontend-plugin-packs/`:
  * a manifest JSON beside its `ui/` entry), signed here with a throwaway key.
+ *
+ * TST-BWB-7 (grade-tests w62): red when the signature check is skipped (every "refuses a
+ * signature…" and the tamper case), when an entry without a tenant is accepted, when the
+ * statement hashes anything but the entry bytes on disk (tamper case), or when the
+ * fixture artifact is minted for any tenant but the trusted one.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import http from 'node:http';

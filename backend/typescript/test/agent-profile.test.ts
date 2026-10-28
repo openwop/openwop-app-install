@@ -14,6 +14,15 @@
  * Two distinct REAL tenants come from the test-login cookie sessions (each
  * email → its own personalTenant), the same device the site-page tests use.
  * A small pure-service block covers the spec→roster autonomy mapping table.
+ *
+ * TST-BLF-1. Red when: a spec level maps wrong, `draft-only` is not preserved,
+ * an activation duplicates a capability (or the CAS insert is a blind put), a
+ * revoke keeps the capability, `assistant` becomes tenant-electable, or the PUT
+ * honours the body's autonomy `level` over `roster.autonomyLevel` (ADR 0493).
+ * Tenant isolation is a recorded DOUBLE guard — the roster store is tenant-keyed
+ * (`requireOwnedAgent` → `getRosterEntry(tenantOf(req), id)`) and
+ * `getAgentProfile` re-checks `profile.tenantId` — so the cross-tenant cases
+ * assert the outer guard's own 404 message (`Agent not found.`).
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -113,6 +122,9 @@ async function makeAgent(client: Client, persona: string): Promise<string> {
   return bodyOf(created).rosterId;
 }
 
+/** The flat error envelope (middleware/errorEnvelope.ts). */
+interface ErrBody { error?: string; message?: string }
+
 /** The route's profile response shape (subset asserted in the tests). */
 interface ProfileResp {
   profileId: string;
@@ -146,7 +158,7 @@ describe('agent profile autonomy mapping (pure)', () => {
     expect(levelForSpecLevel('autonomous-within-policy')).toBe('auto');
   });
 
-  it('specLevelForLevel inverts the map, preserving draft-only for review (ADR 0101)', () => {
+  it('specLevelForLevel inverts the map, preserving draft-only for review (ADR 0493)', () => {
     expect(specLevelForLevel('guided')).toBe('execute-with-approval');
     expect(specLevelForLevel('auto')).toBe('autonomous-within-policy');
     expect(specLevelForLevel('review')).toBe('recommend');
@@ -155,7 +167,7 @@ describe('agent profile autonomy mapping (pure)', () => {
   });
 });
 
-describe('backfillProfileReadPermissions (ADR 0102 migration)', () => {
+describe('backfillProfileReadPermissions (ADR 0102 per-tool permissions, migration)', () => {
   it('adds missing read tokens to profiles with permissions, idempotently; leaves permission-less profiles ungated', async () => {
     const t = 'tenant-backfill';
     const withPerms = 'host:bf-perms';
@@ -200,7 +212,7 @@ describe('resolveAgentToolPermissions (ADR 0102 wiring)', () => {
   });
 });
 
-describe('agent profile autonomy sync + data preservation (ADR 0101)', () => {
+describe('agent profile autonomy sync + data preservation (ADR 0493)', () => {
   it('syncAgentProfileAutonomy moves the stored level + specLevel in lockstep', async () => {
     const t = 'tenant-sync';
     const id = 'host:sync-1';
@@ -238,8 +250,9 @@ describe('agent profile autonomy sync + data preservation (ADR 0101)', () => {
     const id = 'host:cas-1';
     await upsertAgentProfile(t, id, { roleKey: 'r', autonomy: { specLevel: 'recommend' } });
     // Interleave: a user governance edit lands BETWEEN the heal's read and its
-    // swap. Simulated by racing both — whichever order the scheduler picks,
-    // the end state must contain BOTH the edit and the capability.
+    // swap. Simulated by racing both (UNFORCED: the interleaving is whatever the
+    // scheduler does) — whichever order it picks, the end state must contain
+    // BOTH the edit and the capability.
     await Promise.all([
       activateAgentCapability(t, id, 'challenge-authoring', { roleKey: 'r', autonomy: { specLevel: 'recommend' } }),
       upsertAgentProfile(t, id, { roleKey: 'r', permissions: { read: [], write: [], never: ['email.send'] }, autonomy: { specLevel: 'recommend' } }),
@@ -273,14 +286,14 @@ describe('agent profile autonomy sync + data preservation (ADR 0101)', () => {
     expect(p3?.capabilities).toContain('challenge-authoring');
     expect(p3?.capabilities).toContain('assistant');
     // Exactly two — a lost-then-merged insert must not duplicate either entry.
-    // (Scheduling usually makes both creators read-absent in the same tick and
-    // exercise the CAS-loser continue; the invariant holds either way.)
+    // The race is UNFORCED, but MEASURED: both creators read-absent in the same
+    // tick (w65 probe: replacing the CAS(null) insert with a blind put reds this).
     expect(p3?.capabilities).toHaveLength(2);
   });
 });
 
 describe('agent profile routes — happy path', () => {
-  it('PUT derives the profile autonomy from roster.autonomyLevel (ADR 0101 SSoT), not the body; GET round-trips', async () => {
+  it('PUT derives the profile autonomy from roster.autonomyLevel (ADR 0493 SSoT), not the body; GET round-trips', async () => {
     const a = await newTenantClient();
     const id = await makeAgent(a, 'Fin Close'); // default roster autonomy = auto
 
@@ -318,7 +331,7 @@ describe('agent profile routes — happy path', () => {
     });
     expect(first.status).toBe(200);
     const firstBody = bodyOf(first);
-    // The body asked for `auto`; the roster says `guided` → the SSoT wins (ADR 0101).
+    // The body asked for `auto`; the roster says `guided` → the SSoT wins (ADR 0493).
     expect(firstBody.autonomy.level).toBe('guided');
 
     const second = await a<ProfileResp>('PUT', `/host/openwop-app/agents/${id}/profile`, {
@@ -335,8 +348,9 @@ describe('agent profile routes — happy path', () => {
   it('GET 404s before any profile is written (no profile yet, but agent exists)', async () => {
     const a = await newTenantClient();
     const id = await makeAgent(a, 'No Profile Yet');
-    const get = await a('GET', `/host/openwop-app/agents/${id}/profile`);
+    const get = await a<ErrBody>('GET', `/host/openwop-app/agents/${id}/profile`);
     expect(get.status).toBe(404);
+    expect(get.body).toMatchObject({ error: 'not_found', message: 'Agent profile not found.' });
   });
 
   it('PUT rejects a malformed body (400)', async () => {
@@ -379,14 +393,17 @@ describe('agent profile routes — auth required', () => {
   });
 
   it('a request with no bearer (cookies disabled) is 401 for both GET and PUT', async () => {
+    // middleware/auth.ts answers before the route runs — that IS the claim.
     const get = await fetch(`${AUTH_BASE}/host/openwop-app/agents/host:anything-00000000/profile`);
     expect(get.status).toBe(401);
+    expect(((await get.json()) as ErrBody).error).toBe('unauthenticated');
     const put = await fetch(`${AUTH_BASE}/host/openwop-app/agents/host:anything-00000000/profile`, {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(SAMPLE_BODY),
     });
     expect(put.status).toBe(401);
+    expect(((await put.json()) as ErrBody).error).toBe('unauthenticated');
   });
 });
 
@@ -398,7 +415,9 @@ describe('agent profile routes — tenant isolation + fail-closed', () => {
     expect((await a('PUT', `/host/openwop-app/agents/${id}/profile`, SAMPLE_BODY)).status).toBe(200);
 
     // B reads A's agent id → 404 (the agent isn't in B's roster).
-    expect((await b('GET', `/host/openwop-app/agents/${id}/profile`)).status).toBe(404);
+    const bRead = await b<ErrBody>('GET', `/host/openwop-app/agents/${id}/profile`);
+    expect(bRead.status).toBe(404);
+    expect(bRead.body).toMatchObject({ error: 'not_found', message: 'Agent not found.' });
     // A can still read its own.
     expect((await a('GET', `/host/openwop-app/agents/${id}/profile`)).status).toBe(200);
   });
@@ -410,8 +429,9 @@ describe('agent profile routes — tenant isolation + fail-closed', () => {
     expect((await a('PUT', `/host/openwop-app/agents/${id}/profile`, SAMPLE_BODY)).status).toBe(200);
 
     // B's PUT against A's agent fails closed.
-    const bWrite = await b('PUT', `/host/openwop-app/agents/${id}/profile`, { ...SAMPLE_BODY, roleKey: 'hijacked' });
+    const bWrite = await b<ErrBody>('PUT', `/host/openwop-app/agents/${id}/profile`, { ...SAMPLE_BODY, roleKey: 'hijacked' });
     expect(bWrite.status).toBe(404);
+    expect(bWrite.body).toMatchObject({ error: 'not_found', message: 'Agent not found.' });
 
     // A's profile is untouched.
     const after = await a<{ roleKey: string }>('GET', `/host/openwop-app/agents/${id}/profile`);
@@ -421,8 +441,12 @@ describe('agent profile routes — tenant isolation + fail-closed', () => {
 
   it('fails closed on an unknown agent id (404 for both GET and PUT)', async () => {
     const a = await newTenantClient();
-    expect((await a('GET', '/host/openwop-app/agents/host:nope-00000000/profile')).status).toBe(404);
-    expect((await a('PUT', '/host/openwop-app/agents/host:nope-00000000/profile', SAMPLE_BODY)).status).toBe(404);
+    const get = await a<ErrBody>('GET', '/host/openwop-app/agents/host:nope-00000000/profile');
+    expect(get.status).toBe(404);
+    expect(get.body?.message).toBe('Agent not found.');
+    const put = await a<ErrBody>('PUT', '/host/openwop-app/agents/host:nope-00000000/profile', SAMPLE_BODY);
+    expect(put.status).toBe(404);
+    expect(put.body?.message).toBe('Agent not found.');
   });
 });
 
@@ -445,9 +469,10 @@ describe('ADR 0373 — capability election routes', () => {
     const a = await newTenantClient();
     const id = await makeAgent(a, 'Research Analyst');
 
-    // Not elected yet.
-    const before = await a<{ capabilities?: string[] }>('GET', `/host/openwop-app/agents/${id}/profile`);
-    expect(bodyOf(before).capabilities ?? []).not.toContain('deep-investigation');
+    // Not elected yet: no profile exists at all.
+    const before = await a<ErrBody>('GET', `/host/openwop-app/agents/${id}/profile`);
+    expect(before.status).toBe(404);
+    expect(before.body?.message).toBe('Agent profile not found.');
 
     const elected = await a<{ capabilities: string[] }>('PUT', `/host/openwop-app/agents/${id}${DEEP}`);
     expect(elected.status).toBe(200);
@@ -478,31 +503,43 @@ describe('ADR 0373 — capability election routes', () => {
     // it; without this test the allowlist is just a comment.
     const a = await newTenantClient();
     const id = await makeAgent(a, 'Not The Assistant');
-    const res = await a('PUT', `/host/openwop-app/agents/${id}/capabilities/assistant`);
+    const res = await a<ErrBody>('PUT', `/host/openwop-app/agents/${id}/capabilities/assistant`);
     expect(res.status, 'assistant is feature-owned, not tenant-electable').toBe(404);
-    const profile = await a<{ capabilities?: string[] }>('GET', `/host/openwop-app/agents/${id}/profile`);
-    expect(bodyOf(profile).capabilities ?? []).not.toContain('assistant');
+    expect(res.body).toMatchObject({ error: 'not_found', message: 'Capability not found.' });
+    // Nothing was written: the refused election minted no profile.
+    const profile = await a<ErrBody>('GET', `/host/openwop-app/agents/${id}/profile`);
+    expect(profile.status).toBe(404);
+    expect(profile.body?.message).toBe('Agent profile not found.');
   });
 
   it('404s an unknown capability name without confirming it exists', async () => {
     const a = await newTenantClient();
     const id = await makeAgent(a, 'Analyst');
-    expect((await a('PUT', `/host/openwop-app/agents/${id}/capabilities/not-a-capability`)).status).toBe(404);
+    const res = await a<ErrBody>('PUT', `/host/openwop-app/agents/${id}/capabilities/not-a-capability`);
+    expect(res.status).toBe(404);
+    expect(res.body?.message).toBe('Capability not found.');
   });
 
   it('tenant isolation — tenant B cannot elect on tenant A\'s agent', async () => {
     const a = await newTenantClient();
     const b = await newTenantClient();
     const id = await makeAgent(a, 'A-owned Analyst');
-    expect((await b('PUT', `/host/openwop-app/agents/${id}${DEEP}`)).status, 'cross-tenant elect must 404').toBe(404);
-    expect((await b('DELETE', `/host/openwop-app/agents/${id}${DEEP}`)).status, 'cross-tenant revoke must 404').toBe(404);
-    // A's agent is untouched.
-    const profile = await a<{ capabilities?: string[] }>('GET', `/host/openwop-app/agents/${id}/profile`);
-    expect(bodyOf(profile).capabilities ?? []).not.toContain('deep-investigation');
+    const elect = await b<ErrBody>('PUT', `/host/openwop-app/agents/${id}${DEEP}`);
+    expect(elect.status, 'cross-tenant elect must 404').toBe(404);
+    expect(elect.body?.message).toBe('Agent not found.');
+    const revoke = await b<ErrBody>('DELETE', `/host/openwop-app/agents/${id}${DEEP}`);
+    expect(revoke.status, 'cross-tenant revoke must 404').toBe(404);
+    expect(revoke.body?.message).toBe('Agent not found.');
+    // A's agent is untouched: no profile was minted by B's election.
+    const profile = await a<ErrBody>('GET', `/host/openwop-app/agents/${id}/profile`);
+    expect(profile.status).toBe(404);
+    expect(profile.body?.message).toBe('Agent profile not found.');
   });
 
   it('fails closed on an unknown agent id', async () => {
     const a = await newTenantClient();
-    expect((await a('PUT', `/host/openwop-app/agents/host:nope-00000000${DEEP}`)).status).toBe(404);
+    const res = await a<ErrBody>('PUT', `/host/openwop-app/agents/host:nope-00000000${DEEP}`);
+    expect(res.status).toBe(404);
+    expect(res.body?.message).toBe('Agent not found.');
   });
 });

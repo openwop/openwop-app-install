@@ -8,7 +8,7 @@
  *
  * Authority parity (hard rule #1): both resolve org scope through the same
  * `listOrgs` + `resolveEffectiveAccess` predicate the comments routes enforce —
- * `list` needs `workspace:read`, `post` needs `workspace:write` (matching the
+ * `list` needs `workspace:read`, `post` needs `host:comments:write` (ADR 0947 D2; matching the
  * GET/POST route scopes). Read-before-write (hard rule #4): `list` grounds the
  * reviewer before it posts. The read fails EMPTY without an acting user; the
  * write (an action tool) fails TYPED. The comment is authored by the acting
@@ -18,7 +18,7 @@
 
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
 import { resolveActionOrgScope, resolveReadOrgScope, str, toolEmpty, toolError, toolOk } from '../../host/agentToolKit.js';
-import { listThread, createComment, isResourceType, RESOURCE_TYPES, type ResourceType } from './commentsService.js';
+import { listThread, createComment, isResourceType, RESOURCE_TYPES, type ResourceType, COMMENT_WRITE_SCOPE } from './commentsService.js';
 import { emitCommentNotification } from './notifications.js';
 import { OpenwopError } from '../../types.js';
 
@@ -99,7 +99,7 @@ export function registerCommentsAgentTools(): void {
     },
     async run(input, scope) {
       // Action tool: fail TYPED.
-      const resolved = await resolveActionOrgScope(scope, COMMENTS_GATE, str(input.orgId));
+      const resolved = await resolveActionOrgScope(scope, { ...COMMENTS_GATE, requiredScope: COMMENT_WRITE_SCOPE }, str(input.orgId));
       if ('error' in resolved) return resolved.error;
       try {
         const parentId = str(input.parentId);

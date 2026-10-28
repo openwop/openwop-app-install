@@ -272,7 +272,7 @@ export function useTurnTransport(
             } catch { /* best-effort hydration — a fresh exchange still works */ }
           }
         } else {
-          conversationRef.current = await openConversationSession({ provider: config.provider, model: config.model, credentialRef: config.credentialRef, chatSessionId: sessionRef.current.id, ...(opts?.webSearch ? { webSearch: true } : {}) });
+          conversationRef.current = await openConversationSession({ provider: config.provider, model: config.model, credentialRef: config.credentialRef, chatSessionId: sessionRef.current.id, ...(opts?.webSearch ? { webSearch: true } : {}), ...(opts?.activeAgentId ? { agentScope: opts.activeAgentId } : {}) });
           const openedRunId = conversationRef.current.runId;
           conversationTurnsRef.current = new Map();
           conversationCursorRef.current = 0;

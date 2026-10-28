@@ -15,8 +15,9 @@ import { createHash } from 'node:crypto';
 import { DurableCollection } from '../../../host/hostExtPersistence.js';
 
 export type VideoJobStatus = 'submitting' | 'processing' | 'downloading' | 'completed' | 'failed';
-/** avatar = HeyGen-class script→avatar; t2v = frontier text→video (ADR 0404 P4). */
-export type VideoJobKind = 'avatar' | 't2v';
+/** avatar = HeyGen-class script→avatar; t2v = frontier text→video (ADR 0404 P4);
+ *  i2v = frontier image→video from a grounded still or a product photo (ADR 0945 D7). */
+export type VideoJobKind = 'avatar' | 't2v' | 'i2v';
 
 export interface VideoJob {
   /** `${tenantId}:${requestHash}` — the dedup key. */
@@ -35,8 +36,15 @@ export interface VideoJob {
   /** Asset-lineage inputs stamped at submit so ANY finalizer (incl. the status/
    *  resolve path, which lacks the original request) can mint the asset. */
   promptSnippet?: string;
+  /** ADR 0945 D4 — sha256 of the FULL prompt/script (the snippet is cut). */
+  promptHash?: string;
   lineageModel?: string;
   rightsNote?: string;
+  /** ADR 0945 D7 (i2v) — the still the video animates, pinned by id + hash, and
+   *  the product it depicts (verified at submit). */
+  sourceAssetId?: string;
+  sourceSha256?: string;
+  productId?: string;
   createdBy: string;
   createdAt: string;
   updatedAt: string;
@@ -58,10 +66,12 @@ const jobs = new DurableCollection<VideoJob>('creative-video:job', (j) => j.jobI
  *  (ADR 0404 grade-data CV-1). `model` + t2v params are included so the SAME prompt
  *  on a DIFFERENT model is a distinct job, never a collision that returns the first
  *  model's asset or under-charges (ADR 0404 P4). */
-export function requestHashFor(input: { provider: string; orgId?: string; kind?: VideoJobKind; model?: string; script: string; avatarId?: string; voiceId?: string; width?: number; height?: number; durationSec?: number }): string {
+export function requestHashFor(input: { provider: string; orgId?: string; kind?: VideoJobKind; model?: string; script: string; avatarId?: string; voiceId?: string; width?: number; height?: number; durationSec?: number; sourceSha256?: string }): string {
   const canonical = JSON.stringify({
     p: input.provider, o: input.orgId ?? '', k: input.kind ?? 'avatar', m: input.model ?? '', s: input.script,
     a: input.avatarId ?? '', v: input.voiceId ?? '', w: input.width ?? 0, h: input.height ?? 0, d: input.durationSec ?? 0,
+    // ADR 0945 D7 — only when present, so every pre-existing avatar/t2v hash is unchanged.
+    ...(input.sourceSha256 ? { i: input.sourceSha256 } : {}),
   });
   return createHash('sha256').update(canonical, 'utf8').digest('hex');
 }

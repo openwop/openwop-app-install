@@ -4,9 +4,11 @@
  *
  *  1. A colon-suffixed operation on a BOUND id (`/runs/<t>%2F<o>:diff`) answered
  *     `403 id_tenant_mismatch` — the path guard captured `<o>:diff` as the
- *     opaque segment and the 16–128 grammar refused the `:`. `:pause` and
- *     `:resume` have NO route on this host; after the fix they answer the
- *     honest `404 not_found`, not a false tenant refusal.
+ *     opaque segment and the 16–128 grammar refused the `:`. (CORRECTED in
+ *     wave 63: this header used to say `:pause`/`:resume` had no route and
+ *     answered 404. ADR 0632 routes `:pause`; a terminal run answers
+ *     `409 run_terminal`, which is what case 2 asserts.) A FOREIGN tenant
+ *     segment is still refused `403 id_tenant_mismatch` (`v2Identity.ts:215`).
  *  2. Bulk-cancel over the cap answered `400 validation_error` WITHOUT
  *     `details.maxRunIds` (§Cancel: MUST carry it).
  *  3. `tags` limits were not enforced (101 → 201; MUST be 400) and `tags` /
@@ -30,25 +32,38 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
 const V2 = { 'OpenWOP-Version': '2' };
-async function req(method: string, path: string, headers: Record<string, string> = {}, body?: unknown) {
+/** The fields these legs read off a response body (no `any`). */
+interface Body {
+  runId?: string; status?: string; error?: string; message?: string;
+  details?: { status?: string; runStatus?: string; maxRunIds?: number };
+  tags?: unknown; metadata?: Record<string, unknown>; divergedAtSeq?: number | null; eventDiffs?: unknown[];
+}
+async function req(method: string, path: string, headers: Record<string, string> = {}, body?: unknown): Promise<{ status: number; json: Body; text: string }> {
   const res = await fetch(`${base}${path}`, { method, headers: { Authorization: 'Bearer dev-token', 'Content-Type': 'application/json', ...headers }, body: body === undefined ? undefined : JSON.stringify(body) });
-  const text = await res.text(); let json: any; try { json = JSON.parse(text); } catch { json = undefined; }
+  const text = await res.text(); let json: Body = {}; try { json = JSON.parse(text) as Body; } catch { json = {}; }
   return { status: res.status, json, text };
 }
 async function createDone(extra: Record<string, unknown> = {}, headers: Record<string, string> = V2): Promise<string> {
   const r = await req('POST', '/runs', headers, { workflowId: 'conformance-noop', inputs: {}, ...extra });
   expect(r.status, r.text.slice(0, 200)).toBe(201);
-  const id = r.json.runId as string;
-  for (let i = 0; i < 50; i++) { const s = await req('GET', `/runs/${encodeURIComponent(id)}`, headers); if (['completed', 'failed'].includes(s.json?.status)) break; await new Promise((r) => setTimeout(r, 20)); }
+  const id = r.json.runId!;
+  for (let i = 0; i < 50; i++) { const s = await req('GET', `/runs/${encodeURIComponent(id)}`, headers); if (['completed', 'failed'].includes(s.json.status ?? '')) break; await new Promise((r) => setTimeout(r, 20)); }
   return id;
 }
 
 describe('1. colon-suffixed operations reach their route with a bound id', () => {
-  it(':diff with two bound ids is not a tenant refusal', async () => {
+  it(':diff on a bound id reaches its route — not a tenant refusal', async () => {
     const a = await createDone(); const b = await createDone();
-    const r = await req('GET', `/runs/${encodeURIComponent(a)}:diff?against=${encodeURIComponent(b)}`, V2);
-    expect(r.status, r.text.slice(0, 160)).not.toBe(403);
-    expect(r.json?.error).not.toBe('id_tenant_mismatch');
+    // The PATH id is the bound one under test. `?against=` is passed as the bare opaque
+    // half: the route looks the query up raw, so a BOUND `against` 404s — a separate
+    // defect pinned as it.fails in v2-event-sequence-zero-based (DIFF-AGAINST-BOUND-1).
+    const bOpaque = b.slice(b.lastIndexOf('/') + 1);
+    const r = await req('GET', `/runs/${encodeURIComponent(a)}:diff?against=${encodeURIComponent(bOpaque)}`, V2);
+    expect(r.status, r.text.slice(0, 160)).toBe(200);
+    // The route itself answered: a structured diff body, not an error envelope.
+    expect(r.json.error).toBeUndefined();
+    expect(Array.isArray(r.json.eventDiffs), r.text.slice(0, 160)).toBe(true);
+    expect(r.json).toHaveProperty('divergedAtSeq');
   });
   it(':pause on a bound id reaches its route (ADR 0632): a terminal run answers 409 run_terminal, never a false 403', async () => {
     const a = await createDone();
@@ -60,7 +75,10 @@ describe('1. colon-suffixed operations reach their route with a bound id', () =>
   it('a FOREIGN tenant segment with a suffix is still refused', async () => {
     const a = await createDone(); const opaque = a.split('/')[1];
     const r = await req('GET', `/runs/${encodeURIComponent(`other-tenant/${opaque}`)}:diff?against=x`, V2);
-    expect([403, 404]).toContain(r.status);
+    // Exactly the identity refusal: a 404 would be some OTHER guard (round-1 probe
+    // 8fw4g1-rs-foreign stayed green when this accepted [403, 404]).
+    expect(r.status, r.text.slice(0, 160)).toBe(403);
+    expect(r.json.error).toBe('id_tenant_mismatch');
   });
 });
 
@@ -82,6 +100,8 @@ describe('3. tags / metadata: limits enforced, both surfaced unchanged', () => {
   it('a 257-char tag → 400 validation_error', async () => {
     const r = await req('POST', '/runs', V2, { workflowId: 'conformance-noop', inputs: {}, tags: ['x'.repeat(257)] });
     expect(r.status).toBe(400);
+    expect(r.json.error).toBe('validation_error');
+    expect(r.json.message).toContain('1–256 characters (got 257)');
   });
   it('valid tags + metadata surface unchanged on the snapshot (major 2)', async () => {
     const tags = ['alpha', 'odd format!/with slashes', '  spaced  ']; const metadata = { owner: 'qa', n: 3, nested: { k: [1, 2] } };
@@ -94,7 +114,7 @@ describe('3. tags / metadata: limits enforced, both surfaced unchanged', () => {
   it('the snapshot metadata never leaks the host bag (engineVersion lives on its own axis)', async () => {
     const id = await createDone({ metadata: { a: 1 } });
     const s = await req('GET', `/runs/${encodeURIComponent(id)}`, V2);
-    expect(Object.keys(s.json.metadata)).toEqual(['a']);
+    expect(Object.keys(s.json.metadata ?? {})).toEqual(['a']);
   });
 });
 

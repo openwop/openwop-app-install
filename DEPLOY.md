@@ -68,10 +68,13 @@ openwop-app ships as **immutable `vX.Y.Z` releases** (the `/install/` download's
 1. **Back up your database first.** Upgrades are **forward-only** — there are no
    down-migrations. Rollback = redeploy the prior version's image **and** restore the
    pre-upgrade snapshot (ADR 0052 §D3).
-2. **Check `RELEASES.md` for a required stop** between your current version and the
-   target. By default there are none — migrations replay forward on boot, so you can
-   jump several versions in one upgrade. A release flagged `requiredStop: true` in
-   `releases.json` must be landed on first (ADR 0052 §D2).
+2. **Plan it:** `node scripts/upgrade-plan.mjs <your version> [<target>]` reads
+   `releases.json` and prints each step: any **required stop** you must land on first
+   (`requiredStop`, ADR 0052 §D2), and whether you must **stop every old instance**
+   before the new one starts (`rollingSafe: false`, §D2a). The second applies even
+   when you skip past the release that needs it, because its migrations still replay
+   on boot. By default there are no required stops, so you can jump several versions
+   in one upgrade. A downgrade is refused: restore the backup instead.
 3. **Read the release's `#### Upgrading from` block** in `CHANGELOG.md` for breaking
    config/env changes and any manual action.
 4. **Deploy the new image** (backend first, then frontend — see §6/§7). DB **schema**
@@ -84,7 +87,10 @@ openwop-app ships as **immutable `vX.Y.Z` releases** (the `/install/` download's
 **Rolling (multi-instance) deploys:** a migration in a `MINOR` release MUST be safe
 for the prior binary running concurrently (additive / expand-then-contract) — old and
 new revisions briefly serve traffic together during a Cloud Run rollout. A migration
-that can't be made rolling-safe MUST ship as a `MAJOR` and be flagged a required stop.
+that can't be made rolling-safe MUST ship as a `MAJOR` and be recorded
+`rollingSafe: false` with a `rollingUnsafeReason` (§D2a), so the planner tells every
+operator crossing it to stop the old binary. (v0.2.0 is the one such release; it
+shipped as a `0.x` minor, and the manifest gained the field on 2026-10-24.)
 
 **Versions:** the running app version is the SSoT in `/VERSION` (mirrored into
 `src/version.ts` + both `package.json`s by `/cut-app-release`), advertised as
@@ -112,6 +118,8 @@ The app has two planes, and only one defaults to non-durable:
 | `OPENWOP_DEPLOY_POSTURE` | `auth` | Require sign-in for managed-tier turns. |
 | `OPENWOP_STORAGE_DSN` | `postgres://…` | Durable control plane (runs, events, secrets). |
 | `OPENWOP_BYOK_KMS_KEY` | `projects/…/cryptoKeys/…` | **Mandatory in `auth`.** Signed-in tenant secrets get KMS-envelope encryption. The backend now **refuses to boot** in the `auth` posture without it — it will not silently fall back to the ephemeral/plaintext secret store. |
+| `OPENWOP_AUTHORIZATION_ENFORCEMENT` | `true` | **Required in `auth` (ADR 0981).** RFC 0049 membership enforcement on the protocol surface: shared-workspace members hold only their role's scopes. The backend **refuses to boot** in `auth` without it. Before turning it on, read `GET /host/openwop-app/operations/profile-census` (superadmin) under real traffic: it lists who enforcement would deny. Personal workspaces are unaffected. To accept the risk instead, set `OPENWOP_ALLOW_UNENFORCED_AUTHORIZATION=true`, which is also how the census gathers data before you enforce. `scripts/preflight-deploy.sh` (Gate 5c) reads the live service env and refuses the deploy **before the build** when either decision is missing, naming the variable. |
+| `OPENWOP_SUPERADMIN_REQUIRE_MFA` | `true` | **Required in `auth` whenever `OPENWOP_SUPERADMIN_TENANTS` is set (ADR 0981).** Enable TOTP on the identity project, have every listed superadmin enroll (Settings → Security) and sign in again with the factor, then set it. Break-glass stays exempt. The backend **refuses to boot** without it unless `OPENWOP_ALLOW_SUPERADMIN_WITHOUT_MFA=true` accepts the risk. |
 | `OPENWOP_BYOK_ENCRYPTION_KEY` | `printf '%s' "$(openssl rand -hex 32)"` | **Required in the `auth` posture, INCLUDING when `OPENWOP_BYOK_KMS_KEY` is set.** The two are not alternatives: KMS envelope-encrypts signed-in tenant secrets, while the local-AES path keeps its own master key and is still reached at boot. Setting only KMS fails closed with *"BYOK local-AES master key is not configured in production"* (SEC-3 refuses to mint a throwaway disk key — one generated on a fresh Cloud Run instance is unrecoverable across restarts and gives false at-rest assurance). Only `OPENWOP_BYOK_EPHEMERAL=true` deploys, like the live demo, skip it. **Never rotate it once live** — anything encrypted under it becomes unreadable. Use `printf '%s'`, not a bare pipe: see the secret-seeding note below. |
 
 ### Sessions and sign-in (ADR 0833)
@@ -368,6 +376,13 @@ Shipped backends:
     HTTP API; dependency-free (`fetch`); per-(tenant,index) physical index.
     Env: `OPENWOP_SEARCH_OS_ENDPOINT` (+ `_USERNAME`/`_PASSWORD` or `_API_KEY`,
     `_INDEX_PREFIX`). See `backend/typescript/src/host/search/`.
+    **Physical index names are `<prefix>v2.<base32(tenant)>.<base32(index)>`**
+    (`physicalIndexName`), an injective mapping. Builds before this note used a
+    lossy `<prefix><tenant>-<index>` (lowercased, other characters → `-`) that let
+    tenant `a-b` + index `c` share tenant `a` + index `b-c`'s index. Do NOT enable
+    this backend on a build older than the `v2.` naming. If you are upgrading a
+    deployment that already ran it, re-index into the `v2.` names and then drop the
+    old-scheme indexes; the new build never reads them.
   - `pgvector` — backs **`vector`** (`OPENWOP_SURFACE_VECTOR=pgvector`).
     `host.db.vector` over Postgres + pgvector (`<=>` cosine; an EXACT per-tenant
     scan today — no ANN index is built, see ADR 0867), fixed embedding dimension.
@@ -854,14 +869,37 @@ curl -s https://app.openwop.dev/api/readiness   # {"status":"ready",...} — 503
 
 ### Verifying live agent dispatch (real model completion)
 
-`POST /v1/host/openwop-app/agents/{agentId}/dispatch` with `{"live": true}` runs a
+`POST /host/openwop-app/agents/{agentId}/dispatch` with `{"live": true}` runs a
 manifest agent's turn through the real provider pipeline. By default it routes
 to the **managed tier** (no per-tenant BYOK needed), so a real completion
 requires the managed key to be configured:
 
 - **Managed tier:** set `MINIMAX_API_KEY` (the `openwop-free` tier is
-  MiniMax-backed) and restart; `/api/readiness` turns green. Then a `live`
-  dispatch produces a real completion.
+  MiniMax-backed by default) and restart; `/api/readiness` turns green. Then a
+  `live` dispatch produces a real completion.
+  **Choosing the free tier's provider (ADR 0990).** A superadmin picks the
+  provider (`minimax`, `anthropic`, `openai` or `google`) and model at
+  **Settings → AI & automation → Free tier** (`/free-tier-settings`). It takes
+  effect within ~15 s on every instance, with no redeploy, and a **Send a test
+  message** button checks a candidate before saving. Keys are never typed on
+  that page: add each provider's key in the **Secrets Vault**
+  (`/access?tab=connections`, **Host-global** scope) as `free-tier:<provider>`
+  (for example `free-tier:anthropic`). That requires `OPENWOP_BYOK_EPHEMERAL=false`,
+  like the Stripe key. The env keys (`MINIMAX_API_KEY`, `ANTHROPIC_API_KEY`,
+  `OPENAI_API_KEY`, `GOOGLE_API_KEY`) still work as the fallback; the Vault key
+  wins when both are set. A provider with no key cannot be selected.
+
+  With no saved setting, env decides: `OPENWOP_MANAGED_PROVIDER` (default
+  `minimax`) plus `<PROVIDER>_MODEL` (`MINIMAX_MODEL` default `MiniMax-M3`,
+  `ANTHROPIC_MODEL` default `claude-sonnet-5-5`, `OPENAI_MODEL` default
+  `gpt-5.6-terra`, `GOOGLE_MODEL` default `gemini-3.8-flash`). Each provider
+  reads only its own key, so a switch before its key is set reads as
+  `managed_unavailable` and never sends another provider's key. An unsupported
+  value, in env or in the setting, leaves the tier unavailable rather than
+  falling back to MiniMax. Other providers cost more per token than MiniMax-M3:
+  set the page's per-person daily allowance, and revisit
+  `OPENWOP_MANAGED_GLOBAL_DAILY_TOKEN_CAP`, when you switch. Managed SPEECH stays
+  MiniMax-only and always uses the MiniMax key, whichever provider serves chat.
 - **BYOK:** issue a tenant secret for a real provider (anthropic / openai /
   google) and dispatch with `{"live": true, "provider": "<id>", "model": "<id>"}`
   (the resolver honors an explicit pin; `callAI` is the provider gate).
@@ -1003,7 +1041,7 @@ gcloud run services update openwop-app-backend \
 
 ### Optional: localized public content (`capabilities.i18n` / `capabilities.content`) — RFC 0103 / ADR 0064
 
-The anonymous `/v1/content/pages/:slug` delivery negotiates its locale over **host env**
+The anonymous `/content/pages/:slug` delivery negotiates its locale over **host env**
 (the operator honesty gate — `capabilities.i18n` + `capabilities.content` are advertised
 at `/.well-known/openwop` ONLY when more than one locale is configured; unset ⇒ no advert,
 byte-identical to a non-localized deploy). Per-ORG authoring locales are separate (the CMS
@@ -1042,12 +1080,49 @@ gcloud run services update openwop-app-backend \
 > `Content-Language: es` (the column actually used). Keep `es` in the list: an
 > `es-MX` reader negotiates to the first-declared Spanish tag.
 
-Verify: `curl -H 'Accept-Language: pt-BR' https://app.openwop.dev/api/v1/content/pages/home -i`
+Verify: `curl -H 'Accept-Language: pt-BR' https://app.openwop.dev/api/content/pages/home -i`
 → `Content-Language: pt-BR` (falls back to the default locale for unsupported tags), and
 `/.well-known/openwop` lists `capabilities.i18n`. With `OpenWOP-Version: 2`, discovery
 carries top-level `i18n` and `content` records (without `es-419` on this deployment; see above).
-An AUTHENTICATED `GET /v1/content/pages/:slug` reads the caller's own workspace, not the
+An AUTHENTICATED `GET /content/pages/:slug` reads the caller's own workspace, not the
 system site (`localized-content.md` §F; ADR 0748).
+
+### Optional: email — Postmark for transactional mail, Amazon SES for campaigns (ADR 0994)
+
+Each workspace connects its own email accounts; the host only decides which one
+each kind of email prefers. Sign-in, verification and password-reset emails come
+from Firebase Auth and are not affected.
+
+1. **Host preference** (incremental, keeps every other binding):
+   ```
+   scripts/update-env.sh OPENWOP_EMAIL_TRANSACTIONAL_PROVIDER=postmark OPENWOP_EMAIL_MARKETING_PROVIDER=smtp
+   ```
+   It is an order, not a pin: a workspace with only one account connected uses it
+   for both. `OPENWOP_POSTMARK_BROADCAST_STREAM` (default `broadcast`) names the
+   Postmark stream campaign mail goes on when Postmark sends it.
+2. **Connections**, in the workspace (`/access?tab=connections`, workspace scope so
+   approval emails can use them too):
+   - **Postmark**: the server API token. Campaign and other non-transactional
+     mail goes on the server's **Broadcast** stream with ID `broadcast`
+     (`OPENWOP_POSTMARK_BROADCAST_STREAM` names a different one). **Upgrade
+     note:** before this change every Postmark send used `outbound`; a server
+     with no such Broadcast stream now refuses that mail with
+     `email_stream_missing`. Create the stream in Postmark (Servers → your
+     server → Message Streams → Create stream → Broadcasts) before deploying.
+   - **SMTP** for SES: `host` `email-smtp.<region>.amazonaws.com`, `port` 587,
+     `secure` false (STARTTLS), and the SES **SMTP** credentials (not the AWS
+     access key). SES must be out of its sandbox for the sending identity.
+3. **Bounce and complaint webhooks**, per org (`POST …/orgs/:orgId/webhook-configs`,
+   `webhooks:manage`); each returns an `ingestPath`:
+   - Postmark: `provider: postmark`, secret `user:pass`; set the same Basic auth
+     on the Postmark webhook for Bounce and Spam Complaint, on both streams.
+   - SES: create an SNS topic, point the SES identity's (or configuration set's)
+     Bounce, Complaint and Delivery notifications at it, then create the config
+     with `provider: ses` and the **topic ARN** as the secret. Subscribe
+     `https://<public host><ingestPath>` (HTTPS) to the topic; the host
+     confirms the subscription itself once the signature and topic check out.
+4. **Check**: `GET …/orgs/:orgId/provider-status` shows `routing.transactional`
+   and `routing.marketing`, the provider each kind of email would use.
 
 ## 7. Firebase Hosting + custom domain
 
@@ -1335,16 +1410,16 @@ hour, so newly-deployed bundles aren't picked up until the cache expires.
 
 ```bash
 # Anon-tier still works (no auth).
-curl -i -X POST https://app.openwop.dev/api/v1/runs \
+curl -i -X POST https://app.openwop.dev/api/runs \
   -H 'content-type: application/json' \
   -d '{"workflowId":"openwop-app.uppercase","tenantId":"","inputs":{"text":"hi"}}'
 
 # Sign in via the SPA, copy the ID token from devtools, then:
-curl -i https://app.openwop.dev/api/v1/runs \
+curl -i https://app.openwop.dev/api/runs \
   -H "authorization: Bearer <ID_TOKEN>"
 
 # BYOK secret set as signed-in user
-curl -i -X POST https://app.openwop.dev/api/v1/host/openwop-app/byok/secrets \
+curl -i -X POST https://app.openwop.dev/api/host/openwop-app/byok/secrets \
   -H "authorization: Bearer <ID_TOKEN>" \
   -H 'content-type: application/json' \
   -d '{"credentialRef":"TEST_KEY","value":"sk-test"}'
@@ -1696,6 +1771,34 @@ Two halves:
   already trusted by default (ADR 0851). Without it, every caller behind the LB
   shares one rate-limit key. Cloud Run ingress stays `all`, because the Firebase
   `/api` rewrite still reaches the service on its run.app URL.
+
+**Handing an existing edge to another deployment (ADR 0940).** Each deployment owns its edge.
+When a deployment's own backend takes over an edge that today fronts another one:
+```
+scripts/custom-domain-edge.sh repoint --service <cloud-run-service> --project <edge-project> --account <acct>          # dry-run: private snapshot + plan
+OPENWOP_EDGE_APPLY_PROJECT=<edge-project> \
+  scripts/custom-domain-edge.sh repoint --service <cloud-run-service> --project <edge-project> --account <acct> --apply
+```
+What it does:
+- creates `<prefix>-neg-<service>` and `<prefix>-be-<service>` in the edge's own project;
+- verifies the NEG’s exact project/region/Cloud Run service and the backend’s HTTP protocol, scheme and sole NEG group;
+- conditionally PATCHes only the URL-map default using the fingerprint from the original JSON snapshot. An intervening change returns 412; the script never refreshes that fingerprint to force a write.
+
+Python 3 and gcloud are required. Before writing, it saves a private, uniquely named directory
+with the original URL-map JSON, previous default and fingerprint, then the pinned project/account/map,
+exact request body and nonzero request ID. The previous backend remains available.
+Only a completed operation whose full read-back matches the intended change earns `rollback.sh`.
+That rollback uses the saved post-apply fingerprint and refuses a newer operator change.
+
+An ambiguous response is resumed with the **same directory**, preserving the original request ID/body:
+```
+OPENWOP_EDGE_APPLY_PROJECT=<edge-project> scripts/custom-domain-edge.sh repoint --resume <snapshot-directory>
+OPENWOP_EDGE_APPLY_PROJECT=<edge-project> bash <snapshot-directory>/rollback.sh
+```
+A dry run issues no rollback script. Repeating a verified rollback reports that the original
+configuration is already present and performs no write. Move the five
+`OPENWOP_CUSTOM_DOMAIN_*` settings to the new backend and unset them on the old one in the same
+change: two backends must never write one certificate map.
 
 **Per-domain certificates.** Set by `OPENWOP_CUSTOM_DOMAIN_EDGE`:
 

@@ -23,12 +23,16 @@ import { fileURLToPath } from 'node:url';
 import { WORKFLOW_TEMPLATE_CATEGORIES, WORKFLOW_TEMPLATE_CHAIN_IDS } from '../src/host/workflowTemplates.js';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '../../..');
-const PACK = join(REPO, 'examples/workflow-chain-packs/work-twin-templates/pack.json');
 /** `tmpl.<category>.<name>`, kept only when <category> is a library category, so
  *  property reads on an unrelated local named `tmpl` do not count. */
 const ID = /\btmpl\.([a-z-]+)\.([a-z0-9-]+)\b/g;
+const isCategory = (c: string) => (WORKFLOW_TEMPLATE_CATEGORIES as readonly string[]).includes(c);
 const boundIds = (text: string): string[] =>
-  [...text.matchAll(ID)].filter((m) => (WORKFLOW_TEMPLATE_CATEGORIES as readonly string[]).includes(m[1]!)).map((m) => m[0]);
+  [...text.matchAll(ID)].filter((m) => isCategory(m[1]!)).map((m) => m[0]);
+/** `tmpl.<x>.<y>` ids whose category is NOT a library category — a typo'd
+ *  category would otherwise be filtered out above and never checked. */
+const strayIds = (text: string): string[] =>
+  [...text.matchAll(ID)].filter((m) => !isCategory(m[1]!)).map((m) => m[0]);
 
 describe('workflow-template library — shape', () => {
   it('ships exactly 44 templates (11 categories × 4), unique ids', () => {
@@ -40,10 +44,9 @@ describe('workflow-template library — shape', () => {
     }
   });
 
-  it('the registration list and the pack name the same chains', () => {
-    const pack = JSON.parse(readFileSync(PACK, 'utf8')) as { chains: Array<{ chainId: string }> };
-    expect(pack.chains.map((c) => c.chainId).sort()).toEqual([...WORKFLOW_TEMPLATE_CHAIN_IDS].sort());
-  });
+  // (grade-tests wave 64) `'the registration list and the pack name the same chains'`
+  // was cut: `work-twin-template-chains.test.ts` › `'is the pack the loader registered
+  // every chain from'` asserts the same pack-vs-list equality (8fw5g5-wtpl-packlist-cover).
 });
 
 describe('workflow-template library — consumers bind only ids that resolve', () => {
@@ -57,6 +60,8 @@ describe('workflow-template library — consumers bind only ids that resolve', (
       // Non-vacuity: both consumers bind templates today.
       expect(ids.length, rel).toBeGreaterThan(0);
       for (const id of ids) expect(WORKFLOW_TEMPLATE_CHAIN_IDS, `${rel} binds ${id}`).toContain(id);
+      // A misspelled CATEGORY must not slip past the filter (measured: none today).
+      expect(strayIds(readFileSync(join(REPO, rel), 'utf8')), `${rel} binds a tmpl id outside every library category`).toEqual([]);
     });
   }
 });

@@ -7,7 +7,7 @@
  * file only adapts that spine to the campaign `EmailProvider` seam.
  *
  * Provider selection (ADR 0193 convergence): campaigns are NOT pinned to
- * SendGrid — the preflight walks `emailSendProviders()` (host default first)
+ * SendGrid — the preflight walks `emailSendProviders(purpose)` (ADR 0994 preference first)
  * and dispatches through the FIRST provider the acting user has a Connection
  * for, so a new adapter-table row widens campaigns automatically.
  *
@@ -22,9 +22,8 @@
 
 import type { Storage } from '../../storage/storage.js';
 import { OpenwopError } from '../../types.js';
-import { makeEmailAdapter, emailSendProviders } from '../../host/emailAdapter.js';
+import { makeEmailAdapter, emailSendProviders, resolveEmailProvider } from '../../host/emailAdapter.js';
 import type { EgressPurpose } from '../../host/recipientEgressGuard.js';
-import { resolveConnectionCredential } from '../connections/connectionsService.js';
 import { getEmailSettings, type EmailProvider } from './emailService.js';
 
 export interface BrokeredProviderDeps {
@@ -51,17 +50,10 @@ export interface BrokeredProviderDeps {
  * failed-stat per recipient.
  */
 export async function makeBrokeredCampaignProvider(deps: BrokeredProviderDeps): Promise<EmailProvider> {
-  const candidates = emailSendProviders();
-  let provider: string | undefined;
-  for (const p of candidates) {
-    const resolved = await resolveConnectionCredential({
-      tenantId: deps.tenantId,
-      provider: p,
-      actingUserId: deps.actingUserId,
-      orgId: deps.orgId,
-    });
-    if (resolved) { provider = p; break; }
-  }
+  // ADR 0994 D1 — the purpose's preferred provider first (campaigns → SES over
+  // SMTP, invites → Postmark), then any other the caller has connected.
+  const candidates = emailSendProviders(deps.purpose);
+  const provider = await resolveEmailProvider({ tenantId: deps.tenantId, actingUserId: deps.actingUserId, orgId: deps.orgId, purpose: deps.purpose });
   if (!provider) {
     throw new OpenwopError(
       'credential_required',
@@ -129,16 +121,7 @@ export async function sendBrokeredTransactionalEmail(input: {
     // lane sends whatever its mailbox server accepts. Domain verification is a recorded
     // follow-up (ADR 0848 open question 2), not a check this line performs.
     if (!from) return false; // no sender configured — honest no-op
-    let provider: string | undefined;
-    for (const p of emailSendProviders()) {
-      const resolved = await resolveConnectionCredential({
-        tenantId: input.tenantId,
-        provider: p,
-        actingUserId: input.actingUserId,
-        orgId: input.orgId,
-      });
-      if (resolved) { provider = p; break; }
-    }
+    const provider = await resolveEmailProvider({ tenantId: input.tenantId, actingUserId: input.actingUserId, orgId: input.orgId, purpose: 'transactional' }); // ADR 0994 D1
     if (!provider) return false; // no email Connection — honest no-op
     const adapter = makeEmailAdapter({
       storage: input.storage,

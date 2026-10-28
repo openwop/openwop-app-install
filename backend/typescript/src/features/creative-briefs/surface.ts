@@ -11,6 +11,22 @@ import { OpenwopError } from '../../types.js';
 import { createBrief, listBriefs, getBrief } from './creativeBriefsService.js';
 import { renderForBrief, renderVariantsForBrief, reelPromptForBrief, storeReelRender } from './render/renderService.js';
 import { listTemplates } from './render/templates.js';
+import { assertEditModeEnabled } from './groundingSettings.js';
+import { assertProductGroundedEnabled, productShotSource, composeProductShot, checkFidelity, protectionMask } from './fidelityService.js';
+import type { FeatureSurfaceOrgPolicy } from '../../host/featureSurfaces.js';
+
+/** ADR 0945 P1 — the product-grounded methods ask the HTTP door's write scope
+ *  (they write assets and verdicts, and read the catalog's bytes). The older
+ *  methods keep the membership floor (a pre-existing gap, filed in ADR 0945). */
+export const CREATIVE_BRIEFS_SURFACE_POLICY: FeatureSurfaceOrgPolicy = {
+  methodScopes: { productShotSource: 'workspace:write', composeProductShot: 'workspace:write', checkFidelity: 'workspace:write', protectionMask: 'workspace:write' },
+};
+
+function requireOrg(args: Record<string, unknown>): string {
+  const orgId = str(args.orgId);
+  if (!orgId) throw new OpenwopError('validation_error', 'Field `orgId` is required.', 400, { field: 'orgId' });
+  return orgId;
+}
 
 export function buildCreativeBriefsSurface(scope: BundleScope): FeatureSurface {
   const tenantId = scope.tenantId;
@@ -96,6 +112,37 @@ export function buildCreativeBriefsSurface(scope: BundleScope): FeatureSurface {
         ...(args.brandId !== undefined ? { brandId: args.brandId } : {}),
       });
       return result;
+    },
+    // ADR 0945 P1 — composite mode. The source's BYTES are returned for the
+    // node's recorded image-edit call and must never reach a node output.
+    productShotSource: async (args) => {
+      const orgId = requireOrg(args);
+      await assertProductGroundedEnabled(tenantId, scope.actingUserId);
+      // ADR 0945 Q1 — an edit-mode caller is refused HERE, before any paid call.
+      if (str(args.mode) === 'edit') await assertEditModeEnabled(tenantId, orgId);
+      return productShotSource(tenantId, orgId, str(args.productId), str(args.sourceAssetId) || undefined);
+    },
+    composeProductShot: async (args) => {
+      const orgId = requireOrg(args);
+      await assertProductGroundedEnabled(tenantId, scope.actingUserId);
+      const render = await composeProductShot(tenantId, orgId, scope.actingUserId ?? scope.runId ?? 'workflow', {
+        productId: str(args.productId), briefId: str(args.briefId), templateId: str(args.templateId),
+        cutoutAssetId: str(args.cutoutAssetId), backgroundAssetId: str(args.backgroundAssetId),
+        ...(typeof args.directionIndex === 'number' ? { directionIndex: args.directionIndex } : {}),
+        ...(args.copy && typeof args.copy === 'object' ? { copy: args.copy as Record<string, unknown> } : {}),
+      });
+      return { render, mediaAssetId: render.mediaAssetId, warnings: render.warnings };
+    },
+    checkFidelity: async (args) => {
+      const orgId = requireOrg(args);
+      await assertProductGroundedEnabled(tenantId, scope.actingUserId);
+      return { verdict: await checkFidelity(tenantId, orgId, str(args.assetId), { ...(scope.runId ? { runId: scope.runId } : {}), ...(str(args.maskAssetId) ? { maskAssetId: str(args.maskAssetId) } : {}) }) };
+    },
+    // ADR 0945 P2 — edit mode's protection mask (bytes in-node only).
+    protectionMask: async (args) => {
+      const orgId = requireOrg(args);
+      await assertProductGroundedEnabled(tenantId, scope.actingUserId);
+      return protectionMask(tenantId, orgId, str(args.productId), str(args.cutoutAssetId), str(args.provider));
     },
   };
 }

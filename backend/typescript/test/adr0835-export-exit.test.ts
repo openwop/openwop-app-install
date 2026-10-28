@@ -14,6 +14,11 @@
  *    (`*.md` is excluded — prose, never compiled or executed.)
  *  - S10: an operation name lands in a `//` comment in the generated server;
  *    a line terminator in it must not end the comment.
+ *
+ * TST-BWA-4 (grade-tests w62): red when the enum pass keeps an out-of-options value or
+ * stops warning, when `jsId` stops slugging an unknown type, when `escapeHtml` passes text
+ * through, when `oneLine` keeps line terminators, or when a prototype key is looked up with
+ * `in` instead of `Object.hasOwn` (the export then throws, and the defaults below go).
  */
 import { describe, expect, it, beforeAll } from 'vitest';
 import { generateScrubbed } from '../src/features/app-builder/export/exportService.js';
@@ -114,5 +119,10 @@ describe('ADR 0835 AB2-CD-10 — prototype keys in the data model never crash an
       operations: [{ id: 'listTodos', name: 'List', kind: 'toString', modelId: 'Todo', input: [{ name: 'q', type: '__proto__' }] }],
     });
     for (const target of EXPORT_TARGETS) expect(() => generateScrubbed(state, target), target).not.toThrow();
+    // …and "as the defaults": the field is a text column, the op an unimplemented `action` POST.
+    const backend = generateScrubbed(state, 'react-tailwind').files.filter((f) => f.path.startsWith('backend/')).map((f) => f.content).join('\n');
+    expect(backend).toContain("title: text('title')");
+    expect(backend).toContain('// List (kind: action)');
+    expect(backend).toContain("app.post('/operations/listTodos', (c) => c.json({ error: 'not_implemented', operation: 'listTodos' }, 501));");
   });
 });

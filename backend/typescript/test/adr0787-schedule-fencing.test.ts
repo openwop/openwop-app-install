@@ -21,6 +21,19 @@
  *     ONE run (deterministic run id) — `SCTWF-3`
  *   - a run that started is never labelled `dispatch-error` when its
  *     bookkeeping write loses to contention
+ *
+ * Tracker: TST-BSC-3 (docs/steward/TEST-ASSESSMENT.md). Red when: the fence
+ * stops comparing `nextFireAt` with the slot, or stops checking `enabled`
+ * (the "disabled" case); a lost CAS gives up instead of re-reading, or the
+ * mutator writes blind (`put`) instead of compare-and-swap; the run id gains a
+ * random part or drops the tenant; a bookkeeping loss is recorded as
+ * `dispatch-error`; a re-saved unchanged cadence recomputes `nextFireAt`.
+ *
+ * DOUBLE GUARDS (recorded): the "DSAR-erased" case is refused by the fence's
+ * `!job.enabled` AND its `isErasedJob` check — breaking both reds it, either
+ * alone does not. The "deleted" case is structural: `mutateJob` answers a
+ * missing row with null, so the fence can never advance a deleted job (no
+ * single-line sabotage exists).
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -226,6 +239,7 @@ describe('ADR 0787 D1 — the fence is the row', () => {
     await processDueSchedules(deps, SLOT + 90_000);
     const runs = await runsFor('j-rewind');
     expect(runs).toHaveLength(1);
+    expect(runs[0]!.runId).toMatch(/^schedule-run-[0-9a-f]{32}$/);
     expect(runs[0]!.runId).toBe(scheduledRunId('t1', 'j-rewind', SLOT));
   });
 
@@ -269,8 +283,9 @@ describe('ADR 0787 D2 — every job mutator is a compare-and-swap', () => {
     await write;
     const job = await getJob('j-erase');
     expect(job?.enabled).toBe(false);
-    expect(job?.ownerUserId).not.toBe('user:alice');
-    expect(job?.metadata?.actingUserId).not.toBe('user:alice');
+    // The erasure sentinel (`ERASED` in host/subjectErasureRedaction.ts), as a literal.
+    expect(job?.ownerUserId).toBe('[erased]');
+    expect(job?.metadata?.actingUserId).toBe('[erased]');
   });
 
   it('a metadata edit racing the advance cannot rewind nextFireAt', async () => {

@@ -19,9 +19,12 @@ import {
 import { listingState } from './stores.js';
 
 
-/** A seller's payouts, newest first, bounded (dashboard read). */
-export async function listPayouts(tenantId: string, limit = 20): Promise<SellerPayout[]> {
+/** A seller's payouts, newest first, bounded (dashboard read). ADR 0948 P0b:
+ *  payouts are tenant-indexed, so a client org's payouts share the index;
+ *  `orgId` selects exactly one seller's (absent = the tenant's own). */
+export async function listPayouts(tenantId: string, limit = 20, orgId?: string): Promise<SellerPayout[]> {
   return (await payouts.listForTenantIndexed(tenantId))
+    .filter((p) => (p.orgId ?? '') === (orgId ?? ''))
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
     .slice(0, Math.max(1, limit));
 }

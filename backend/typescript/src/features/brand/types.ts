@@ -18,6 +18,8 @@
  * @see docs/adr/0170-brand-identity-app-and-marketing-consolidation.md
  */
 
+import type { CreativeLocks } from '../../host/contentRules/creative/types.js';
+
 /** The five Campaign Studio channels per-channel voice rules key on (ADR 0157). */
 export const BRAND_CHANNELS = [
   'landing_page',
@@ -196,6 +198,14 @@ export interface BrandIdentity {
   chromePolicy?: { showPoweredBy?: boolean; customFooter?: string; customCopyright?: string };
 }
 
+/** ADR 0946 D4 — creative locks the renderer enforces by construction. The
+ *  shape is the content-rules library's `CreativeLocks` (the P2 `brand-lock`
+ *  pre-flight rule reads the same type), so there is one definition. Zones are
+ *  percentages of the canvas; colours are lowercase `#hex`; an empty list
+ *  means "not locked" for that facet. Edited through the brand's own write
+ *  path (governance-change bar); no agent tool writes them. */
+export type BrandCreativeLocks = CreativeLocks;
+
 /** A brand. Tenant + org scoped; persisted on `DurableCollection`. Carries an
  *  optional `voiceProfile`-led marketing facet (ADR 0155) and/or an optional
  *  `identity` app-chrome facet (ADR 0170). */
@@ -215,6 +225,8 @@ export interface Brand {
   governance: BrandGovernance;
   /** Visual-identity facet (ADR 0170) — inert unless this is the reserved app brand. */
   identity?: BrandIdentity;
+  /** ADR 0946 D4 — creative locks the ad renderer enforces. */
+  creativeLocks?: BrandCreativeLocks;
   createdBy: string;
   createdAt: string;
   updatedAt: string;

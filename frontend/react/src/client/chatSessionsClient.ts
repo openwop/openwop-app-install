@@ -62,6 +62,10 @@ export interface ChatSessionHeader {
   ownerSubject?: { kind: string; id: string };
   /** Active participants — owner + members. Empty for legacy sessions. */
   participants?: ConversationParticipant[];
+  /** ADR 0944 D2 — the client this conversation works for, bound once at
+   *  creation. Agents recall that client's shared memory here. `name` is a
+   *  display snapshot. */
+  client?: { orgId: string; name: string };
 }
 
 /** ADR 0195 D3 — the curated reaction vocabulary (mirrors the backend
@@ -185,20 +189,24 @@ export async function fetchModelCapabilities(): Promise<ProviderCapabilities[]> 
 
 const SEARCH_PATH = '/host/openwop-app/chat/search';
 
-/** Server-side full-text search over the caller's conversations + messages
- *  (ADR 0112). Returns `[]` when the `conversation-search` toggle is off (the
- *  route 404s) OR on any transient error — message search is a best-effort
- *  ENHANCEMENT over the client-side title filter, so the rail degrades silently
- *  to titles-only rather than surfacing an error. */
-export async function searchChatConversations(q: string): Promise<ConversationSearchHit[]> {
+/** The search route's body (ADR 0997): `truncated` = only the newest matching
+ *  messages were examined, so a short list is not proof of absence. */
+export interface ConversationSearchResult {
+  hits: ConversationSearchHit[];
+  truncated: boolean;
+}
+
+/** Server-side search over the caller's conversations + messages (ADR 0112, ADR
+ *  0997): every word must match. THROWS on failure. It used to return `[]`, which
+ *  the rail showed as "no matches" while the search was broken (CSU-2). */
+export async function searchChatConversations(q: string, signal?: AbortSignal): Promise<ConversationSearchResult> {
   const query = q.trim();
-  if (!query) return [];
-  try {
-    const r = await http<{ hits: ConversationSearchHit[] }>(`${SEARCH_PATH}?q=${encodeURIComponent(query)}`);
-    return r.hits ?? [];
-  } catch {
-    return []; // toggle off (404) / transient → no message hits, titles-only
-  }
+  if (!query) return { hits: [], truncated: false };
+  const r = await http<Partial<ConversationSearchResult>>(
+    `${SEARCH_PATH}?q=${encodeURIComponent(query)}`,
+    signal ? { signal } : {},
+  );
+  return { hits: r.hits ?? [], truncated: r.truncated === true };
 }
 
 export async function createChatSession(opts?: {
@@ -210,6 +218,8 @@ export async function createChatSession(opts?: {
   participants?: string[];
   /** Seed a group from an advisory board (ADR 0040). */
   boardId?: string;
+  /** ADR 0944 D2 — bind the new conversation to a client org (checked server-side). */
+  clientOrgId?: string;
 }): Promise<ChatSessionHeader> {
   return http<ChatSessionHeader>(PATH, {
     method: 'POST',

@@ -92,6 +92,22 @@ describe('conversation share resolver', () => {
     expect(resource.messageCount).toBe(1);
   });
 
+  // ADR 0992 D1 — the SPA stores every message as a JSON envelope. The public view
+  // and its card describe the TEXT, never the envelope (run state, resume tokens).
+  it('renders and describes an SPA-envelope conversation by its text, never the envelope', async () => {
+    const sid = 'conv-envelope';
+    const at = new Date(Date.now() - 60_000).toISOString();
+    await hostExtStorage().createChatSession({ sessionId: sid, tenantId: T, title: 'Envelope chat', createdAt: at, updatedAt: at, messageCount: 0 });
+    await hostExtStorage().appendChatMessage({ messageId: `${sid}-m0`, sessionId: sid, role: 'user', meta: null, authorSubject: 'user:u1', createdAt: at,
+      content: JSON.stringify({ role: 'user', content: 'plan the launch', activeInterrupts: [{ token: 'tok_SHARE_SECRET_0001' }] }) });
+    const link = await createLink(T, ORG, 'u1', { resourceType: 'conversation', resourceId: sid });
+    const md = String((await resolveShared(link.token)).resource.markdown);
+    expect(md).toContain('plan the launch');
+    expect(md).not.toContain('tok_SHARE_SECRET_0001');
+    const card = await resolveSharedCard(link.token, 'http://x.test');
+    expect(card.description).toBe('plan the launch');
+  });
+
   it('goes dark (404) after revoke', async () => {
     const link = await createLink(T, ORG, 'u1', { resourceType: 'conversation', resourceId: 'conv-1' });
     // Non-vacuity: the card resolves while the link is live.

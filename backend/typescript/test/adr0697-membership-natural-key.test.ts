@@ -16,31 +16,40 @@
  * row DIRECTLY to storage, because that is what the race did and because a twin
  * planted through the fixed `createMember` is unrepresentable — the test would
  * pass vacuously, which is the ADR 0684 failure one layer over.
+ *
+ * Every case owns its OWN workspace (`nextWs()`): the owner case leaves owner rows
+ * that cannot be deleted (the owner invariant), and a shared workspace made later
+ * cases read them back under shuffle.
+ *
+ * The "concurrent" leg is not a forced race: the fix is a DERIVED key, so two
+ * callers converge on one row whatever their interleaving. The sequential
+ * operator-re-add leg reds under the same sabotage.
+ *
+ * Tracker TST-BGF-10. Red when: `createMember` mints a random id for a
+ * workspace-root membership, overwrites an existing one, or derives ids for a
+ * sub-org; `deleteMember` stops sweeping twins; or its owner restore puts back
+ * only the visible row.
  */
-import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll } from 'vitest';
 import {
   createMember, deleteMember, listMembers, isWorkspaceMember, createOrg, getMember,
 } from '../src/host/accessControlService.js';
 import { initHostExtPersistence, __hostExtStorage } from '../src/host/hostExtPersistence.js';
 import { openStorage } from '../src/storage/index.js';
 
-const WS = 'host-adr0697';          // a workspace root: orgId === tenantId
 const SUB = 'user:dup-subject';
+let wsSeq = 0;
+/** A fresh workspace root (orgId === tenantId) per case. */
+const nextWs = (): string => `host-adr0697-${++wsSeq}`;
 
 beforeAll(async () => {
   initHostExtPersistence(await openStorage('memory://'));
 });
 
-beforeEach(async () => {
-  for (const m of await listMembers(WS, WS)) {
-    try { await deleteMember(m.memberId); } catch { /* owner invariant — fine */ }
-  }
-});
-
 /** Write a member row straight into the store, bypassing `createMember`.
  *  This reproduces a row the RACE wrote: present in the collection, absent from
  *  the point-read index (the winning write owned that key). */
-async function plantLegacyTwin(memberId: string, roles: string[] = ['viewer']): Promise<void> {
+async function plantLegacyTwin(WS: string, memberId: string, roles: string[] = ['viewer']): Promise<void> {
   const storage = __hostExtStorage();
   if (!storage) throw new Error('storage not initialised');
   const now = new Date().toISOString();
@@ -52,6 +61,7 @@ async function plantLegacyTwin(memberId: string, roles: string[] = ['viewer']): 
 
 describe('ADR 0697 D1 — the relationship is the key', () => {
   it('two concurrent createMember calls for one subject converge on ONE row', async () => {
+    const WS = nextWs();
     await Promise.all([
       createMember({ orgId: WS, tenantId: WS, displayName: 'A', subject: SUB }),
       createMember({ orgId: WS, tenantId: WS, displayName: 'A', subject: SUB }),
@@ -62,6 +72,7 @@ describe('ADR 0697 D1 — the relationship is the key', () => {
   });
 
   it('THE LIVE ROUTE: an operator re-adding an existing member makes no twin', async () => {
+    const WS = nextWs();
     // This needs no race. `POST /orgs/:orgId/members` calls `createMember` with
     // no existence check (`routes/accessControl.ts:458`), so adding a participant
     // who was already auto-joined wrote a second row for the CANONICAL subject —
@@ -74,6 +85,7 @@ describe('ADR 0697 D1 — the relationship is the key', () => {
   });
 
   it('an existing membership is RETURNED, not overwritten with defaults', async () => {
+    const WS = nextWs();
     await createMember({ orgId: WS, tenantId: WS, displayName: 'A', subject: SUB, roles: ['admin'] });
     const again = await createMember({ orgId: WS, tenantId: WS, displayName: 'Replaced', subject: SUB });
     // A racing auto-join must not demote an operator's role edit to `viewer`,
@@ -83,12 +95,13 @@ describe('ADR 0697 D1 — the relationship is the key', () => {
   });
 
   it('a SUB-ORG membership is untouched — the narrowing is real, not global', async () => {
+    const WS = nextWs();
     // `isWorkspaceMember` never reads this shape, and derived ids here would
     // change ids already in use for no gain. Two calls still make two rows.
-    await createOrg({ orgId: 'org-child', tenantId: WS, createdBy: SUB, name: 'Child' });
-    await createMember({ orgId: 'org-child', tenantId: WS, displayName: 'B', subject: SUB });
-    await createMember({ orgId: 'org-child', tenantId: WS, displayName: 'B', subject: SUB });
-    const rows = (await listMembers(WS, 'org-child')).filter((m) => m.subject === SUB);
+    await createOrg({ orgId: `${WS}-child`, tenantId: WS, createdBy: SUB, name: 'Child' });
+    await createMember({ orgId: `${WS}-child`, tenantId: WS, displayName: 'B', subject: SUB });
+    await createMember({ orgId: `${WS}-child`, tenantId: WS, displayName: 'B', subject: SUB });
+    const rows = (await listMembers(WS, `${WS}-child`)).filter((m) => m.subject === SUB);
     expect(rows).toHaveLength(2);
     expect(rows.every((m) => /^mbr-[0-9a-f]{8}$/.test(m.memberId))).toBe(true);
   });
@@ -96,8 +109,9 @@ describe('ADR 0697 D1 — the relationship is the key', () => {
 
 describe('ADR 0697 D2 — removal holds against a LEGACY twin', () => {
   it('THE case: deleting the visible row removes the relationship, not one row', async () => {
+    const WS = nextWs();
     const visible = await createMember({ orgId: WS, tenantId: WS, displayName: 'A', subject: SUB });
-    await plantLegacyTwin('mbr-legacy01');       // what the race left behind
+    await plantLegacyTwin(WS, 'mbr-legacy01');       // what the race left behind
 
     expect(await isWorkspaceMember(SUB, WS)).toBe(true);
     await deleteMember(visible.memberId);
@@ -112,20 +126,22 @@ describe('ADR 0697 D2 — removal holds against a LEGACY twin', () => {
   });
 
   it('deleting the TWIN first also removes the relationship', async () => {
+    const WS = nextWs();
     // Direction matters: an operator may act on either row, and the index points
     // at only one of them.
     const visible = await createMember({ orgId: WS, tenantId: WS, displayName: 'A', subject: SUB });
-    await plantLegacyTwin('mbr-legacy02');
+    await plantLegacyTwin(WS, 'mbr-legacy02');
     await deleteMember('mbr-legacy02');
     expect(await isWorkspaceMember(SUB, WS)).toBe(false);
     expect(await getMember(visible.memberId)).toBeNull();
   });
 
   it('a duplicated OWNER still cannot be removed into an ownerless workspace', async () => {
+    const WS = nextWs();
     // The invariant is counted over EVERYTHING removed. Counting per row would
     // pass on the first delete and strand the workspace on the second.
     const owner = await createMember({ orgId: WS, tenantId: WS, displayName: 'O', subject: SUB, roles: ['owner'] });
-    await plantLegacyTwin('mbr-legacy03', ['owner']);
+    await plantLegacyTwin(WS, 'mbr-legacy03', ['owner']);
     await expect(deleteMember(owner.memberId)).rejects.toThrow(/owner/i);
     // ...and the compensating restore put BOTH rows back, so the workspace is
     // exactly as it was rather than half-deleted.

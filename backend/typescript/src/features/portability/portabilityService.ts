@@ -30,10 +30,10 @@ async function claimImport(tenantId: string, kind: string, dedupKey: string): Pr
 // feature imports (prompts, connections).
 import { listRoster, createRosterEntry, getRosterEntry } from '../../host/rosterService.js';
 import { getAgentProfile, upsertAgentProfile } from '../../host/agentProfileService.js';
-import { listOrgs } from '../../host/accessControlService.js';
+import { assertRunOrgScope, listOrgs, runOrgScopeFilter } from '../../host/accessControlService.js';
 import { getJob, registerJob, listJobs, scheduleSubject } from '../../host/schedulingService.js';
 import { getChart, putChart } from '../../host/orgChartService.js';
-import { listEntriesUnfiltered, createEntry, canonicalPromptActor, VALID_VISIBILITY as VALID_PROMPT_VISIBILITY } from '../prompts/promptLibraryService.js';
+import { listEntriesUnfiltered, createEntry, canonicalPromptActor, readableBy as promptReadableBy, publishedBodyOf, VALID_VISIBILITY as VALID_PROMPT_VISIBILITY } from '../prompts/promptLibraryService.js';
 import { listConnections } from '../connections/connectionsService.js';
 import { resolveSubjectAccess, levelSatisfies } from '../../host/subjectAccess.js';
 
@@ -272,11 +272,26 @@ const KIND_HANDLERS: Record<ExportKind, KindHandler> = {
   },
 
   'prompt-template': {
-    async exportItems(tenantId) {
+    async exportItems(tenantId, caller) {
+      // ADR 0993 D7 (`CPC-16` for prompts) — the export is a READ door, so it
+      // answers what the exporter may READ: orgs they are a member of, and in them
+      // only entries `readableBy` grants. It used to hand any exporter every
+      // member's private entries in every org.
+      //
+      // No caller, no rows — checked BEFORE `runOrgScopeFilter`, which lets every
+      // org through for an undefined actor. Two identity spaces: membership is the
+      // raw request subject (what members are keyed on), ownership is the
+      // canonical `createdBy` space (`canonicalPromptActor`).
+      if (!caller) return [];
+      const owner = canonicalPromptActor(tenantId, caller);
       const orgs = await listOrgs(tenantId);
+      const member = await runOrgScopeFilter(tenantId, caller, orgs.map((o) => o.orgId), 'workspace:read');
       const items: ExportItem[] = [];
-      for (const org of orgs) {
-        for (const e of await listEntriesUnfiltered(tenantId, org.orgId)) {
+      for (const org of orgs.filter((o) => member.has(o.orgId))) {
+        for (const e of (await listEntriesUnfiltered(tenantId, org.orgId)).filter((x) => promptReadableBy(x, owner))) {
+          // `/architect` H4 — a published body is the library's own, and no other
+          // tenant can resolve it, so the bundle carries the text itself.
+          const body = await publishedBodyOf(e);
           items.push({
             kind: 'prompt-template',
             ref: `pt:${e.entryId}`,
@@ -287,12 +302,8 @@ const KIND_HANDLERS: Record<ExportKind, KindHandler> = {
               ...(e.description ? { description: e.description } : {}),
               ...(e.tags?.length ? { tags: e.tags } : {}),
               ...(e.promptRef ? { promptRef: e.promptRef } : {}),
-              // ADR 0694 D3b — carry `visibility`. Without it a round-trip CANNOT
-              // preserve intent, and any import-side default silently rewrites the
-              // ACL of every exported entry. (Note the export itself is unfiltered:
-              // co-residency leakage of prompts is the KNOWN, still-open `CPC-16`
-              // tracked at routes.ts:66 — this line does not widen that, but it does
-              // stop the round trip from ALSO downgrading privacy.)
+              ...(body ? { template: body } : {}),
+              // ADR 0694 D3b — carry `visibility`, so a round trip preserves intent.
               visibility: e.visibility,
             },
           });
@@ -305,12 +316,30 @@ const KIND_HANDLERS: Record<ExportKind, KindHandler> = {
       if (!name) return { status: 'skipped', message: 'payload.name missing' };
       const orgId = str(item.payload.orgId) || 'default';
       const promptRef = str(item.payload.promptRef);
-      if (!promptRef) return { status: 'skipped', message: 'payload.promptRef missing (required by the prompt library)' };
-      // Idempotency: dedupe by (org, name).
-      const existing = (await listEntriesUnfiltered(tenantId, orgId)).find((e) => e.name === name);
+      const template = item.payload.template && typeof item.payload.template === 'object' ? item.payload.template : undefined;
+      if (!promptRef && !template) return { status: 'skipped', message: 'payload.promptRef or payload.template is required by the prompt library' };
+      if (!actor || actor === 'import') {
+        return { status: 'skipped', message: `prompt '${name}' needs an authenticated importer (no subject on the request)` };
+      }
+      // ADR 0993 D7 (`/architect` H4) — writing an entry into an org takes the
+      // same `workspace:write` the create route asks for.
+      try {
+        await assertRunOrgScope(tenantId, actor, orgId, 'workspace:write');
+      } catch {
+        return { status: 'skipped', message: `prompt '${name}' needs write access to org ${orgId}` };
+      }
+      const owner = canonicalPromptActor(tenantId, actor);
+      // Idempotency: dedupe by (org, name) — among the entries the importer may
+      // READ, so a co-member's private name is not an existence oracle (D7).
+      const existing = (await listEntriesUnfiltered(tenantId, orgId)).find((e) => e.name === name && promptReadableBy(e, owner));
       if (existing) return { status: 'skipped', message: `prompt '${name}' already present in org ${orgId}` };
-      if (!(await claimImport(tenantId, 'prompt', `${orgId}:${name}`))) {
-        return { status: 'skipped', message: `prompt '${name}' claimed by a concurrent import` };
+      // The claim is per IMPORTER for a private item (grade-code P61CD-5): a
+      // tenant-wide (org, name) claim told member B that member A had imported a
+      // private prompt of that name, and blocked B's import of it for good.
+      const importedVisibility = VALID_PROMPT_VISIBILITY.has(str(item.payload.visibility)) ? str(item.payload.visibility) : 'private';
+      const claimKey = importedVisibility === 'private' ? `${orgId}:${owner}:${name}` : `${orgId}:${name}`;
+      if (!(await claimImport(tenantId, 'prompt', claimKey))) {
+        return { status: 'skipped', message: `prompt '${name}' was already imported` };
       }
       // PLC-7 (ADR 0694 D3a/D3c) — `actor` here is the RAW request subject
       // (`routes.ts` → `callerSubject(req) ?? 'import'` → `req.userId ??
@@ -322,17 +351,14 @@ const KIND_HANDLERS: Record<ExportKind, KindHandler> = {
       // `listEntriesUnfiltered`. `promptSurface.ts:28-29` documents and fixes this
       // exact hazard for the workflow surface; the fix had never been transferred
       // here. Same rule, deliberately character-for-character.
-      // D3c — refuse BEFORE stamping. The `'import'` sentinel would canonicalize to
-      // a perfectly real-looking id, which is exactly why it must be rejected here:
-      // a subject-less import has no owner to attribute the row to, and a row nobody
-      // can read is worse than an import that says it skipped.
-      if (!actor || actor === 'import') {
-        return { status: 'skipped', message: `prompt '${name}' needs an authenticated importer (no subject on the request)` };
-      }
-      const owner = canonicalPromptActor(tenantId, actor);
+      // D3c — the subject-less refusal above runs BEFORE stamping. The `'import'`
+      // sentinel would canonicalize to a perfectly real-looking id, which is exactly
+      // why it must be rejected: a subject-less import has no owner to attribute the
+      // row to, and a row nobody can read is worse than an import that says it skipped.
       await createEntry(tenantId, orgId, owner, {
         name,
-        promptRef,
+        // A published body is REPUBLISHED (D4); only a binding is re-bound.
+        ...(template ? { template } : { promptRef }),
         // ADR 0694 D3b, CORRECTED — an earlier draft defaulted an unspecified import
         // to `org`, reasoning that "an import is an org-scoped act". That was WRONG
         // and would have shipped a privacy DOWNGRADE: the exporter did not carry
@@ -345,7 +371,7 @@ const KIND_HANDLERS: Record<ExportKind, KindHandler> = {
         // its importer instead of by nobody. Preserving the bundle's stated visibility
         // — and defaulting to the conservative `private` when a foreign bundle names
         // none — is therefore both sufficient and safe.
-        visibility: VALID_PROMPT_VISIBILITY.has(str(item.payload.visibility)) ? str(item.payload.visibility) : 'private',
+        visibility: importedVisibility,
         ...(str(item.payload.description) ? { description: str(item.payload.description) } : {}),
         ...(Array.isArray(item.payload.tags) ? { tags: strArr(item.payload.tags) } : {}),
       });

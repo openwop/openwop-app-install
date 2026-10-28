@@ -11,6 +11,18 @@
  *     resolves agents without the shared visibility rule.
  *  3. ROUTE probes: the HTTP boundary answers uniform 404 (never data, never
  *     the old 403 existence-oracle) for another tenant's agent/roster ids.
+ *
+ * TST-BQR-5. Red when: a raw roster-store access or a second
+ * `getUserAgentAnyTenant` caller appears outside its owner; a tenant-less
+ * agent-registry `.resolve(<one arg>)` appears — through `getAgentRegistry()`
+ * OR an alias (`reg`/`registry`/`agentRegistry`) — outside the measured
+ * allowlist; a binding surface raw-imports the registry; the sqlite
+ * user_agents get/delete predicate drops `tenant_id`; `getRosterEntry` stops
+ * keying by tenant; `agentVisibleToTenant` or `resolveAgentForTenant` stop
+ * scoping by tenant; the PATCH/DELETE agent route reads cross-tenant. The
+ * roster ROUTE is a DOUBLE guard (`getRosterEntry` tenant-keyed read AND the
+ * route's `entry.tenantId !== tenantOf(req)` check): a probe on either one
+ * alone is vacuous by design; the read is probed via the service case.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync, statSync, rmSync } from 'node:fs';
@@ -31,6 +43,9 @@ import { agentVisibleToTenant, resolveAgentForTenant } from '../src/host/agentVi
 import { getAgentRegistry } from '../src/executor/agentRegistry.js';
 import { APP_MIGRATIONS } from '../src/host/appMigrations.js';
 import type { UserAgentRecord } from '../src/types.js';
+import type { ResolvedAgentManifest } from '../src/executor/agentRegistry.js';
+
+interface RouteError { error: string; message: string }
 
 const SRC = join(__dirname, '../src');
 
@@ -73,17 +88,22 @@ describe('ADR 0379 P1 — tripwires (source scan)', () => {
     // drift mode the ADR narrates. Every `.resolve(<one arg>)` on the agent
     // registry must be in the allowlist of audited tenant-less callers
     // (pack-agent-only paths, each with its disposition recorded in the ADR).
+    // MEASURED on bdec085fa (wave 58): the only tenant-less agent-registry
+    // resolve is the '*' wildcard path itself. The previous four-entry list was
+    // stale (0 matches) and the regex missed the aliased form `reg.resolve(id)`.
+    // Shrink-only: a new entry needs a disposition here AND in the ADR.
     const ALLOWED = new Set([
-      'host/a2aServer.ts',            // a2a: pack agents only (documented)
-      'host/workforceEval.ts',        // eval harness: pack agent
-      'host/agentVisibility.ts',      // the '*' wildcard path itself
-      'routes/agents.ts',             // verify-run harness agent (pack)
+      'host/agentVisibility.ts',      // the '*' wildcard path itself (`reg.resolve(agentId)`)
     ]);
+    const TENANTLESS = /\b(?:getAgentRegistry\(\)|reg|registry|agentRegistry)\.resolve\(\s*[^,()]+\s*\)/;
     const offenders = files.filter((f) => {
       const text = readFileSync(f, 'utf8');
-      // A resolve with NO comma before the closing paren = tenant-less.
-      return /getAgentRegistry\(\)\.resolve\(\s*[^,()]+\s*\)/.test(text) && !ALLOWED.has(f.slice(SRC.length + 1));
+      // Only files that can reach the AGENT registry; a resolve with NO comma
+      // before the closing paren = tenant-less.
+      return text.includes('getAgentRegistry') && TENANTLESS.test(text) && !ALLOWED.has(f.slice(SRC.length + 1));
     });
+    // Positive control: the allowlisted file still matches (else the regex rotted).
+    expect(TENANTLESS.test(readFileSync(join(SRC, 'host/agentVisibility.ts'), 'utf8'))).toBe(true);
     expect(offenders.map((f) => f.slice(SRC.length + 1)), 'new tenant-less resolve — thread the tenant or disposition it here + in the ADR').toEqual([]);
   });
 
@@ -149,11 +169,11 @@ describe('ADR 0379 P2 (PR-A) — collision-by-construction substrate', () => {
 
   it('registry: the SAME user agentId resolves per tenant; pack agents stay tenant-blind', async () => {
     const reg = getAgentRegistry();
-    const mk = (tenant: string): Parameters<typeof reg.register>[0] => ({
+    const mk = (tenant: string): ResolvedAgentManifest => ({
       agentId: 'user.probe-shared', persona: `P-${tenant}`, modelClass: 'chat',
       systemPrompt: 'x', toolAllowlist: [], packName: `user:${tenant}`,
       packVersion: '0.0.0', ownerTenant: tenant,
-    } as Parameters<typeof reg.register>[0]);
+    });
     reg.register(mk('t-a'));
     reg.register(mk('t-b'));
     expect(reg.get('user.probe-shared', 't-a')?.persona).toBe('P-t-a');
@@ -241,8 +261,8 @@ describe('ADR 0379 P1 — roster service fail-closed accessors', () => {
 
 describe('ADR 0379 P1 — the ONE visibility rule (all binding surfaces share it)', () => {
   it('pack agents are global; user agents owner-only; "*" is the explicit admin escape', () => {
-    const pack = { agentId: 'core.x.helper', persona: 'H' } as Parameters<typeof agentVisibleToTenant>[0];
-    const owned = { agentId: 'user.t-a.iris', persona: 'I', ownerTenant: 't-a' } as Parameters<typeof agentVisibleToTenant>[0];
+    const pack: ResolvedAgentManifest = { agentId: 'core.x.helper', persona: 'H', modelClass: 'chat', systemPrompt: 'x', packName: 'core.x', packVersion: '1.0.0' };
+    const owned: ResolvedAgentManifest = { agentId: 'user.t-a.iris', persona: 'I', modelClass: 'chat', systemPrompt: 'x', packName: 'user:t-a', packVersion: '0.0.0', ownerTenant: 't-a' };
     expect(agentVisibleToTenant(pack, 't-b')).toBe(true);
     expect(agentVisibleToTenant(owned, 't-a')).toBe(true);
     expect(agentVisibleToTenant(owned, 't-b')).toBe(false);
@@ -252,10 +272,12 @@ describe('ADR 0379 P1 — the ONE visibility rule (all binding surfaces share it
 
   it('resolveAgentForTenant is fail-closed: cross-tenant and absent are the same null', async () => {
     const storage = await openStorage('memory://');
-    await ensureUserAgentRegistered(storage, AGENT('t-a', 'scoped-probe'));
-    expect(await resolveAgentForTenant('user.t-a.scoped-probe', 't-a')).not.toBeNull();
-    expect(await resolveAgentForTenant('user.t-a.scoped-probe', 't-b')).toBeNull();
-    expect(await resolveAgentForTenant('user.t-a.absent-probe', 't-a')).toBeNull();
+    try {
+      await ensureUserAgentRegistered(storage, AGENT('t-a', 'scoped-probe'));
+      expect((await resolveAgentForTenant('user.t-a.scoped-probe', 't-a'))?.ownerTenant).toBe('t-a');
+      expect(await resolveAgentForTenant('user.t-a.scoped-probe', 't-b')).toBeNull();
+      expect(await resolveAgentForTenant('user.t-a.absent-probe', 't-a')).toBeNull();
+    } finally { await storage.close(); }
   });
 });
 
@@ -296,10 +318,29 @@ describe('ADR 0379 P1 — route boundary: uniform 404, no existence oracle', () 
     const foreign = AGENT('t-foreign', 'secret-agent');
     await storage.insertUserAgent(foreign);
 
+    // Positive control: the caller's OWN agent IS editable through the same route.
+    const own = AGENT('default', 'own-probe');
+    await storage.insertUserAgent(own);
+    const ownPatch = await call(`/host/openwop-app/agents/${own.agentId}`, {
+      method: 'PATCH', body: JSON.stringify({ systemPrompt: 'mine' }),
+    });
+    expect(ownPatch.status).toBe(200);
+    expect((await storage.getUserAgent('default', own.agentId))?.systemPrompt).toBe('mine');
+
+    const notFound = (id: string): RouteError => ({
+      error: 'not_found',
+      message: `User-authored agent ${id} not found. Pack-installed agents are not editable through this route.`,
+    });
     const patch = await call(`/host/openwop-app/agents/${foreign.agentId}`, {
       method: 'PATCH', body: JSON.stringify({ systemPrompt: 'stolen' }),
     });
     expect(patch.status).toBe(404);
+    // Uniform: the SAME body a never-existing id gets (no existence oracle).
+    expect(await patch.json()).toMatchObject(notFound(foreign.agentId));
+    const absent = await call('/host/openwop-app/agents/user.t-foreign.never-existed', {
+      method: 'PATCH', body: JSON.stringify({ systemPrompt: 'x' }),
+    });
+    expect(await absent.json()).toMatchObject(notFound('user.t-foreign.never-existed'));
 
     const del = await call(`/host/openwop-app/agents/${foreign.agentId}`, { method: 'DELETE' });
     expect(del.status).toBe(404);
@@ -310,6 +351,9 @@ describe('ADR 0379 P1 — route boundary: uniform 404, no existence oracle', () 
 
   it("GET/PATCH/DELETE another tenant's roster member → 404; row survives", async () => {
     const foreign = await createRosterEntry({ tenantId: 't-foreign', persona: 'Covert', agentRef: { agentId: 'p.k.covert' } });
+    // Positive control: the caller's OWN roster member reads through the same route.
+    const own = await createRosterEntry({ tenantId: 'default', persona: 'Overt', agentRef: { agentId: 'p.k.overt' } });
+    expect((await call(`/host/openwop-app/roster/${own.rosterId}`)).status).toBe(200);
 
     expect((await call(`/host/openwop-app/roster/${foreign.rosterId}`)).status).toBe(404);
     expect((await call(`/host/openwop-app/roster/${foreign.rosterId}`, {

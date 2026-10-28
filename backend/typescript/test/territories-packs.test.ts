@@ -1,6 +1,11 @@
 /**
  * Sales Territory Management — P5 pack tests (ADR 0272 / ADR 0014).
  * Validates the node + agent pack manifests and the node→surface wiring.
+ * What breaks it: a manifest node with no handler in the runtime `nodes` map
+ * (the map is what the loader reads; a named export alone is the
+ * "skills-bridge" bug class), a node forwarding the wrong args to the surface,
+ * a missing-surface call that does not fail as host_capability_missing, or a
+ * write tool on the advisory planner's allowlist (the ADR 0208 stance).
  */
 
 import { describe, expect, it } from 'vitest';
@@ -18,12 +23,10 @@ interface AgentsManifest { name: string; agents: Array<{ agentId: string; person
 describe('feature.territories.nodes pack', () => {
   const manifest = JSON.parse(readFileSync(join(NODES_DIR, 'pack.json'), 'utf8')) as NodesManifest;
 
-  it('declares 7 read + 2 governed write nodes (v1.2.0), all role:"action"', () => {
+  // The version is not pinned: a literal here churns on every legitimate bump and
+  // cannot enforce the bump it asks for (the pack-signature gate owns versions).
+  it('declares 7 read + 2 governed write nodes, all role:"action"', () => {
     expect(manifest.name).toBe('feature.territories.nodes');
-    // R2 TER2-B3/review M3 — bumped when `set-quota`'s advertised inputs changed
-    // (`currency` is required above zero, `repSplits` REPLACES). A pack that describes
-    // a shape the host refuses is the same lie as a prompt that does.
-    expect(manifest.version).toBe('1.2.1');
     expect(manifest.nodes).toHaveLength(9);
     for (const n of manifest.nodes) expect(n.role, n.typeId).toBe('action');
     const ids = manifest.nodes.map((n) => n.typeId).sort();
@@ -40,10 +43,8 @@ describe('feature.territories.nodes pack', () => {
         'feature.territories.nodes.set-quota',
       ].sort(),
     );
-    // A5 — the write nodes are marked side-effectful
-    for (const w of ['feature.territories.nodes.activate-model', 'feature.territories.nodes.set-quota']) {
-      expect(manifest.nodes.find((n) => n.typeId === w)?.role).toBe('action');
-    }
+    // A5 — the write nodes (activate-model, set-quota) are side-effectful: the
+    // role loop above covers them with every other node.
   });
 
   it('every node handler is exported and passes args through to the surface', async () => {
@@ -51,6 +52,11 @@ describe('feature.territories.nodes pack', () => {
     for (const name of ['listModels', 'activeModel', 'listTerritories', 'listRules', 'listQuotas', 'preview', 'attainment']) {
       expect(typeof mod[name], name).toBe('function');
     }
+    // The loader dispatches through the `nodes` MAP, keyed by typeId: it must
+    // name every node pack.json declares (the SSoT), each a function.
+    const map = mod.nodes as Record<string, unknown>;
+    expect(Object.keys(map).sort()).toEqual(manifest.nodes.map((n) => n.typeId).sort());
+    for (const [typeId, fn] of Object.entries(map)) expect(typeof fn, typeId).toBe('function');
 
     // mock surface — capture the args the node forwards
     const calls: Record<string, unknown> = {};

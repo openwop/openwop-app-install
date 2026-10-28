@@ -23,15 +23,35 @@ export interface MediaCropBox { x: number; y: number; w: number; h: number }
 /** ADR 0363 P1 — alt-text provenance (see the backend owner `mediaService`). */
 export type MediaAltTextSource = 'human' | 'ai' | 'decorative';
 
+/** ADR 0945 D4 — the write-once generation stamp (ids and hashes only). */
+export type FidelityOutcome = 'pass' | 'fail' | 'needs_review';
+export interface MediaGrounding {
+  mode: 'none' | 'composite' | 'edit' | 'animate';
+  productId?: string;
+  sources: Array<{ assetId: string; sha256: string }>;
+  promptHash?: string;
+  provider: string;
+  model: string;
+  op: string;
+  runId?: string;
+  composedFrom?: { renderId: string; templateId: string; briefId?: string };
+  fidelity?: { verdictId: string; outcome: FidelityOutcome; rulesetVersion: string };
+}
+export interface MediaLineage { generatedBy?: 'ai'; grounding?: MediaGrounding }
+
 export interface MediaAsset {
   assetId: string;
   orgId: string;
   collectionId?: string;
   name: string;
   contentType: string;
+  /** Current bytes, used to confirm an immutable creative review. */
+  contentHash?: string;
   sizeBytes: number;
   tags: string[];
   marketing?: MediaMarketing;
+  /** ADR 0229 / ADR 0945 — provenance (absent on plain uploads). */
+  lineage?: MediaLineage;
   renditions?: Partial<Record<'16:9' | '1:1' | '9:16', MediaCropBox>>;
   /** ADR 0363 P1 — accessibility alt text; `decorative` pairs with empty text. */
   altText?: string;
@@ -109,6 +129,12 @@ export async function listAssets(orgId: string, filter: { collectionId?: string;
   return (await asJson<{ assets: MediaAsset[] }>(res, 'listAssets')).assets;
 }
 
+/** Existing authenticated, org-scoped point read for an asset review. */
+export async function getMediaAsset(orgId: string, assetId: string): Promise<MediaAsset> {
+  const res = await fetch(`${orgBase(orgId)}/assets/${encodeURIComponent(assetId)}`, fetchOpts({ headers: authedHeaders() }));
+  return asJson<MediaAsset>(res, 'getMediaAsset');
+}
+
 export async function uploadAsset(orgId: string, file: File, collectionId?: string): Promise<MediaAsset> {
   const contentBase64 = await blobToBase64(file);
   const res = await fetch(
@@ -181,4 +207,29 @@ export async function aiEditAsset(orgId: string, assetId: string, req: { op: Ima
 export async function aiUpscaleAsset(orgId: string, assetId: string, req: { scale: 2 | 4; provider?: string; model?: string }): Promise<MediaAsset[]> {
   const res = await fetch(`${orgBase(orgId)}/assets/${encodeURIComponent(assetId)}/ai-upscale`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify(req) }));
   return (await asJson<{ assets: MediaAsset[] }>(res, 'aiUpscaleAsset')).assets;
+}
+
+/** ADR 0945 P5 — one fidelity check row (stage A, the judge, or a mode note). */
+export interface FidelityCheckView { id: string; status: 'pass' | 'fail' | 'not_applicable'; value?: number; threshold?: number; detail: string }
+export interface AssetProvenance {
+  assetId: string;
+  generatedBy: 'ai' | null;
+  grounding: MediaGrounding | null;
+  sources: Array<{ assetId: string; sha256: string; present: boolean; name?: string; contentType?: string; serveUrl?: string }>;
+  verdict: null | {
+    verdictId: string;
+    assetSha256: string;
+    outcome: FidelityOutcome;
+    mode: string;
+    checks: FidelityCheckView[];
+    judge?: { provider: string; model?: string; repaired: boolean; results: Array<{ attribute: string; answer: 'match' | 'mismatch' | 'not_visible'; evidence: string }> };
+    rulesetVersion: string;
+    checkedAt: string;
+  };
+}
+
+/** ADR 0945 P5 — the asset's generation stamp, verdict and resolved sources. */
+export async function getAssetProvenance(orgId: string, assetId: string): Promise<AssetProvenance> {
+  const res = await fetch(`${orgBase(orgId)}/assets/${encodeURIComponent(assetId)}/provenance`, fetchOpts({ headers: authedHeaders() }));
+  return asJson<AssetProvenance>(res, 'getAssetProvenance');
 }

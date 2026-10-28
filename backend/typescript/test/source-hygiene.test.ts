@@ -8,6 +8,9 @@
  * binary — silently blinding every text search over it (this pass found the
  * class only because a grep came back inexplicably empty). This tripwire
  * keeps the class extinct.
+ *
+ * What breaks it: a raw NUL in any tracked text file under the five trees
+ * (sabotage-witnessed by inserting one into smtpEgress.ts, 8fw3g1-hyg-nul).
  */
 import { readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -25,7 +28,10 @@ describe('source hygiene — control bytes', () => {
     const files = execFileSync('git', ['ls-files', '--', ...SOURCE_TREES], { cwd: repoRoot, encoding: 'utf8' })
       .split('\n')
       .filter((f) => f && TEXT_EXT.test(f));
-    expect(files.length).toBeGreaterThan(100); // the scan actually saw the trees
+    // The scan actually saw the trees: MEASURED 9,913 tracked text files at
+    // 0151a8bb2 (/grade-tests wave 61). A floor of 100 let a scan that lost
+    // whole trees pass; ~9% headroom absorbs any deletion wave.
+    expect(files.length).toBeGreaterThan(9001);
     const offenders = files.filter((f) => {
       try {
         return readFileSync(join(repoRoot, f), 'latin1').includes('\u0000');

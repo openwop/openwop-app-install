@@ -1,6 +1,17 @@
 /**
  * RFC 0133 — workflow-chain composition (host implementation).
  * Sub-chains (runtime child chains, co-registered) + produced variables.
+ *
+ * What breaks it:
+ *  - §1.2/§2.2 closed-world validation (`validateChainComposition`): a chain that pins
+ *    `config.workflowId`, references an undeclared sub-chain, names an unknown producer,
+ *    collides a produced name with a param, or reads an undeclared variable must be
+ *    refused at load time with the exact RFC error code, never at instantiation.
+ *  - §1.1 sibling cycles and the §1.3 depth bound (`MAX_SUB_CHAIN_DEPTH`, the DoS
+ *    backstop), pinned at the exact boundary.
+ *  - §1.3 co-registration: children registered before the parent, `subChainRef`
+ *    rewritten to the minted id, and the minted id DETERMINISTIC per (tenant, child,
+ *    version), because replay/`:fork` re-resolves a child by that id.
  */
 import { describe, it, expect } from 'vitest';
 import {
@@ -110,8 +121,8 @@ describe('RFC 0133 §1.3 — co-registration', () => {
     // The parent node's subChainRef is gone; workflowId now points at the child.
     // (expandChain prefixes node ids, so find by config, not the original 'build'.)
     const node = definition.nodes[0]!;
-    expect((node.config as Record<string, unknown>).workflowId).toBe(childId);
-    expect(node.config as Record<string, unknown>).not.toHaveProperty('subChainRef');
+    expect(node.config?.workflowId).toBe(childId);
+    expect(node.config).not.toHaveProperty('subChainRef');
   });
 
   it('mints a DETERMINISTIC child id (same tenant+child ⇒ same id, dedup/convergent)', async () => {
@@ -169,25 +180,40 @@ describe('RFC 0133 §1.3 — deterministic tenant-scoped child id', () => {
 });
 
 describe('RFC 0133 §1.3 — depth bound (sub_chain_max_depth_exceeded)', () => {
+  // A chain of DISTINCT ids `link-0 → link-1 → … → link-<last>`: never a cycle (the
+  // visited set never repeats), so only the depth bound can stop it. `link-<last>`
+  // holds no reference. A link at nesting depth d that still references a child is
+  // refused once d > MAX_SUB_CHAIN_DEPTH (`workflowChainPackLoader.ts`, the
+  // `depth > MAX_SUB_CHAIN_DEPTH` check in `coRegisterSubChains`).
+  const linkChain = (n: number, last: number): WorkflowChain => chain({
+    chainId: `link-${n}`,
+    dag: n === last
+      ? { nodes: [{ id: 'leaf', typeId: 'core.fail', config: {} }], edges: [] }
+      : { nodes: [{ id: 'd', typeId: 'core.subWorkflow', config: { subChainRef: `link-${n + 1}` } }], edges: [] },
+    ...(n === last ? {} : { subChains: [{ ref: { packName: 'p', chainId: `link-${n + 1}`, version: '1.0.0' } }] }),
+  });
+  const depsFor = (last: number, registered: WorkflowDefinition[]): SubChainDeps => ({
+    register: (d) => registered.push(d),
+    own: async () => {},
+    supported: true,
+    resolveExternal: (ref) => linkChain(Number(ref.chainId.split('-')[1]), last),
+  });
+
   it('refuses when nesting exceeds MAX_SUB_CHAIN_DEPTH — the DoS backstop, distinct from a cycle', async () => {
-    // A self-recursive-by-version chain: each level references a fresh child chainId
-    // so it is NOT a cycle (visited-set never repeats), forcing the depth bound.
-    const linkChain = (n: number): WorkflowChain => chain({
-      chainId: `link-${n}`,
-      dag: { nodes: [{ id: 'd', typeId: 'core.subWorkflow', config: { subChainRef: `link-${n + 1}` } }], edges: [] },
-      subChains: [{ ref: { packName: 'p', chainId: `link-${n + 1}`, version: '1.0.0' } }],
-    });
-    const registered: WorkflowDefinition[] = [];
-    const deps: SubChainDeps = {
-      register: (d) => registered.push(d),
-      own: async () => {},
-      supported: true,
-      // Every ref resolves to the next link — an unbounded chain of DISTINCT ids.
-      resolveExternal: (ref) => linkChain(Number(ref.chainId.split('-')[1])),
-    };
-    await expect(
-      coRegisterSubChains(linkChain(0), { params: {}, tenantId: 't1' }, deps),
-    ).rejects.toMatchObject({ code: 'sub_chain_max_depth_exceeded' });
     expect(MAX_SUB_CHAIN_DEPTH).toBe(8);
+    // At the bound: links 0…9, so the deepest REFERENCING link sits at depth 8.
+    // Accepted, and all nine children are co-registered.
+    const ok: WorkflowDefinition[] = [];
+    const accepted = await coRegisterSubChains(linkChain(0, 9), { params: {}, tenantId: 't1' }, depsFor(9, ok));
+    expect(accepted.registeredChildIds).toHaveLength(9);
+    expect(ok).toHaveLength(9);
+    // One level past it: links 0…10, a referencing link at depth 9. Refused.
+    const over: WorkflowDefinition[] = [];
+    await expect(
+      coRegisterSubChains(linkChain(0, 10), { params: {}, tenantId: 't1' }, depsFor(10, over)),
+    ).rejects.toMatchObject({
+      code: 'sub_chain_max_depth_exceeded',
+      message: 'sub-chain nesting exceeds maxSubChainDepth (8)',
+    });
   });
 });

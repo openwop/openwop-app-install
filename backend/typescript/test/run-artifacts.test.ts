@@ -6,6 +6,20 @@
  * existing `artifactProjection` `run-event` source so the workbench/Library/approval-card
  * can preview it. Verifies kind derivation, idempotency, projection round-trip, the Library
  * list, and cross-tenant isolation.
+ *
+ * Breaks it (round-1 probes, witnessed): the markdown hint / lone-port unwrap in
+ * deriveArtifact (8fw2g2-ra-md, ra-unwrap), the insert-only CAS replaced by a put
+ * (ra-cas — reds the gate-preview case AND, since round 2, the URL-image case,
+ * which now re-executes with a DIFFERENT output), the role→status map
+ * (ra-status), the asset-only Library filter (ra-asset), the tenant check on the
+ * read (ra-tenant), the document / multi-image / URL-array / serve branches
+ * (ra-doc, ra-multi, ra-urlmulti, ra-serve).
+ *
+ * DOUBLE GUARD on "INLINE BINARY … idempotent (no re-mint)" (`mintAndLink`):
+ * the get-first on the bookkeeping row AND the CAS-loss GC of a freshly minted
+ * asset each keep the media count at 1 (round-1 8fw2g2-ra-getfirst, get-first
+ * removed, was VACUOUS by design). The probe is on both together
+ * (8fw2g2-ra-getfirst-both-r2).
  */
 
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -55,6 +69,10 @@ describe('ADR 0083 — run-artifact producer', () => {
 
   it('null/empty output → no row', async () => {
     expect(await persistRunArtifact({ tenantId: 't1', runId: 'r', nodeId: 'n', role: 'deliverable', output: null, now: 'x' })).toBeNull();
+    expect(await persistRunArtifact({ tenantId: 't1', runId: 'r', nodeId: 'n2', role: 'deliverable', output: undefined, now: 'x' })).toBeNull();
+    // …and nothing was written for either.
+    expect(await getRunArtifact('r:n')).toBeNull();
+    expect(await listRunArtifactsForTenant('t1')).toEqual([]);
   });
 
   it('projects a run-event artifact; a raw output is addressable but not a Library asset', async () => {
@@ -119,9 +137,16 @@ describe('ADR 0083 amendment — reference resolution (media / document / serve)
     expect(rows.some((a) => a.format === 'application/json')).toBe(false); // …NOT a JSON blob
     expect(rows.some((a) => a.content.includes('/assets/img-a'))).toBe(true);
     expect(rows.some((a) => a.content.includes('/assets/img-b'))).toBe(true);
-    // replay-safe: a re-execution writes no new rows (insert-only on the deterministic key)
-    await persistRunArtifact({ tenantId: 'tU', runId: 'uRun', nodeId: 'gen', role: 'deliverable', output: out, now: '2026-06-20T01:00:00Z' });
-    expect((await listRunArtifactsForTenant('tU')).length).toBe(2);
+    // replay-safe: a re-execution writes no new rows AND overwrites none (insert-only on
+    // the deterministic key). The re-exec carries DIFFERENT urls, so an overwrite would
+    // show `img-c`/`img-d` — a row COUNT alone cannot tell insert-only from overwrite.
+    const rerun = { images: [{ url: '/host/openwop-app/assets/img-c', mimeType: 'image/png' }, { url: '/host/openwop-app/assets/img-d', mimeType: 'image/png' }] };
+    await persistRunArtifact({ tenantId: 'tU', runId: 'uRun', nodeId: 'gen', role: 'deliverable', output: rerun, now: '2026-06-20T01:00:00Z' });
+    const after = await listRunArtifactsForTenant('tU');
+    expect(after.length).toBe(2);
+    expect(after.some((a) => a.content.includes('/assets/img-a'))).toBe(true);
+    expect(after.some((a) => a.content.includes('/assets/img-b'))).toBe(true);
+    expect(after.some((a) => a.content.includes('/assets/img-c') || a.content.includes('/assets/img-d'))).toBe(false);
   });
 
   it('DOCUMENT reference → links the document: artifact (no duplicate run-event blob)', async () => {

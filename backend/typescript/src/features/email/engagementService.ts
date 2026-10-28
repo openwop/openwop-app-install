@@ -63,6 +63,8 @@ interface EngagementToken {
   token: string;
   tenantId: string;
   campaignId: string;
+  /** Immutable topic authority; legacy unbound links retain channel controls only. */
+  orgId?: string;
   contactId: string;
   kind: 'click' | 'unsubscribe' | 'preferences' | 'open';
   /** ANLWF-1 / ADR 0651 D1 — the FIRST analytics session that linked through this
@@ -130,6 +132,27 @@ export interface EngagementEvent {
 }
 const events = new DurableCollection<EngagementEvent>('email:engagement', (e) => `${e.tenantId}::${e.id}`);
 
+/**
+ * ADR 0955 P0 (J8) — the per-CONTACT engagement index: a denormalized copy of each event,
+ * keyed `${tenantId}::${contactId}::${at}::${id}`, so "this contact's opens and clicks" is
+ * one prefix read instead of the tenant scan `listEngagement` is. `email:engagement` stays
+ * the record; this is a projection that every event writer maintains through
+ * `putEngagementEvent`, and that `ensureContactIndex` backfills ONCE per tenant for the
+ * rows written before it existed.
+ */
+const byContact = new DurableCollection<EngagementEvent>(
+  'email:engagement-by-contact',
+  (e) => contactIndexKey(e),
+  undefined,
+  (e) => e.tenantId,
+);
+const contactIndexKey = (e: Pick<EngagementEvent, 'tenantId' | 'contactId' | 'at' | 'id'>): string => `${e.tenantId}::${e.contactId}::${e.at}::${e.id}`;
+
+/** Per-tenant marker: the legacy rows have been copied into `byContact`. Written only
+ *  AFTER the copy succeeds, so a failed backfill is retried by the next read. */
+interface ContactIndexMark { key: string; at: string }
+const contactIndexMarks = new DurableCollection<ContactIndexMark>('email:engagement-by-contact-mark', (m) => m.key, undefined, (m) => m.key);
+
 // MKT-2 (ADR 0077/0081 retention seam) — PER-KIND retention for the two append-only
 // engagement stores (behavioral PII → `confidential-pii`, riding the operator opt-in
 // `retention.confidentialPiiDays`, consistent with the analytics:event purger). The
@@ -169,6 +192,19 @@ registerRetentionPurger({
   },
 });
 
+// ADR 0955 P0 — the per-contact index ages with the events it copies (same kinds, same cutoff).
+registerRetentionPurger({
+  feature: 'email:engagement-by-contact',
+  dryRun: 'rows-by-age',
+  async purge(tenantId, classification, cutoffIso) {
+    if (!tenantId || classification !== 'confidential-pii') return 0;
+    const ageable = (await byContact.listForTenantIndexed(tenantId)).filter((e) => e.kind === 'opened' || e.kind === 'clicked');
+    return purgeRowsByAge('email:engagement-by-contact', ageable, tenantId, cutoffIso,
+      (e) => ({ tenantId: e.tenantId, updatedAt: e.at, id: contactIndexKey(e) }),
+      (id) => byContact.delete(id));
+  },
+});
+
 // `email:engagement` events: age `opened`/`clicked` (pure behavioral analytics); KEEP
 // `unsubscribed` forever — it is the dedup marker `recordUnsubscribe` reads (below) AND the
 // consent/suppression record.
@@ -196,7 +232,7 @@ function appendOwx(url: string, token: string): string {
 }
 
 export async function mintToken(input: {
-  tenantId: string; campaignId: string; contactId: string; kind: 'click' | 'unsubscribe' | 'preferences' | 'open'; url?: string; email?: string;
+  tenantId: string; campaignId: string; orgId?: string; contactId: string; kind: 'click' | 'unsubscribe' | 'preferences' | 'open'; url?: string; email?: string;
   /** EM-UX-2 — the sibling preferences token, on an `unsubscribe` mint only. */
   prefsToken?: string;
 }): Promise<string> {
@@ -207,6 +243,7 @@ export async function mintToken(input: {
   const url = input.kind === 'click' && input.url ? appendOwx(input.url, token) : input.url;
   await tokens.put({
     token, tenantId: input.tenantId, campaignId: input.campaignId, contactId: input.contactId,
+    ...(input.orgId ? { orgId: input.orgId } : {}),
     kind: input.kind, ...(url ? { url } : {}), ...(input.email ? { email: input.email.toLowerCase() } : {}),
     ...(input.kind === 'unsubscribe' && input.prefsToken ? { prefsToken: input.prefsToken } : {}),
     createdAt: new Date().toISOString(),
@@ -242,14 +279,14 @@ export async function claimClickTokenForSession(token: string, sessionKey: strin
 
 /** ADR 0227: resolve a preference-center token for the public page. */
 export async function resolvePreferencesToken(token: string): Promise<
-  { tenantId: string; campaignId: string; contactId: string; email?: string; createdAt: string } | null
+  { tenantId: string; campaignId: string; orgId?: string; contactId: string; email?: string; createdAt: string } | null
 > {
   if (typeof token !== 'string' || !token || token.length > 256) return null;
   const row = await tokens.get(token).catch(() => null);
   if (!row || row.kind !== 'preferences') return null;
   // ADR 0655 D3 — `createdAt` rides out so the public page can tell a FRESH link
   // (may widen consent) from a stale one (may only narrow it).
-  return { tenantId: row.tenantId, campaignId: row.campaignId, contactId: row.contactId, createdAt: row.createdAt, ...(row.email ? { email: row.email } : {}) };
+  return { tenantId: row.tenantId, campaignId: row.campaignId, contactId: row.contactId, createdAt: row.createdAt, ...(row.orgId ? { orgId: row.orgId } : {}), ...(row.email ? { email: row.email } : {}) };
 }
 
 /** Test-only — back-date a token so the D3 freshness rule can be witnessed. Never routed. */
@@ -292,7 +329,7 @@ const URL_RE = /https?:\/\/[^\s<>()"']+/g;
 export async function instrumentBody(
   body: string,
   base: string,
-  mintArgs: { tenantId: string; campaignId: string; contactId: string; email: string },
+  mintArgs: { tenantId: string; campaignId: string; orgId?: string; contactId: string; email: string },
 ): Promise<string> {
   return (await instrumentBodyWithUnsubscribe(body, base, mintArgs)).body;
 }
@@ -304,7 +341,7 @@ export async function instrumentBody(
 export async function instrumentBodyWithUnsubscribe(
   body: string,
   base: string,
-  mintArgs: { tenantId: string; campaignId: string; contactId: string; email: string },
+  mintArgs: { tenantId: string; campaignId: string; orgId?: string; contactId: string; email: string },
 ): Promise<{ body: string; unsubscribeUrl: string }> {
   // Longest-first (grade-code AUDIT-4): replacing a shorter URL before a longer
   // one that has it as a prefix would split the shorter out of the middle of
@@ -388,7 +425,7 @@ ${pixel}
 export async function recordClick(token: string): Promise<string | null> {
   const row = await tokens.get(token).catch(() => undefined);
   if (!row || row.kind !== 'click' || !row.url) return null;
-  await events.put({
+  await putEngagementEvent({
     id: `eng:${randomUUID()}`, tenantId: row.tenantId, campaignId: row.campaignId,
     contactId: row.contactId, kind: 'clicked', url: row.url, at: new Date().toISOString(),
   }).catch((e) => log.warn('click record failed', { error: e instanceof Error ? e.message : String(e) }));
@@ -402,7 +439,7 @@ export async function recordClick(token: string): Promise<string | null> {
 export async function recordOpen(token: string): Promise<boolean> {
   const row = await tokens.get(token).catch(() => undefined);
   if (!row || row.kind !== 'open') return false;
-  await events.put({
+  await putEngagementEvent({
     id: `eng:${randomUUID()}`, tenantId: row.tenantId, campaignId: row.campaignId,
     contactId: row.contactId, kind: 'opened', at: new Date().toISOString(),
   }).catch((e) => log.warn('open record failed', { error: e instanceof Error ? e.message : String(e) }));
@@ -512,7 +549,7 @@ export async function recordUnsubscribe(token: string): Promise<UnsubscribeOutco
     const prior = await listEngagement(row.tenantId, row.campaignId);
     const existing = prior.find((e) => e.kind === 'unsubscribed' && e.contactId === row.contactId);
     if (!existing) {
-      await events.put({
+      await putEngagementEvent({
         id: `eng:${randomUUID()}`, tenantId: row.tenantId, campaignId: row.campaignId,
         contactId: row.contactId, kind: 'unsubscribed', at: new Date().toISOString(),
         ...(unenforced.length ? { unenforced: [...unenforced] } : {}),
@@ -525,13 +562,60 @@ export async function recordUnsubscribe(token: string): Promise<UnsubscribeOutco
       // length 1, so the length comparison left the row naming the WRONG gate —
       // an operator reading the panel would chase the enforced one.
       const { unenforced: _drop, ...rest } = existing;
-      await events.put({ ...rest, ...(unenforced.length ? { unenforced: [...unenforced] } : {}) });
+      await putEngagementEvent({ ...rest, ...(unenforced.length ? { unenforced: [...unenforced] } : {}) });
     }
   } catch (e) {
     log.warn('unsubscribe engagement row failed', { error: e instanceof Error ? e.message : String(e) });
   }
 
   return unenforced.length ? { status: 'partial', unenforced } : { status: 'revoked', unenforced: [] };
+}
+
+/**
+ * ADR 0955 P0 — the ONE writer of an engagement event: the record, then its per-contact
+ * index copy (same `at` and `id`, so a rewrite of the row rewrites the copy in place).
+ * Callers keep their own best-effort handling; a failed copy is logged, never silent.
+ */
+export async function putEngagementEvent(ev: EngagementEvent): Promise<void> {
+  await events.put(ev);
+  try { await byContact.put(ev); }
+  catch (e) { log.warn('engagement_contact_index_write_failed', { tenantId: ev.tenantId, error: e instanceof Error ? e.message : String(e) }); }
+}
+
+/** ADR 0955 P0 — the index copy alone, for a writer that must put the record through its
+ *  own collection handle (the demo seeder backdates rows and keeps its tenant markers). */
+export async function indexEngagementEvent(ev: EngagementEvent): Promise<void> {
+  await byContact.put(ev);
+}
+
+/** ADR 0955 P0 — drop an event's index copy (the demo seeder's cleanup). */
+export async function unindexEngagementEvent(ev: Pick<EngagementEvent, 'tenantId' | 'contactId' | 'at' | 'id'>): Promise<void> {
+  await byContact.delete(contactIndexKey(ev));
+}
+
+/** Copy the tenant's pre-index events into `byContact`, once. Idempotent (deterministic
+ *  keys), so two first reads racing each other only write the same rows twice. */
+async function ensureContactIndex(tenantId: string): Promise<void> {
+  if (await contactIndexMarks.get(tenantId)) return;
+  for (const ev of await events.listByPrefix(`${tenantId}::`)) {
+    if (ev.tenantId === tenantId) await byContact.put(ev);
+  }
+  await contactIndexMarks.put({ key: tenantId, at: new Date().toISOString() });
+}
+
+/**
+ * ADR 0955 P0 (J8) — one contact's engagement, newest first: a prefix read on the
+ * per-contact index, never a tenant scan (after the one-time backfill above).
+ */
+export async function listContactEngagement(tenantId: string, contactId: string, opts: { campaignId?: string; sinceIso?: string } = {}): Promise<EngagementEvent[]> {
+  if (!tenantId || !contactId) return [];
+  await ensureContactIndex(tenantId);
+  const rows = await byContact.listByPrefix(`${tenantId}::${contactId}::`);
+  return rows
+    .filter((e) => e.tenantId === tenantId && e.contactId === contactId
+      && (!opts.campaignId || e.campaignId === opts.campaignId)
+      && (!opts.sinceIso || e.at >= opts.sinceIso))
+    .sort((a, b) => b.at.localeCompare(a.at));
 }
 
 export async function listEngagement(tenantId: string, campaignId?: string): Promise<EngagementEvent[]> {
@@ -571,6 +655,8 @@ export async function engagementStats(tenantId: string, campaignId: string): Pro
 export async function __clearEngagement(): Promise<void> {
   await tokens.__clear();
   await events.__clear();
+  await byContact.__clear();
+  await contactIndexMarks.__clear();
 }
 
 /**
@@ -647,6 +733,20 @@ export async function deleteSubjectEngagement(tenantId: string, subjectKey: stri
     if (row.contactId !== subjectKey && !addressContacts.has(row.contactId)) continue;
     try { await events.delete(`${row.tenantId}::${row.id}`); removed += 1; }
     catch (e) { failed += 1; log.error('engagement_event_erase_failed', { tenantId, error: e instanceof Error ? e.message : String(e) }); }
+  }
+  // ADR 0955 P0 — the per-contact index copies, by the contact prefix (a point range per
+  // contact, not a scan). Read independently of the events above so a copy whose event
+  // is already gone (a half-finished earlier erasure) is still reached.
+  for (const contactId of new Set([subjectKey, ...addressContacts])) {
+    const copies = await byContact.listByPrefix(`${tenantId}::${contactId}::`).catch((e) => {
+      failed += 1; log.error('engagement_index_read_failed', { tenantId, error: e instanceof Error ? e.message : String(e) }); return [] as EngagementEvent[];
+    });
+    for (const row of copies) {
+      if (row.tenantId !== tenantId || row.contactId !== contactId) continue;
+      // Not counted in `removed`: a copy is not a separate datum of the subject's.
+      try { await byContact.delete(contactIndexKey(row)); }
+      catch (e) { failed += 1; log.error('engagement_index_erase_failed', { tenantId, error: e instanceof Error ? e.message : String(e) }); }
+    }
   }
   return { removed, failed };
 }

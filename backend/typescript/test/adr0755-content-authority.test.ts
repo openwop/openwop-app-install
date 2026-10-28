@@ -20,8 +20,26 @@
  *   - ADR 0748 correction: a tenant-pinned env key (the production certify
  *     binding) is its tenant's own principal (ADR 0601 C4); member principals are
  *     `owk_` keys whose authority is their issuer's.
+ *
+ * WIT-CNT-2 (the cookie posture) lives in `adr0755-content-cookie-posture.test.ts`:
+ * it boots a second app, which re-initialises the shared in-memory storage, so it
+ * cannot share a file with cases that run in any order.
+ *
+ * Red when (wave 60 probes, tracker TST-BRA-1): the publish tier is dropped from
+ * POST (WIT-CNT-5); `assertOrgScope` is skipped (WIT-CNT-3, downgrade, editor DELETE
+ * of a live page); the `tenant-owner` branch is skipped (every env-key case); the
+ * key-lane `content:read` / `content:write` check is removed (WIT-CNT-4, narrow-key
+ * DELETE); the DELETE status tier is dropped; DELETE is gated on approval; the `sec:`
+ * refusal is dropped (WIT-CNT-7); the echo cap grows (WIT-CNT-13); `Vary:
+ * Authorization` is dropped (WIT-CNT-9); the create approval gate is skipped.
+ *
+ * Double guards, recorded (a single-site sabotage stays green by design):
+ *   - WIT-CNT-1: `createProtocolPage`'s tenant-wide `pages.get` pre-check AND
+ *     `createPage`'s `ownedOrConflict` org check (both `cmsService.ts`) each 409 a
+ *     sibling org's pageId.
+ *   - issuer removal → 401: `deleteMember`'s ADR 0795 D6 key revocation AND the
+ *     auth layer's `issuer-not-live` check (`middleware/auth.ts`).
  */
-import { mintAnonSession, signSession } from '../src/middleware/cookieSession.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
@@ -29,7 +47,7 @@ import { createApp } from '../src/index.js';
 import { createMember, createOrg, deleteMember, updateMember } from '../src/host/accessControlService.js';
 import { createPage, getPage } from '../src/features/cms/cmsService.js';
 import { issueApiKey, revokeApiKey } from '../src/features/developer-keys/apiKeyService.js';
-import { saveConfig } from '../src/host/featureToggles/service.js';
+import { getEffectiveConfig, saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 
 const TENANT = 'tenant-0755';
@@ -52,15 +70,23 @@ const saved: Record<string, string | undefined> = {};
 let BASE = '';
 let server: http.Server;
 
-async function call(method: string, path: string, opts: { key?: string | null; body?: unknown; headers?: Record<string, string> } = {}) {
+/** The error envelope and the protocol page/section bodies these cases read. */
+interface ContentBody {
+  error?: string;
+  status?: string;
+  details?: { requiredScope?: string; reason?: string; fields?: string[]; omitted?: number };
+}
+
+async function call(method: string, path: string, opts: { key?: string | null; body?: unknown; headers?: Record<string, string> } = {}): Promise<{ status: number; json: ContentBody; text: string; headers: Headers }> {
   // ADR 0812 P3c-0 — the protocol content ops are unversioned major-2 paths now.
   const headers: Record<string, string> = { 'openwop-version': '2', ...(opts.headers ?? {}) };
   if (opts.key !== null) headers.authorization = `Bearer ${opts.key ?? OP}`;
   if (opts.body !== undefined) headers['content-type'] = 'application/json';
   const res = await fetch(`${BASE}${path}`, { method, headers, ...(opts.body !== undefined ? { body: JSON.stringify(opts.body) } : {}) });
   const text = await res.text();
-  let json: any; try { json = JSON.parse(text); } catch { json = text; }
-  return { status: res.status, json, headers: res.headers };
+  let json: ContentBody = {};
+  try { json = JSON.parse(text) as ContentBody; } catch { /* a 204 or a non-JSON body: assert on `text` */ }
+  return { status: res.status, json, text, headers: res.headers };
 }
 
 const draft = (pageId: string) => ({ pageId, slug: pageId, name: pageId, sectionOrder: ['hero'] });
@@ -111,6 +137,8 @@ describe('ADR 0755 — content admin authority on real members', () => {
     expect(d.json.details?.requiredScope).toBe('workspace:write');
     const p = await call('POST', '/content/pages', { key: SUBADMIN, body: { ...draft('sa-pub'), status: 'published' } });
     expect(p.status).toBe(403);
+    // The write tier refuses a publish first: a root viewer never reaches the admin tier.
+    expect(p.json.details?.requiredScope).toBe('workspace:write');
     // …but reads, which the root viewer role does grant.
     expect((await call('GET', '/content/pages', { key: SUBADMIN })).status).toBe(200);
   });
@@ -149,12 +177,14 @@ describe('ADR 0755 — content admin authority on real members', () => {
   });
 
   it('ADR 0748 correction: an env key pinned to ANOTHER tenant reaches none of this tenant\'s content', async () => {
-    // Its authority is its OWN tenant's: the page above does not exist there (§F 404),
+    // Its own page in THIS tenant (seeded here, so the case runs in any order). The
+    // other key's authority is its OWN tenant's: the page does not exist there (§F 404),
     // and what it writes lands in its tenant, never this one.
-    expect((await call('GET', '/content/pages/env-pub', { key: OTHER_ENV_KEY })).status).toBe(404);
-    const w = await call('PUT', '/content/pages/env-pub/sections/hero', { key: OTHER_ENV_KEY, body: { locale: 'en', data: { heading: 'x' } } });
+    expect((await call('POST', '/content/pages', { key: TENANT_ENV_KEY, body: { ...draft('env-foreign'), status: 'published' } })).status).toBe(201);
+    expect((await call('GET', '/content/pages/env-foreign', { key: OTHER_ENV_KEY })).status).toBe(404);
+    const w = await call('PUT', '/content/pages/env-foreign/sections/hero', { key: OTHER_ENV_KEY, body: { locale: 'en', data: { heading: 'x' } } });
     expect(w.status).toBe(404);
-    expect((await getPage(TENANT, TENANT, 'env-pub'))!.sections[0]!.data).not.toEqual({ heading: 'x' });
+    expect((await getPage(TENANT, TENANT, 'env-foreign'))!.sections[0]!.data).toEqual({});
   });
 
   it('an owk_ key holds its issuer\'s CURRENT authority: downgraded, then removed, the issuer takes the key down with them', async () => {
@@ -184,12 +214,13 @@ describe('ADR 0755 — content admin authority on real members', () => {
   it('the approval gate binds a tenant-pinned env key too: a published create is 409, a draft still lands', async () => {
     const d = getToggleDefault('cms-approval-gate');
     expect(d, 'cms-approval-gate must be declared').toBeTruthy();
-    await saveConfig({ ...d!, status: 'on' }, 'test');
+    const prior = (await getEffectiveConfig('cms-approval-gate')) ?? d!;
+    await saveConfig({ ...prior, status: 'on' }, 'test');
     try {
       expect((await call('POST', '/content/pages', { key: TENANT_ENV_KEY, body: { ...draft('env-gated'), status: 'published' } })).status).toBe(409);
       expect((await call('POST', '/content/pages', { key: TENANT_ENV_KEY, body: draft('env-gated-draft') })).status).toBe(201);
     } finally {
-      await saveConfig({ ...d!, status: 'off' }, 'test');
+      await saveConfig(prior, 'test');
     }
   });
 
@@ -198,7 +229,7 @@ describe('ADR 0755 — content admin authority on real members', () => {
     expect((await call('POST', '/content/pages', { key: TENANT_ENV_KEY, body: { ...draft('del-pub'), status: 'published' } })).status).toBe(201);
     const r = await call('DELETE', '/content/pages/del-pub', { key: TENANT_ENV_KEY });
     expect(r.status, JSON.stringify(r.json)).toBe(204);
-    expect(r.json).toBe('');
+    expect(r.text).toBe('');
     expect(await getPage(TENANT, TENANT, 'del-pub')).toBeNull();
     expect((await call('GET', '/content/pages/del-pub', { key: TENANT_ENV_KEY })).status).toBe(404);
     expect((await call('DELETE', '/content/pages/del-pub', { key: TENANT_ENV_KEY })).status).toBe(404);
@@ -231,21 +262,25 @@ describe('ADR 0755 — content admin authority on real members', () => {
   });
 
   it('DELETE: an owk_ key that did not declare content:write is refused before anything else', async () => {
+    // Its own draft page: the issuer (a root editor) could delete it, so only the key lane refuses.
+    expect((await call('POST', '/content/pages', { key: TENANT_ENV_KEY, body: draft('del-narrow-target') })).status).toBe(201);
     const { token } = await issueApiKey({ tenantId: TENANT, name: 'del-narrow', createdBy: EDITOR_SUBJECT, scopes: ['content:read'] });
-    const r = await call('DELETE', '/content/pages/del-foreign', { key: token });
+    const r = await call('DELETE', '/content/pages/del-narrow-target', { key: token });
     expect(r.status).toBe(403);
     expect(r.json.details?.requiredScope).toBe('content:write');
-    expect(await getPage(TENANT, TENANT, 'del-foreign')).not.toBeNull();
+    expect(await getPage(TENANT, TENANT, 'del-narrow-target')).not.toBeNull();
   });
 
   it('DELETE: the approval gate does not block removal (the fail-safe direction, like unpublish)', async () => {
     expect((await call('POST', '/content/pages', { key: TENANT_ENV_KEY, body: { ...draft('del-gated'), status: 'published' } })).status).toBe(201);
     const d = getToggleDefault('cms-approval-gate');
-    await saveConfig({ ...d!, status: 'on' }, 'test');
+    expect(d, 'cms-approval-gate must be declared').toBeTruthy();
+    const prior = (await getEffectiveConfig('cms-approval-gate')) ?? d!;
+    await saveConfig({ ...prior, status: 'on' }, 'test');
     try {
       expect((await call('DELETE', '/content/pages/del-gated', { key: TENANT_ENV_KEY })).status).toBe(204);
     } finally {
-      await saveConfig({ ...d!, status: 'off' }, 'test');
+      await saveConfig(prior, 'test');
     }
   });
 
@@ -262,44 +297,16 @@ describe('ADR 0755 — content admin authority on real members', () => {
     for (let i = 0; i < 50; i += 1) body[`k${i}`.padEnd(200, 'x')] = 1;
     const r = await call('PUT', '/content/pages/sec-ok/sections/hero', { body });
     expect(r.status).toBe(400);
-    expect(r.json.details.fields).toHaveLength(8);
-    expect(r.json.details.omitted).toBe(42);
+    expect(r.json.details?.fields).toHaveLength(8);
+    expect(r.json.details?.omitted).toBe(42);
     expect(JSON.stringify(r.json).length).toBeLessThan(2000);
   });
 
   it('WIT-CNT-9: the public delivery varies on the credential and appends rather than replaces', async () => {
     const r = await call('GET', '/content/pages/home', { key: null });
     expect(r.status).toBe(200);
-    const vary = (r.headers.get('vary') ?? '').toLowerCase();
-    for (const h of ['accept-language', 'accept-encoding', 'authorization', 'cookie']) expect(vary).toContain(h);
-  });
-
-  // Last: it boots a second app, which re-initialises the shared in-memory storage.
-  it('WIT-CNT-2: in the cookie posture a credential-less write is 401, never an anonymous owner', async () => {
-    // `OPENWOP_AUTH_ENFORCE_BEARER` is read when the auth middleware is built, so
-    // the cookie posture needs its own app: there a header-less request is given
-    // a freshly minted anonymous session — whose `anon:` tenant the old tenant
-    // gate treated as the caller's own personal workspace, i.e. full authority.
-    const prior = process.env.OPENWOP_AUTH_ENFORCE_BEARER;
-    delete process.env.OPENWOP_AUTH_ENFORCE_BEARER;
-    let cookieServer: http.Server | undefined;
-    try {
-      const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-      const base = await new Promise<string>((res) => { cookieServer = app.listen(0, '127.0.0.1', () => res(`http://127.0.0.1:${(cookieServer!.address() as AddressInfo).port}`)); });
-      // (1) No credential at all: since the ADR 0750 major-1 extension the auth
-      // layer refuses it 401 before any gate, and mints no anonymous owner.
-      const bare = await fetch(`${base}/content/pages`, { method: 'POST', headers: { 'content-type': 'application/json', 'openwop-version': '2' }, body: JSON.stringify(draft('anon-draft')) });
-      expect(bare.status).toBe(401);
-      expect(bare.headers.get('set-cookie'), 'a refusal mints no anonymous identity').toBeNull();
-      // (2) An anonymous SESSION (what the SPA holds) reaches the content gate,
-      // which must still refuse it — the WIT-CNT-2 property proper.
-      const r = await fetch(`${base}/content/pages`, { method: 'POST', headers: { 'content-type': 'application/json', 'openwop-version': '2', cookie: `__session=${signSession(mintAnonSession())}` }, body: JSON.stringify(draft('anon-draft')) });
-      const body = (await r.json()) as { details?: { reason?: string } };
-      expect(r.status, JSON.stringify(body)).toBe(401);
-      expect(body.details?.reason, 'refused by the content gate, not by the auth middleware').toBe('anonymous_principal_refused');
-    } finally {
-      if (prior === undefined) delete process.env.OPENWOP_AUTH_ENFORCE_BEARER; else process.env.OPENWOP_AUTH_ENFORCE_BEARER = prior;
-      if (cookieServer) await new Promise<void>((res) => cookieServer!.close(() => res()));
-    }
+    // Exact tokens: a substring would let `accept-language` stand in for a missing `accept`.
+    const vary = (r.headers.get('vary') ?? '').split(',').map((t) => t.trim().toLowerCase());
+    for (const h of ['accept-language', 'accept-encoding', 'authorization', 'cookie']) expect(vary, `Vary: ${vary.join(', ')}`).toContain(h);
   });
 });

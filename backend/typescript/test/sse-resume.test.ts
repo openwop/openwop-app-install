@@ -10,13 +10,22 @@
  *
  * Three assertions:
  *   1. Without the header, the SSE stream replays every event 0..N.
- *   2. With `Last-Event-ID: K`, the stream replays only events K+1..N
- *      (strictly-greater semantics).
- *   3. Malformed header → HTTP 400 with `invalid_request` so a buggy
- *      client doesn't silently get every event each reconnect.
+ *   2. With `Last-Event-ID: K`, the stream replays EXACTLY events K+1..N
+ *      (strictly-greater semantics, and none dropped — the resumed sequence
+ *      list must EQUAL the baseline's tail; a resume that skipped K+1 passed
+ *      the old "every seq > K" check, 8fw3g1-ssr-drop, round-1 vacuous).
+ *   3. Malformed header → HTTP 400 `validation_error` naming the field
+ *      (ADR 0744; an older header said `invalid_request`) so a buggy client
+ *      doesn't silently get every event each reconnect. Asserted twice: with
+ *      no `OpenWOP-Version` header (the default negotiation) and with an
+ *      explicit major 2 — protected twins, both kept.
+ *
+ * The baseline's load-bearing checks (status, content-type, >= 4 events) sit
+ * in case 1, not in `beforeAll`: a failing hook SKIPS the cases instead of
+ * failing them.
  */
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
@@ -112,20 +121,25 @@ async function createSampleRun(): Promise<string> {
 }
 
 async function waitForTerminal(runId: string): Promise<void> {
-  for (let i = 0; i < 40; i++) {
-    await new Promise((r) => setTimeout(r, 25));
+  await vi.waitFor(async () => {
     const snap = await fetch(`${BASE}/runs/${runId}`, {
       headers: { authorization: `Bearer ${TOKEN}` },
     });
     const body = (await snap.json()) as { status: string };
-    if (['completed', 'failed', 'cancelled'].includes(body.status)) return;
-  }
-  throw new Error('run did not reach terminal status');
+    expect(['completed', 'failed', 'cancelled'], 'run did not reach terminal status').toContain(body.status);
+  }, { timeout: 10_000, interval: 25 });
 }
+
+const sequencesOf = (frames: SseFrame[]): number[] => frames
+  .map((f) => JSON.parse(f.data) as { sequence?: number })
+  .map((o) => o.sequence)
+  .filter((s): s is number => typeof s === 'number');
 
 describe('SSE Last-Event-ID resume — chat-improvements §2B.4', () => {
   let runId: string;
   let allEvents: SseFrame[];
+  let baselineStatus = 0;
+  let baselineType: string | null = null;
 
   beforeAll(async () => {
     runId = await createSampleRun();
@@ -135,13 +149,15 @@ describe('SSE Last-Event-ID resume — chat-improvements §2B.4', () => {
     const res = await fetch(`${BASE}/runs/${runId}/events`, {
       headers: { authorization: `Bearer ${TOKEN}` },
     });
-    expect(res.status).toBe(200);
-    expect(res.headers.get('content-type')).toContain('text/event-stream');
+    baselineStatus = res.status;
+    baselineType = res.headers.get('content-type');
     allEvents = await readSseUntilClose(res);
-    expect(allEvents.length, 'baseline replay must include at least 4 events').toBeGreaterThanOrEqual(4);
   });
 
   it('without Last-Event-ID replays every event 0..N', () => {
+    expect(baselineStatus).toBe(200);
+    expect(baselineType).toContain('text/event-stream');
+    expect(allEvents.length, 'baseline replay must include at least 4 events').toBeGreaterThanOrEqual(4);
     // Every event carries an id: <sequence>; the baseline has them in
     // monotonically-increasing order starting from 0 (the run.created
     // event the executor emits first).
@@ -166,10 +182,7 @@ describe('SSE Last-Event-ID resume — chat-improvements §2B.4', () => {
 
   it('with Last-Event-ID set to a midpoint replays only events > midpoint', async () => {
     // Pick the middle sequence number from the baseline.
-    const sequences = allEvents
-      .map((f) => JSON.parse(f.data) as { sequence?: number })
-      .map((o) => o.sequence)
-      .filter((s): s is number => typeof s === 'number');
+    const sequences = sequencesOf(allEvents);
     const mid = sequences[Math.floor(sequences.length / 2)]!;
 
     const res = await fetch(`${BASE}/runs/${runId}/events`, {
@@ -179,11 +192,7 @@ describe('SSE Last-Event-ID resume — chat-improvements §2B.4', () => {
       },
     });
     expect(res.status).toBe(200);
-    const resumed = await readSseUntilClose(res);
-    const resumedSequences = resumed
-      .map((f) => JSON.parse(f.data) as { sequence?: number })
-      .map((o) => o.sequence)
-      .filter((s): s is number => typeof s === 'number');
+    const resumedSequences = sequencesOf(await readSseUntilClose(res));
 
     expect(resumedSequences.length, 'resumed stream replays SOMETHING when mid < final').toBeGreaterThan(0);
     for (const seq of resumedSequences) {
@@ -192,8 +201,12 @@ describe('SSE Last-Event-ID resume — chat-improvements §2B.4', () => {
         `every replayed event MUST have sequence > Last-Event-ID (${mid}); got ${seq}`,
       ).toBe(true);
     }
+    // …and EVERY event after the midpoint is present, none dropped.
+    expect(resumedSequences).toEqual(sequences.filter((s) => s > mid));
   });
 
+  // Twin of the ADR 0744 case below (protected, kept): this one sends NO
+  // `OpenWOP-Version` header, so it pins the default negotiation's answer.
   it('malformed Last-Event-ID returns 400 validation_error', async () => {
     const res = await fetch(`${BASE}/runs/${runId}/events`, {
       headers: {

@@ -1,0 +1,730 @@
+[
+  {
+    "requirement_id": "S01-R1",
+    "original_gap_id": "OPS-01",
+    "section": 1,
+    "requirement": "Inventory current operator commands against the real route/major negotiator; replace retired write examples and add a disposable setup witness for BYOK, plan config and signed Stripe test webhook. Derive expected methods/paths from mounted route behavior, not a second handwritten catalog.",
+    "proposed_witnesses": [
+      "S01-T1"
+    ],
+    "status": "Partially implemented 2026-10-24 (gap-closure Wave A1, #5184 merged f8b5ac251): the shipped operator docs (README, DEPLOY, DEPLOY-SMOKE, WHITE-LABEL, deploy/compose README, backend .env.example) no longer name retired /v1 write routes, including the Stripe BYOK + fee-config recipe and the SAML ACS URL an IdP POSTs to (both answered 410). S01-T1 executed-pass in-process (backend/typescript/test/operator-doc-routes.test.ts, memory storage, fake test credentials): every documented /v1 address of this host is requested with its method and none answers 410; the BYOK write lands host-global and resolves; a signed webhook is acknowledged (202) and a wrongly signed one refused (401); fee config round-trips; each retired /v1 write answers 410. Sabotage-witnessed (a /v1 write restored in README reds the scan). Still open: plan-config recipe, execution against an extracted bundle, and FEATURES/ROADMAP reconciliation (S01-R6). OPS-01 stays Open."
+  },
+  {
+    "requirement_id": "S01-R2",
+    "original_gap_id": "OPS-02",
+    "section": 1,
+    "requirement": "Add explicit release compatibility data separating stop-old-binary, required intermediate version, backup prerequisite and incompatible schema/app migration. Correct the 0.2.0 contradiction with an audit note; do not change immutable released bytes. Validate all supported source\u2192target paths and prevent an old binary running against incompatible schema.",
+    "proposed_witnesses": [
+      "S01-T2"
+    ],
+    "status": "Partially implemented 2026-10-24 (gap-closure Wave A2, #5185 merged 6114d882d; ADR 0052 \u00a7D2a): releases.json gains rollingSafe/rollingUnsafeReason on every entry (0.2.0 recorded false with a dated note; the released artifact is unchanged); scripts/upgrade-plan.mjs validates the manifest and plans from->to as hops at required stops with stop-old-binary, migration ranges and operator actions, and refuses downgrades; check-migration-integrity runs the validator. S01-T2 executed-pass for the metadata half (backend/typescript/test/upgrade-plan.test.ts): the real manifest validates, the 0.2.0 contradiction is caught when reintroduced, all 28 published source->target pairs plan completely, required-stop split and downgrade refusal on fixtures, CLI exit codes. Still open: the boot guard that stops an older binary on a non-rolling-safe schema (needs a per-migration compatibility marker; recorded open in ADR 0052 \u00a7D2a), real-DB migration witnesses (S01-R5), and the supported-path decision (S01-G1). OPS-02 stays Open."
+  },
+  {
+    "requirement_id": "S01-R3",
+    "original_gap_id": "BRAND-01",
+    "section": 1,
+    "requirement": "Document and validate runtime Appearance versus build-time HTML/auth/email/native settings. Generate/validate allowed Compose build variables; unsupported variables fail with a useful message. Preserve the single BrandProvider/systemBrand authority and check first paint before public identity fetch, login, title/favicon, email and native-shell identity.",
+    "proposed_witnesses": [
+      "S01-T3"
+    ],
+    "status": "Partially implemented 2026-10-25 (gap-closure Wave A4, #5191 merged e5e38109d): the Compose build-variable half. BRAND_ENV_KEYS now lists every VITE_BRAND_* name the app source reads (VITE_BRAND_PRIVACY_URL was missing; 25 names); deploy/compose forwards all 25 into the frontend image (it forwarded one); vite.config.ts refuses an unknown VITE_BRAND_* name in every mode, naming the closest known one; WHITE-LABEL.md gains a runtime-vs-build matrix. S01-T3 config half executed-pass (frontend/react/src/brand/__tests__/brandEnvHandoff.test.ts): the known set equals the names the source reads, compose and Dockerfile forward exactly that set, and the real vite build exits non-zero on a misspelled name before bundling. Downstream audit (names only): no known build sets an unknown name. Still open: email and native-shell identity, and a first-paint browser check before the public identity fetch (login, title, favicon). BRAND-01 stays Open."
+  },
+  {
+    "requirement_id": "S01-R4",
+    "original_gap_id": "OPS-04",
+    "section": 1,
+    "requirement": "Qualify Compose, Fly, Render, AWS, Azure and GCP from an extracted versioned bundle on empty infrastructure, including sign-in, durable state, media, configured test provider, TLS and streaming. Keep every tier in the matrix; sequencing one first does not close the rest.",
+    "proposed_witnesses": [
+      "S01-T4"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S01-R5",
+    "original_gap_id": "OPS-02",
+    "section": 1,
+    "requirement": "Exercise fresh install, adjacent upgrade, skipped-version upgrade, interrupted migration, parallel start and safe retry on SQLite where supported and real Postgres. Recovery is a coherent backup restore, not down-migration; section 06 qualifies the actual restore.",
+    "proposed_witnesses": [
+      "S01-T2",
+      "S01-T4"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S01-R6",
+    "original_gap_id": "OPS-01",
+    "section": 1,
+    "requirement": "Reconcile factual current-state drift in FEATURES/ROADMAP with implemented ADR evidence, including 0549 and 0551, without rewriting historical rationale or declaring unfinished qualification complete.",
+    "proposed_witnesses": [
+      "S01-T1"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S02-R1",
+    "original_gap_id": "SEC-01",
+    "section": 2,
+    "requirement": "Extend existing startup/preflight owners with a reviewed strict production profile: authenticated identity, expected membership authorization, durable control/surface stores, persistent BYOK protection, Secure cookies/TLS, superadmin MFA and withdrawn test/dev entry points. Retain an explicitly named evaluation profile; existing operators get a documented migration, not silent lockout.",
+    "proposed_witnesses": [
+      "S02-T1"
+    ],
+    "status": "Partially implemented 2026-10-26 (ADR 0981). P1 merged in #5262 (6adc7ca93): under OPENWOP_DEPLOY_POSTURE=auth (the strict profile) server start reports every missing control in one list and exits once (host/startupChecks.ts serverStartupErrors over the existing owners; the BYOK KMS key joins the posture rows); /readiness carries profile strict|evaluation and never a hatch name. S02-T1 cases 1-3 and 5 executed-pass for the existing rows (backend/typescript/test/production-profile.test.ts), sabotage-witnessed. P2 merged in #5265 (e79425222): a superadmin-only census (GET /host/openwop-app/operations/profile-census) records, from this instance's traffic while each rule is off, the callers membership enforcement and the superadmin second factor would refuse, and names the hatches in effect (backend/typescript/test/profile-census.test.ts, sabotage-witnessed except the personal-workspace skip). P3 merged in #5272 (9ff1b1e94; live rev 01056-bmp, with preflight Gate 5c refusing an undecided auth deploy before the build): under the strict profile, server start also refuses unless membership enforcement is on and, when superadmins are listed, the superadmin second factor is required, each with a named hatch (OPENWOP_ALLOW_UNENFORCED_AUTHORIZATION, OPENWOP_ALLOW_SUPERADMIN_WITHOUT_MFA); no-lockout HTTP cases executed-pass (break-glass reaches a superadmin route with MFA required; a census-reported member is denied under enforcement and allowed once given a role). S02-T1 is complete for the D2 matrix. Still open: the S02-T2 permission matrix (S02-R2). SEC-01 stays Open."
+  },
+  {
+    "requirement_id": "S02-R2",
+    "original_gap_id": "SEC-01",
+    "section": 2,
+    "requirement": "Generate a route/tool/node/schedule/trigger/MCP/stream permission matrix from existing registries. Exercise owner/admin/editor/viewer, revoked member, API key, delegated identity, anonymous, same-tenant other workspace and foreign tenant; assert authority at the server entry and service boundaries, including plan/toggle denials.",
+    "proposed_witnesses": [
+      "S02-T2"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S02-R3",
+    "original_gap_id": "SEC-02",
+    "section": 2,
+    "requirement": "Inventory executable pack trust tiers and actual isolation adapters. Falsify filesystem/network/resource/credential boundaries from inside the deployed worker; fix any enforcement gap before the corresponding untrusted-execution claim. Signatures prove provenance, not containment.",
+    "proposed_witnesses": [
+      "S02-T3"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S02-R4",
+    "original_gap_id": "SEC-02",
+    "section": 2,
+    "requirement": "Triage every row in dependency-alerts.json, prioritize the four reported highs, then produce complete dependency/SBOM/license/provenance and vulnerability evidence for backend, frontend, deploy images and shipped desktop/iOS shells. Triage reachable findings with exploitability and remediation/retest records; review secret canaries across errors, telemetry, streams, exports and backups.",
+    "proposed_witnesses": [
+      "S02-T3",
+      "S02-T4"
+    ],
+    "status": "Partially implemented 2026-10-25 (gap-closure Wave A5, #5192 merged a29b98710): the advisory-triage half for the four npm lockfiles. In-range bumps under npm 10.9.8 with no package added or removed: backend vite 8.2.2->8.2.4 (transitive), vitest and @vitest/* 4.1.11->4.1.12, nodemailer 10.0.12->10.1.4, fast-uri 3.1.8->3.1.9; frontend vite 7.3.5->7.3.7, vitest and @vitest/* 4.1.11->4.1.12; clients/copilot-provider zod 4.6.5->4.6.6 (transitive); clients/desktop fast-uri 3.1.8->3.1.9. Measured with npm audit --package-lock-only before and after: 27 of the 28 rows in dependency-alerts.json no longer match an advisory; the remaining row (#222, @azure/msal-node GHSA-xcx6-jx8p-x3h5, high) stays excepted in scripts/audit-exceptions.json until 2026-11-07, unfixed. The GitHub alerts close only once main carries the lockfiles (it does from a29b98710). Re-checked 2026-10-25 through the GitHub API: one Dependabot alert stays open, #222 (msal-node, high, excepted). This requirement's mapped witnesses S02-T3 (hostile worker) and S02-T4 (independent retest) do not cover advisory triage and were not executed. KMS preflight and SMTP/email tests, both builds, typecheck, lint and statics pass. Still open: exploitability records, SBOM/license/provenance for images and shipped desktop/iOS shells, and the secret-canary review. SEC-02 stays Open."
+  },
+  {
+    "requirement_id": "S02-R5",
+    "original_gap_id": "SEC-02",
+    "section": 2,
+    "requirement": "Prepare and commission independent assessment of auth, tenancy, BYOK, egress, pack execution, AI/tool injection and money paths. Close critical/high exploitable findings and retest; distinguish audited control scope from certification and publish approved redacted summary.",
+    "proposed_witnesses": [
+      "S02-T4"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S03-R1",
+    "original_gap_id": "SCALE-01",
+    "section": 3,
+    "requirement": "Census manual/API/fork/bulk-redrive/chat/agent/schedule/trigger/sub-run creation and distinguish attempt, idempotent retry, new run and new billable run. Define which nonterminal states, including suspended approvals and queued work, consume each configured concurrency limit. The current >60s active-run expiry shall be corrected.",
+    "proposed_witnesses": [
+      "S03-T1",
+      "S03-T2",
+      "S03-T4"
+    ],
+    "status": "P0 only, 2026-10-27 (ADR 0987, PR pending): the lane census is pinned (backend/typescript/test/adr0987-admission-census.test.ts): runQuotaMiddleware on 6 routes in 4 files; creative-briefs reserves a slot without it (a no-op); reservePlanRun has one caller (runStarter.ts); insertRunWithStartContext from 18 files; startWorkflowRun 38 code call sites in 32 files (the ADR's 43/34 included 5 comment matches). Nothing is fixed yet; SCALE-01 stays Open."
+  },
+  {
+    "requirement_id": "S03-R2",
+    "original_gap_id": "SCALE-01",
+    "section": 3,
+    "requirement": "Reuse sharedRateLimit fixed windows where their semantics fit public/expensive request budgets and planRunLimit for monthly entitlements. Keep local global shedding labeled per-instance; do not convert every cheap GET into a DB write. Benchmark fixed-window boundary bursts and any edge integration before promising a smooth rate.",
+    "proposed_witnesses": [
+      "S03-T1",
+      "S03-T4"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S03-R3",
+    "original_gap_id": "SCALE-01",
+    "section": 3,
+    "requirement": "Introduce durable admission reservations in existing Storage/run creation transaction/outbox path. State machine: reserved\u2192attached-to-run\u2192released; crash recovery uses the authoritative run/dispatch state plus fenced generation, never elapsed wall time alone. Reserve atomically before a hard limit can be exceeded; idempotent retries attach once and release on failed creation.",
+    "proposed_witnesses": [
+      "S03-T1",
+      "S03-T3"
+    ],
+    "status": "P1, 2026-10-27 (ADR 0987 D2, PR pending): concurrency admission is counted from run state INSIDE the run insert (Postgres: pg_advisory_xact_lock partition 3 + count of pending/running rows by runs.admission_key; SQLite: its write transaction), refusing with nothing written; no reservation to release or leak. For POST /runs (main and eval paths). S03-T2 executed-pass single-process (adr0987-admission-insert.test.ts: five runs still running at 61 s still hold their slots; a suspended run releases its slot; a terminal run releases with no release call). Sabotage-witnessed. Still open: the other run lanes (P2), per-day windows and failure posture (P3), crash-boundary witness S03-T3, the Q3 hot-key load test. SCALE-01 stays Open."
+  },
+  {
+    "requirement_id": "S03-R4",
+    "original_gap_id": "SCALE-01",
+    "section": 3,
+    "requirement": "Enforce all configured hard scopes jointly across instances with deterministic tenant/principal keys; use no raw bearer/IP in records. Batch cost equals minted runs. Concurrent children, forks and recovery paths follow explicit policy rather than a bypass. Strict profile refuses admission if authoritative budget unavailable; existing availability-oriented policy changes require an ADR correction and operator migration.",
+    "proposed_witnesses": [
+      "S03-T1",
+      "S03-T3",
+      "S03-T4"
+    ],
+    "status": "P1, 2026-10-27 (ADR 0987 D2, PR pending): one user's cap holds jointly across instances for POST /runs: S03-T1 executed-pass on two real OS processes over Postgres 15 (adr0987-admission-two-process-postgres-live.test.ts: 3 runs on A + 3 on B admit exactly 5; P0 pinned 6). The scope is a sha256 digest of the session/key scope, never the raw id. Still open: every other lane (P2) and the key/tenant scopes' joint enforcement on those lanes. SCALE-01 stays Open."
+  },
+  {
+    "requirement_id": "S03-R5",
+    "original_gap_id": "SCALE-01",
+    "section": 3,
+    "requirement": "Expose scope, usage, degraded/strict posture and denied admission through existing metrics/Operations. Terminal transitions and reconciliation release once, with bounded sweeps and no per-request global scan. Do not promise exactly-once billing from an HTTP response.",
+    "proposed_witnesses": [
+      "S03-T3",
+      "S03-T4"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S04-R1",
+    "original_gap_id": "EVENT-01",
+    "section": 4,
+    "requirement": "Replace the ring as the durable authority with tenant/workspace-scoped persistent event records and an internal ordered cursor using existing Storage/host event dispatch ownership. Pubsub carries references, not arbitrarily large payloads. Preserve original eventId, payload and delivery class; never persist ephemeral events.",
+    "proposed_witnesses": [
+      "S04-T1",
+      "S04-T2",
+      "S04-T4"
+    ],
+    "status": "Partially evidenced. S04-T1 executed-pass at plan scope 2026-10-27 (ADR 0988 P1, PR pending): two OS processes on real Postgres 15 (backend/typescript/test/adr0988-host-event-two-process-postgres-live.test.ts), an oversized durable event emitted on A reaches a subscriber on B with the same eventId and full body; 8 concurrent emits on one tenant head from both processes all commit and replay once each (production peak measured 7/s on one head, ADR 0988 D5). S04-T2 executed-pass for replay=required: A SIGKILLed, fresh process C replays exactly the later durable events in commit order, no ephemeral. Sabotage-witnessed. Delivered by ADR 0973 (live f94471e98). Still open: S04-T4 (application convergence) not run. EVENT-01 stays Open."
+  },
+  {
+    "requirement_id": "S04-R2",
+    "original_gap_id": "EVENT-01",
+    "section": 4,
+    "requirement": "Make append/publication/retry ordering explicit: a durable event accepted for delivery is discoverable by subscribers after restart, and publication failure is retried through existing durable work ownership. Prevent missing updates at backlog/live handoff; do not add a second event bus, runId or wire sequence.",
+    "proposed_witnesses": [
+      "S04-T1",
+      "S04-T2",
+      "S04-T4"
+    ],
+    "status": "Partially evidenced. S04-T1 executed-pass at plan scope 2026-10-27 (ADR 0988 P1, PR pending): two OS processes on real Postgres 15 (backend/typescript/test/adr0988-host-event-two-process-postgres-live.test.ts), an oversized durable event emitted on A reaches a subscriber on B with the same eventId and full body; 8 concurrent emits on one tenant head from both processes all commit and replay once each (production peak measured 7/s on one head, ADR 0988 D5). S04-T2 executed-pass for replay=required: A SIGKILLed, fresh process C replays exactly the later durable events in commit order, no ephemeral. Sabotage-witnessed. Delivered by ADR 0973 (live f94471e98). ADR 0988 D2 (PR pending): a failed append is retried (1 + 3 attempts, jittered, ~1 s); if it still fails, an event that fits NOTIFY is published with its body, and an oversized one on a multi-instance host is kept as a dead-letter row (superadmin GET /host/openwop-app/operations/host-events/dead-letters) instead of reaching one instance only; counted by openwop.host_event.log.append_failed{outcome}. Witnessed single-process (adr0988-host-event-append-failure.test.ts, gate-run) and across two real processes on Postgres (S04-T1 fault case), sabotage-witnessed. Not built: a durable publication outbox (rejected, ADR 0988 D3). S04-T4 not run. EVENT-01 stays Open."
+  },
+  {
+    "requirement_id": "S04-R3",
+    "original_gap_id": "EVENT-01",
+    "section": 4,
+    "requirement": "Under existing RFC 0236, fix retained-cursor replay and oversized cross-instance fan-out now while preserving legacy unknown-cursor behavior. Under accepted RFC 0250 only, advertise the optional facet, honor replay=required across restart and return the reviewed uniform pre-stream resync error for an unavailable cursor.",
+    "proposed_witnesses": [
+      "S04-T2",
+      "S04-T3"
+    ],
+    "status": "Partially evidenced. S04-T2 executed-pass for replay=required across a real restart, and legacy unknown-cursor behaviour preserved on a fresh process (ADR 0988 P1 test, PR pending). ADR 0988 D1 (PR pending): a KNOWN cursor without replay=required now resumes from the durable log when this process's ring does not hold it; witnessed on a fresh process over real Postgres (the two-process test's D1 case, formerly it.fails) and single-process in adr0973-rfc0250-host-event-replay.test.ts; an unknown or foreign-tenant cursor still opens live (legacy unchanged), sabotage-witnessed. S04-T3 is RFC 0250's leg, certified on cut 217c, not re-run here. EVENT-01 stays Open."
+  },
+  {
+    "requirement_id": "S04-R4",
+    "original_gap_id": "EVENT-01",
+    "section": 4,
+    "requirement": "Extend existing stream clients/SDK use with bounded reconnect/backoff, eventId deduplication and explicit resync-required UI state. Reconcile authorized entity state, buffer concurrent new events and reapply by authoritative revision where available. Do not claim a cross-entity atomic baseline without an owning contract.",
+    "proposed_witnesses": [
+      "S04-T3",
+      "S04-T4"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S04-R5",
+    "original_gap_id": "EVENT-01",
+    "section": 4,
+    "requirement": "Define minimum retention, volume/size limits, privacy erasure, legal holds and tenant teardown behavior; register subject erasure/retention handlers with existing owners. Keep diagnostics bounded, with no payload, raw cursor or secret labels.",
+    "proposed_witnesses": [
+      "S04-T2",
+      "S04-T3"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S05-R1",
+    "original_gap_id": "DATA-01",
+    "section": 5,
+    "requirement": "Inventory multi-row money/entitlement, last-owner, merge/rekey, unique identifier, seed/import, delete/cascade and subject-erasure invariants. For each, record authoritative owner/keys, allowed transient states, transaction/CAS/compensation behavior and real caller paths; do not classify every KV write as unsafe.",
+    "proposed_witnesses": [
+      "S05-T2",
+      "S05-T3",
+      "S05-T4"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S05-R2",
+    "original_gap_id": "DATA-01",
+    "section": 5,
+    "requirement": "For seed and CRM merge lease callers, choose a proven transactional operation or renewed, fenced lease whose generation is checked by every authoritative write. A stale holder cannot commit after successor acquisition. Cancellation alone is insufficient; external effects require provider idempotency/recorded effect identity.",
+    "proposed_witnesses": [
+      "S05-T1",
+      "S05-T2"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S05-R3",
+    "original_gap_id": "DATA-01",
+    "section": 5,
+    "requirement": "Use existing Storage transactions/constraints where the invariant is relational; where portable CAS is retained, define recovery transitions and durable reconciliation with bounded tenant-indexed scans. No new private database, global process mutex or unrelated lock namespace.",
+    "proposed_witnesses": [
+      "S05-T1",
+      "S05-T2",
+      "S05-T3"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S05-R4",
+    "original_gap_id": "DATA-01",
+    "section": 5,
+    "requirement": "For each subject-bearing store/derived index/cache/object, register an existing eraser/lifecycle hook or a reviewed lawful-retention exemption. Validate tenant fold/merge/rekey updates row keys as well as content; repeatable seeds/imports remain idempotent. Recover interrupted jobs without orphaned credentials/media references.",
+    "proposed_witnesses": [
+      "S05-T3",
+      "S05-T4"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S05-R5",
+    "original_gap_id": "DATA-01",
+    "section": 5,
+    "requirement": "Cover migrations with current forward-only counters and release metadata. Enumerate old/new writers, backfill restart and rollback by coherent restore. Add redacted invariant health to existing Operations/metrics; avoid payload/subject identifiers in metric labels.",
+    "proposed_witnesses": [
+      "S05-T3",
+      "S05-T4"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S06-R1",
+    "original_gap_id": "QA-01",
+    "section": 6,
+    "requirement": "Extend existing CI/release/attestation ownership to record exact source/artifact/config/schema/app versions, suite version, test environment and every executed/failed/skipped/blocked/inapplicable requirement. A test mock, fake success or static shape check cannot substantiate a production property. Preserve Tracegate evidence and appropriate full-lane/audit semantics.",
+    "proposed_witnesses": [
+      "S06-T4"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S06-R2",
+    "original_gap_id": "REL-01",
+    "section": 6,
+    "requirement": "Qualify run/effect lifecycle on real Postgres with independently running API/worker processes: crash before/after run commit/outbox/lease/provider effect/approval/terminal; duplicate accepted work; poisoned retries; cancellation; provider ambiguity; version rollout; replay and fork. Provider-side idempotency or effect fencing must be shown, not inferred from a client retry.",
+    "proposed_witnesses": [
+      "S06-T1"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S06-R3",
+    "original_gap_id": "OPS-03",
+    "section": 6,
+    "requirement": "Inventory coherent restore set: DB and migration metadata, objects, BYOK wrapping keys or cloud KMS access and rotation versions, configuration, signing/identity/domain bindings, installed pinned packs and historical runtime dependencies. Exercise backup encryption, integrity, off-host retention and access separation; restore to empty isolated infrastructure and prove tenant/media/secret/workflow correctness.",
+    "proposed_witnesses": [
+      "S06-T2"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S06-R4",
+    "original_gap_id": "REL-01",
+    "section": 6,
+    "requirement": "Define single-node, multi-instance and regional-failover profiles separately. Run representative read/write/SSE/workflow/money/AI-stub mixes over graduated concurrency/data volumes, hot tenants, slow providers and large graphs. Record saturation, queue lag, p50/p95/p99, errors and poolMax\u00d7maxInstances. Initial load points and stop/budget thresholds are agreed test inputs, not invented capacity promises.",
+    "proposed_witnesses": [
+      "S06-T3"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S06-R5",
+    "original_gap_id": "REL-01",
+    "section": 6,
+    "requirement": "Collect actual declared SLIs for the existing 28-day window, exercise alert routing and runbook actions, and record missing telemetry/degraded periods. Restore RPO/RTO and failover timings are measured against buyer-approved objectives; an objective without a witness remains open.",
+    "proposed_witnesses": [
+      "S06-T2",
+      "S06-T3"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S06-R6",
+    "original_gap_id": "QA-01",
+    "section": 6,
+    "requirement": "Verify signed conformance and supply-chain/deploy provenance against the exact candidate and serving revision; add independent cross-host exchange with pinned packs/keys and recorded effects. Existing self-measured bundle remains self evidence. Publish current supported topology/capacity/recovery limits and regress them at each release.",
+    "proposed_witnesses": [
+      "S06-T4"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S07-R1",
+    "original_gap_id": "UX-01",
+    "section": 7,
+    "requirement": "Fix Brand initial/read/retry state so failure terminates loading, announces once and offers Retry. Test failed first load, failed refresh with stale data, feature disabled, org-read failure, retry failure/success and unmount/request races.",
+    "proposed_witnesses": [
+      "S07-T1"
+    ],
+    "status": "Implemented 2026-10-24 (gap-closure Wave A3, #5186 merged 8d8084242): BrandPage checks a failed first read before the loading branch (it was an endless spinner), offers Retry on the brands and orgs failure cards, keeps the last good list under a warning when a refresh fails, and lets only the newest read settle (sequence guard; unmount retires reads in flight). S07-T1 executed-pass in jsdom (frontend/react/src/features/brand/__tests__/brandFirstRead.test.tsx): failed first load announced once with Retry, retry failure, retry success, orgs-read retry, failed refresh with stale list, feature disabled, and a late older-read failure after a newer success. Sabotage-witnessed (old branch order reds cases 1-2; dropping the guard reds the race). Not witnessed: the unmount case (React 18 drops post-unmount updates silently, so nothing is observable) and a real browser/assistive-technology check (S07-T2/T3). UX-01 stays Open until its closure packet is reviewed."
+  },
+  {
+    "requirement_id": "S07-R2",
+    "original_gap_id": "UX-02",
+    "section": 7,
+    "requirement": "Classify every failure-card/no-recovery candidate and every source-discovered read path. Add targeted retry or meaningful recovery/back action; use explicit stale/partial/offline/permission states and avoid success-with-empty. Reach zero unexplained baseline entries; source scans enumerate candidates, behavior tests prove fixes.",
+    "proposed_witnesses": [
+      "S07-T2"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S07-R3",
+    "original_gap_id": "UX-03",
+    "section": 7,
+    "requirement": "Review legacy Notice/live-region sites for proper announcement versus described-by; unify through existing shared announcer and avoid double announcements. Cover actionable errors, async result changes, validation summaries and interrupted approvals with VoiceOver/NVDA, preserving focus and form context.",
+    "proposed_witnesses": [
+      "S07-T2"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S07-R4",
+    "original_gap_id": "UX-05",
+    "section": 7,
+    "requirement": "Set WCAG2.2 AA as the proposed product verification target and use WAI APG interaction guidance. Qualify all primary journeys with keyboard, accessible names, focus visibility/order, modal/menu/canvas controls, measured contrast, reflow/zoom, reduced motion and touch targets. Record criterion-specific results; automated scans alone do not establish conformance.",
+    "proposed_witnesses": [
+      "S07-T3"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S07-R5",
+    "original_gap_id": "UX-05",
+    "section": 7,
+    "requirement": "Run signed-in owner/editor/viewer and anonymous/disabled/paywall states at 360/768/1440 CSS px, light/dark and text expansion; include workflow canvas/inspector, checkout-return, access, marketplace and long nav. Inspect actual screenshots and computed values; current public landing evidence cannot close these.",
+    "proposed_witnesses": [
+      "S07-T3"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S07-R6",
+    "original_gap_id": "LOC-01",
+    "section": 7,
+    "requirement": "Externalize showcase strings and all new public UI; commission native review of all advertised French/Spanish namespaces, prioritizing security/money/core tasks first but retaining full coverage. Check Intl/date/number/plural/locale negotiation and authored content separately. Pseudolocale/RTL test infrastructure exposes layout gaps; new languages follow documented demand without removing existing review obligations.",
+    "proposed_witnesses": [
+      "S07-T3",
+      "S07-T4"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S07-R7",
+    "original_gap_id": "UX-04",
+    "section": 7,
+    "requirement": "Persist resumable setup progress through existing user/workspace preferences, display repair in the setup hub and let authority determine available provider actions. Measure first successful workflow/approval/result and navigation tasks in unassisted representative-user sessions. Approve target success/time thresholds before assessing improvement; report sample size and uncertainty.",
+    "proposed_witnesses": [
+      "S07-T4"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S08-R1",
+    "original_gap_id": "APP-01",
+    "section": 8,
+    "requirement": "Build the complete facet \u00d7 target matrix from existing seven generator targets and model/actions/bindings/auth/env/layout facets. For each, keep current support, implementer and executable parity fixture; unsupported advertised behavior remains open. Do not close APP-01 by renaming the output a design export.",
+    "proposed_witnesses": [
+      "S08-T1"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S08-R2",
+    "original_gap_id": "APP-01",
+    "section": 8,
+    "requirement": "Implement approved live preview through existing credential/connection/egress/governance owners with explicit sandbox/target selection and user consent. Simulation stays visibly separate and deterministic. Validate operation inputs/outputs, typed errors, timeout/cancel, permission and retry behavior.",
+    "proposed_witnesses": [
+      "S08-T3"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S08-R3",
+    "original_gap_id": "APP-01",
+    "section": 8,
+    "requirement": "Extend each generator to execute declared closed actions, state/binding roots, data operations and responsive behavior appropriate to its framework. Generate from the same validated application model; capability claims are derived from proven output. Preserve existing navigation, source addresses, hashes, source preview/diff and replay determinism.",
+    "proposed_witnesses": [
+      "S08-T1"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S08-R4",
+    "original_gap_id": "APP-01",
+    "section": 8,
+    "requirement": "Replace incomplete backend action scaffolds with declared validated operation bindings; unknown/unconfigured custom logic stays blocked, never silently successful or unrestricted arbitrary code. Generated CRUD requires input/output validation, authn/authz, tenant/record policy, bounded pagination/query, migrations, secrets-by-reference and safe error handling before being classified deployable.",
+    "proposed_witnesses": [
+      "S08-T2"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S08-R5",
+    "original_gap_id": "APP-01",
+    "section": 8,
+    "requirement": "Design and accept the ADR 0349 amendment for an operator-selected first deployment adapter, then implement the existing approved-hash artifact\u2192preflight\u2192approval\u2192deploy\u2192smoke\u2192release evidence chain. Keep full other-target roadmap; no empty deploy button or alternate hardcoded workflow. Extension uses existing chains/registry; a normative new pack kind would need an upstream RFC.",
+    "proposed_witnesses": [
+      "S08-T4"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S08-R6",
+    "original_gap_id": "APP-01",
+    "section": 8,
+    "requirement": "Qualify generated apps on isolated infrastructure through create/read/update/delete/custom action, sign-in/role denial, restart/migration, media, mobile/theme/AT and version rollback/recovery. Vendor writes need explicit execute-time credentials/approval. Publishing source is not proof the generated service works.",
+    "proposed_witnesses": [
+      "S08-T1",
+      "S08-T2",
+      "S08-T4"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S09-R1",
+    "original_gap_id": "AI-01",
+    "section": 9,
+    "requirement": "Enumerate all LLM calls: chat agent tools, workflow nodes, authoring pipelines, structured outputs, multimodal/voice, realtime, subruns and headless utilities. Map each to generated schema/catalog grounding, read-before-write context, output validation/repair, approval/effect gate, replay provenance and eval owner; no unowned blind authoring lane.",
+    "proposed_witnesses": [
+      "S09-T1"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S09-R2",
+    "original_gap_id": "AI-01",
+    "section": 9,
+    "requirement": "Define representative positive, ambiguous, adversarial, multilingual, refusal and failure fixtures per task. Use existing eval suites/trajectory/trial owners to measure task correctness, evidence attribution, schema validity, approval adherence, injection/exfiltration resistance, latency and total cost. Pin prompt/model/pack/data versions; judge calibration and human labeled holdout prevent self-grading inflation.",
+    "proposed_witnesses": [
+      "S09-T1",
+      "S09-T2"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S09-R3",
+    "original_gap_id": "AI-01",
+    "section": 9,
+    "requirement": "Run all advertised chains and manually authored chat-agent fixtures against every supported provider/model capability combination. Record pass/vendor-refused/app-failed/blocked, repeated-trial uncertainty and accepted cost ceilings; stop/retry on documented vendor rate limits. Never infer one provider pass covers another, nor change routing/model mid-run.",
+    "proposed_witnesses": [
+      "S09-T2"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S09-R4",
+    "original_gap_id": "INT-01",
+    "section": 9,
+    "requirement": "Generate provider \u00d7 version \u00d7 auth \u00d7 operation/trigger catalog from existing Connections/pack registries, preserving shipped/enabled/qualified/unsupported distinctions. Verify each declared auth scope, consent/tenant context, pagination, write idempotency, partial failure, 429/backoff, token refresh/revocation and webhook signatures through the broker.",
+    "proposed_witnesses": [
+      "S09-T3"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S09-R5",
+    "original_gap_id": "INT-01",
+    "section": 9,
+    "requirement": "Assign maintained integration ownership, official documentation/API contract/version and requalification trigger for provider/model/schema/dependency changes. Fix obsolete/broken operations and test real outcomes before marking qualified; no unsupported method stays advertised as working. Keep full advertised inventory in scope, prioritizing critical/sold paths first.",
+    "proposed_witnesses": [
+      "S09-T3",
+      "S09-T4"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S09-R6",
+    "original_gap_id": "AI-01",
+    "section": 9,
+    "requirement": "Require reliable fixture-gated promotion for supported AI output/application workflows; production evaluation/feedback respects privacy and redacts raw sensitive prompts. Record drift/quality regression and route repair through existing eval/Operations surfaces, not a new chat or LLM subsystem.",
+    "proposed_witnesses": [
+      "S09-T2",
+      "S09-T4"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S10-R1",
+    "original_gap_id": "DEV-01",
+    "section": 10,
+    "requirement": "Run an independent developer journey for node/agent/connection/artifact/UI/canvas/chain packs supported by the app: discover schema, author, validate, sign, publish through existing registry, install, exercise from UI/chat/workflow and upgrade. Record time, errors and missing docs; resolve every blocker rather than claim DX from examples alone.",
+    "proposed_witnesses": [
+      "S10-T1"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S10-R2",
+    "original_gap_id": "MKT-01",
+    "section": 10,
+    "requirement": "Qualify publisher identity/support metadata, submission/review, package content/integrity, dependency/pin compatibility, trust classification, curation, installed/available state, update permission/trust diff, revoke/disable/uninstall and rollback/restore. Preserve historical run resolution where safe; revocation policy can forbid execution, not silently bypass trust.",
+    "proposed_witnesses": [
+      "S10-T2"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S10-R3",
+    "original_gap_id": "MKT-01",
+    "section": 10,
+    "requirement": "Expose supported app/pack versions, real provider qualification, release notes, support owner and permission changes through existing listing/projection UI. Close gaps found in lifecycle tests; keep provenance, review, operational qualification and hostile-code containment distinct.",
+    "proposed_witnesses": [
+      "S10-T1",
+      "S10-T2"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S10-R4",
+    "original_gap_id": "COM-01",
+    "section": 10,
+    "requirement": "Test all subscription, plan/bundle, credits and Connect paid-listing lanes: initial/delayed payment, duplicate/out-of-order webhooks, amount/currency mismatch, refund/partial refund/dispute/payout failure, cancel/downgrade and toggle-off money truth. Order pending\u2192paid CAS remains fulfillment authority; fees computed minor-units-first.",
+    "proposed_witnesses": [
+      "S10-T3",
+      "S10-T4"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S10-R5",
+    "original_gap_id": "COM-01",
+    "section": 10,
+    "requirement": "Use one Stripe client/webhook with two signing secrets and required routing precedence; host-global refs resolve through persistent BYOK and proper Secrets Vault scope. Preserve priced-implies-gated central choke, anonymous seller refusal and both paid listing approvals; fixtures prove all invocation lanes respect entitlements.",
+    "proposed_witnesses": [
+      "S10-T3",
+      "S10-T4"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S10-R6",
+    "original_gap_id": "COM-01",
+    "section": 10,
+    "requirement": "Provide tenant/operator reconciliation of provider costs, billable usage, invoices/credits/fees/refunds/disputes and outstanding obligations through existing billing/usage/obligation-ledger owners. Add missing reseller provision\u2192entitle\u2192rebill\u2192support\u2192offboard workflow with clear seller-region/payment restrictions; do not create a new financial truth from UI estimates.",
+    "proposed_witnesses": [
+      "S10-T4"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S11-R1",
+    "original_gap_id": "FAM-01",
+    "section": 11,
+    "requirement": "Resolve every row of feature-census.json to its registry/toggles/packs/routes/stores/data owner, current ADR status and target buyer. Pair frontend/backend surfaces without assuming identical directory names; map shared-only code to owning domains. For each deployment collect installed/enabled/entitled/permission/credential state, including OFF/BETA and feature-dependent historical runs.",
+    "proposed_witnesses": [
+      "S11-T1"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S11-R2",
+    "original_gap_id": "FAM-01",
+    "section": 11,
+    "requirement": "For every family define input\u2192author/configure\u2192execute\u2192approve\u2192outcome\u2192measure\u2192failure recovery\u2192export/offboard journeys, and grade subcapabilities from real code/runtime evidence. Compare with specialist workflows using current primary sources and actual trial evidence where available; vendor claims remain labeled. A focused first bundle sequences execution, not removes the remaining families.",
+    "proposed_witnesses": [
+      "S11-T2"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S11-R3",
+    "original_gap_id": "FAM-01",
+    "section": 11,
+    "requirement": "Apply five-pass /prd refinement to every newly confirmed domain gap: factual baseline, single owner/schema, threats/authority, falsifiable success/failure witnesses, compatibility/migration and existing ADR/RFC mapping. Keep original finding and closure IDs linked; do not invent feature parity from accepted ADRs or promise equivalent depth without a buyer requirement.",
+    "proposed_witnesses": [
+      "S11-T4"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S11-R4",
+    "original_gap_id": "FAM-01",
+    "section": 11,
+    "requirement": "Repair confirmed domain correctness/security/data/UX/integration gaps in existing feature packages; expose relevant operations consistently through UI/API, ctx.features surface, nodes/agent and existing single chat, with chains/stacks reachable from builder and slash picker. Pure presentation/infra controls explicitly record why no pack/agent applies.",
+    "proposed_witnesses": [
+      "S11-T2",
+      "S11-T4"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S11-R5",
+    "original_gap_id": "FAM-01",
+    "section": 11,
+    "requirement": "Classify all 3,055 candidate markers plus new census hits into real production debt, deliberate scaffold/mock, ordinary UI placeholder, obsolete comment or false positive; retain verbatim source and disposition. Every real item gets owner, impact, acceptance criterion and remediation link; clear confirmed debt, preserve useful fixtures and historical rationale. No blanket baseline delete or raw-count-as-defects claim.",
+    "proposed_witnesses": [
+      "S11-T3"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S11-R6",
+    "original_gap_id": "FAM-01",
+    "section": 11,
+    "requirement": "Close each family only when its domain-specific outcomes, permissions, lifecycle and section 07 experience criteria pass, all confirmed required gaps are implemented, and any residual externally gated evidence is explicit. Regrade with confidence and scope; no automatic A+ from passing generic gates.",
+    "proposed_witnesses": [
+      "S11-T1",
+      "S11-T2",
+      "S11-T3",
+      "S11-T4"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S12-R1",
+    "original_gap_id": "SUP-01",
+    "section": 12,
+    "requirement": "Assign actual accountable support/security/release owners and escalation coverage; approve supported app/schema/pack/deployment versions, patch/security response targets, deprecation notice windows and fork/upstream compatibility. Publish versioned terms/runbooks in existing adopter docs; no unstaffed SLA or invented LTS promise.",
+    "proposed_witnesses": [
+      "S12-T1"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S12-R2",
+    "original_gap_id": "SUP-01",
+    "section": 12,
+    "requirement": "Exercise support incidents, upgrade advisory, security intake/disclosure, key loss and restore escalation with an operator unfamiliar with implementation. Record response/escalation/repair outcome against approved policy and make current support contact/limitations discoverable in product/docs. Preserve confidential/security channels.",
+    "proposed_witnesses": [
+      "S12-T1"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S12-R3",
+    "original_gap_id": "TCO-01",
+    "section": 12,
+    "requirement": "Measure common workloads across technical-operator, enterprise-host and reseller cases: tenants/users/records/concurrency/workflows/provider tokens/media/storage/egress plus install/upgrade/incident/support/qualification labor. Capture actual prices/quotes and observation period; keep license, infrastructure, AI, support and exit costs separate.",
+    "proposed_witnesses": [
+      "S12-T2"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S12-R4",
+    "original_gap_id": "TCO-01",
+    "section": 12,
+    "requirement": "Calculate low/base/high workload and labor sensitivity, monthly TCO and cost per successful business outcome. Compare current required competitor editions/embedding/support terms with the same job, deployment scope and service level; no unsupported cheapest/ROI claim or vendor sticker-price shortcut.",
+    "proposed_witnesses": [
+      "S12-T2"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S12-R5",
+    "original_gap_id": "MKT-02",
+    "section": 12,
+    "requirement": "Define externally attributable active publishers, maintained live-qualified operations, installs/update success, active customer cohorts, retention and paid settlement/revenue metrics with privacy-safe denominator/time-window definitions. Distinguish steward/affiliate/independent evidence; separate local shipped pack count from adoption.",
+    "proposed_witnesses": [
+      "S12-T3"
+    ],
+    "status": "Planned; not executed"
+  },
+  {
+    "requirement_id": "S12-R6",
+    "original_gap_id": "MKT-02",
+    "section": 12,
+    "requirement": "Recruit consented independent pilot operators/publishers, observe onboarding/maintenance/support/business outcomes and fix confirmed blockers through existing product sections. Record actual interviews/usage/feedback and negative outcomes; no fabricated customers, synthetic testimonials or code-only adoption grades.",
+    "proposed_witnesses": [
+      "S12-T3",
+      "S12-T4"
+    ],
+    "status": "Planned; not executed"
+  }
+]

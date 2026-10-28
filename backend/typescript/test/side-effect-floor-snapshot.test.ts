@@ -67,9 +67,13 @@ const ROLES = new Set(['pure', 'read', 'gate', 'action', 'side-effect', 'streami
 describe('replay.md req 4 — the manifest-derived side-effect floor', () => {
   it('the scan finds manifests at all', () => {
     // The vacuity guard for every test below it.
+    // Floors MEASURED at 0151a8bb2 (/grade-tests wave 61): 757 declared
+    // manifest nodes, a 351-member floor, 276 served. Set ~7–15% under the
+    // truth (never a multiple of 10) so a scan that silently loses a pack root
+    // fails, while ordinary node retirement does not.
     const declared = scanManifests();
-    expect(declared.length).toBeGreaterThan(100);
-    expect(MANIFEST_SIDE_EFFECT_FLOOR.size).toBeGreaterThan(0);
+    expect(declared.length).toBeGreaterThan(701);
+    expect(MANIFEST_SIDE_EFFECT_FLOOR.size).toBeGreaterThan(301);
     expect(MANIFEST_DECLARED_TYPE_IDS.size).toBe(declared.length);
   });
 
@@ -125,7 +129,7 @@ describe('replay.md req 4 — the manifest-derived side-effect floor', () => {
     // closing it should require deleting that test. This is that deletion.
     const unwired = [...MANIFEST_FAST_PATH_SERVED].filter((t) => !isSideEffectingNode(t));
     expect(unwired, 'a derived served typeId that the classifier does not classify').toEqual([]);
-    expect(MANIFEST_FAST_PATH_SERVED.size).toBeGreaterThan(100);
+    expect(MANIFEST_FAST_PATH_SERVED.size).toBeGreaterThan(251); // measured 276 (see the first case)
   });
 
   it('the union ADDS coverage the hand-list never had — not a restatement of it', () => {

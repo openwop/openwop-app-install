@@ -119,7 +119,7 @@ export function CampaignPreview({ artifact, content }: ArtifactRendererProps): J
     <div className="canvas-edit-card">
       {canEdit ? (
         <div className="canvas-edit-card__bar">
-          <Button variant="secondary" size="sm" onClick={() => navigate(`/campaign-studio/new?fromArtifact=${encodeURIComponent(`${runId}:${nodeId}`)}`)}>
+          <Button variant="secondary" size="sm" onClick={() => navigate(`/campaign-studio/plans/new?fromArtifact=${encodeURIComponent(`${runId}:${nodeId}`)}`)}>
             {t('canvasOpenEditor')}
           </Button>
         </div>

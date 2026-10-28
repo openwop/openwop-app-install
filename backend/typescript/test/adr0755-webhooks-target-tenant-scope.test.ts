@@ -6,6 +6,15 @@
  * caller is a member of. Its scope gate resolved `webhooks:manage` in the ACTIVE
  * tenant, so under RFC 0049 enforcement an admin at home who is a mere viewer in
  * the shared workspace managed that workspace's webhooks. Enforcement ON here.
+ *
+ * Red when (wave 60 probes, tracker TST-BRA-5): `resolveWebhookTenant` checks the
+ * scope in the ACTIVE tenant instead of the explicit one, drops the explicit-tenant
+ * check, or stops admitting a member of the explicit workspace (the CONTROL).
+ *
+ * Fixture coupling, recorded: the members are keyed `bearer:<first 8 chars>` because
+ * this gate reads `callerSubject` (the env key's subject string), not
+ * `credentialAuthority` as the content gate does. The split is a tracker row
+ * (TST-BRA-5 product note); changing the keys here would hide it.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -47,10 +56,16 @@ afterAll(async () => {
 const list = (key: string, tenantId?: string) =>
   fetch(`${BASE}/webhooks${tenantId ? `?tenantId=${encodeURIComponent(tenantId)}` : ''}`, { headers: { authorization: `Bearer ${key}` } });
 
+/** A served list, not an error envelope that happens to be 200. */
+async function expectList(r: Response): Promise<void> {
+  const body = (await r.json()) as { subscriptions?: unknown };
+  expect(r.status, JSON.stringify(body)).toBe(200);
+  expect(Array.isArray(body.subscriptions), JSON.stringify(body)).toBe(true);
+}
+
 describe('webhooks:manage in the target tenant (enforcement on)', () => {
   it('CONTROL: an admin manages webhooks in their own active tenant', async () => {
-    const r = await list(MIXED);
-    expect(r.status, await r.text()).toBe(200);
+    await expectList(await list(MIXED));
   });
 
   it('an admin at home who is a viewer in the shared workspace is refused there, with the scope challenge', async () => {
@@ -62,7 +77,6 @@ describe('webhooks:manage in the target tenant (enforcement on)', () => {
   });
 
   it('CONTROL: an admin of the shared workspace manages its webhooks', async () => {
-    const r = await list(WSADMIN, WS);
-    expect(r.status, await r.text()).toBe(200);
+    await expectList(await list(WSADMIN, WS));
   });
 });

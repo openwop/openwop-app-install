@@ -10,12 +10,14 @@
  * what the signer signs (the served bytes, through a real Ed25519 key in the
  * pinned keyring) and requires `valid`.
  *
- * Sabotage: point the route at any other representation and the verdict turns
- * `invalid` / `discovery_drift`; drop the keyring and it turns `unknown_signer`.
+ * Red when (wave 60 probe w60g4-attest-served): the route digests any other
+ * representation than the served bytes. A second leg signs a DIFFERENT digest
+ * and requires `discovery_drift`, so a route that answered `valid` without
+ * comparing would be red too (w60g4-attest-compare-r2). Tracker: TST-BVC-8.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { generateKeyPairSync, sign as edSign } from 'node:crypto';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Server } from 'node:http';
@@ -63,6 +65,7 @@ beforeAll(async () => {
 afterAll(async () => {
   for (const [k, v] of saved) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
   await new Promise<void>((res) => server.close(() => res()));
+  rmSync(dir, { recursive: true, force: true });
 });
 
 describe('ADR 0812 P4 — attestation verify reads the served discovery root', () => {
@@ -76,7 +79,6 @@ describe('ADR 0812 P4 — attestation verify reads the served discovery root', (
 
     const { publicKey, privateKey } = generateKeyPairSync('ed25519');
     const keysDir = join(dir, 'keys');
-    const { mkdirSync } = await import('node:fs');
     mkdirSync(keysDir, { recursive: true });
     writeFileSync(join(keysDir, 'k.pem'), publicKey.export({ type: 'spki', format: 'pem' }).toString());
     writeFileSync(join(keysDir, 'index.json'), JSON.stringify([{ keyId: KEY_ID, file: 'k.pem' }]));
@@ -96,14 +98,26 @@ describe('ADR 0812 P4 — attestation verify reads the served discovery root', (
       signerKeyId: KEY_ID,
     };
     const manifest = join(dir, 'attestation.json');
-    writeFileSync(manifest, JSON.stringify({ payload, signature: edSign(null, canonicalPayloadBytes(payload), privateKey).toString('base64') }));
+    const sign = (p: DeploymentAttestationPayload): void => {
+      writeFileSync(manifest, JSON.stringify({ payload: p, signature: edSign(null, canonicalPayloadBytes(p), privateKey).toString('base64') }));
+    };
+    const summary = async (): Promise<{ state: string; verdict?: { ok: boolean; reason?: string } }> => {
+      const res = await fetch(`${BASE}/host/openwop-app/operations/attestation/summary`, { headers: { authorization: 'Bearer dev-token' } });
+      expect(res.status).toBe(200);
+      return await res.json() as { state: string; verdict?: { ok: boolean; reason?: string } };
+    };
     process.env.OPENWOP_TRUSTED_PACK_KEYS_DIR = keysDir;
     process.env.OPENWOP_ATTESTATION_PATH = manifest;
 
-    const res = await fetch(`${BASE}/host/openwop-app/operations/attestation/summary`, { headers: { authorization: 'Bearer dev-token' } });
-    expect(res.status).toBe(200);
-    const body = await res.json() as { state: string; verdict?: unknown };
+    sign(payload);
+    const body = await summary();
     expect(body.verdict, JSON.stringify(body)).toEqual({ ok: true });
     expect(body.state).toBe('valid');
+
+    // Control: the same, validly signed attestation over DIFFERENT bytes is drift.
+    sign({ ...payload, discoveryDigest: sha256Hex(`${text} `) });
+    const drift = await summary();
+    expect(drift.state).toBe('invalid');
+    expect(drift.verdict).toMatchObject({ ok: false, reason: 'discovery_drift' });
   });
 });

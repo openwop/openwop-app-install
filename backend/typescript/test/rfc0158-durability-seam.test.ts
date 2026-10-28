@@ -10,6 +10,13 @@
  * claim: an `after-accept` exercise that had quietly dispatched, or a
  * `during-execution` one that died before `run.started`, would still "kill a
  * process" and would witness nothing.
+ *
+ * Waits: the duplicate-delivery route AWAITS both deliveries
+ * (`Promise.allSettled`, routes/durabilitySeam.ts) before it answers 201, and an
+ * effectUrl run enqueues no outbox row, so nothing can deliver after the
+ * response: arrivals are asserted at response time, and the "arrives ONCE"
+ * absence check drains the event loop instead of sleeping. Every refusal asserts
+ * its code and message, so a refusal from a neighbouring check cannot satisfy it.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -49,11 +56,19 @@ afterAll(async () => {
   await new Promise<void>((r) => server.close(() => r()));
 });
 
-async function call(method: 'GET' | 'POST', path: string, body?: unknown): Promise<{ status: number; json: Record<string, unknown> }> {
+interface ErrorBody { error?: string; message?: string }
+interface DuplicateBody { runId: string; workflowId: string; deliveries: string[] }
+interface BoundBody { class: string; bound: number; terms: Array<{ name: string; ms: number }>; classes: Record<string, unknown> }
+interface EffectsBody { effects: Array<{ effectId?: string; keying?: string }> }
+
+/** One typed boundary: each call site names the body shape the route answers. */
+async function call<T extends object = Record<string, unknown>>(method: 'GET' | 'POST', path: string, body?: unknown): Promise<{ status: number; json: T & ErrorBody }> {
   const res = await fetch(`${base}${path}`, { method, headers: V2, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   const text = await res.text();
-  return { status: res.status, json: text ? (JSON.parse(text) as Record<string, unknown>) : {} };
+  return { status: res.status, json: (text ? JSON.parse(text) : {}) as T & ErrorBody };
 }
+const SEAM_OFF = /durability conformance seam is not enabled/;
+const drain = async (): Promise<void> => { for (let i = 0; i < 5; i++) await new Promise<void>((r) => setImmediate(r)); };
 const bareRunId = (wire: unknown): string => String(wire).split('/').pop() as string;
 const startedCount = async (runId: string): Promise<number> =>
   (await storage.listEvents(runId)).filter((e) => e.type === 'run.started').length;
@@ -62,19 +77,28 @@ describe('RFC 0158 durability seam — the gate (ADR 0739 D1)', () => {
   it('answers 404 under createApp even with the seam flag ON — this process is the harness', async () => {
     // No markOwnProcess(). This is the in-process conformance lane's state, and
     // the 404 is what keeps a real SIGKILL away from it.
-    expect((await call('GET', KILL)).status).toBe(404);
-    expect((await call('GET', BOUND)).status).toBe(404);
+    for (const r of [await call('GET', KILL), await call('GET', BOUND)]) {
+      expect(r.status).toBe(404);
+      expect(r.json.error).toBe('not_found');
+      expect(r.json.message).toMatch(SEAM_OFF);
+    }
     const before = deaths;
-    expect((await call('POST', KILL, { mode: 'after-accept', workflowId: 'conformance-noop' })).status).toBe(404);
+    const post = await call('POST', KILL, { mode: 'after-accept', workflowId: 'conformance-noop' });
+    expect(post.status).toBe(404);
+    expect(post.json.message).toMatch(SEAM_OFF);
     expect(deaths, 'a refused request reached the terminator').toBe(before);
   });
 
   it('answers 404 as its own process when the seam flag is OFF — the production posture', async () => {
     markOwnProcess();
     process.env.OPENWOP_TEST_SEAM_ENABLED = 'false';
-    expect((await call('GET', KILL)).status).toBe(404);
+    const probe = await call('GET', KILL);
+    expect(probe.status).toBe(404);
+    expect(probe.json.message).toMatch(SEAM_OFF);
     const before = deaths;
-    expect((await call('POST', KILL, { mode: 'during-execution', workflowId: 'conformance-noop' })).status).toBe(404);
+    const post = await call('POST', KILL, { mode: 'during-execution', workflowId: 'conformance-noop' });
+    expect(post.status).toBe(404);
+    expect(post.json).toMatchObject({ error: 'not_found', message: expect.stringMatching(SEAM_OFF) });
     expect(deaths).toBe(before);
   });
 
@@ -90,9 +114,15 @@ describe('RFC 0158 durability seam — the gate (ADR 0739 D1)', () => {
   it('refuses an unknown mode and an unresolvable workflow WITHOUT dying', async () => {
     markOwnProcess();
     const before = deaths;
-    expect((await call('POST', KILL, { mode: 'politely-exit', workflowId: 'conformance-noop' })).status).toBe(400);
-    expect((await call('POST', KILL, { mode: 'after-accept' })).status).toBe(400);
-    expect((await call('POST', KILL, { mode: 'after-accept', workflowId: 'no-such-workflow-xyz' })).status).toBe(404);
+    const badMode = await call('POST', KILL, { mode: 'politely-exit', workflowId: 'conformance-noop' });
+    expect(badMode.status).toBe(400);
+    expect(badMode.json).toMatchObject({ error: 'validation_error', message: expect.stringMatching(/^mode must be one of /) });
+    const noWf = await call('POST', KILL, { mode: 'after-accept' });
+    expect(noWf.status).toBe(400);
+    expect(noWf.json).toMatchObject({ error: 'validation_error', message: 'workflowId must be a non-empty string' });
+    const unknownWf = await call('POST', KILL, { mode: 'after-accept', workflowId: 'no-such-workflow-xyz' });
+    expect(unknownWf.status).toBe(404);
+    expect(unknownWf.json).toMatchObject({ error: 'not_found', message: expect.stringMatching(/is not resolvable for this caller/) });
     expect(deaths).toBe(before);
   });
 });
@@ -169,10 +199,10 @@ describe('RFC 0158 durability seam — bound-is-derived (D3)', () => {
   it('each class sums EXACTLY to the bound recoveryBound.ts declares, and the class is NAMED', async () => {
     markOwnProcess();
     for (const cls of ['unleased', 'leased'] as const) {
-      const r = await call('GET', `${BOUND}?class=${cls}`);
+      const r = await call<BoundBody>('GET', `${BOUND}?class=${cls}`);
       expect(r.status).toBe(200);
       expect(r.json['class']).toBe(cls);
-      const terms = r.json['terms'] as Array<{ name: string; ms: number }>;
+      const terms = r.json.terms;
       expect(terms.length, 'a total with no addends cannot be recomputed').toBeGreaterThan(0);
       const sum = terms.reduce((a, t) => a + t.ms, 0);
       expect(sum).toBe(r.json['bound']);
@@ -186,11 +216,13 @@ describe('RFC 0158 durability seam — bound-is-derived (D3)', () => {
 
   it('the bare read names its class rather than serving an anonymous scalar', async () => {
     markOwnProcess();
-    const r = await call('GET', BOUND);
+    const r = await call<BoundBody>('GET', BOUND);
     expect(r.status).toBe(200);
     expect(r.json['class']).toBe('leased');
-    expect(Object.keys(r.json['classes'] as object).sort()).toEqual(['leased', 'unleased']);
-    expect((await call('GET', `${BOUND}?class=fastest`)).status).toBe(400);
+    expect(Object.keys(r.json.classes).sort()).toEqual(['leased', 'unleased']);
+    const fastest = await call('GET', `${BOUND}?class=fastest`);
+    expect(fastest.status).toBe(400);
+    expect(fastest.json).toMatchObject({ error: 'validation_error', message: 'class must be "leased" or "unleased"' });
   });
 });
 
@@ -201,7 +233,7 @@ describe('RFC 0158 durability seam — duplicate-delivery (D4, §C)', () => {
     const firedBefore = (await storage.listNotifications({ tenantId: 'default', limit: 200, includeArchived: true }))
       .filter((n) => n.type === 'conformance.side-effect').length;
     // No workflowId — the 2.32.0 request shape. The seam chooses effectful work.
-    const r = await call('POST', KILL, { mode: 'duplicate-delivery' });
+    const r = await call<DuplicateBody>('POST', KILL, { mode: 'duplicate-delivery' });
     expect(r.status, JSON.stringify(r.json)).toBe(201);
     expect(deaths, 'duplicate-delivery must not kill anything').toBe(before);
     expect(r.json['workflowId']).toBe(DUPLICATE_DELIVERY_WORKFLOW_ID);
@@ -211,13 +243,13 @@ describe('RFC 0158 durability seam — duplicate-delivery (D4, §C)', () => {
     // the execution claim (ADR 0740) — from `executeRun`'s own return values.
     // Before the fence both executed (`run.started` ×2) and the second was
     // stopped only by accident, inside `core.delay`, by the terminal check.
-    expect([...(r.json['deliveries'] as string[])].sort()).toEqual(['duplicate-refused', 'executed']);
+    expect([...r.json.deliveries].sort()).toEqual(['duplicate-refused', 'executed']);
     // The refused delivery wrote NOTHING — not even a `run.started`.
     expect(await startedCount(bareRunId(r.json['runId'])), 'a refused duplicate still appended run.started').toBe(1);
 
-    const eff = await call('GET', `/runs/${encodeURIComponent(String(r.json['runId']))}/effects`);
+    const eff = await call<EffectsBody>('GET', `/runs/${encodeURIComponent(r.json.runId)}/effects`);
     expect(eff.status).toBe(200);
-    const effects = eff.json['effects'] as Array<{ effectId?: string; keying?: string }>;
+    const effects = eff.json.effects;
     // The suite records `blocked` on an empty projection — "there is no identity
     // to count invocations against". Pin it here so that is caught in this repo.
     expect(effects.length, 'the chosen work recorded NO effect — the row would be `blocked`').toBeGreaterThan(0);
@@ -244,7 +276,7 @@ describe('RFC 0158 durability seam — duplicate-delivery (D4, §C)', () => {
 
   it('ignores a requested workflowId (2.31.1 sends conformance-noop, which records no effects) and SAYS what it used', async () => {
     markOwnProcess();
-    const r = await call('POST', KILL, { mode: 'duplicate-delivery', workflowId: 'conformance-noop' });
+    const r = await call<DuplicateBody>('POST', KILL, { mode: 'duplicate-delivery', workflowId: 'conformance-noop' });
     expect(r.status, JSON.stringify(r.json)).toBe(201);
     expect(r.json['workflowId']).toBe(DUPLICATE_DELIVERY_WORKFLOW_ID);
   });
@@ -273,12 +305,13 @@ describe('RFC 0158 durability seam — duplicate-delivery, the effectUrl contrac
     markOwnProcess();
     const rx = await receiver();
     try {
-      const r = await call('POST', KILL, { mode: 'duplicate-delivery', effectUrl: rx.url });
+      const r = await call<DuplicateBody>('POST', KILL, { mode: 'duplicate-delivery', effectUrl: rx.url });
       expect(r.status, JSON.stringify(r.json)).toBe(201);
       expect(r.json['workflowId']).toBe(HTTP_EFFECT_WORKFLOW_ID);
       const runId = bareRunId(r.json['runId']);
-      expect([...(r.json['deliveries'] as string[])].sort(), 'two deliveries must be ATTEMPTED or the row witnesses nothing').toEqual(['duplicate-refused', 'executed']);
-      await new Promise((res) => setTimeout(res, 600));
+      expect([...r.json.deliveries].sort(), 'two deliveries must be ATTEMPTED or the row witnesses nothing').toEqual(['duplicate-refused', 'executed']);
+      // No wait: the route answered only after both deliveries settled, and the
+      // executed one awaited the receiver's reply, so the arrival is already in.
       // The suite records `blocked` on zero arrivals — the seam MUST land the effect.
       expect(rx.arrivals.length, 'the staged effect never reached effectUrl').toBeGreaterThanOrEqual(1);
       expect(JSON.parse(rx.arrivals[0] as string)).toMatchObject({ runId, nodeId: 'effect' });
@@ -299,11 +332,15 @@ describe('RFC 0158 durability seam — duplicate-delivery, the effectUrl contrac
     markOwnProcess();
     const rx = await receiver();
     try {
-      const r = await call('POST', KILL, { mode: 'duplicate-delivery', effectUrl: rx.url });
+      const r = await call<DuplicateBody>('POST', KILL, { mode: 'duplicate-delivery', effectUrl: rx.url });
       expect(r.status, JSON.stringify(r.json)).toBe(201);
-      // A LONGER wait is a STRONGER claim: this waits for a second arrival that
-      // must not happen.
-      await new Promise((res) => setTimeout(res, 1_200));
+      // Both deliveries have SETTLED (the route awaited them) and an effectUrl run
+      // has no outbox row, so no later delivery exists to wait for: the terminal
+      // event is already durable, and draining the loop flushes any request a
+      // delivery left in flight.
+      const atResponse = await storage.listEvents(bareRunId(r.json['runId']));
+      expect(atResponse.some((e) => e.type === 'run.completed'), 'the run was not terminal when the route answered').toBe(true);
+      await drain();
       expect(rx.arrivals.length, 'the one staged effect did not arrive exactly once').toBe(1);
       const events = await storage.listEvents(bareRunId(r.json['runId']));
       expect(events.filter((e) => e.type === 'run.completed').length, 'one run, one terminal event').toBe(1);
@@ -315,8 +352,14 @@ describe('RFC 0158 durability seam — duplicate-delivery, the effectUrl contrac
 
   it('refuses a non-http(s) effectUrl without staging anything', async () => {
     markOwnProcess();
-    expect((await call('POST', KILL, { mode: 'duplicate-delivery', effectUrl: 'file:///etc/passwd' })).status).toBe(400);
-    expect((await call('POST', KILL, { mode: 'duplicate-delivery', effectUrl: 'not a url' })).status).toBe(400);
-    expect((await call('POST', KILL, { mode: 'duplicate-delivery', effectUrl: 42 })).status).toBe(400);
+    const staged = async (): Promise<number> =>
+      (await storage.listRuns({ tenantId: 'default', workflowId: HTTP_EFFECT_WORKFLOW_ID, limit: 1_000 })).length;
+    const before = await staged();
+    for (const effectUrl of ['file:///etc/passwd', 'not a url', 42]) {
+      const r = await call('POST', KILL, { mode: 'duplicate-delivery', effectUrl });
+      expect(r.status, String(effectUrl)).toBe(400);
+      expect(r.json).toMatchObject({ error: 'validation_error', message: 'effectUrl must be an absolute http(s) URL when present' });
+    }
+    expect(await staged(), 'a refused effectUrl still staged a run').toBe(before);
   });
 });

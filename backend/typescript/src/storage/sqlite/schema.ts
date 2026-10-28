@@ -1162,6 +1162,14 @@ export const MIGRATIONS: Record<number, (db: Database) => void> = {
       db.exec(`DELETE FROM webhooks WHERE protocol_major IS NULL OR protocol_major = 1;`);
     })();
   },
+  51: (db) => {
+    // ADR 0987 D2 — the run's concurrency-admission scope (mirrors postgres mig
+    // 49; see it). NULLABLE WITH NO BACKFILL; the index serves the per-key count
+    // the run insert takes.
+    addColumnIfTableExists(db, 'runs', 'admission_key', 'TEXT');
+    const has = db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'runs'`).get();
+    if (has) db.exec(`CREATE INDEX IF NOT EXISTS runs_admission_key_status_idx ON runs (admission_key, status);`);
+  },
 };
 
 /** Highest defined migration — DERIVED from MIGRATIONS, never a hand-bumped cap

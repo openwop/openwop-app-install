@@ -7,6 +7,11 @@
  * wrapper is unit-tested in conversation-tool-loop-429-retry.test.ts; this
  * drives the OTHER seam (group-room advisor turns and every non-tool reply)
  * through the real function, with only the network and the key stubbed.
+ *
+ * What breaks it: dropping the retry (case 1), retrying a permanent error
+ * (case 2), or retrying more than ONCE — a retry that recursed into itself
+ * passed case 1, whose fixture fails only once (8fw3g1-rty-once, round-1
+ * vacuous); case 3 fails twice and pins exactly two calls.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
@@ -32,7 +37,17 @@ vi.mock('../src/byok/secretResolver.js', async (importOriginal) => {
 import { dispatchReply } from '../src/host/exchange/dispatchTurn.js';
 import type { RunRecord } from '../src/types.js';
 
-const run = { runId: 'r', tenantId: 'tenant-retry', inputs: { provider: 'google', model: 'gemini-3.8-flash', credentialRef: 'byok:k' }, metadata: {} } as unknown as RunRecord;
+const run: RunRecord = {
+  runId: 'r',
+  workflowId: 'wf-retry',
+  tenantId: 'tenant-retry',
+  status: 'running',
+  inputs: { provider: 'google', model: 'gemini-3.8-flash', credentialRef: 'byok:k' },
+  metadata: {},
+  configurable: {},
+  createdAt: '2026-10-03T00:00:00.000Z',
+  updatedAt: '2026-10-03T00:00:00.000Z',
+};
 
 let saved: string | undefined;
 let reset: () => void = () => {};
@@ -63,5 +78,17 @@ describe('dispatchReply — one retry on a transient provider failure', () => {
     failures = [new Error('google_400: bad request')];
     await expect(dispatchReply(run, [{ role: 'user', content: 'hi' }])).rejects.toThrow(/google_400/);
     expect(calls).toHaveLength(1);
+  });
+
+  it('a second consecutive 503 is NOT retried again: exactly two calls, then the error surfaces', async () => {
+    calls.length = 0;
+    failures = [
+      new Error('google_503: This model is currently experiencing high demand.'),
+      new Error('google_503: still busy'),
+      new Error('google_503: a third failure a recursing retry would reach'),
+    ];
+    await expect(dispatchReply(run, [{ role: 'user', content: 'hi' }])).rejects.toThrow('google_503: still busy');
+    expect(calls).toEqual(['gemini-3.8-flash', 'gemini-3.8-flash']);
+    failures = [];
   });
 });

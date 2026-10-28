@@ -14,6 +14,10 @@ import type { BackendFeature } from '../types.js';
 import { registerCampaignIntelRoutes } from './routes.js';
 import { buildCampaignIntelSurface } from './surface.js';
 import { registerCampaignIntelAgentTools } from './agentTools.js';
+import { registerCampaignIntelErasure } from './erasure.js';
+import { checkLaunchAgainstCaps } from './spendCaps.js';
+import { setAdsCapChecker } from '../../host/adsAdapter.js';
+import { MULTI_TOUCH_TOGGLE } from './attributionSettings.js';
 
 export const campaignIntelFeature: BackendFeature = {
   id: 'campaign-intel',
@@ -25,12 +29,28 @@ export const campaignIntelFeature: BackendFeature = {
     // silently-dropped node-typeId allowlist. The ADR 0308 D2 feature-registered-
     // builtin seam; per-tenant toggle honesty lives inside each tool's run.
     registerCampaignIntelAgentTools();
+    // ADR 0952 D2 — spend caps: the launch check rides the ONE ads adapter
+    // (a breached, stale or unenforceable cap refuses `setDeliveryStatus` active),
+    // and a cap's creator is tombstoned on erasure.
+    setAdsCapChecker((tenantId, target) => checkLaunchAgainstCaps(tenantId, target));
+    registerCampaignIntelErasure();
   },
   surface: { id: 'campaign-intel', build: buildCampaignIntelSurface },
   requiredPacks: [
     'feature.campaign-intel.nodes',
     'vendor.openwop-app.campaign-intel.agents',
   ],
+  // ADR 0956 D2 — the multi-touch model report is a sub-capability, OFF until a
+  // workspace opts in. Last-click stays the floor either way.
+  extraToggleDefaults: [{
+    id: MULTI_TOUCH_TOGGLE,
+    label: 'Multi-touch attribution',
+    description: 'Adds first-touch, linear, time-decay and position-based attribution beside last-click, over each conversion\'s touch path (deterministic identity links only). One model is shown at a time with all models compared; modelled credit is never added to platform-reported conversions. A sub-capability of Campaign Intelligence.',
+    category: 'Marketing',
+    status: 'off',
+    bucketUnit: 'tenant',
+    salt: 'campaign-intel-multi-touch',
+  }],
   toggleDefault: {
     id: 'campaign-intel',
     label: 'Campaign Intelligence',

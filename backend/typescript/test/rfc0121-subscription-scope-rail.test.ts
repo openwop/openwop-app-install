@@ -14,6 +14,12 @@
  *
  * The live `subscription` advertisement + any credential ACQUISITION mechanism are
  * deliberately NOT built here — this witnesses the acquisition-free rail only.
+ *
+ * Three different checks answer `validation_error`, so each refusal asserts its
+ * own message. Overlap noted (both files protected, both kept): the honest-off
+ * discovery case shares its claim with `rfc0121-subscription-at-own-risk.test.ts`
+ * › "stays DARK by default"; this one adds the `apiKey`-present and non-empty
+ * provider halves.
  */
 
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
@@ -24,6 +30,8 @@ import { createApp } from '../src/index.js';
 let BASE: string;
 const H = { authorization: 'Bearer dev-token', 'content-type': 'application/json' };
 let server: http.Server;
+const prevEnv = { dsn: process.env.OPENWOP_STORAGE_DSN, cookies: process.env.OPENWOP_AUTH_DISABLE_COOKIES };
+const restore = (k: string, v: string | undefined): void => { if (v === undefined) delete process.env[k]; else process.env[k] = v; };
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -33,6 +41,8 @@ beforeAll(async () => {
 });
 afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
+  restore('OPENWOP_STORAGE_DSN', prevEnv.dsn);
+  restore('OPENWOP_AUTH_DISABLE_COOKIES', prevEnv.cookies);
 });
 
 const APP_PATH = '/host/openwop-app/credentials/bind';
@@ -40,6 +50,14 @@ const SAMPLE_PATH = '/host/sample/credentials/bind';
 const post = (path: string, body: unknown) => fetch(`${BASE}${path}`, { method: 'POST', headers: H, body: JSON.stringify(body) });
 
 /** Tolerant of `{error}` / `{code}` / `{error:{code}}` — mirrors the conformance driver. */
+function errMessage(json: unknown): string | undefined {
+  const j = json as { message?: unknown; error?: unknown };
+  if (typeof j?.message === 'string') return j.message;
+  const e = j?.error as { message?: unknown } | undefined;
+  if (e && typeof e.message === 'string') return e.message;
+  return undefined;
+}
+
 function errCode(json: unknown): string | undefined {
   const j = json as { error?: unknown; code?: unknown };
   if (typeof j?.code === 'string') return j.code;
@@ -51,23 +69,28 @@ function errCode(json: unknown): string | undefined {
 
 describe('RFC 0121 §B.8 — subscription-scope bind-seam witness', () => {
   it('is wired (NOT 404) under both the sample + app-canonical prefixes', async () => {
+    // Wired means it answers as the seam: 200 with the acquisition-free body on BOTH paths.
     for (const path of [SAMPLE_PATH, APP_PATH]) {
       const res = await post(path, { provider: 'anthropic', mode: 'subscription', scope: 'user' });
-      expect(res.status).not.toBe(404);
+      expect(res.status, path).toBe(200);
+      expect(await res.json(), path).toEqual({ bound: true, scope: 'user' });
     }
   });
 
   it('rejects a tenant-scope subscription binding with credential_scope_forbidden (403)', async () => {
     const res = await post(SAMPLE_PATH, { provider: 'anthropic', mode: 'subscription', scope: 'tenant' });
-    expect(res.status).toBeGreaterThanOrEqual(400);
     expect(res.status).toBe(403);
-    expect(errCode(await res.json())).toBe('credential_scope_forbidden');
+    const json = await res.json();
+    expect(errCode(json)).toBe('credential_scope_forbidden');
+    expect(errMessage(json)).toMatch(/must bind at user scope; tenant\/workspace binding is forbidden/);
   });
 
   it('rejects a workspace-scope subscription binding with credential_scope_forbidden', async () => {
     const res = await post(SAMPLE_PATH, { provider: 'anthropic', mode: 'subscription', scope: 'workspace' });
-    expect(res.status).toBeGreaterThanOrEqual(400);
-    expect(errCode(await res.json())).toBe('credential_scope_forbidden');
+    expect(res.status).toBe(403);
+    const json = await res.json();
+    expect(errCode(json)).toBe('credential_scope_forbidden');
+    expect(errMessage(json)).toMatch(/must bind at user scope; tenant\/workspace binding is forbidden/);
   });
 
   it('accepts a user-scope subscription binding (stub) → 200 { bound: true }', async () => {
@@ -79,17 +102,23 @@ describe('RFC 0121 §B.8 — subscription-scope bind-seam witness', () => {
   it('validation_error when required fields are missing', async () => {
     const missingProvider = await post(SAMPLE_PATH, { mode: 'subscription', scope: 'user' });
     expect(missingProvider.status).toBe(400);
-    expect(errCode(await missingProvider.json())).toBe('validation_error');
+    const mp = await missingProvider.json();
+    expect(errCode(mp)).toBe('validation_error');
+    expect(errMessage(mp)).toMatch(/`provider` \(non-empty string\) is required/);
 
     const missingScope = await post(SAMPLE_PATH, { provider: 'anthropic', mode: 'subscription' });
     expect(missingScope.status).toBe(400);
-    expect(errCode(await missingScope.json())).toBe('validation_error');
+    const ms = await missingScope.json();
+    expect(errCode(ms)).toBe('validation_error');
+    expect(errMessage(ms)).toMatch(/Fields `mode` and `scope` \(strings\) are required/);
   });
 
   it('validation_error for a non-subscription mode (seam is subscription-scope-only for now)', async () => {
     const res = await post(SAMPLE_PATH, { provider: 'anthropic', mode: 'apiKey', scope: 'user' });
     expect(res.status).toBe(400);
-    expect(errCode(await res.json())).toBe('validation_error');
+    const json = await res.json();
+    expect(errCode(json)).toBe('validation_error');
+    expect(errMessage(json)).toMatch(/only binds `mode: "subscription"`/);
   });
 });
 

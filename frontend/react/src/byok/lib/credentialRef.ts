@@ -50,6 +50,9 @@ export function parseCredentialRef(ref: string, providers: readonly string[]): P
  *  sentinels. Every other ref is listed under a provider or as unscoped — none is
  *  counted and then shown nowhere. */
 export const WEB_SEARCH_REF = 'web-search';
+/** ADR 0910 D8 — the Challenge Factory's dedicated key, owned by its card on
+ *  KickTodo's AI & connections page; listed here it would read as an unscoped key. */
+const FACTORY_REF_PREFIX = 'kicktodo-factory:';
 export function isCardOwnedRef(ref: string): boolean {
-  return ref === WEB_SEARCH_REF || ref.startsWith('subscription:') || ref.startsWith('managed:');
+  return ref === WEB_SEARCH_REF || ref.startsWith('subscription:') || ref.startsWith('managed:') || ref.startsWith(FACTORY_REF_PREFIX);
 }

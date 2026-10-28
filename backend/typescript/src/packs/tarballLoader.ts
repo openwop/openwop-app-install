@@ -18,7 +18,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash, verify as verifySig, KeyObject, createPublicKey } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
-import type { NodeModule } from '../executor/types.js';
+import { readNodeDataFields, type NodeModule } from '../executor/types.js';
 import { getNodeRegistry } from '../executor/nodeRegistry.js';
 import { SuspendSignal } from '../executor/suspendSignal.js';
 import { createLogger } from '../observability/logger.js';
@@ -31,7 +31,7 @@ const log = createLogger('packs.tarballLoader');
 interface PackManifest {
   name: string;
   version: string;
-  nodes?: Array<{ typeId: string; version: string }>;
+  nodes?: Array<{ typeId: string; version: string; 'x-dataFields'?: unknown }>;
   runtime?: { format?: string; entry?: string };
   /** RFC 0072 §C capability declarations. ADR 0555 P1 reads this to decide
    *  isolation eligibility (`secrets.resolveInPack` ⇒ ineligible). */
@@ -162,6 +162,11 @@ export async function loadPackFromManifest(packDir: string): Promise<NodeModule 
         tier: trust.tier,
         isolation: packNodeEligibility(manifest, typeId),
       },
+      ...(() => {
+        // ADR 0936 — the manifest entry's declared data fields travel with the module.
+        const dataFields = readNodeDataFields(manifest.nodes?.find((n) => n.typeId === typeId));
+        return dataFields ? { dataFields } : {};
+      })(),
       async execute(ctx) {
         // Forward the spec-defined NodeContext surface to the pack.
         // Packs receive `inputs` + `config` (the static node config)

@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.workflows.incident-postmortem",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "kind": "workflow-chain",
   "description": "Incident-postmortem chains (RFC 0013): after an incident resolves, draft a blameless postmortem from the timeline and turn its action items into tracked tasks. Draft-first (the human edits before anything is shared). Replay-deterministic.",
   "author": "openwop",
@@ -14,7 +14,7 @@
   "chains": [
     {
       "chainId": "postmortem.draft-blameless",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "label": "Incident → Blameless Postmortem Draft",
       "description": "When an incident is marked resolved, draft a blameless postmortem (summary, timeline, root cause, impact, action items) for the human to edit — as a saved draft, not an auto-send.",
       "parameters": {
@@ -24,7 +24,7 @@
         "properties": {
           "provider": { "type": "string", "description": "AI provider id for this chain's model-calling nodes. Set it to fix a provider into those nodes when the workflow is created. Leave it unset and each run uses the run's chosen provider, else the workspace's AI setting, else the host's catalog default (ADR 0903); whichever is chosen is recorded on the run, so a replay or fork uses the same one. The workspace needs a key for the provider that runs." },
           "model": { "type": "string", "description": "Model id for this chain's model-calling nodes. Must be offered by the provider in the host catalog. Leave it unset to use the provider's model from the same choice (ADR 0903)." },
-          "triggerEventName": { "type": "string", "description": "Host event name that starts this workflow (e.g. `crm.deal.won`)." }
+          "triggerEventName": { "type": "string", "description": "Host event name that starts this workflow. MUST match the `events.md` §Types grammar: two or three kebab-case segments under a registered org, never `openwop.`-prefixed (e.g. `example.deal.won`)." }
         }
       },
       "capabilities": [],
@@ -90,7 +90,7 @@
     },
     {
       "chainId": "postmortem.action-items",
-      "version": "1.2.0",
+      "version": "1.2.1",
       "label": "Postmortem → Tracked Action Items",
       "description": "Extracts the action items from a postmortem and, after a human confirms scope, files each as a follow-up task so nothing falls through.",
       "parameters": {
@@ -105,7 +105,7 @@
           },
           "provider": { "type": "string", "description": "AI provider id for this chain's model-calling nodes. Set it to fix a provider into those nodes when the workflow is created. Leave it unset and each run uses the run's chosen provider, else the workspace's AI setting, else the host's catalog default (ADR 0903); whichever is chosen is recorded on the run, so a replay or fork uses the same one. The workspace needs a key for the provider that runs." },
           "model": { "type": "string", "description": "Model id for this chain's model-calling nodes. Must be offered by the provider in the host catalog. Leave it unset to use the provider's model from the same choice (ADR 0903)." },
-          "triggerEventName": { "type": "string", "description": "Host event name that starts this workflow (e.g. `crm.deal.won`)." }
+          "triggerEventName": { "type": "string", "description": "Host event name that starts this workflow. MUST match the `events.md` §Types grammar: two or three kebab-case segments under a registered org, never `openwop.`-prefixed (e.g. `example.deal.won`)." }
         }
       },
       "capabilities": [

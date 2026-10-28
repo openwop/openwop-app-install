@@ -9,6 +9,7 @@ export const messages = {
   lede: 'Définissez la voix de votre espace de travail — voix, niveau de formalité, formules approuvées et interdites, positionnement et règles par canal — puis appliquez-la à chaque contenu généré.',
   newBrand: 'Nouvelle marque',
   loading: 'Chargement des marques…',
+  refreshFailedStale: 'La liste des marques n’a pas pu être actualisée. Affichage de la dernière liste chargée.',
   loadFailed: 'Impossible de charger les marques.',
   emptyTitle: 'Aucune marque pour l’instant',
   emptyBody: 'Définissez une marque une fois : sa voix et ses règles fondent chaque contenu de Campaign Studio, donc la campagne n° 2 ne prend que quelques minutes.',

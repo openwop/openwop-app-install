@@ -5,10 +5,14 @@
  * `byok_required` — proving the trigger→ticket wiring and that nothing reaches
  * `notify` without a summary. The addressed notification itself is pinned at the
  * surface (`notifyTicketTeam`), which the node only forwards to.
+ *
+ * Tracker TST-BHB-1. Red when (sabotage-witnessed, wave 62): the get-ticket node
+ * returns success for a missing ticket (`ticket_unavailable` skipped), or
+ * `projectTicketForAgent` stops stripping the requester's address from run history.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { getSetCookies } from './headerCookies.js';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
@@ -46,12 +50,11 @@ async function runToEnd(owner: ReturnType<typeof client>, workflowId: string, in
   const create = await owner.post('/runs', { workflowId, inputs });
   expect(create.status, JSON.stringify(create.body)).toBe(201);
   const runId = create.body.runId as string;
-  let snap: { status: string; error?: { code: string } } = { status: 'pending' };
-  for (let i = 0; i < 80; i++) {
-    snap = (await owner.get(`/runs/${runId}`)).body as typeof snap;
-    if (snap.status === 'completed' || snap.status === 'failed' || snap.status === 'cancelled') break;
-    await new Promise((r) => setTimeout(r, 25));
-  }
+  const snap = await vi.waitFor(async () => {
+    const s = (await owner.get(`/runs/${runId}`)).body as { status: string; error?: { code: string } };
+    expect(['completed', 'failed', 'cancelled']).toContain(s.status);
+    return s;
+  }, { timeout: 10_000, interval: 25 });
   const events = ((await owner.get(`/runs/${runId}/debug-bundle`)).body.events as BundleEvent[]) ?? [];
   return { ...snap, events };
 }
@@ -73,7 +76,9 @@ describe('ADR 0878 D8 — service-desk.sla-escalation', () => {
     const tenantId = `org:sdchain-${Date.now()}`;
     expect((await owner.post('/host/openwop-app/test/login', { email: `sdchain-${Date.now()}@acme.test`, tenantId })).status).toBe(201);
     const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Support' })).body.orgId as string;
+    // A REAL requester address, so "the run never carries it" can fail (TST-BHB-1).
     const { ticket } = await createTicket({ tenantId, orgId, subject: 'Printer on fire', channel: 'manual', externalKey: 'chain-1', createdBy: 'system',
+      requester: { email: 'jane.requester@example.com', phone: '+15550100777' },
       firstMessage: { messageId: 'in-1', body: 'it is still on fire', author: 'contact:c1' } });
     const wf = expandChain(getChain('service-desk.sla-escalation')!.chain, { params: { ticketId: ticket.ticketId } });
     registerWorkflow(wf);
@@ -83,6 +88,8 @@ describe('ADR 0878 D8 — service-desk.sla-escalation', () => {
     const read = run.events.find((e) => e.type === 'node.completed' && e.nodeId?.endsWith('_ticket'));
     expect((read?.payload?.outputs as { ticket?: { ticketId?: string; requester?: unknown } })?.ticket?.ticketId).toBe(ticket.ticketId);
     expect((read?.payload?.outputs as { ticket?: Record<string, unknown> }).ticket).not.toHaveProperty('requester');
+    expect(JSON.stringify(run.events)).not.toContain('jane.requester@example.com');
+    expect(JSON.stringify(run.events)).not.toContain('5550100777');
     expect(run.events.some((e) => e.type === 'node.completed' && e.nodeId?.endsWith('_notify'))).toBe(false);
   });
 
@@ -96,6 +103,7 @@ describe('ADR 0878 D8 — service-desk.sla-escalation', () => {
     expect(run.status).toBe('failed');
     const failed = run.events.find((e) => e.type === 'node.failed');
     expect(failed?.nodeId?.endsWith('_ticket'), JSON.stringify(failed)).toBe(true);
+    expect((failed?.payload?.error as { code?: string } | undefined)?.code).toMatch(/(^|\.)ticket_unavailable$/);
     expect(run.events.some((e) => e.nodeId?.endsWith('_summarize') && e.type === 'node.started')).toBe(false);
   });
 });

@@ -3,7 +3,10 @@
  *
  * The script is the standing re-check for three deferred decisions, so its one
  * job is to say CLEAR only when it measured something: no gauge line is
- * UNMEASURED, never CLEAR.
+ * UNMEASURED, never CLEAR. *
+ * Tracker TST-BFC-4. Red when: no gauge line reads CLEAR; the earliest total
+ * is overwritten; versions compare as strings; T2 fires only above (not at) its
+ * threshold; `t3.measured` is true with no vector gauge.
  */
 import { describe, expect, it } from 'vitest';
 import { evaluate, versionAtLeast, TRIGGERS } from '../../../scripts/measure-storage-growth.mjs';

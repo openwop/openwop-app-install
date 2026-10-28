@@ -121,3 +121,10 @@ build-meta/certification-bundle.json
 build-meta/conformance-claims.json
 # ADR 0782 / NP-V2 Track C — which checkout + session made this build (upload-only forensics).
 build-meta/deployer.json
+
+# Python bytecode. scripts/test-custom-domain-edge.sh imports
+# scripts/lib/custom-domain-repoint.py inside the gate, and the resulting
+# __pycache__/ made merge-train.sh refuse its own train dir ("uncommitted
+# changes"), so a red multi-PR train could not bisect (slot 74, 2026-10-25).
+__pycache__/
+*.pyc

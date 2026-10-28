@@ -11,6 +11,14 @@
  *      Kanban bridge: a card→To Do move registers a `queue` subscription,
  *      records a delivered delivery, and a repeat move of the same card to the
  *      same column de-duplicates to the same run.
+ *
+ * Protected (RFC 0083 effectively-once / durable delivery; advertised
+ * capability). Wave 61: idempotency was checked by value-equality of two
+ * identical registrations, which a re-register that REWRITES the row also
+ * satisfies inside one millisecond (probe tg-idem, vacuous). The second call
+ * now carries a different label and retry policy, and the first registration's
+ * values must win, with exactly one row. The pause case also asserts that
+ * `fire` never ran and no delivery attempt was recorded.
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -32,6 +40,7 @@ import {
   deliver,
   getSubscription,
   listDeliveries,
+  listSubscriptions,
   makeDedupKey,
   registerSubscription,
   setSubscriptionState, hostDerivedSubscriptionId } from '../src/host/triggerBridgeService.js';
@@ -52,11 +61,19 @@ describe('trigger-bridge service (pure, RFC 0083 §C)', () => {
 
   it('registerSubscription is idempotent by subscriptionId', async () => {
     const a = await registerSubscription({ subscriptionId: 'sub-1', tenantId: 't1', source: 'queue' });
-    const b = await registerSubscription({ subscriptionId: 'sub-1', tenantId: 't1', source: 'queue' });
+    // A second registration with DIFFERENT options returns the existing row
+    // unchanged — it neither rewrites it nor adds a second one.
+    const b = await registerSubscription({
+      subscriptionId: 'sub-1', tenantId: 't1', source: 'queue', label: 'second', retryPolicy: { maxAttempts: 9 },
+    });
     // Read-through returns a freshly-deserialized object each call, so this is
-    // value-equality (the idempotency guarantee is "same subscription, not a
-    // second row"), not reference-equality.
-    expect(a).toEqual(b);
+    // value-equality, not reference-equality.
+    expect(b).toEqual(a);
+    expect(b.label).toBeUndefined();
+    expect(b.retryPolicy.maxAttempts).toBe(a.retryPolicy.maxAttempts);
+    expect(a.retryPolicy.maxAttempts).not.toBe(9);
+    expect((await getSubscription('sub-1'))?.label).toBeUndefined();
+    expect(await listSubscriptions('t1')).toHaveLength(1);
     expect(a.state).toBe('active');
   });
 
@@ -94,8 +111,12 @@ describe('trigger-bridge service (pure, RFC 0083 §C)', () => {
   it('skips delivery when the subscription is paused (§B)', async () => {
     await registerSubscription({ subscriptionId: 'sub-1', tenantId: 't1', source: 'queue' });
     await setSubscriptionState('sub-1', 'paused');
-    const res = await deliver({ subscriptionId: 'sub-1', dedupKey: 'k1', fire: async () => 'run-A' });
+    let fired = false;
+    const res = await deliver({ subscriptionId: 'sub-1', dedupKey: 'k1', fire: async () => { fired = true; return 'run-A'; } });
     expect(res.outcome).toBe('skipped');
+    // Skipped means NOT fired and no attempt recorded.
+    expect(fired).toBe(false);
+    expect(await listDeliveries('sub-1')).toEqual([]);
   });
 
   it('makeDedupKey is host-opaque (a hash, not inbound content)', () => {

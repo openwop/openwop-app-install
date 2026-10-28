@@ -20,7 +20,9 @@ export default function ScheduledAgentsTile({ compact }: DashboardTileProps): JS
   if (status === 'no-org') return <p className="dash-tile__state muted">{t('scheduledAgentsEmpty')}</p>;
 
   const upcoming = (data ?? [])
-    .filter((s) => s.enabled && s.nextRunAt)
+    // ADR 0985 D4 — the job's state: a row with no job is not upcoming, and one
+    // whose last slot was skipped is not shown as on track.
+    .filter((s) => s.enabled && s.nextRunAt && !s.unscheduled && !s.lastSkip)
     .sort((a, b) => (a.nextRunAt! < b.nextRunAt! ? -1 : 1))
     .slice(0, compact ? 4 : 8);
   if (upcoming.length === 0) return <p className="dash-tile__state muted">{t('scheduledAgentsEmpty')}</p>;
@@ -30,7 +32,7 @@ export default function ScheduledAgentsTile({ compact }: DashboardTileProps): JS
       {upcoming.map((s) => (
         <li key={s.chatId} className="dash-tile__row">
           <Link to={`/chat?conversation=${encodeURIComponent(s.conversationId)}`} className="dash-tile__row-main u-truncate" title={s.prompt}>
-            {s.agentId}
+            {s.agentName ?? s.agentId}
           </Link>
           <span className="dash-tile__row-meta muted">{formatRelativeTime(s.nextRunAt!)}</span>
         </li>

@@ -39,7 +39,10 @@ import { recordAttestationAge } from '../../observability/metricSeams.js';
 import { collectLocalScrape, lastEmissionMap, localScrapeStartedAt, localScrapeCardinalityLimit } from '../../observability/metrics.js';
 import { flattenSnapshot, projectSlos } from '../../observability/sloProjection.js';
 import { sendError } from '../../middleware/errorEnvelope.js';
-import { requireSuperadmin } from '../../host/superadmin.js';
+import { requireSuperadmin, superadminMfaRequired } from '../../host/superadmin.js';
+import { hostEventDeadLetterSummary } from '../../host/hostEventLog.js';
+import { profileCensusReport } from '../../host/profileCensus.js';
+import { isAuthorizationEnforced } from '../../host/protocolAuthorization.js';
 import { authorizeOrgScope, requireFeatureEnabled, requireTenantScope } from '../featureRoute.js';
 import { callerSubject, tenantOf } from '../../host/requestSubject.js';
 import { verifyChain } from '../../host/auditChainService.js';
@@ -163,6 +166,28 @@ export function registerOperationsRoutes(deps: RouteDeps): void {
       requireSuperadmin(req);
       const tenantId = typeof req.query.tenantId === 'string' && req.query.tenantId ? req.query.tenantId : undefined;
       res.json(await buildWebhookSummary(storage, tenantId));
+    } catch (err) { next(err); }
+  });
+
+  // ── ADR 0981 P2 — strict-profile census (superadmin). Who membership
+  //    enforcement and the superadmin second factor WOULD refuse, recorded
+  //    from this instance's traffic while each rule is off, plus the profile
+  //    hatches in effect by name (operator-only, Q5). Read-only. ─────────────
+  app.get(`${BASE}/profile-census`, (req, res, next) => {
+    try {
+      requireSuperadmin(req);
+      res.json(profileCensusReport({ membershipEnforced: isAuthorizationEnforced(), superadminMfaRequired: superadminMfaRequired() }));
+    } catch (err) { next(err); }
+  });
+
+  // ── ADR 0988 D2 — dead-lettered host events (superadmin; 403 otherwise).
+  //    Durable events the replay log could not hold, kept instead of reaching
+  //    one instance only. Counts by type and the time span; no bodies, no
+  //    tenant ids. ───────────────────────────────────────────────────────────
+  app.get(`${BASE}/host-events/dead-letters`, async (req, res, next) => {
+    try {
+      requireSuperadmin(req);
+      res.json(await hostEventDeadLetterSummary());
     } catch (err) { next(err); }
   });
 

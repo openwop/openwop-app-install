@@ -5,6 +5,17 @@
  * (credential stops serving, config survives), advisory boards PRUNE the member
  * from advisors[] and clear a matching moderator (board survives). Bystander
  * agents' configs untouched. Full app boot so the REAL registrations serve.
+ *
+ * "Pause" is asserted on BOTH halves: the config row's `enabled` and the
+ * scheduler job `schedchat-<chatId>` (`setJobEnabled`, the thing that actually
+ * stops it firing). "Config survives" is asserted on the authored fields
+ * (prompt, allowedDomains), not by implication.
+ *
+ * Breaks it (round-1 probes, witnessed): the chat filter on the rosterId leg
+ * (8fw2g2-rlc-chat) or with no filter at all (rlc-bystander), the widget filter
+ * on the agentId leg (rlc-widget), the moderator clear (rlc-mod), the advisor
+ * prune (rlc-prune), and the cascade's vector purge (rlc-vector); the job leg
+ * is 8fw2g2-rlc-job-r2.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Server } from 'node:http';
@@ -17,6 +28,15 @@ import { createBoard, getBoard } from '../src/features/advisory-board/service.js
 import { createOrg } from '../src/host/accessControlService.js';
 import type { Storage } from '../src/storage/storage.js';
 import { __hostExtStorage } from '../src/host/hostExtPersistence.js';
+import { getJob } from '../src/host/schedulingService.js';
+import { createAgentMemoryPort, agentMemoryScope } from '../src/host/agentMemoryAdapter.js';
+
+/** The host-ext storage createApp wired (fails loudly instead of casting). */
+function hostStorage(): Storage {
+  const s = __hostExtStorage();
+  if (!s) throw new Error('createApp did not initialise host-ext persistence');
+  return s;
+}
 
 const T = 'roster-lc-t1';
 
@@ -45,15 +65,27 @@ describe('roster deletion reaches feature-owned refs (ADR 0288)', () => {
       personaKind: 'fictional', livingPersonaAck: true,
     });
 
-    await deleteRosterMemberCascade(T, __hostExtStorage() as Storage, doomed.rosterId);
+    // Positive control: both scheduler jobs are live before the delete.
+    expect((await getJob(`schedchat-${chatDoomed.chatId}`))?.enabled).toBe(true);
+    expect((await getJob(`schedchat-${chatKeeper.chatId}`))?.enabled).toBe(true);
+
+    await deleteRosterMemberCascade(T, hostStorage(), doomed.rosterId);
 
     // Scheduled chats: doomed PAUSED (config survives), keeper untouched.
     const chats = await listScheduledChats(T, scope);
-    expect(chats.find((c) => c.chatId === chatDoomed.chatId)?.enabled).toBe(false);
+    const doomedChat = chats.find((c) => c.chatId === chatDoomed.chatId);
+    expect(doomedChat?.enabled).toBe(false);
+    expect(doomedChat?.prompt).toBe('daily digest');
+    expect(doomedChat?.cronExpr).toBe('0 9 * * *');
     expect(chats.find((c) => c.chatId === chatKeeper.chatId)?.enabled).toBe(true);
+    // …and the scheduler job itself stops firing; the keeper's still fires.
+    expect((await getJob(`schedchat-${chatDoomed.chatId}`))?.enabled).toBe(false);
+    expect((await getJob(`schedchat-${chatKeeper.chatId}`))?.enabled).toBe(true);
 
-    // Widgets: doomed DISABLED (row survives), keeper untouched.
-    expect((await getWidget(T, org.orgId, widgetDoomed.widgetId))?.enabled).toBe(false);
+    // Widgets: doomed DISABLED (row + authored config survive), keeper untouched.
+    const doomedWidget = await getWidget(T, org.orgId, widgetDoomed.widgetId);
+    expect(doomedWidget?.enabled).toBe(false);
+    expect(doomedWidget?.allowedDomains).toEqual(['example.com']);
     expect((await getWidget(T, org.orgId, widgetKeeper.widgetId))?.enabled).toBe(true);
 
     // Advisory board: doomed pruned from advisors + moderator cleared; board survives.
@@ -80,8 +112,7 @@ describe('roster deletion reaches feature-owned refs (ADR 0288)', () => {
  */
 describe('ADR 0664 D1 — a deleted agent leaves no recallable memory', () => {
   it('re-creating the same persona does not recall the deleted agent’s notes', async () => {
-    const { createAgentMemoryPort, agentMemoryScope } = await import('../src/host/agentMemoryAdapter.js');
-    const tenantId = `t-adr0664-${Date.now()}`;
+    const tenantId = 't-adr0664-vector-ghost';
     const persona = 'Vector Ghost';
 
     const first = await createRosterEntry({ tenantId, persona, agentRef: { agentId: 'agent:ghost' }, roleKey: 'kb-agent' });
@@ -94,7 +125,7 @@ describe('ADR 0664 D1 — a deleted agent leaves no recallable memory', () => {
     const before = await port.read(scope, 'codename');
     expect(JSON.stringify(before), 'non-vacuity: the note is recallable before deletion').toContain('bluebird');
 
-    await deleteRosterMemberCascade(tenantId, __hostExtStorage()!, first.rosterId);
+    await deleteRosterMemberCascade(tenantId, hostStorage(), first.rosterId);
 
     // The re-created agent gets the SAME rosterId, hence the same namespace — that is the
     // whole hazard, so assert it rather than assuming it.

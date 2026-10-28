@@ -10,7 +10,16 @@
  *
  * These assert the seam end-to-end: a job registered WITH inputs fires a run
  * whose `inputs` carry them, and a job without inputs still fires (additive,
- * back-compatible).
+ * back-compatible) with `inputs: null` exactly as a run started without inputs
+ * is stored (`host/runStarter.ts`).
+ *
+ * Unique coverage: `adr0787-schedule-door.test.ts` drives Run-now but never
+ * asserts the run's `inputs`.
+ *
+ * Sabotage witnessed red (8f grade-tests wave 2): the daemon not forwarding
+ * `job.inputs` (`8fw2g3-sis-daemon`), `registerJob` dropping them
+ * (`-sis-register`), and a missing `inputs` stored as `{}` instead of null
+ * (`-sis-null-r2`).
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -65,6 +74,7 @@ describe('scheduled-job per-fire inputs', () => {
     await processDueSchedules(deps, FIRE);
     const fired = await runsFor('plain');
     expect(fired).toHaveLength(1);
-    expect(fired[0]!.inputs ?? null).toBeNull();
+    // Stored as exactly `null` (not `{}`, not absent).
+    expect(fired[0]!.inputs).toBeNull();
   });
 });

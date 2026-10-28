@@ -1,7 +1,16 @@
 /**
- * Regression: POST /v1/runs with a malformed `inputs` (an ARRAY of variable
+ * Regression: POST /runs with a malformed `inputs` (an ARRAY of variable
  * descriptors instead of a {name:value} map) must be rejected cleanly, NOT 500.
  * Repro of the prod report: inputs=[{name,type,description,required}] → internal_error.
+ * (The path was `/v1/runs` until the ADR 0812 v2 port.)
+ *
+ * The refusal asserted is the shape guard's OWN (`routes/runs.ts`, the
+ * `inputs must be a JSON object…` 400), so a later refusal of the same request
+ * (e.g. a missing required variable) cannot stand in for it.
+ *
+ * Sabotage witnessed red (8f grade-tests wave 2): the array check removed
+ * (`8fw2g3-rmi-array`, `-rmi-array-r2`) and the primitive check removed
+ * (`-rmi-primitive-r2`).
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -24,7 +33,10 @@ async function jsonFetch<T = unknown>(path: string, init: RequestInit = {}): Pro
   return { status: res.status, body: (await res.json()) as T };
 }
 
-describe('POST /v1/runs — malformed inputs shape', () => {
+// The v2 emitter namespaces this host's own codes (`openwop-app.<code>`).
+const SHAPE_MESSAGE = 'inputs must be a JSON object mapping variable names to values (not an array or primitive).';
+
+describe('POST /runs — malformed inputs shape', () => {
   beforeAll(async () => {
     // Register a workflow that declares a `transcript` variable (like the prod chain).
     const reg = await jsonFetch('/host/openwop-app/workflows', {
@@ -40,17 +52,23 @@ describe('POST /v1/runs — malformed inputs shape', () => {
   });
 
   it('rejects an ARRAY inputs with a clean 4xx (not 500)', async () => {
-    const res = await jsonFetch<{ error?: string }>('/runs', {
+    const res = await jsonFetch<{ error?: string; message?: string }>('/runs', {
       method: 'POST',
       body: JSON.stringify({
         workflowId: 'app.malformed-inputs-test',
         inputs: [{ name: 'transcript', type: 'string', description: 'The transcript.', required: true }],
       }),
     });
-    expect(res.status).not.toBe(500);
-    expect(res.status).toBeGreaterThanOrEqual(400);
-    expect(res.status).toBeLessThan(500);
-    expect(res.body.error).not.toBe('internal_error');
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({ error: 'openwop-app.invalid_request', message: SHAPE_MESSAGE });
+
+    // The guard claims primitives too: a string `inputs` gets the same refusal.
+    const prim = await jsonFetch<{ error?: string; message?: string }>('/runs', {
+      method: 'POST',
+      body: JSON.stringify({ workflowId: 'app.malformed-inputs-test', inputs: 'transcript' }),
+    });
+    expect(prim.status).toBe(400);
+    expect(prim.body).toMatchObject({ error: 'openwop-app.invalid_request', message: SHAPE_MESSAGE });
   });
 
   it('still accepts a well-formed object inputs', async () => {

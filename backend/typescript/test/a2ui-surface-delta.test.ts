@@ -2,6 +2,17 @@
  * RFC 0114 — A2UI surface delta core (diff/apply). Verifies the load-bearing
  * round-trip (apply(prev, diff(prev,next)) deep-equals next) over a2ui-surface-
  * shaped trees, and the fail-closed behaviors (malformed path / `test` op throw).
+ *
+ * The `test`-op refusal is DOUBLE-GUARDED by design: `applyPatch` refuses `test`
+ * by name, and its final `else` throws on any unknown op. Removing the named
+ * guard alone still throws (wave 58 probe `de-testop`, vacuous as predicted),
+ * so the case asserts the named guard's own message.
+ *
+ * Tracker TST-BG1-16. Red when (probe-witnessed, wave 58): JSON Pointer tokens
+ * stop being escaped; an array length change is walked index-wise; the delta
+ * chain re-baselines on every frame; a catalogVersion change still deltas; an
+ * empty diff ships a delta frame; a non-opted-in subscriber gets a delta; the
+ * differ emits a root replace instead of a key `remove`.
  */
 import { describe, expect, it } from 'vitest';
 import {
@@ -42,7 +53,7 @@ describe('RFC 0114 — diffSurface/applyPatch round-trip', () => {
 
   it('remove an object key', () => {
     const start = { ...BASE, subtitle: 'x' };
-    roundtrip(start, BASE);
+    expect(roundtrip(start, BASE)).toEqual([{ op: 'remove', path: '/subtitle' }]);
   });
 
   it('array length change → whole-array replace (correct, coarse)', () => {
@@ -63,10 +74,12 @@ describe('RFC 0114 — diffSurface/applyPatch round-trip', () => {
 
 describe('RFC 0114 — applyPatch fail-closed', () => {
   it('rejects a `test` op (forbidden on the wire)', () => {
-    expect(() => applyPatch(BASE, [{ op: 'test', path: '/title', value: 'x' } as unknown as PatchOp])).toThrow();
+    // A wire frame is untyped JSON; parse one rather than cast past the union.
+    const ops: PatchOp[] = JSON.parse('[{"op":"test","path":"/title","value":"x"}]');
+    expect(() => applyPatch(BASE, ops)).toThrow('`test` op not permitted (RFC 0114)');
   });
   it('throws on a missing path (caller re-materializes full)', () => {
-    expect(() => applyPatch(BASE, [{ op: 'remove', path: '/nope/0/deep' }])).toThrow();
+    expect(() => applyPatch(BASE, [{ op: 'remove', path: '/nope/0/deep' }])).toThrow('patch path not found: nope/0/deep');
   });
   it('supports move/copy in apply even though the differ does not emit them', () => {
     const doc = { a: { x: 1 }, b: {} };
@@ -83,13 +96,11 @@ describe('RFC 0114 — projectA2uiDelivery (per-connection transport)', () => {
     const st: A2uiDeltaState = {};
     expect(projectA2uiDelivery(st, 'evt_1', s1, true)).toEqual({ kind: 'full' });
     const out = projectA2uiDelivery(st, 'evt_2', s2, true);
-    expect(out.kind).toBe('delta');
-    if (out.kind === 'delta') {
-      expect(out.frame.surfaceRef).toBe('evt_1'); // baseline full event id
-      expect(out.frame.catalogVersion).toBe('0.9.1');
-      // reconstruct: applying the patch to the baseline yields the new surface
-      expect(applyPatch(s1.surface, out.frame.patch)).toEqual(s2.surface);
-    }
+    if (out.kind !== 'delta') throw new Error(`expected a delta frame, got ${out.kind}`);
+    expect(out.frame.surfaceRef).toBe('evt_1'); // baseline full event id
+    expect(out.frame.catalogVersion).toBe('0.9.1');
+    // reconstruct: applying the patch to the baseline yields the new surface
+    expect(applyPatch(s1.surface, out.frame.patch)).toEqual(s2.surface);
   });
 
   it('a subscriber WITHOUT opt-in always gets full', () => {
@@ -117,10 +128,8 @@ describe('RFC 0114 — projectA2uiDelivery (per-connection transport)', () => {
     projectA2uiDelivery(st, 'evt_1', s1, true);
     projectA2uiDelivery(st, 'evt_2', s2, true);
     const out = projectA2uiDelivery(st, 'evt_3', s3, true);
-    expect(out.kind).toBe('delta');
-    if (out.kind === 'delta') {
-      expect(out.frame.surfaceRef).toBe('evt_1'); // chain keeps the baseline ref
-      expect(applyPatch(s2.surface, out.frame.patch)).toEqual(s3.surface); // against last-delivered (s2)
-    }
+    if (out.kind !== 'delta') throw new Error(`expected a delta frame, got ${out.kind}`);
+    expect(out.frame.surfaceRef).toBe('evt_1'); // chain keeps the baseline ref
+    expect(applyPatch(s2.surface, out.frame.patch)).toEqual(s3.surface); // against last-delivered (s2)
   });
 });

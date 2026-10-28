@@ -14,9 +14,22 @@
  *     dropped, the run still starts;
  *   - a `required`-verification event that fails verification starts no run;
  *   - the `triggerBridge.ingestion` capability is advertised only when wired.
+ *
+ * Protected (RFC 0099 SSRF, content redaction, signature verification). Wave 61
+ * (every one of these was a round-1 vacuous probe):
+ *   - bad signature: the subscription now has a STORED secret, so the HMAC is
+ *     actually evaluated (before, `loadIngestSecret` was null and verification
+ *     failed without reaching the compare — ti-hmac), with a correct-HMAC
+ *     positive control in the same case;
+ *   - SSRF: the attachment URLs are `https://`, so the protocol refusal cannot
+ *     mask the deny check, and the deny is witnessed by its own log line,
+ *     `trigger_ingest_attachment_ssrf_denied` (a failed fetch also returns null,
+ *     so `null` alone could not tell them apart — ti-ssrf);
+ *   - the body cap is tested AT the boundary, 1 048 576 bytes in, one more out
+ *     (ti-cap-boundary).
  */
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createHmac } from 'node:crypto';
@@ -36,11 +49,14 @@ import {
   listDeliveries,
   makeDedupKey,
   registerSubscription,
+  setSubscriptionState,
 } from '../src/host/triggerBridgeService.js';
 import {
   __resetIngestSecrets,
   bodyWithinCap,
   ingestExternalEvent,
+  MAX_INGEST_BODY_BYTES,
+  storeIngestSecret,
   resolveAttachment,
   triggerIngestionEnabled,
   verifyWebhookSignature,
@@ -48,6 +64,31 @@ import {
 } from '../src/host/triggerIngestionService.js';
 
 const WF = 'openwop-app.uppercase';
+
+/** Capture structured log lines (the host logger writes JSON lines to stdout)
+ *  emitted while `fn` runs, and return those whose `msg` equals `msg`. */
+async function logLinesDuring(msg: string, fn: () => Promise<unknown>): Promise<Array<Record<string, unknown>>> {
+  const lines: string[] = [];
+  const orig = process.stdout.write.bind(process.stdout);
+  const spy = vi.spyOn(process.stdout, 'write').mockImplementation((chunk: string | Uint8Array, ...rest: unknown[]) => {
+    lines.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'));
+    return orig(chunk, ...(rest as []));
+  });
+  try {
+    await fn();
+  } finally {
+    spy.mockRestore();
+  }
+  const out: Array<Record<string, unknown>> = [];
+  for (const l of lines.join('').split('\n')) {
+    if (!l.startsWith('{')) continue;
+    try {
+      const j = JSON.parse(l) as Record<string, unknown>;
+      if (j.msg === msg) out.push(j);
+    } catch { /* not a log line */ }
+  }
+  return out;
+}
 
 describe('trigger ingestion service (RFC 0099 §F, sqlite memory)', () => {
   const storage = openSqliteStorage(':memory:');
@@ -168,7 +209,8 @@ describe('trigger ingestion service (RFC 0099 §F, sqlite memory)', () => {
 
   it('verification required + bad signature → no run (rejected, signature-invalid)', async () => {
     const subscriptionId = `tgsub-wh-${Math.random().toString(16).slice(2)}`;
-    // A webhook sub with a signing secret + required verification.
+    // A webhook sub with a signing secret + required verification, and the
+    // secret actually STORED, so the HMAC compare is what decides.
     await registerSubscription({
       subscriptionId,
       tenantId: 't1',
@@ -177,10 +219,12 @@ describe('trigger ingestion service (RFC 0099 §F, sqlite memory)', () => {
       verificationMode: 'required',
       secretFingerprint: 'deadbeef',
     });
+    await storeIngestSecret(subscriptionId, 'shh', { tenantId: 't1' }); // default scheme: legacy-hex
+    const wrongHmac = createHmac('sha256', 'not-shh').update('{"x":1}').digest('hex');
     const result = await ingestExternalEvent(deps, subscriptionId, {
       source: 'webhook',
       rawBody: '{"x":1}',
-      signature: 'sha256=not-the-real-hmac',
+      signature: `sha256=${wrongHmac}`,
       externalDeliveryId: 'bad-sig-1',
     });
     expect(result.outcome).toBe('rejected');
@@ -195,6 +239,18 @@ describe('trigger ingestion service (RFC 0099 §F, sqlite memory)', () => {
     expect(records[0]!.stateChange).toBeUndefined();
     expect(records[0]!.attempt).toEqual({ subscriptionId, dedupKey: makeDedupKey(subscriptionId, 'bad-sig-1'), attempt: 1, outcome: 'dead-lettered' });
     expect(JSON.stringify(records)).not.toContain('bad-sig-1');
+
+    // Positive control: the CORRECT HMAC over the same body is delivered, so the
+    // refusal above came from the compare, not from a missing secret.
+    const rightHmac = createHmac('sha256', 'shh').update('{"x":1}').digest('hex');
+    const good = await ingestExternalEvent(deps, subscriptionId, {
+      source: 'webhook',
+      rawBody: '{"x":1}',
+      signature: `sha256=${rightHmac}`,
+      externalDeliveryId: 'good-sig-1',
+    });
+    expect(good.outcome).toBe('delivered');
+    expect(good.runId).toBeTruthy();
   });
 
   it('RFC 0232 §C.2 — a seam that also appends the dead-lettered event binds the record to that event id', async () => {
@@ -219,12 +275,19 @@ describe('trigger ingestion service (RFC 0099 §F, sqlite memory)', () => {
 
   it('SSRF: an attachment URL on a private/metadata host is dropped, the run still starts', async () => {
     const sub = await regExternal('email');
-    const result = await ingestExternalEvent(deps, sub, {
-      source: 'email',
-      subject: 'with attachment',
-      messageId: 'att-ssrf-1',
-      attachmentUrls: [{ url: 'http://169.254.169.254/latest/meta-data/', filename: 'evil' }],
+    expect(process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE).not.toBe('true'); // the deny check is live
+    let result!: Awaited<ReturnType<typeof ingestExternalEvent>>;
+    const denied = await logLinesDuring('trigger_ingest_attachment_ssrf_denied', async () => {
+      result = await ingestExternalEvent(deps, sub, {
+        source: 'email',
+        subject: 'with attachment',
+        messageId: 'att-ssrf-1',
+        // https, so the protocol refusal cannot be what drops it.
+        attachmentUrls: [{ url: 'https://169.254.169.254/latest/meta-data/', filename: 'evil' }],
+      });
     });
+    // Dropped BY THE DENY CHECK (not by a failed fetch, which also yields null).
+    expect(denied.map((l) => l.host)).toEqual(['169.254.169.254']);
     expect(result.outcome).toBe('delivered'); // run still starts (§F.4 negative)
     const run = await storage.getRun(result.runId!);
     const te = (run!.metadata as { triggerData: TriggerEvent }).triggerData;
@@ -234,7 +297,6 @@ describe('trigger ingestion service (RFC 0099 §F, sqlite memory)', () => {
   it('a paused subscription skips ingestion (no run)', async () => {
     const subscriptionId = `tgsub-paused-${Math.random().toString(16).slice(2)}`;
     await registerSubscription({ subscriptionId, tenantId: 't1', source: 'webhook', workflowId: WF, verificationMode: 'none' });
-    const { setSubscriptionState } = await import('../src/host/triggerBridgeService.js');
     await setSubscriptionState(subscriptionId, 'paused');
     const result = await ingestExternalEvent(deps, subscriptionId, { source: 'webhook', rawBody: '{}', externalDeliveryId: 'p1' });
     expect(result.outcome).toBe('skipped');
@@ -253,14 +315,26 @@ describe('trigger ingestion helpers (pure)', () => {
   });
 
   it('bodyWithinCap rejects an oversize body', () => {
+    // The default cap (OPENWOP_TRIGGER_INGEST_MAX_BODY_BYTES unset): 1 MiB.
+    expect(MAX_INGEST_BODY_BYTES).toBe(1_048_576);
     expect(bodyWithinCap('ok')).toBe(true);
-    const huge = 'x'.repeat(2_000_000);
-    expect(bodyWithinCap(huge)).toBe(false);
+    // At the boundary: exactly the cap is accepted, one byte more is not.
+    expect(bodyWithinCap('x'.repeat(1_048_576))).toBe(true);
+    expect(bodyWithinCap('x'.repeat(1_048_577))).toBe(false);
+    expect(bodyWithinCap('x'.repeat(2_000_000))).toBe(false);
   });
 
   it('resolveAttachment refuses a denied (loopback/metadata) host', async () => {
-    expect(await resolveAttachment('http://169.254.169.254/x')).toBeNull();
-    expect(await resolveAttachment('http://localhost/x')).toBeNull();
+    let results: Array<unknown> = [];
+    const denied = await logLinesDuring('trigger_ingest_attachment_ssrf_denied', async () => {
+      // https throughout, so the http-protocol refusal cannot mask the deny check.
+      results = [
+        await resolveAttachment('https://169.254.169.254/x'),
+        await resolveAttachment('https://localhost/x'),
+      ];
+    });
+    expect(results).toEqual([null, null]);
+    expect(denied.map((l) => l.host)).toEqual(['169.254.169.254', 'localhost']);
     expect(await resolveAttachment('not a url')).toBeNull();
   });
 
@@ -303,10 +377,20 @@ describe('trigger ingestion HTTP surface (RFC 0099 §F.2/§F.3)', () => {
   }
 
   it('advertises triggerBridge.ingestion only when wired (default on)', async () => {
-    const body = bodyOf(await jf<{ triggerBridge?: { sources?: string[]; ingestion?: { externalSources?: string[]; registrationEndpoint?: boolean } } }>('/.well-known/openwop'));
+    type Advert = { triggerBridge?: { sources?: string[]; ingestion?: { externalSources?: string[]; registrationEndpoint?: boolean } } };
+    const body = bodyOf(await jf<Advert>('/.well-known/openwop'));
     expect(body.triggerBridge?.sources).toEqual(expect.arrayContaining(['queue', 'webhook', 'email', 'form']));
     expect(body.triggerBridge?.ingestion?.externalSources).toEqual(['webhook', 'email', 'form']);
     expect(body.triggerBridge?.ingestion?.registrationEndpoint).toBe(true);
+    // …and NOT when ingestion is turned off.
+    process.env.OPENWOP_TRIGGER_INGESTION_ENABLED = 'false';
+    try {
+      const off = bodyOf(await jf<Advert>('/.well-known/openwop'));
+      expect(off.triggerBridge?.ingestion).toBeUndefined();
+      expect(off.triggerBridge?.sources).toEqual(['queue']);
+    } finally {
+      delete process.env.OPENWOP_TRIGGER_INGESTION_ENABLED;
+    }
   });
 
   it('POST /v1/trigger-subscriptions registers a webhook source + returns a binding with the signing secret once', async () => {
@@ -327,8 +411,10 @@ describe('trigger ingestion HTTP surface (RFC 0099 §F.2/§F.3)', () => {
   });
 
   it('POST /v1/trigger-subscriptions rejects a non-resolvable workflow (RFC 0049 bind check)', async () => {
-    const reg = await jf('/trigger-subscriptions', { method: 'POST', body: JSON.stringify({ source: 'email', workflowId: 'no.such.workflow' }) });
+    const reg = await jf<{ error?: unknown; message?: unknown }>('/trigger-subscriptions', { method: 'POST', body: JSON.stringify({ source: 'email', workflowId: 'no.such.workflow' }) });
     expect(reg.status).toBe(404);
+    // The workflow bind check refused — not some other not-found.
+    expect(bodyOf(reg).message).toBe('Workflow not found (cannot bind a subscription to a workflow the caller cannot start).');
   });
 
   it('an inbound delivery on a form subscription starts a run end-to-end', async () => {

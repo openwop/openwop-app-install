@@ -18,6 +18,14 @@
  *    apart would auto-close completed work);
  *  - the per-run sync path still fires and still auto-unsubscribes (the
  *    rate-limit slot release depends on both).
+ *
+ * Sabotage witnessed red (8f grade-tests wave 2): keyed registration made to
+ * accumulate (`8fw2g3-life-keyed`), distinct keys collapsed (`-life-distinct`),
+ * the status dropped (`-life-status`), a throwing handler left unisolated
+ * (`-life-isolate`), the ran-claim removed (`-life-ranclaim`), the global
+ * dispatch made synchronous (`-life-notify-sync`), the per-run handler left
+ * subscribed (`-life-fireonce`), and a throwing per-run handler unguarded
+ * (`-life-perrun-throw`).
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import {

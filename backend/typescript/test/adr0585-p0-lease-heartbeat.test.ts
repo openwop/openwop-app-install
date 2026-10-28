@@ -12,6 +12,12 @@
  * in prose: a renewal can only ever move the expiry FORWARD. If that ever stops
  * holding, P0 stops being additive and becomes able to reclaim a live run early
  * — in a host with no effect fencing, where the duplicate is a second refund.
+ *
+ * Tracker TST-BG3-7. Red when: the predicate becomes `>` (no renewal at exactly one
+ * heartbeat), the default heartbeat leaves 30 s, the heartbeat stops being far
+ * shorter than the lease, the lease stops outliving the run ceiling, the renewal
+ * writes anything but `Date.now() + RUN_DISPATCH_LEASE_MS`, or a wiring leg below
+ * (loop call, predicate guard, marker-before-write, the race arm) is removed.
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -51,12 +57,12 @@ describe('ADR 0585 P0 — the additive invariant', () => {
    * length is a constant and the clock only advances, the new expiry is always
    * >= the old one. This is the property that lets P0 ship without P1.
    */
-  it('a renewal never moves the expiry BACKWARD', () => {
-    const dispatchedAt = 1_000_000;
-    const firstExpiry = dispatchedAt + RUN_DISPATCH_LEASE_MS;
-    for (const laterNow of [dispatchedAt, dispatchedAt + 1, dispatchedAt + RUN_LEASE_HEARTBEAT_MS, dispatchedAt + 9 * 60_000]) {
-      expect(laterNow + RUN_DISPATCH_LEASE_MS).toBeGreaterThanOrEqual(firstExpiry);
-    }
+  it('a renewal never moves the expiry BACKWARD — it writes now + the constant lease length', () => {
+    // The property holds only because the heartbeat writes exactly this expression.
+    // (/grade-tests w58 found the earlier form of this case did arithmetic on its
+    // own numbers and could not fail; this reads what the renewal writes.)
+    const src = readFileSync(new URL('../src/executor/executor.ts', import.meta.url), 'utf8');
+    expect(src).toMatch(/renewRunDispatchLeaseIfOwner\(\s*run\.runId, getInstanceId\(\), Date\.now\(\) \+ RUN_DISPATCH_LEASE_MS,/);
   });
 
   it('the heartbeat is far shorter than the lease — or renewal could not keep one alive', () => {
@@ -78,11 +84,12 @@ describe('ADR 0585 P0 — the predicate can fail (positive control)', () => {
    * pass — so the control is that it returns TRUE for a real elapsed interval,
    * which a never-renew stub cannot do.
    */
-  it('a never-renew implementation fails the due cases', () => {
-    const neverRenew = () => false;
-    expect(neverRenew()).toBe(false);
-    expect(isLeaseRenewalDue(1_000 + RUN_LEASE_HEARTBEAT_MS, 1_000)).toBe(true);
-    expect(isLeaseRenewalDue(1_000 + RUN_LEASE_HEARTBEAT_MS, 1_000)).not.toBe(neverRenew());
+  it('the DEFAULT heartbeat is 30 s — pinned by literal, not by the imported constant', () => {
+    // The cases above use RUN_LEASE_HEARTBEAT_MS, so a change to the constant moves
+    // their expectations with it. This one does not: 30 s is the value P1's reclaim
+    // threshold is sized against, and a never-renew stub fails its first line.
+    expect(isLeaseRenewalDue(30_000, 0)).toBe(true);
+    expect(isLeaseRenewalDue(29_999, 0)).toBe(false);
   });
 });
 

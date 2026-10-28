@@ -46,7 +46,8 @@ function frontendTutorials(): Map<string, string[]> {
 describe('ADR 0488 — backend seed ↔ frontend content drift', () => {
   it('the frontend content directory is readable (non-vacuous — a moved path fails here first)', () => {
     expect(existsSync(FE_CONTENT), `frontend tutorial content not found at ${FE_CONTENT}`).toBe(true);
-    expect(frontendTutorials().size).toBeGreaterThan(0);
+    // MEASURED 6 authored tutorials on 6a852d799 (a floor far below the truth lets a lost module through).
+    expect(frontendTutorials().size).toBeGreaterThanOrEqual(6);
   });
 
   it('the seed ships EXACTLY the tutorials the frontend authored', () => {
@@ -95,8 +96,12 @@ describe('ADR 0488 — backend seed ↔ frontend content drift', () => {
    * match spills into surrounding code. The backend seed is JSON — already
    * parsed, already unescaped — so it is the reliable side to read FROM. The
    * frontend is then de-escaped before comparison.
+   *
+   * So the check runs ONE way: a sentence edited only on the FRONTEND side is
+   * not caught here (the title says so). The structural cases above still pin
+   * ids, step ids and shape in both directions.
    */
-  it('the authored PROSE matches on both sides, not just the structure', () => {
+  it('every authored sentence in the SEED appears in the frontend content (seed → frontend direction)', () => {
     // Every authored sentence the SEED carries.
     const sentences = new Set<string>();
     const walk = (v: unknown): void => {
@@ -115,7 +120,8 @@ describe('ADR 0488 — backend seed ↔ frontend content drift', () => {
       }
     };
     walk(SEED_TUTORIALS);
-    expect(sentences.size, 'non-vacuous — no authored prose found in the seed').toBeGreaterThan(20);
+    // MEASURED 214 distinct sentences on 6a852d799.
+    expect(sentences.size, 'non-vacuous — authored prose went missing from the seed').toBeGreaterThanOrEqual(214);
 
     // The frontend source, de-escaped so `\'` compares as `'`.
     const fe = readdirSync(FE_CONTENT)

@@ -15,6 +15,12 @@
  *      including one appended while no stream was open;
  *   3. not opted in: the stream is held open past the bound (the MUST holds);
  *   4. a pending `bufferMs` batch flushes on the bounded close.
+ *
+ * Tracker TST-BJC. Red when (probe-witnessed, w65): the opt-in check is skipped (a
+ * plain stream is ended early) or never true; the `retry:` hint is not written; the
+ * route's teardown stops flushing the pending batch; discovery advertises
+ * `maxStreamAgeSec` while the host does not bound. Ceiling: an SSE lifetime is a
+ * wall-clock claim, so the windows (400 ms bound, 3 s read) are real time.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';

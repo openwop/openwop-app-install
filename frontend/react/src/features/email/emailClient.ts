@@ -9,7 +9,15 @@ export interface Org { orgId: string; name: string }
 export type ContactStage = 'lead' | 'qualified' | 'customer' | 'churned';
 export const CONTACT_STAGES: readonly ContactStage[] = ['lead', 'qualified', 'customer', 'churned'];
 
-export type EmailBodyFormat = 'text' | 'markdown';
+export type EmailBodyFormat = 'text' | 'markdown' | 'sms';
+
+/** ADR 0955 D8 — SMS segment count (160/153 GSM-7, 70/67 otherwise); the server re-checks. */
+const GSM7 = /^[A-Za-z0-9 \r\n@£$¥èéùìòÇØøÅåΔ_ΦΓΛΩΠΨΣΘΞÆæßÉ!"#¤%&'()*+,\-./:;<=>?¡ÄÖÑÜ§¿äöñüà^{}\\[~\]|€]*$/;
+export function smsSegments(text: string): number {
+  const len = [...text].length;
+  if (GSM7.test(text)) return len <= 160 ? 1 : Math.ceil(len / 153);
+  return len <= 70 ? 1 : Math.ceil(len / 67);
+}
 export interface EmailTemplate { templateId: string; orgId: string; name: string; subject: string; body: string; format?: EmailBodyFormat; version?: number; contentHash?: string; createdAt: string; updatedAt: string }
 /** ADR 0905 D1 — one immutable content version of a template. */
 export interface EmailTemplateVersion { templateId: string; version: number; subject: string; body: string; format?: EmailBodyFormat; restoredFrom?: number; createdBy: string; createdAt: string }
@@ -27,7 +35,18 @@ async function failWithReason(res: Response, ctx: string): Promise<never> {
   throw new Error(body.message || `${ctx} returned ${res.status}`);
 }
 export interface CampaignStats { sent: number; failed: number; skipped: number }
-export interface Campaign { campaignId: string; orgId: string; templateId: string; audience: { stage?: ContactStage; segmentId?: string }; status: 'draft' | 'sending' | 'sent'; stats?: CampaignStats; createdAt: string; updatedAt: string }
+/** ADR 0905 D3 — the campaign's send-review cycle (mirrors the approval row). */
+export interface CampaignReview {
+  cycle: number; approvalId: string; fromStatus: 'draft' | 'sent';
+  pin: { templateId: string; templateVersion: number; contentHash: string; senderAddress: string; audienceHash: string };
+  submittedBy?: string; submittedAt: string;
+  outcome?: 'approved' | 'changes_requested' | 'closed'; decidedBy?: string; decidedAt?: string; note?: string;
+}
+export type CampaignStatus = 'draft' | 'in_review' | 'approved' | 'sending' | 'sent';
+export const CAMPAIGN_STATUSES: readonly CampaignStatus[] = ['draft', 'in_review', 'approved', 'sending', 'sent'];
+/** ADR 0905 D7 — an org's subscription topic (an opt-out list; it only narrows). */
+export interface EmailTopic { topicId: string; orgId: string; name: string; description?: string; createdAt: string; updatedAt: string }
+export interface Campaign { campaignId: string; orgId: string; templateId: string; audience: { stage?: ContactStage; segmentId?: string }; topicId?: string; status: CampaignStatus; stats?: CampaignStats; review?: CampaignReview; createdAt: string; updatedAt: string }
 export interface SendLog { sendId: string; campaignId: string; contactId: string; status: 'sent' | 'failed' | 'skipped'; error?: string; ts: string }
 
 /** Saved segments (ADR 0211 §2) — a minimal read-only shape for the campaign
@@ -108,7 +127,41 @@ export async function listCampaigns(orgId: string): Promise<Campaign[]> {
   const res = await fetch(`${base(orgId)}/campaigns`, fetchOpts({ headers: authedHeaders() }));
   return (await asJson<{ campaigns: Campaign[] }>(res, 'listCampaigns')).campaigns;
 }
-export async function createCampaign(orgId: string, input: { templateId: string; stage?: ContactStage; segmentId?: string }): Promise<Campaign> {
+/** ADR 0955 D7 — the org's sending health (the per-sender breaker). */
+export interface SendingHealth {
+  state: { paused: boolean; pausedAt?: string; reason?: 'complaints' | 'hard_bounces'; resumedAt?: string } | null;
+  window: { sent: number; hardBounces: number; complaints: number };
+  thresholds: { minSends: number; complaintRate: number; hardBounceRate: number };
+  canResume: boolean;
+  /** ADR 0955 P4b — present only while the workspace warms up new senders and this one is on the ramp. */
+  warmup?: { day: number; cap: number; remaining: number } | null;
+}
+export async function getSendingHealth(orgId: string): Promise<SendingHealth> {
+  const res = await fetch(`${base(orgId)}/deliverability`, fetchOpts({ headers: authedHeaders() }));
+  return asJson<SendingHealth>(res, 'getSendingHealth');
+}
+export async function resumeSending(orgId: string): Promise<void> {
+  const res = await fetch(`${base(orgId)}/deliverability/resume`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: '{}' }));
+  await asJson<unknown>(res, 'resumeSending');
+}
+
+export async function listTopics(orgId: string): Promise<{ topics: EmailTopic[]; max: number }> {
+  const res = await fetch(`${base(orgId)}/topics`, fetchOpts({ headers: authedHeaders() }));
+  return asJson<{ topics: EmailTopic[]; max: number }>(res, 'listTopics');
+}
+export async function createTopic(orgId: string, input: { name: string; description?: string }): Promise<EmailTopic> {
+  const res = await fetch(`${base(orgId)}/topics`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify(input) }));
+  return asJson<EmailTopic>(res, 'createTopic');
+}
+export async function deleteTopic(orgId: string, topicId: string): Promise<void> {
+  const res = await fetch(`${base(orgId)}/topics/${encodeURIComponent(topicId)}`, fetchOpts({ method: 'DELETE', headers: authedHeaders() }));
+  if (!res.ok) {
+    let detail = '';
+    try { detail = ((await res.json()) as { message?: string }).message ?? ''; } catch { /* non-JSON */ }
+    throw new Error(detail || `deleteTopic returned ${res.status}`);
+  }
+}
+export async function createCampaign(orgId: string, input: { templateId: string; stage?: ContactStage; segmentId?: string; topicId?: string }): Promise<Campaign> {
   const res = await fetch(`${base(orgId)}/campaigns`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify(input) }));
   return asJson<Campaign>(res, 'createCampaign');
 }
@@ -181,7 +234,13 @@ export async function listSends(orgId: string, campaignId: string): Promise<Send
  *  /send works; ADR 0019 correction note / ADR 0193). ADR 0848 D4 — `canEdit`: may THIS
  *  caller change it (an admin-tier setting)? Absent from an older backend ⇒ treated as
  *  editable (the PUT still decides). */
-export interface EmailSettings { senderAddress: string; configured: boolean; canEdit?: boolean }
+export interface EmailSettings {
+  senderAddress: string; configured: boolean; canEdit?: boolean;
+  /** ADR 0905 D4 — sends need an approval in this workspace (`email-approval-gate`). */
+  approvalGate?: boolean;
+  /** ADR 0905 D3 — the org's extra approvers besides its admins. */
+  approverRoleRefs?: string[]; approverGroupRefs?: string[];
+}
 export interface ProviderStatus {
   providers: { provider: string; connected: boolean }[];
   defaultProvider: string | null;
@@ -194,6 +253,16 @@ export async function getProviderStatus(orgId: string): Promise<ProviderStatus> 
 export async function getEmailSettings(orgId: string): Promise<EmailSettings> {
   const res = await fetch(`${base(orgId)}/settings`, fetchOpts({ headers: authedHeaders() }));
   return asJson<EmailSettings>(res, 'getEmailSettings');
+}
+/** ADR 0905 D3 — submit a campaign for send review (or re-pin an open review). */
+export async function submitCampaignReview(orgId: string, campaignId: string): Promise<Campaign> {
+  const res = await fetch(`${base(orgId)}/campaigns/${encodeURIComponent(campaignId)}/submit-review`, fetchOpts({ method: 'POST', headers: jsonHeaders() }));
+  return (await asJson<{ campaign: Campaign }>(res, 'submitCampaignReview')).campaign;
+}
+/** ADR 0905 D3 — withdraw an open review; the campaign returns to draft. */
+export async function withdrawCampaignReview(orgId: string, campaignId: string): Promise<Campaign> {
+  const res = await fetch(`${base(orgId)}/campaigns/${encodeURIComponent(campaignId)}/withdraw-review`, fetchOpts({ method: 'POST', headers: jsonHeaders() }));
+  return asJson<Campaign>(res, 'withdrawCampaignReview');
 }
 export async function putEmailSettings(orgId: string, senderAddress: string): Promise<EmailSettings> {
   const res = await fetch(`${base(orgId)}/settings`, fetchOpts({ method: 'PUT', headers: jsonHeaders(), body: JSON.stringify({ senderAddress }) }));

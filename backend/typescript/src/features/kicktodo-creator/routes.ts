@@ -42,6 +42,13 @@ import {
   type OutlineDoc,
 } from './outlineDoc.js';
 import { registerApprovalEligibility, registerChallengePublishApprovalHandler } from '../../host/approvalService.js';
+import { registerRunApprovalGrant } from '../../host/runApprovalGrant.js';
+import { registerRunStartGrant, RUN_START_GRANT_METADATA_KEY, type RunStartRequest, type RunStartStamp } from '../../host/runStartGrant.js';
+import { CONVERSATION_WORKFLOW_ID } from '../../host/conversation.js';
+import { parseResolveBody } from '../../host/exchange/validateTurn.js';
+import { isRunOwnedBy } from '../../host/runOwner.js';
+import { CHALLENGE_FACTORY_WORKFLOW_ID, LESSON_BATCH_WORKFLOW_ID } from './builtinWorkflows.js';
+import type { RunRecord } from '../../types.js';
 import { registerCanvasEditorRoutes } from '../canvasEditorRoutes.js';
 import { registerCanvasComponents } from '../../host/canvasComponentCatalog.js';
 import { ensureCanvasForTenant, getCanvasForTenant } from '../../host/canvasSurface.js';
@@ -410,7 +417,60 @@ function skeletonOutlineDoc(candidate: FactoryCandidate): OutlineDoc {
   };
 }
 
+/**
+ * ADR 0975 D1 — who may decide the Challenge Factory's own gates (outline,
+ * lesson batches) without the tenant-wide `approvals:respond`: the person who
+ * STARTED that Factory run, while they hold KickTodo manage authority (for an
+ * operator in `host-kicktodo`, only while the activation is live — ADR 0910 D9:
+ * authority is read when each gated act happens). Deciding someone else's run
+ * still needs `approvals:respond`. Module-level so a second route registration
+ * (tests) re-registers the SAME predicate.
+ */
+export async function factoryRunApprovalGrant(req: Request, run: RunRecord): Promise<boolean> {
+  const subject = callerSubject(req);
+  if (!subject || !isRunOwnedBy(run, subject)) return false;
+  return hasKicktodoManageAuthority(run.tenantId, subject);
+}
+
+/**
+ * ADR 0975 D8 — the Studio's Challenge Author chat is how a Factory run starts,
+ * and a chat turn is a run of the conversation workflow. A KickTodo operator
+ * (viewer + `host:kicktodo:manage` while the activation is live) holds neither
+ * `runs:create` nor `approvals:respond`, so with enforcement on it could not
+ * open or continue that chat. These two predicates admit exactly that chat:
+ *  - START: a conversation the caller asks to scope to the Challenge Author
+ *    (`metadata.agentScope`), by a caller with KickTodo manage authority in that
+ *    workspace. The host stamps the grant on the run (callers cannot write it).
+ *  - CONTINUE: a run carrying that stamp, owned by the caller, still with manage
+ *    authority, and a turn addressed to the Challenge Author (or `close`). A
+ *    `bypass` permission mode is refused: the grant never widens what the agent
+ *    may do without asking.
+ * Any other conversation, agent, or someone else's run still needs the
+ * tenant-wide scopes.
+ */
+const CHALLENGE_AUTHOR_CHAT_GRANT = 'kicktodo-challenge-author';
+
+export async function challengeAuthorChatStartGrant(req: Request, start: RunStartRequest): Promise<RunStartStamp | null> {
+  if (start.metadata.agentScope !== CHALLENGE_AUTHOR_AGENT_ID) return null;
+  const subject = callerSubject(req);
+  if (!subject || !(await hasKicktodoManageAuthority(start.tenantId, subject))) return null;
+  return { grant: CHALLENGE_AUTHOR_CHAT_GRANT, agentId: CHALLENGE_AUTHOR_AGENT_ID };
+}
+
+export async function challengeAuthorChatTurnGrant(req: Request, run: RunRecord): Promise<boolean> {
+  const stamp = (run.metadata as Record<string, unknown> | undefined)?.[RUN_START_GRANT_METADATA_KEY] as Partial<RunStartStamp> | undefined;
+  if (stamp?.grant !== CHALLENGE_AUTHOR_CHAT_GRANT || stamp.agentId !== CHALLENGE_AUTHOR_AGENT_ID) return false;
+  const subject = callerSubject(req);
+  if (!subject || !isRunOwnedBy(run, subject)) return false;
+  const turn = parseResolveBody((req.body as { resumeValue?: unknown } | undefined)?.resumeValue);
+  if (turn.operation === 'exchange' && (turn.to !== CHALLENGE_AUTHOR_AGENT_ID || turn.exchangePermissionMode === 'bypass')) return false;
+  return hasKicktodoManageAuthority(run.tenantId, subject);
+}
+
 export function registerKicktodoCreatorRoutes(deps: RouteDeps): void {
+  registerRunApprovalGrant([CHALLENGE_FACTORY_WORKFLOW_ID, LESSON_BATCH_WORKFLOW_ID], factoryRunApprovalGrant);
+  registerRunStartGrant([CONVERSATION_WORKFLOW_ID], challengeAuthorChatStartGrant);
+  registerRunApprovalGrant([CONVERSATION_WORKFLOW_ID], challengeAuthorChatTurnGrant);
   // KTFULL-B2 (approvals-side half) — the OWNER states who may decide a
   // `challenge-publish` approval on the GENERIC decision lane (approvals routes,
   // review cards, decide-by-email): the decider must hold the SAME

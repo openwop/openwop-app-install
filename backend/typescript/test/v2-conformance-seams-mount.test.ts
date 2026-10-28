@@ -205,10 +205,25 @@ describe('declared-but-unserved seams answer 404 (WS0)', () => {
     // /v1/host/sample/a2ui/emit-surface was deleted with the /v1 path space.
   });
 
-  it('every served:false operation is refused and no served one is', () => {
+  it('every served:false operation is refused and no served one is', async () => {
     for (const op of SEAM_OPERATIONS) {
       const hit = unservedSeamOperation(op.method, concrete(op.v2Path));
       expect(hit?.operationId ?? null, op.operationId).toBe(op.served ? null : op.operationId);
+    }
+    // The WS0 claim is about the WIRE: the alias must answer 404 for an unserved
+    // seam, not merely have a predicate that says so (8f W4 probe cs-unserved-http
+    // was vacuous while only the predicate was checked). The message is the
+    // alias's own, so a 404 from some other route cannot satisfy it.
+    const unserved = SEAM_OPERATIONS.filter((op) => !op.served);
+    expect(unserved.length, 'there are unserved seams to refuse (measured 4 at 6a852d799)').toBeGreaterThan(0);
+    for (const op of unserved) {
+      const r = await fetch(`${base}${concrete(op.v2Path)}`, {
+        method: op.method.toUpperCase(), headers: AUTH,
+        body: op.method === 'put' || op.method === 'post' ? '{}' : undefined,
+      });
+      expect(r.status, op.operationId).toBe(404);
+      expect(((await r.json()) as { message?: unknown }).message, op.operationId)
+        .toBe(`conformance seam ${op.operationId} is not served by this host`);
     }
   });
 });

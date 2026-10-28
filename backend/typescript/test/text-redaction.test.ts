@@ -10,6 +10,11 @@
  * COMMENT (OPTIONAL) field. Without `sanitizeFreeTextDeep` on the
  * resume-time event-log write, the raw key ships into the
  * `node.completed` event payload and renders in chat history.
+ *
+ * Protected (SR-1 free-text secret redaction). What breaks if this goes red:
+ * a pasted provider key survives into the durable event log. The array branch
+ * of the deep walk and the 32-char hex boundary are each fed a value that only
+ * that branch/boundary redacts (wave-61 probes rd-deep-array, rd-hex-boundary).
  */
 
 import { describe, expect, it } from 'vitest';
@@ -33,6 +38,9 @@ describe('sanitizeFreeText', () => {
   it('redacts long hex digests', () => {
     expect(sanitizeFreeText('digest=' + 'a'.repeat(40)))
       .toBe('digest=***');
+    // The boundary: 32 hex chars is a digest, 31 is not (no other rule matches).
+    expect(sanitizeFreeText('f'.repeat(32))).toBe('***');
+    expect(sanitizeFreeText('f'.repeat(31))).toBe('f'.repeat(31));
   });
 
   it('leaves non-secret text alone', () => {
@@ -64,7 +72,7 @@ describe('sanitizeFreeTextDeep', () => {
           comment: 'sk-1234567890abcdefghij',
           attempts: 3,
           ok: true,
-          choices: ['Clarity critic', 'Persuasion critic'],
+          choices: ['Clarity critic', 'sk-ABCDEFGHIJKLMNOPQRST'],
           nestedKey: null,
         },
       },
@@ -75,15 +83,18 @@ describe('sanitizeFreeTextDeep', () => {
     expect(inner.attempts).toBe(3);
     expect(inner.ok).toBe(true);
     expect(inner.nestedKey).toBe(null);
-    expect(inner.choices).toEqual(['Clarity critic', 'Persuasion critic']);
+    // A secret inside an ARRAY is redacted too (the array branch of the walk).
+    expect(inner.choices).toEqual(['Clarity critic', 'sk-***']);
   });
 
   it('preserves shape — arrays stay arrays, objects keep keys', () => {
-    const input = ['plain', { k: 'v' }, ['nested']];
-    expect(sanitizeFreeTextDeep(input)).toEqual(input);
+    const input = ['plain', { k: 'v' }, ['nested', 'Bearer abcdefghijklmnopqr']];
+    const out = sanitizeFreeTextDeep(input);
+    expect(Array.isArray(out)).toBe(true);
+    expect(out).toEqual(['plain', { k: 'v' }, ['nested', 'Bearer ***']]);
   });
 
-  it('mirrors the HITL approval shape end-to-end', () => {
+  it('scrubs the HITL resumeValue shape that executor.ts writes to node.completed', () => {
     // Mirrors what executor.ts:780 writes to the node.completed event
     // payload: `{outputs: {output: <resumeValue>}}` where resumeValue is
     // the approval card's `{action, content, selectedKey, comment}` shape.

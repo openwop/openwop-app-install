@@ -7,6 +7,10 @@
  *     BEFORE dispatch (never silently dropped)
  * Mirrors the openwop `callai-multimodal.test.ts` seam contract (steward-authored)
  * so the reference host passes it non-vacuously under OPENWOP_REQUIRE_BEHAVIOR.
+ *
+ * TST-BNM-1. Red when: `audio` leaves INPUT_MODALITIES (advert + accept), a
+ * `file` part stops mapping to `document`, the route maps the modality refusal
+ * to a generic code, or an EMPTY messages array is admitted.
  */
 
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
@@ -92,7 +96,10 @@ describe('RFC 0091 — callai-multimodal seam', () => {
   });
 
   it('400s on a missing/empty messages array', async () => {
-    expect((await post({})).status).toBe(400);
-    expect((await post({ messages: [] })).status).toBe(400);
+    for (const body of [{}, { messages: [] }]) {
+      const res = await post(body);
+      expect(res.status).toBe(400);
+      expect(errorCodeOf(await res.json())).toBe('validation_error');
+    }
   });
 });

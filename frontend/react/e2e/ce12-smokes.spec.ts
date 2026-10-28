@@ -83,7 +83,13 @@ test.describe('CE-12 smokes', () => {
     // is held closed: exactly an unrefreshed tab. Reads still reach the server.
     await page.route(/\/notifications\/stream/, (route) => route.abort());
     await page.goto('/chat');
-    await page.getByRole('button', { name: 'Open chat tools' }).click();
+    // The two chat layouts start the tools rail in different states: the single-chat
+    // sidebar opens it closed, the multi-tab deck (`multi-tab-chat`, default on) opens
+    // it on Conversations so the button reads "Close chat tools". Open it only if it is
+    // closed, read off `aria-pressed`, which both layouts' launchers carry.
+    const tools = page.getByRole('button', { name: /^(Open|Close) chat tools$/ });
+    await expect(tools).toBeVisible({ timeout: 20_000 });
+    if ((await tools.getAttribute('aria-pressed')) !== 'true') await tools.click();
     await page.getByRole('tab', { name: /^Reviews/ }).click();
     const card = page.locator('article, li, section, div').filter({ hasText: prompt }).last();
     await expect(card.getByRole('button', { name: 'Approve' })).toBeVisible({ timeout: 20_000 });

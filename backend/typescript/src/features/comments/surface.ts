@@ -22,7 +22,7 @@ import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { OpenwopError } from '../../types.js';
 import { assertOrgScope } from '../../host/accessControlService.js';
 import { surfaceStr as str, surfaceOptStr as optStr, type FeatureSurface } from '../../host/featureSurfaces.js';
-import { listThread, createComment, updateComment, getComment, RESOURCE_TYPES, type ResourceType, type CommentCaller } from './commentsService.js';
+import { listThread, createComment, updateComment, getComment, RESOURCE_TYPES, type ResourceType, type CommentCaller, COMMENT_WRITE_SCOPE } from './commentsService.js';
 import type { HostEventOrigin } from '../../host/hostEventDispatcher.js';
 import { emitCommentNotification } from './notifications.js';
 
@@ -110,7 +110,7 @@ export function buildCommentsSurface(scope: BundleScope): FeatureSurface {
    * Blast radius today: zero chains consume this pack (verified both directions
    * in the workflows grade), so no shipped consumer changes behaviour.
    */
-  const requireOrg = async (raw: unknown, needed: 'workspace:read' | 'workspace:write'): Promise<string> => {
+  const requireOrg = async (raw: unknown, needed: 'workspace:read' | typeof COMMENT_WRITE_SCOPE): Promise<string> => {
     const orgId = requireOrgId(raw);
     if (!viewer) {
       throw new OpenwopError(
@@ -146,7 +146,7 @@ export function buildCommentsSurface(scope: BundleScope): FeatureSurface {
     },
     post: async (args) => {
       const rt = requireResourceType(args.resourceType);
-      const orgId = await requireOrg(args.orgId, 'workspace:write');
+      const orgId = await requireOrg(args.orgId, COMMENT_WRITE_SCOPE);
       const { comment, notify } = await createComment({
         tenantId, orgId, resourceType: rt, resourceId: str(args.resourceId),
         ...(optStr(args.parentId) ? { parentId: optStr(args.parentId) } : {}),
@@ -162,7 +162,7 @@ export function buildCommentsSurface(scope: BundleScope): FeatureSurface {
     },
     resolve: async (args) => {
       const commentId = str(args.commentId);
-      const orgId = await requireOrg(args.orgId, 'workspace:write');
+      const orgId = await requireOrg(args.orgId, COMMENT_WRITE_SCOPE);
       const existing = await getComment(tenantId, orgId, commentId, caller);
       if (!existing) return { comment: null };
       // CMNT-5 / WF-CMNT-5 — this passed `existing.authorId` as the `actorId`,

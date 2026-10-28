@@ -17,6 +17,10 @@
  *   3. `OPENWOP_BILLING_EXEMPT_TENANTS` still exempts;
  *   4. no `workflowRuns` key in `OPENWOP_BILLING_PLAN_LIMITS` (prod today) ⇒
  *      nothing counted, nothing refused.
+ *
+ * Tracker TST-BUL-7. Sabotage-witnessed (w62): red when billing stops
+ * registering the reserver, `POST /runs` reserves for the wrong tenant, `:fork`
+ * skips the seam, the exemption is ignored, or an absent limit counts as zero.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -88,8 +92,8 @@ describe('ADR 0821 P5 — the run limit is wired at the non-runStarter start sit
 
     // A refused launch (no such workflow) never consumes a run.
     const missing = await createRun('openwop-app.no-such-workflow');
-    expect(missing.status).toBeGreaterThanOrEqual(400);
-    expect(missing.status).not.toBe(429);
+    expect(missing.status, JSON.stringify(missing.body)).toBe(404);
+    expect(JSON.stringify(missing.body)).not.toContain('plan_run_limit_reached');
     expect(await planRunsThisMonth(tenant)).toBe(1);
 
     // :fork is a new run and counts — the second (last) run of the month.
@@ -107,6 +111,7 @@ describe('ADR 0821 P5 — the run limit is wired at the non-runStarter start sit
       method: 'POST', body: JSON.stringify({ mode: 'branch', fromSeq: 0 }),
     });
     expect(refusedFork.status).toBe(429);
+    expect(JSON.stringify(refusedFork.body)).toContain('plan_run_limit_reached');
     expect(await planRunsThisMonth(tenant)).toBe(2);
 
     // OPENWOP_BILLING_EXEMPT_TENANTS still exempts the same tenant, at the limit.

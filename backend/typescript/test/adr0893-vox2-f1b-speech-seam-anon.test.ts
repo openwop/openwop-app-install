@@ -7,6 +7,10 @@
  * off there and the scope gate only narrows `owk_` keys. Each fresh anon tenant
  * also gets its own per-org TTS budget, so the budget did not bound it either.
  * This file boots the real cookie posture (anon sessions minted) to reproduce it.
+ *
+ * (TST-BPD) Red when (sabotage-witnessed, wave 65): `requireNonAnonymousPrincipal`
+ * (`middleware/auth.ts`, the gate `speechSeamGate` runs first) admits an anonymous
+ * principal ⇒ every seam row.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Server } from 'node:http';

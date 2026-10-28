@@ -55,7 +55,7 @@ beforeAll(async () => {
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
-  for (const id of ['users', 'campaign-brief', 'campaign-orchestration', 'campaign-connectors', 'campaign-intel']) {
+  for (const id of ['users', 'campaign-brief', 'campaign-orchestration', 'campaign-connectors', 'campaign-intel', 'commerce']) {
     const d = getToggleDefault(id);
     if (d) await saveConfig({ ...d, status: 'on' }, 'test');
   }
@@ -179,6 +179,11 @@ describe('campaign-sync.pacing-check — real executor, real over-budget alert',
     expect(imp.status, JSON.stringify(imp.body)).toBe(201);
     expect(imp.body.imported).toBe(1);
 
+    // ADR 0952 P1 — a campaign-scoped spend cap, so the chain's enforce-caps root
+    // runs as the run owner through the real executor (no dispatch ⇒ $0 spent).
+    const cap = await owner.post('/host/openwop-app/campaign-intel/caps', { orgId, scope: { kind: 'campaign', campaignId }, limitMinor: 50_000, currency: 'USD' });
+    expect(cap.status, JSON.stringify(cap.body)).toBe(201);
+
     const found = getChain('campaign-sync.pacing-check');
     expect(found, 'campaign-sync.pacing-check chain must be loaded at boot').toBeTruthy();
     const params = { orgId };
@@ -200,5 +205,78 @@ describe('campaign-sync.pacing-check — real executor, real over-budget alert',
     const rows = (paceOutputs.report as { rows: Array<{ campaignId: string; spend: number; budget: number; spentPct: number; band: string }> }).rows;
     const row = rows.find((r) => r.campaignId === campaignId);
     expect(row, JSON.stringify(rows)).toMatchObject({ spend: 150, budget: 100, spentPct: 150, band: 'over' });
+
+    // The caps root ran as the owner and evaluated the cap; `pace` stays the primary output.
+    const capsOutputs = completedOutputs(events, 'caps');
+    expect(capsOutputs).toMatchObject({ outcome: 'enforced', caps: [{ capId: (cap.body as { capId?: string }).capId, status: 'ok', spentMinor: 0, transitioned: false }] });
+    const primary = expanded.nodes.filter((n) => n.outputRole === 'primary').map((n) => n.nodeId);
+    expect(primary).toHaveLength(1);
+    expect(primary[0]).toMatch(/_pace$/);
+  });
+});
+
+describe('campaign-intel.reallocate — real loader + executor (ADR 0952 P3)', () => {
+  it('runs optimize → propose → apply as the owner; with nothing to move it ends no_change / no_plan and opens no approval', async () => {
+    const { owner, orgId } = await ownerOrg();
+    const found = getChain('campaign-intel.reallocate');
+    expect(found, 'campaign-intel.reallocate chain must be loaded at boot').toBeTruthy();
+    const params = { orgId };
+    const expanded = expandChain(found!.chain, { params });
+    registerWorkflow(expanded);
+    // The apply step is the chain's one primary output.
+    const primary = expanded.nodes.filter((nd) => nd.outputRole === 'primary').map((nd) => nd.nodeId);
+    expect(primary).toHaveLength(1);
+    expect(primary[0]).toMatch(/_apply$/);
+
+    const create = await owner.post('/runs', { workflowId: expanded.workflowId, inputs: params });
+    expect(create.status, JSON.stringify(create.body)).toBe(201);
+    const snap = await pollRun(owner, create.body.runId as string);
+    expect(snap.status, `run did not complete cleanly: ${JSON.stringify(snap)}`).toBe('completed');
+    const events = await bundleEvents(owner, create.body.runId as string);
+    // The edge delivered budget-optimize's recommendation; propose did not recompute it.
+    expect(completedOutputs(events, 'propose')).toMatchObject({ outcome: 'no_change', dropped: [], recommendationSource: 'upstream' });
+    expect(completedOutputs(events, 'apply')).toEqual({ outcome: 'no_plan' });
+    const plans = await owner.get(`/host/openwop-app/campaign-intel/reallocations?orgId=${encodeURIComponent(orgId)}`);
+    expect(plans.status).toBe(200);
+    expect((plans.body as { plans?: unknown[] }).plans).toEqual([]);
+  });
+});
+
+describe('campaign-sync.catalog-feed — real loader + executor (ADR 0952 P7)', () => {
+  it('feed off ⇒ completes with outcome:disabled; feed on but the push unverified ⇒ a typed failure, never success', async () => {
+    const { owner, orgId } = await ownerOrg();
+    const found = getChain('campaign-sync.catalog-feed');
+    expect(found, 'campaign-sync.catalog-feed chain must be loaded at boot').toBeTruthy();
+    const params = { orgId, platform: 'meta' };
+    const expanded = expandChain(found!.chain, { params });
+    registerWorkflow(expanded);
+    // Deterministic expansion: the same params give the same workflow id.
+    expect(expandChain(found!.chain, { params }).workflowId).toBe(expanded.workflowId);
+
+    const off = await owner.post('/runs', { workflowId: expanded.workflowId, inputs: params });
+    expect(off.status, JSON.stringify(off.body)).toBe(201);
+    expect((await pollRun(owner, off.body.runId as string)).status).toBe('completed');
+    expect(completedOutputs(await bundleEvents(owner, off.body.runId as string), 'push')).toEqual({ outcome: 'disabled' });
+
+    // Enable through the service (ads-catalog-feed.test.ts covers the PUT route), then push.
+    const { saveFeedSettings } = await import('../src/features/campaign-connectors/catalogFeed.js');
+    const { getOrg } = await import('../src/host/accessControlService.js');
+    const org = await getOrg(orgId);
+    if (!org) throw new Error('org missing');
+    await saveFeedSettings(org.tenantId, orgId, { enabled: true, metaCatalogId: '777' });
+
+    // No public origin configured: a scheduled push cannot build item links, so it fails typed.
+    const noBase = await owner.post('/runs', { workflowId: expanded.workflowId, inputs: params });
+    const noBaseSnap = await pollRun(owner, noBase.body.runId as string);
+    expect(noBaseSnap.status).toBe('failed');
+    expect(noBaseSnap.error?.code ?? '').toMatch(/not_configured$/);
+
+    process.env.OPENWOP_PUBLIC_BASE_URL = 'https://shop.example';
+    delete process.env.OPENWOP_ADS_VERIFIED_CATALOG_PUSH;
+    const unverified = await owner.post('/runs', { workflowId: expanded.workflowId, inputs: params });
+    const snap = await pollRun(owner, unverified.body.runId as string);
+    expect(snap.status).toBe('failed');
+    expect(snap.error?.code ?? '').toMatch(/connector_not_configured$/);
+    delete process.env.OPENWOP_PUBLIC_BASE_URL;
   });
 });

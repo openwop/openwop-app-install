@@ -10,6 +10,14 @@
  * `gen-distribution` "always-on ⊆ core" gate only fires for features with NO
  * `toggleDefault`, so re-adding one here would quietly re-open the gap without
  * failing that gate.
+ *
+ * TST-BQR-1. Red when a graduated feature re-declares `toggleDefault` (or the
+ * literal text, even commented out), declares the id through
+ * `extraToggleDefaults`, drops out of `bundles.json` core / lands in a sellable
+ * bundle, or leaves `RETIRED_TOGGLE_IDS`. The "runtime" cases read the
+ * DECLARED toggle ids every feature contributes — exactly what
+ * `registerBackendFeatures` registers — because `getToggleDefault` returns
+ * null for every id in a file that never boots (it could not fail).
  */
 
 import { describe, expect, it } from 'vitest';
@@ -26,6 +34,13 @@ const RETIRED_ENTRIES = ['run-input-forms', 'models', 'context-economy'] as cons
 
 const REPO_ROOT = join(import.meta.dirname, '../../..');
 
+/** Every toggle id a backend feature registers at boot (`registerBackendFeatures`). */
+const declaredToggleIds = (): string[] =>
+  BACKEND_FEATURES.flatMap((f) => [
+    ...(f.toggleDefault ? [f.toggleDefault.id] : []),
+    ...(f.extraToggleDefaults ?? []).map((t) => t.id),
+  ]);
+
 describe('ADR 0434 — graduated substrate toggles', () => {
   it.each(GRADUATED)('%s declares no toggleDefault', (id) => {
     const feature = BACKEND_FEATURES.find((f) => f.id === id);
@@ -34,6 +49,9 @@ describe('ADR 0434 — graduated substrate toggles', () => {
   });
 
   it.each(GRADUATED)('%s resolves no toggle at runtime', (id) => {
+    const ids = declaredToggleIds();
+    expect(ids, 'positive control: a real toggle is declared').toContain('crm');
+    expect(ids).not.toContain(id);
     expect(getToggleDefault(id)).toBeFalsy();
   });
 
@@ -76,6 +94,9 @@ describe('ADR 0434 — graduated substrate toggles', () => {
   });
 
   it.each(RETIRED_ENTRIES)('%s still resolves no toggle, and its stale overrides are still retired at boot', (id) => {
+    const ids = declaredToggleIds();
+    expect(ids, 'positive control: a real toggle is declared').toContain('crm');
+    expect(ids).not.toContain(id);
     expect(getToggleDefault(id)).toBeFalsy();
     const src = readFileSync(join(import.meta.dirname, '../src/features/index.ts'), 'utf8');
     const list = /const RETIRED_TOGGLE_IDS = \[([\s\S]*?)\] as const;/.exec(src)?.[1] ?? '';

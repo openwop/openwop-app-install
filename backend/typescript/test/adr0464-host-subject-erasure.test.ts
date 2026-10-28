@@ -10,6 +10,15 @@
  *     place (ids → sentinel, subject free-text redacted), never deleted;
  * with the two-subjects + other-tenant isolation invariant and idempotency for
  * each. The final block proves the host fan-out wiring (`eraseSubject`).
+ *
+ * TST-BQR-16. Red when an eraser loses its tenant fence (kanban card board
+ * set, canvas `${tenantId}:` prefix), stops anonymizing an owned board, a DM
+ * key or a twin link's `linkedBy`, stops treating `metadata.actingUserId` as
+ * ownership, deletes a member's roles, stops deleting twin grants / memory
+ * notes / runner residue; when ANY host eraser is dropped from the fan-out
+ * (total pinned to the measured 31); or when resolver failures stop counting
+ * into `failed`. The falsy-input no-op is double-guarded (the `!subjectKey`
+ * early return AND an empty key that matches no row) — asserted, not probed.
  */
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -108,8 +117,12 @@ describe('ADR 0464 — kanban card erasure (anonymize the subject\'s cards)', ()
     await kanban.eraseSubjectKanban(T, A);
     await kanban.eraseSubjectKanban(T, A);
     expect((await kanban.getCard(c.id))?.assigneeId).toBe(ERASED);
+    // Falsy input is a no-op: a fresh card of A's survives an empty subject or tenant.
+    const keep = await kanban.createCard({ boardId: board.id, columnId: 'todo', title: 'keep', assigneeId: A_RAW });
     await kanban.eraseSubjectKanban(T, '');
-    expect((await kanban.getCard(board.id))?.title).toBeUndefined();
+    await kanban.eraseSubjectKanban('', A);
+    expect((await kanban.getCard(keep.id))?.title).toBe('keep');
+    expect((await kanban.getCard(keep.id))?.assigneeId).toBe(A_RAW);
   });
 });
 
@@ -444,7 +457,11 @@ describe('ADR 0464 — host fan-out wiring (eraseSubject reaches host stores)', 
     await smem.addSubjectNote(T, personSubject(A_RAW), 'fact');
 
     const res = await eraseSubject(T, A);
-    expect(res.total).toBeGreaterThanOrEqual(17);
+    // ADR 0942 adds autonomy-policy attribution to the 31 existing erasers:
+    // exactly 32 erasers `registerHostSubjectErasers`
+    // registers (host/hostSubjectErasers.ts). Adding or removing one there must
+    // update this number — a dropped eraser is no longer silently tolerated.
+    expect(res.total).toBe(32);
     expect(res.failed).toBe(0);
 
     expect((await kanban.getCard(card.id))?.assigneeId).toBe(ERASED);

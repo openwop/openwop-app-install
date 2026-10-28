@@ -10,7 +10,7 @@ export interface Org { orgId: string; name: string }
 // resolves all of these. The mint picker currently offers only the two with a
 // `listResources` source; the others arrive via API/feature flows and MUST still
 // render a correct label in the link list (ADR 0122 Phase 4 / ADR 0116 2b).
-export type ResourceType = 'cms_page' | 'kb_collection' | 'document' | 'conversation' | 'prompt' | 'commerce_quote' | 'commerce_order' | 'app_builder_canvas' | 'slides_canvas' | 'creative_brief' | 'booking_manage' | 'sign_request';
+export type ResourceType = 'cms_page' | 'kb_collection' | 'document' | 'conversation' | 'prompt' | 'commerce_quote' | 'commerce_order' | 'app_builder_canvas' | 'slides_canvas' | 'creative_brief' | 'booking_manage' | 'sign_request' | 'campaign_approval' | 'collab_invite';
 export interface ResourceRef { id: string; label: string }
 
 export interface ShareLink {

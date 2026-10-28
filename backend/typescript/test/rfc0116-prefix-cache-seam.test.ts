@@ -3,6 +3,13 @@
  * with the seam enabled and drives the §witness scenario over HTTP: tenant A
  * primes → A hits → tenant B (SAME cachePrefixId) structurally misses. Also
  * asserts the key-gated advert appears when the seam env is on.
+ *
+ * State note: the seam's `_prefixCacheProbeSeen` (routes/testSeam.ts) is
+ * module-level, and case 1 needs ('tenant-A','shared') unprimed. Case 2 is
+ * refused before assembly, so no case order can prime it (shuffle-safe).
+ * What breaks it: dropping `tenant=` from the scope marker or the scope itself
+ * (probes 8fw2g1-seam-marker-notenant / -unscoped), or accepting a body without
+ * `cachePrefixId` (8fw2g1-seam-400).
  */
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -12,6 +19,8 @@ import { createApp } from '../src/index.js';
 let server: http.Server;
 let BASE: string;
 const TOKEN = 'dev-token';
+const ENV_KEYS = ['OPENWOP_STORAGE_DSN', 'OPENWOP_AUTH_DISABLE_COOKIES', 'OPENWOP_TEST_SEAM_ENABLED'] as const;
+const prevEnv = new Map<string, string | undefined>(ENV_KEYS.map((k) => [k, process.env[k]]));
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -20,9 +29,15 @@ beforeAll(async () => {
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
 });
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
+afterAll(async () => {
+  await new Promise<void>((res) => server.close(() => res()));
+  for (const [k, v] of prevEnv) {
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+});
 
-async function jf<T = any>(path: string, init: RequestInit = {}): Promise<{ status: number; body: T }> {
+async function jf<T>(path: string, init: RequestInit = {}): Promise<{ status: number; body: T }> {
   const res = await fetch(`${BASE}${path}`, { ...init, headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}`, ...(init.headers ?? {}) } });
   return { status: res.status, body: (await res.json().catch(() => undefined)) as T };
 }
@@ -48,13 +63,17 @@ describe('RFC 0116 — prefix-cache-probe seam witness (two tenants over HTTP)',
     const b1 = await probe('tenant-B', 'shared'); // SAME cachePrefixId, different tenant
     expect(b1.body.cacheReadTokens).toBe(0); // cross-tenant structural MISS (the MUST)
 
-    // Outcome-invariance: cachePrefixId is a cost hint only.
+    // Outcome-invariance: cachePrefixId is a cost hint only. These two values are
+    // the seam's own constants (INPUT/OUTPUT in routes/testSeam.ts); they are kept
+    // because they ARE the seam's wire claim to the conformance scenario.
     expect(a2.body.inputTokens).toBe(b1.body.inputTokens);
     expect(a2.body.outputTokens).toBe(b1.body.outputTokens);
   });
 
   it('rejects a malformed probe (400)', async () => {
-    const res = await jf('/host/sample/aiProviders/prefix-cache-probe', { method: 'POST', body: JSON.stringify({ tenant: 'x' }) });
+    const res = await jf<{ error: string; message: string }>('/host/sample/aiProviders/prefix-cache-probe', { method: 'POST', body: JSON.stringify({ tenant: 'x' }) });
     expect(res.status).toBe(400);
+    // The host's non-spec error codes are vendor-prefixed on the way out.
+    expect(res.body).toEqual({ error: 'openwop-app.invalid_argument', message: 'tenant + cachePrefixId required' });
   });
 });

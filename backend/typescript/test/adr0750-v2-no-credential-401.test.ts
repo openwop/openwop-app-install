@@ -13,6 +13,13 @@
  * still get a session from the major-1 `/me` route, that session must still be
  * honoured on the major-2 read, and a REFUSED bearer must still say
  * `invalid_token` rather than being treated as "no credential".
+ *
+ * Tracker TST-BAB-5. TWIN FILE: `adr0745-cookie-posture-challenge.test.ts` pins
+ * the same rule through the `/api` Hosting rewrite; this file pins the bare-root
+ * v2 lane, the major-1 envelope, the `/me` bootstrap and the browser-navigation
+ * exemption. Red when (sabotage-witnessed, wave 60): the no-credential refusal
+ * predicate is removed, or stops exempting non-protocol (browser) requests; the
+ * challenge always (or never) carries `invalid_token`; `/me` no longer mints.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -40,6 +47,8 @@ afterAll(async () => {
 });
 
 const RUN_ID = 'run_adr0750_does_not_exist';
+/** What a document navigation to `/runs` answers in this boot (no SPA dist): measured wave 60. */
+const BROWSER_NAV_STATUS = 200;
 
 describe('ADR 0750 — a major-2 request with NO credential is 401 + challenge, never a minted session', () => {
   it('answers 401 with a Bearer resource_metadata challenge, NO error code, and NO Set-Cookie', async () => {
@@ -47,7 +56,7 @@ describe('ADR 0750 — a major-2 request with NO credential is 401 + challenge, 
     expect(r.status, 'RFC 0200 §B.1: refused before the resource is looked up').toBe(401);
     const challenge = r.headers.get('www-authenticate') ?? '';
     expect(challenge).toMatch(/^Bearer\b/i);
-    expect(challenge).toMatch(/resource_metadata=/);
+    expect(challenge).toContain(`resource_metadata="${base}/.well-known/oauth-protected-resource"`);
     expect(challenge, 'RFC 6750 §3.1: no credential presented ⇒ no error code').not.toMatch(/\berror\s*=/);
     expect(r.headers.get('set-cookie'), 'no anonymous identity may be minted for this request').toBeNull();
   });
@@ -60,7 +69,11 @@ describe('ADR 0750 controls — the anonymous demo visitor is unaffected', () =>
     expect(cookie, 'the SPA bootstrap route must still mint').toBeTruthy();
     const sessionPair = (cookie ?? '').split(';')[0];
     const r = await fetch(`${base}/runs/${RUN_ID}`, { headers: { 'OpenWOP-Version': '2', cookie: sessionPair } });
-    expect(r.status, 'a presented session is a credential: the run lookup proceeds (not the no-credential 401)').not.toBe(401);
+    // The SAME bare id answered 401 with no credential (leg above). With the session
+    // it gets past auth and reaches the v2 path grammar, which refuses a bare id 400:
+    // the session was honoured as a credential.
+    expect(r.status, 'a presented session is a credential (not the no-credential 401)').toBe(400);
+    expect(((await r.json()) as { error?: string }).error, 'the path-grammar refusal, AFTER auth').toBe('validation_error');
   });
 
   it('a REFUSED bearer is still invalid_token, not treated as "no credential"', async () => {
@@ -84,6 +97,10 @@ describe('ADR 0750 controls — the anonymous demo visitor is unaffected', () =>
 
   it('a browser document navigation to a v1 protocol path is not the JSON 401 (not a protocol client)', async () => {
     const r = await fetch(`${base}/runs`, { headers: { accept: 'text/html' } });
-    expect(r.status).not.toBe(401);
+    expect(r.status).toBe(BROWSER_NAV_STATUS);
+    expect(r.headers.get('www-authenticate'), 'no protocol challenge on a page navigation').toBeNull();
+    // With no SPA dist in this boot the navigation falls through to the route
+    // (a 200 for the minted anonymous visitor), never the protocol refusal.
+    expect(((await r.json()) as { error?: unknown }).error, 'not the refusal envelope').toBeUndefined();
   });
 });

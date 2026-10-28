@@ -1,6 +1,6 @@
 # ADR 0951 — Consent-gated behavior analytics: heat maps, session replay, AI summaries
 
-Status: Proposed
+Status: Accepted (P0/P1 source recovered; integration qualification pending; P2–P4 open)
 
 Date: 2026-10-19
 
@@ -99,6 +99,32 @@ The visitor banner (ADR 0860) gains a separate, unticked "Session recording" cho
 It appears only on sites whose org has replay ON. "Accept all" does not tick it in
 regulated regions (Q2).
 
+> **Correction 2026-10-20 (P0 build, /architect).** Three facts the text above did not
+> state, all now implemented:
+> - **How the banner knows "replay ON".** The public posture read
+>   (`GET …/public-consent/:orgId/posture`) returns `choices: ['analytics.replay']`
+>   when the org offers it. Consent owns the question through a new seam,
+>   `registerVisitorChoiceProvider`; analytics answers it (`replayEnabled`: the
+>   `analytics` and `analytics.session-replay` toggles plus configured storage), so
+>   consent never imports analytics. No storage ⇒ not offered, so a visitor is never
+>   asked to consent to a recorder that cannot run.
+> - **Q2 is applied as proposed: always its own tick, in every region.** "Accept"
+>   records the tick as it stands (unticked ⇒ `false`); "Reject" refuses both. A site
+>   that offers recording therefore asks a visitor with no recorded choice in an
+>   `opt-out` regime too, with copy that does not claim nothing is counted.
+> - **`consent` ON is required and is enforced structurally.** With it OFF the public
+>   consent lane 404s, so `analytics.replay` can never be recorded, and the strict
+>   category has no toggle-off escape. A visitor without a consent token is always
+>   refused (`visitorReplayAllowed`): the grant exists only under the token's
+>   `visitor:` subject.
+> - **Only the visitor can GRANT `analytics.replay`.** Every consent write path is
+>   shared (workflow `record` node, form sink, CRM merge, WhatsApp keywords, admin), and
+>   without a guard any of them could record "this person agreed to be recorded". A
+>   grant (a transition to `true`) is refused with a typed 400 unless it arrives on the
+>   public consent lane (`source` `public:<orgId>`, set server-side by that route).
+>   Refusals are accepted from any source; carrying an already-stored `true` forward is
+>   not a grant.
+
 ### D2 — Capture: one first-party recorder, masked before transmit
 
 - **Recorder:** `frontend/react/src/features/site/behaviorRecorder.ts` for SPA public
@@ -143,6 +169,18 @@ regulated regions (Q2).
   `other` cell). Counts only, with no `sessionKey` and no `visitorHash`. Rows are
   bounded at about 50 pages × 3 devices × 500 cells × days, and each cell is
   incremented in place.
+> **Correction 2026-10-20 (P0 build, /architect) — the blob ROOT.** The tenant's blob
+> surface (`buildHostSurfaceBundle({tenantId}).storage.blob`) is the same per-tenant
+> root the `core.storage.blob-*` nodes read and write, so chunks stored there would be
+> readable by any workflow the tenant runs, bypassing `host:analytics:replay` and the
+> per-view access log. Chunks go under a RESERVED host root (`__openwop_session_replay__`,
+> the `__openwop_boot_check__` precedent), with tenant, org and session encoded in the
+> key `replay/<tenant>/<org>/<sessionId>/<n>`. "Configured" means a durable blob backend
+> is selected (GCS or S3; the ADR 0867 boot round trip exits a revision whose backend
+> fails, so configured implies verified). The process-local `memory` blob never counts,
+> except under the dev/test allowance `OPENWOP_REPLAY_ALLOW_MEMORY_BLOB=true`, which
+> `NODE_ENV=production` refuses.
+
 - **Replay index:** `analytics:replay` rows `{sessionId, orgId, subjectKey (the
   consented key), pageIds, startedAt, durationMs, bytes, flags: {rage, dead, error,
   converted}, blobRefs[]}`. **Chunks go to blob** under
@@ -152,6 +190,39 @@ regulated regions (Q2).
   30 minutes and 5 MB per session; 30-day retention (maximum 90). Over budget, the
   recorder is not served and the cap is reported. The storage-growth gauge gains
   `replay_bytes_gauge` and `heat_cells_gauge` lines.
+
+> **Correction 2026-10-20 (P1 build).** What P1 actually built, where it differs from
+> the text above:
+> - **Cells.** A cell is a 2% square of the DOCUMENT (x, y as fractions of its width
+>   and height), or an author-given element id (`data-owx-id`, else `id`, in a
+>   markup-safe alphabet; never text). The row is keyed (tenant, org, page, day,
+>   device, arm), with ≤ 500 cells plus `other`, ≤ 100 sections, and ≤ 200 pages per
+>   org; a new page past the cap is dropped and logged. Counts are CAS-incremented.
+> - **The experiment arm is server-derived** (`resolveExperimentStamp`, the ADR 0651
+>   D3 rule), never client-claimed. **Q5 is decided as proposed:** an arm with fewer
+>   than 30 page views is listed as suppressed, and its cells are not returned on
+>   their own.
+> - **One response for every non-malformed batch: `204`.** That covers consent
+>   refused, heat maps off, bot, page cap and recorded. The lane is not an oracle for
+>   anyone's consent or the org's settings. A malformed batch is a typed 400 naming
+>   the field.
+> - **Bots** (`botTraffic.ts`) count on the page's row as `bots`, never as cells,
+>   views or scroll, and they never create a page. They are classified by UA
+>   tokens (crawlers, AI agents, headless browsers, HTTP libraries) plus the page's
+>   own `navigator.webdriver` report. A missing UA counts as automated. The list is
+>   deliberately separate from publishing's prerender allowlist, which answers a
+>   different question.
+> - **The overlay is not on a screenshot.** The host has no page-snapshot capability,
+>   so the click map is drawn on the page's own proportions, with a link to the live
+>   page. Every value is also in a table (named elements, top areas, scroll reach,
+>   attention). Drawing on a real render of the page version needs a snapshot
+>   capability: open, P4 or later.
+> - **Wired on the published front page** (`FrontPage`, which docs also render). The
+>   funnel viewer is not wired yet (open, with P2's recorder mount).
+> - Rage, dead and error clicks are P3 signals; P1 records plain clicks only.
+> - Both stores carry `tenantOf`, so ADR 0284 tenant teardown reaches them, and they
+>   age out at 396 days on the ADR 0380 kv lane. They name no person, so they are not
+>   subject-erasure stores.
 
 ### D4 — Retention, erasure and access
 
@@ -168,7 +239,40 @@ regulated regions (Q2).
   subject's recordings, not only future capture. No withdrawal hook exists in
   `consentService` today; P0 adds one that calls the same eraser for this one purpose.
 - **Access:** new host scope `host:analytics:replay` (owner and admin by default,
-  grantable through a custom role per client org). The replay list and player require
+  grantable through a custom role per client org).
+
+> **Correction 2026-10-20 (P0 build).** Four statements in D4 were not true of the code:
+> - **"grantable through a custom role" is false today.** A custom role carries only
+>   protocol scopes (`isProtocolScope`, `accessControlService.ts`); management scopes
+>   are never mintable onto one. `host:analytics:replay` is built-in admin/owner only,
+>   like `host:billing:manage`. Per-client delegation needs a custom-role change (open).
+> - **"fails a boot that forgets it" overstates the guard.** `missingSubjectErasers()`
+>   is not called at boot. A forgotten eraser fails the manifest test (both its source
+>   layer and its `createApp()` layer — witnessed red in P0) and counts as a failed,
+>   named system on every erasure.
+> - **The retention purger alone does not hold the window.** The ADR 0077 governance
+>   fan-out runs only for governed tenants with a configured window, behind
+>   `OPENWOP_RETENTION_SWEEP_ENABLED`. P0 adds a default-on seam,
+>   `registerDefaultWindowSweep` (`host/retentionPurger.ts`), run by the retention
+>   daemon beside the ADR 0380 TTLs, so the 30-day default holds on every posture; it
+>   skips legal-held tenants per row and does nothing under a dry run. The governance
+>   purger also runs, and its cutoff is the later (stricter) of the tenant window and
+>   the replay default, so a long tenant window never keeps a recording longer.
+> - **Tenant teardown would orphan the chunks.** The ADR 0284 walk deletes `host_ext_kv`
+>   rows, not blobs. P0 registers a tenant-purge pre-hook that deletes each session's
+>   chunks, then its row. (Org deletion has no feature cascade today; an org's
+>   recordings age out with the window. Open item for P2.)
+>
+> The withdrawal hook is a consent seam, `registerConsentWithdrawalHook(category, …)`,
+> fired from every consent write (`recordConsent`, the merge CAS path and its
+> fallthrough) when the stored value is no longer `true` and either the prior record
+> said `true` or the caller explicitly sent `false`. It is awaited; a failure is logged
+> by hash and never fails the consent write (the recorded refusal is what stops
+> capture; the hook is idempotent and re-runs on the next explicit refusal). A CRM
+> merge that folds `analytics.replay: false` onto a survivor runs it for the survivor:
+> it only ever narrows, which is the safe direction. Turning `analytics.session-replay`
+> OFF does not delete existing recordings; they age out with the window
+> (purge-on-disable is an open item for P2). The replay list and player require
   it on the exact client org (ADR 0921 D2). Every playback writes an `access`
   governance decision and an `analytics.replay.viewed` hash-chain entry
   `{sessionId, viewer, at}`. Heat maps need only `workspace:read`.
@@ -230,6 +334,25 @@ regulated regions (Q2).
 | P3 | Signals service + insights tools + `analytics.behavior-review` chain + hypothesis cards into the 0949 backlog | A rage-click fixture yields a proposed draft and a kanban card |
 | P4 | Budgets per plan (0928), growth gauges, client-report tiles (0957) | Over-budget org stops being served the recorder; gauge lines present |
 
+### Implementation record
+
+| Phase | Commit | Tests |
+|---|---|---|
+| P0 | (this PR) | `test/adr0951-p0-replay-privacy.test.ts` (24: strict category, visitor-only grant, withdrawal, DSAR, retention, storage gate, reserved root, teardown, scope, posture + settings routes); `test/subject-eraser-manifest.test.ts` (both layers red without the eraser — witnessed); frontend `site/__tests__/replayConsent.test.tsx` (7), `analytics/__tests__/behaviorCapture.test.tsx` (5) |
+
+| P1 | (this PR) | `test/adr0951-p1-heatmaps.test.ts` (21: the no-identifier schema test, which pins the field set AND checks stored JSON after a real ingest carrying session key, IP and UA; bot exclusion + separate count; bots never create a page; consent refusal; toggle gating; 9 closed-world 400s; cell cap; arm k-anonymity; scroll reach; 13-month age-out; member-only read); frontend `site/__tests__/heatCapture.test.ts` (4: nothing before consent or on a non-collecting site, no text or input values sent, withdrawal stops capture), `analytics/__tests__/heatmapPanel.test.tsx` (6) |
+
+P1 sabotage witnesses: bot classification bypassed in the route (2 red); a session
+key written into the row (1 red); the consent and withdrawal checks removed from the
+capture module (2 red).
+
+P0 sabotage witnesses (each red, then restored): eraser registration removed (4 red
+across the manifest test and this ADR's test); `analytics.replay` dropped from
+`STRICT_EXPLICIT_OPT_IN` (3 red); the merge-path withdrawal hook removed (1 red); the
+legal-hold skip removed (1 red); the governance purger using the tenant cutoff alone
+(1 red); the banner's checkbox pre-ticked (2 red); `replayAllowedFor` inferred from
+the analytics choice (4 red); the visitor-only grant guard bypassed (1 red).
+
 ## Alternatives weighed
 
 - **Embed Clarity or Hotjar.** Free and mature. Rejected: third-party capture breaks
@@ -278,3 +401,42 @@ stores are host-internal. Nothing is advertised at `/.well-known/openwop`.
   playback needs `host:analytics:replay` and every view is logged. The insights agent
   reads derived signals only and files hypotheses into the ADR 0949 backlog. Sub-toggles
   `analytics.heatmaps` / `analytics.session-replay` (OFF, tenant). Host-ext, no RFC.
+
+
+Recovery checkpoint — 2026-10-25 (source only): original P0 `dc1df8d6e` and
+P1 `e180c17de` histories are retained on current main. Merge conflicts preserve
+all current subject erasers and historical steward records. The new consent,
+retention, store, capture and heat-map behavior has NOT been executed in this
+recovery. Two new regression cases are authored UNRUN for prototype-named
+attention sections and simultaneous admission at the org page cap; review
+identified both as needing verification before merge. Generated metadata,
+focused checks and canonical CI remain pending.
+
+The separate P2 replay capture/player source remains preserved on its recovery
+branch. Atomic chunk/subject/budget reservation, hostile-HTML playback egress,
+serializer privacy and consent rechecking after compression require correction
+before its public ingest is exposed. This checkpoint does not claim P2 complete.
+
+
+Recovery correction — 2026-10-25: the new regressions reproduce both a section
+cap bypass through valid Object prototype member names and concurrent new-page
+admission exceeding the last org slot. Attention now reads only own properties.
+The existing analytics owner replaces read-count-write admission with one
+cross-instance CAS catalog per tenant/org, holding the bounded page metadata
+itself. Expired entries free capacity in that same update. Legacy page metadata
+is adopted without deleting its old rows; historical over-cap indexes remain
+readable and deny new pages until retention frees capacity. The catalog uses
+the existing tenant teardown and 396-day age-out owners; bots admit no page
+and refresh no lastSeen. No identifier, public route, consent category or
+replay ingress is added. Focused and canonical qualification remain pending.
+
+
+Recovery availability correction — 2026-10-25: P0 storage/privacy and P1 heat
+maps are recovered, while P2 recording remains withheld for the documented
+privacy/concurrency findings. P0 must not claim recording is available merely
+because storage and toggles are configured. The actual recorder will register
+the existing visitor-choice provider when installed; P0 registers no recording
+choice. Settings consult that same registry and the UI honours `available`.
+All four locales name the unavailable state. Tests reproduced the previous
+false available/offered claims and the UI ignoring the availability field
+before repair. Direct privacy, consent, retention and erasure tests remain.

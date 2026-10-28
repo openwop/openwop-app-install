@@ -27,12 +27,14 @@ import { getQuote, projectQuotePublic, SHAREABLE_QUOTE_STATUSES } from '../comme
 import { getOrder } from '../commerce/commerceService.js';
 import { bookingShareValidate, bookingShareLoad } from '../crm/bookingService.js';
 import { signShareValidate, signShareLoad } from '../crm/signService.js';
+import { approvalShareValidate, approvalShareLoad } from '../campaign-ops/portal.js';
+import { getCollaborator } from '../../host/externalCollaborators.js';
 import { getCollection, listDocuments } from '../kb/kbService.js';
 import { publicDocumentView, getDocument, canReadDocument } from '../documents/documentsService.js';
 import { hostExtStorage } from '../../host/hostExtPersistence.js';
-import { transcriptToMarkdown } from '../chat-export/transcriptRenderer.js';
+import { messageView, transcriptToMarkdown } from '../chat-export/transcriptRenderer.js';
 import { getConversationMeta } from '../../host/conversationStore.js';
-import { getEntryUnfiltered, resolvePromptRef, readableBy as promptReadableBy } from '../prompts/promptLibraryService.js';
+import { getEntryUnfiltered, resolveEntryBody, readableBy as promptReadableBy } from '../prompts/promptLibraryService.js';
 import { projectAppForShare } from '../app-builder/shareProjection.js';
 import { registerKvAgeOut } from '../../host/kvAgeOut.js';
 import { registerSubjectEraser } from '../../host/subjectErasure.js';
@@ -51,8 +53,8 @@ const MAX = {
   maxViews: 1_000_000,
 } as const;
 
-export type ResourceType = 'cms_page' | 'kb_collection' | 'document' | 'conversation' | 'prompt' | 'commerce_quote' | 'commerce_order' | 'app_builder_canvas' | 'slides_canvas' | 'creative_brief' | 'booking_manage' | 'sign_request';
-export const RESOURCE_TYPES: readonly ResourceType[] = ['cms_page', 'kb_collection', 'document', 'conversation', 'prompt', 'commerce_quote', 'commerce_order', 'app_builder_canvas', 'slides_canvas', 'creative_brief', 'booking_manage', 'sign_request'];
+export type ResourceType = 'cms_page' | 'kb_collection' | 'document' | 'conversation' | 'prompt' | 'commerce_quote' | 'commerce_order' | 'app_builder_canvas' | 'slides_canvas' | 'creative_brief' | 'booking_manage' | 'sign_request' | 'campaign_approval' | 'collab_invite';
+export const RESOURCE_TYPES: readonly ResourceType[] = ['cms_page', 'kb_collection', 'document', 'conversation', 'prompt', 'commerce_quote', 'commerce_order', 'app_builder_canvas', 'slides_canvas', 'creative_brief', 'booking_manage', 'sign_request', 'campaign_approval', 'collab_invite'];
 
 export interface ShareLink {
   /** sha256 of the raw token — the ONLY at-rest identifier (ADR 0448 P2).
@@ -468,7 +470,9 @@ const RESOLVERS: Record<ResourceType, ShareResolver> = {
       const session = await hostExtStorage().getChatSession(tenantId, resourceId);
       if (!session) return null;
       const messages = snapshotMessages(await hostExtStorage().listChatSessionMessages(resourceId), opts?.snapshotAt);
-      const first = messages[0]?.content ?? '';
+      // ADR 0992 D1 — the stored row is the SPA's JSON envelope; describe it by its
+      // text, never by the raw envelope (which can carry run state and tokens).
+      const first = messages[0] ? messageView(messages[0]).text : '';
       return { title: session.title || 'Conversation', description: first.slice(0, MAX.descr) };
     },
   },
@@ -494,16 +498,20 @@ const RESOLVERS: Record<ResourceType, ShareResolver> = {
     async entitlement(tenantId, orgId, resourceId, subject) {
       const entry = await getEntryUnfiltered(tenantId, orgId, resourceId); // UNFILTERED existence (H2)
       if (!entry) return null;
-      return promptReadableBy(entry, subject)
-        ? null
-        : new OpenwopError('forbidden', 'Only the owner may share a private prompt.', 403, { resourceId });
+      // ADR 0993 D2 — the same uniform 404 a read gives. The 403 ("Only the owner
+      // may share a private prompt") confirmed to a non-owner that the entry exists.
+      return promptReadableBy(entry, subject) ? null : notFound(resourceId);
     },
     async load(tenantId, orgId, resourceId) {
       const entry = await getEntryUnfiltered(tenantId, orgId, resourceId);
       if (!entry) return null;
-      const resolved = resolvePromptRef(entry.promptRef); // honor the @version pin (PLC-2)
-      const body = resolved && resolved !== 'ambiguous' ? resolved.template.text : '';
-      return { kind: 'prompt', name: entry.name, description: entry.description ?? '', body };
+      // ADR 0993 D4 — the library's ONE resolver: a published body, or a binding
+      // resolved for the entry's own tenant (honouring its `@version` pin, PLC-2).
+      // An entry whose text no longer resolves serves NOTHING (the link's uniform
+      // not-found), never a success carrying an empty body (grade-code P61CD-10).
+      const resolved = await resolveEntryBody(entry);
+      if (!resolved) return null;
+      return { kind: 'prompt', name: entry.name, description: entry.description ?? '', body: resolved.text };
     },
     async card(tenantId, orgId, resourceId) {
       const entry = await getEntryUnfiltered(tenantId, orgId, resourceId);
@@ -588,6 +596,47 @@ const RESOLVERS: Record<ResourceType, ShareResolver> = {
     },
     async card() {
       return null; // private signing link — no social card
+    },
+    entitlement: ORG_SCOPED_ENTITLEMENT, // system-minted (visitor lane) — never re-checked (ADR 0887 D1 step 1)
+  },
+  // ADR 0924 D5 — the client approver's link to ONE change set (resourceId
+  // `${changeSetId}:${approverId}`). A CAPABILITY link: `load` serves only the
+  // review package and re-runs every per-use check (approver active, client
+  // active on the `client` policy, change set in review); `card` is null. Gated on
+  // the portal sub-toggle; `portalEnabled` also requires its parent.
+  campaign_approval: {
+    toggleId: 'campaign-ops-client-portal',
+    async validate(tenantId, orgId, resourceId) {
+      await approvalShareValidate(tenantId, orgId, resourceId);
+    },
+    async load(tenantId, orgId, resourceId) {
+      return approvalShareLoad(tenantId, orgId, resourceId);
+    },
+    async card() {
+      return null; // private approval link — no social card
+    },
+    entitlement: ORG_SCOPED_ENTITLEMENT, // system-minted (visitor lane) — never re-checked (ADR 0887 D1 step 1)
+  },
+  // ADR 0958 D2 — the single-use invite a vendor, freelancer or client
+  // stakeholder accepts while signed in to THEIR OWN account. A CAPABILITY link:
+  // `load` shows who the invite is for (never the email); accepting is a signed-in
+  // POST that re-checks everything (`campaign-ops/collaboration`). The
+  // sub-toggle `campaign-ops.external-collab` is AND-gated in that route; this
+  // gate is the parent feature, on the LINK's tenant.
+  collab_invite: {
+    toggleId: 'campaign-ops',
+    async validate(tenantId, orgId, resourceId) {
+      const c = await getCollaborator(tenantId, orgId, resourceId);
+      if (!c || c.status !== 'invited') throw new OpenwopError('not_found', 'Invite not found.', 404, {});
+    },
+    async load(tenantId, orgId, resourceId) {
+      const c = await getCollaborator(tenantId, orgId, resourceId);
+      if (!c || c.status !== 'invited') return null;
+      const org = await getOrg(orgId);
+      return { kind: 'collab_invite', collaboratorKind: c.kind, displayName: c.displayName, ...(org && org.tenantId === tenantId ? { clientName: org.name } : {}) };
+    },
+    async card() {
+      return null; // a private invite: no social preview
     },
     entitlement: ORG_SCOPED_ENTITLEMENT, // system-minted (visitor lane) — never re-checked (ADR 0887 D1 step 1)
   },
@@ -711,7 +760,13 @@ export type ShareMintAccess =
   | { lane: 'member'; subject?: ToggleSubject }
   | { lane: 'visitor'; why: string };
 
+/** ADR 0924 D5 — types only their owning feature may mint, on the visitor lane.
+ *  A member-lane mint of a client approval link would hand a member a decision
+ *  token written under someone else's authority (security review, 2026-10-19). */
+const SYSTEM_MINT_ONLY: ReadonlySet<ResourceType> = new Set(['campaign_approval']);
+
 async function assertMintAccess(resourceType: ResourceType, tenantId: string, actor: string, resourceId: string, access: ShareMintAccess): Promise<void> {
+  if (access.lane !== 'visitor' && SYSTEM_MINT_ONLY.has(resourceType)) throw notFound(resourceId);
   if (access.lane === 'visitor') {
     if (!(await owningFeatureEnabled(resourceType, tenantId))) throw notFound(resourceId);
     return;
@@ -1199,7 +1254,7 @@ export async function listLinks(tenantId: string, orgId: string, caller: string)
     // gated-in AND the card path can answer at all (`booking_manage` /
     // `sign_request` return null BY DESIGN — private links have no social card),
     // so those two are never falsely marked missing.
-    const cardCapable = l.resourceType !== 'booking_manage' && l.resourceType !== 'sign_request';
+    const cardCapable = l.resourceType !== 'booking_manage' && l.resourceType !== 'sign_request' && l.resourceType !== 'campaign_approval';
     const resourceMissing = gated && cardCapable && !cardFailed && !redacted && !card;
     // ADR 0887 D2 — the owner's side of D1: a link dark because its publisher lost
     // access says so (and, for a caller who could, offers D5's adopt) instead of

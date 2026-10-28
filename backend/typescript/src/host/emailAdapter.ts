@@ -20,6 +20,7 @@ import { priorSend, recordSend, reserveSend, releaseSend } from './emailSentLedg
 import { sendViaSmtp } from './smtpSend.js';
 import { consultRecipientEgressGuard, type EgressPurpose } from './recipientEgressGuard.js';
 import { bindChainSender, resolveChainPurpose, takeChainSendBudget } from './chainEmailPolicy.js';
+import { resolveConnectionCredential } from '../features/connections/connectionsService.js';
 
 // ADR 0655 D8 — a ledger reservation older than this is a crashed send, not an
 // in-flight one; it is released on read so the retry can reach the provider.
@@ -155,7 +156,16 @@ function postmarkBase(): string {
 const toCsv = (v: string | string[] | undefined): string | undefined =>
   v === undefined ? undefined : (Array.isArray(v) ? v.join(',') : v);
 /** Postmark `POST /email` body (a different shape than SendGrid's v3). */
-function postmarkBody(args: EmailSendArgs): Record<string, unknown> {
+/** ADR 0994 D2 — Postmark requires bulk/promotional mail on a Broadcast stream and
+ *  pauses servers that send it on the transactional one. The stream follows the
+ *  purpose the adapter ENFORCED (after the ADR 0895 chain demotion). */
+function postmarkStream(purpose: EgressPurpose): string {
+  if (purpose === 'transactional') return 'outbound';
+  const s = (process.env.OPENWOP_POSTMARK_BROADCAST_STREAM ?? '').trim();
+  return s || 'broadcast';
+}
+
+function postmarkBody(args: EmailSendArgs, purpose: EgressPurpose): Record<string, unknown> {
   const lu = listUnsubscribeHeaders(args);
   return {
     From: args.from,
@@ -167,7 +177,7 @@ function postmarkBody(args: EmailSendArgs): Record<string, unknown> {
     ...(args.html !== undefined ? { HtmlBody: args.html } : {}),
     ...(args.replyTo ? { ReplyTo: args.replyTo } : {}),
     ...(lu ? { Headers: Object.entries(lu).map(([Name, Value]) => ({ Name, Value })) } : {}),
-    MessageStream: 'outbound',
+    MessageStream: postmarkStream(purpose),
   };
 }
 
@@ -184,7 +194,7 @@ interface ProviderSpec {
   /** A thunk — the base URL is read at SEND time, not module load, so a test /
    *  proxy env override (OPENWOP_*_API_BASE) takes effect. */
   url: () => string;
-  body: (args: EmailSendArgs) => string;
+  body: (args: EmailSendArgs, purpose: EgressPurpose) => string;
   contentType: string;
   authScheme: AuthScheme;
   authHeaderName?: string;
@@ -203,7 +213,7 @@ const PROVIDERS: Record<string, ProviderSpec> = {
   },
   postmark: {
     url: () => `${postmarkBase()}/email`,
-    body: (a) => JSON.stringify(postmarkBody(a)),
+    body: (a, purpose) => JSON.stringify(postmarkBody(a, purpose)),
     contentType: 'application/json',
     // Postmark's token rides a custom header, not Authorization: Bearer.
     authScheme: 'raw',
@@ -217,10 +227,10 @@ const PROVIDERS: Record<string, ProviderSpec> = {
 };
 
 /** Test seam — the exact request body a provider row would send (ADR 0848 D7 witness). */
-export function __providerBodyForTest(provider: string, args: EmailSendArgs): string {
+export function __providerBodyForTest(provider: string, args: EmailSendArgs, purpose: EgressPurpose = 'marketing'): string {
   const spec = PROVIDERS[provider];
   if (!spec) throw new Error(`unknown provider ${provider}`);
-  return spec.body(args);
+  return spec.body(args, purpose);
 }
 
 /** Host default provider (ADR 0193 open question — resolved yes): an SES-less,
@@ -234,25 +244,60 @@ function isKnownProvider(p: string): boolean {
   return p === SMTP_PROVIDER || Boolean(PROVIDERS[p]);
 }
 
-function defaultProvider(): string {
-  const p = process.env.OPENWOP_EMAIL_DEFAULT_PROVIDER;
-  return p && isKnownProvider(p) ? p : 'sendgrid';
+function defaultProvider(purpose?: EgressPurpose): string {
+  // ADR 0994 D1 — a per-purpose preference first (Postmark for transactional, SES
+  // over SMTP for campaigns), then the host default, then sendgrid. Unknown values
+  // are ignored, never an error.
+  const byPurpose = purpose === 'transactional' ? process.env.OPENWOP_EMAIL_TRANSACTIONAL_PROVIDER
+    : purpose === 'marketing' ? process.env.OPENWOP_EMAIL_MARKETING_PROVIDER
+    : undefined;
+  for (const p of [byPurpose, process.env.OPENWOP_EMAIL_DEFAULT_PROVIDER]) {
+    const v = p?.trim();
+    if (v && isKnownProvider(v)) return v;
+  }
+  return 'sendgrid';
 }
 
-/** The providers the send table supports, HOST DEFAULT FIRST — consumers that
+/** The providers the send table supports, PREFERRED FIRST — consumers that
  *  auto-pick a provider (the campaign path resolves whichever the acting user has
  *  a Connection for) iterate in this order, so adding a row automatically widens
- *  them (ADR 0193 Phase 1). Includes the ADR 0199 `smtp` transport. */
-export function emailSendProviders(): readonly string[] {
-  const def = defaultProvider();
+ *  them (ADR 0193 Phase 1). Includes the ADR 0199 `smtp` transport. With a
+ *  `purpose`, the ADR 0994 per-purpose preference leads; it is an ORDER, not a
+ *  pin, so a caller with only one connected account still finds it. */
+export function emailSendProviders(purpose?: EgressPurpose): readonly string[] {
+  const def = defaultProvider(purpose);
   const all = [...Object.keys(PROVIDERS), SMTP_PROVIDER];
   return [def, ...all.filter((p) => p !== def)];
+}
+
+/** ADR 0994 D1 — the first provider, in `purpose` order, for which the caller has
+ *  a Connection (user, then org, then workspace scope, per the broker). Null when
+ *  none resolves. One shared walk for every sender that does not name a provider. */
+export async function resolveEmailProvider(input: {
+  tenantId: string; actingUserId?: string | undefined; orgId?: string | undefined; purpose: EgressPurpose;
+}): Promise<string | null> {
+  for (const p of emailSendProviders(input.purpose)) {
+    const resolved = await resolveConnectionCredential({
+      tenantId: input.tenantId,
+      provider: p,
+      ...(input.actingUserId ? { actingUserId: input.actingUserId } : {}),
+      ...(input.orgId ? { orgId: input.orgId } : {}),
+    });
+    if (resolved) return p;
+  }
+  return null;
 }
 
 export function makeEmailAdapter(deps: EmailAdapterDeps): EmailAdapter {
   return {
     async send(args) {
-      const provider = args.provider ?? defaultProvider();
+      // ADR 0994 D1 — no named provider: the first CONNECTED one in the send's
+      // purpose order (the author-declared purpose; the enforced one is decided
+      // below and only steers the Postmark stream). Falls back to the preference
+      // head so an unconnected send still reports `email_not_connected`.
+      const provider = args.provider
+        ?? (await resolveEmailProvider({ tenantId: deps.tenantId, actingUserId: deps.actingUserId, orgId: deps.orgId, purpose: args.purpose ?? 'marketing' }))
+        ?? defaultProvider(args.purpose ?? 'marketing');
       if (!isKnownProvider(provider)) return { sent: false, provider, error: 'email_provider_unsupported' };
 
       // ADR 0193 Phase 1 — dedup BEFORE the provider call (HTTP or SMTP): a replay
@@ -336,7 +381,7 @@ export function makeEmailAdapter(deps: EmailAdapterDeps): EmailAdapter {
       const r = await brokeredPost(deps, {
         provider,
         url: spec.url(),
-        body: spec.body(args),
+        body: spec.body(args, purpose),
         contentType: spec.contentType,
         authScheme: spec.authScheme,
         ...(spec.authHeaderName ? { authHeaderName: spec.authHeaderName } : {}),
@@ -360,6 +405,15 @@ export function makeEmailAdapter(deps: EmailAdapterDeps): EmailAdapter {
       const j = (json ?? {}) as { errors?: Array<{ message?: string }>; Message?: string };
       if (j.errors?.[0]?.message) detail = j.errors[0].message;      // SendGrid
       else if (typeof j.Message === 'string') detail = j.Message;    // Postmark
+      // ADR 0994 D2 — campaign mail now names a Broadcast stream. A Postmark server
+      // without one refuses the send (ErrorCode 1235, or a message naming the stream);
+      // say exactly what to fix instead of passing the provider's text through.
+      const stream = provider === 'postmark' ? postmarkStream(purpose) : null;
+      if (stream && stream !== 'outbound' && ((j as { ErrorCode?: unknown }).ErrorCode === 1235 || /message ?stream/i.test(detail))) {
+        log.warn('email send failed', { provider, status: r.res.status, code: 'email_stream_missing', stream });
+        await releaseSend(key);
+        return { sent: false, provider, error: `email_stream_missing: the Postmark server has no "${stream}" Broadcast stream for campaign mail. Create it in Postmark, or set OPENWOP_POSTMARK_BROADCAST_STREAM to an existing Broadcast stream's ID.` };
+      }
       log.warn('email send failed', { provider, status: r.res.status });
       await releaseSend(key); // failed send never blocks a retry (put-on-accept)
       return { sent: false, provider, error: detail };

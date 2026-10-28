@@ -53,6 +53,9 @@ export function ProfileMemoryTab(): JSX.Element {
         addPlaceholder={t('memoryAddPlaceholder')}
         emptyBody={t('memoryEmptyBody')}
         {...(recallOnly !== undefined ? { recallOnlyCount: recallOnly } : {})}
+        /* ADR 0982 D6 — deleting a learned fact also stops it being re-learned. The copy lives in
+           THIS lazy namespace (the eager `memory` area catalog would grow the entry chunk). */
+        confirmBodyFor={(note) => (note.source === 'auto-extract' ? t('removeLearnedConfirmBody') : undefined)}
       />
       {/*
         MEM-UX-4 (ADR 0587 §4) — the erasure SCOPE, disclosed.
@@ -70,8 +73,10 @@ export function ProfileMemoryTab(): JSX.Element {
 }
 
 /**
- * ADR 0120 — opt-in consent for auto-learning durable facts from chats. Off by
- * default; learned facts appear as notes in the list below (deletable).
+ * ADR 0120 / ADR 0982 — opt-in consent for auto-learning durable facts from chats.
+ * Off by default; learned facts appear as notes in the list below (deletable, and
+ * a deleted one is never re-learned). An account that can never extract (anonymous,
+ * or no personal workspace) sees a one-line reason instead of a checkbox.
  *
  * Hidden ONLY when the feature is genuinely unavailable — the client returns
  * `null` for exactly one reason, a 404 from an unregistered route
@@ -100,13 +105,14 @@ function ConsentToggle(): JSX.Element | null {
       .then((g) => { if (g) { setGrant(g); setAvailable(true); } })
       .catch((e) => setLoadError(e instanceof Error ? e.message : String(e)));
   }, []);
+  const label = t('consentLabel', { defaultValue: 'Automatically learn durable facts from my chats' });
 
   useEffect(() => { load(); }, [load]);
 
   if (loadError) {
     return (
       <section className="surface-card u-pad-2 u-flex u-flex-col u-gap-1">
-        <strong className="u-fs-13">{t('consentLabel', { defaultValue: 'Automatically learn durable facts from my chats' })}</strong>
+        <strong className="u-fs-13">{label}</strong>
         <Notice variant="error">{t('consentLoadFailed', { defaultValue: 'Could not read whether memory-learning is on. It may be ON — this is not confirmation that it is off.' })}</Notice>
         <div>
           <Button variant="quiet" size="sm" onClick={load}>
@@ -117,8 +123,6 @@ function ConsentToggle(): JSX.Element | null {
     );
   }
 
-  if (!available) return null;
-
   const onToggle = (next: boolean): void => {
     setBusy(true);
     void setExtractionGrant(next)
@@ -127,13 +131,37 @@ function ConsentToggle(): JSX.Element | null {
       .finally(() => setBusy(false));
   };
 
+  if (!available || !grant) return null;
+
+  // ADR 0982 D2 — an account that can never extract sees why, not a checkbox that would do nothing.
+  if (!grant.available) {
+    return (
+      <section className="surface-card u-pad-2 u-flex u-flex-col u-gap-1" aria-labelledby={hid}>
+        <strong id={hid} className="u-fs-13">{label}</strong>
+        <p className="muted u-fs-12 u-m-0">
+          {grant.unavailableReason === 'sign-in' ? t('consentSignIn') : t('consentUnavailable')}
+        </p>
+        {/* Opting OUT is always possible, even where learning can no longer run (a grant filed
+            before ADR 0982, or a changed home tenant). */}
+        {grant.granted ? (
+          <div>
+            <Button variant="quiet" size="sm" disabled={busy} onClick={() => onToggle(false)}>
+              {t('consentTurnOff')}
+            </Button>
+          </div>
+        ) : null}
+      </section>
+    );
+  }
+
   return (
     <section className="surface-card u-pad-2 u-flex u-flex-col u-gap-1" aria-labelledby={hid}>
       <label className="u-flex u-items-center u-gap-2 u-fs-13 u-fw-600">
-        <input type="checkbox" checked={grant?.granted === true} disabled={busy} onChange={(e) => onToggle(e.target.checked)} />
-        <span id={hid}>{t('consentLabel', { defaultValue: 'Automatically learn durable facts from my chats' })}</span>
+        <input type="checkbox" checked={grant?.granted === true} disabled={busy} aria-describedby={`${hid}-hint`} onChange={(e) => onToggle(e.target.checked)} />
+        <span id={hid}>{label}</span>
       </label>
-      <p className="muted u-fs-12 u-m-0">{t('consentHint', { defaultValue: 'When on, your assistant may save lasting facts it learns during chats as memories below — which you can review and delete anytime. Off by default.' })}</p>
+      {/* MAE2UX-6 — the disclosure IS the consent; a screen reader must hear it with the box. */}
+      <p id={`${hid}-hint`} className="muted u-fs-12 u-m-0">{t('consentHint')}</p>
     </section>
   );
 }

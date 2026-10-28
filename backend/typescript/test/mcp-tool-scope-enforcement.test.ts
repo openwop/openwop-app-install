@@ -49,7 +49,7 @@ beforeAll(async () => {
   // would resolve to owner and the fail-closed case would pass vacuously.
   delete process.env.OPENWOP_DEMO_MODE;
   await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  for (const id of ['notebooks', 'kb', 'users', 'commerce-ucp', 'app-builder', 'docs', 'claude-code']) {
+  for (const id of ['notebooks', 'kb', 'users', 'commerce-ucp', 'app-builder', 'docs', 'claude-code', 'campaign-orchestration']) {
     const d = getToggleDefault(id);
     if (d) await saveConfig({ ...d, status: 'on' }, 'test');
   }
@@ -129,6 +129,9 @@ describe('ADR 0601 / NBC-3 — a write tool enforces the scope it advertises', (
       'app-builder-create-project',
       'app-builder-render-design',
       'app-builder-resolve-paused-task',
+      // ADR 0962 P2 — writes a change REQUEST for one client and starts the governed
+      // chain; the change waits on a person's approval. A deliberate bump.
+      'campaign_request_change',
       // ADR 0785 P3 — files onto the CALLER'S OWN personal board; a deliberate bump.
       'claude-code-add-todo',
       // ADR 0785 P4 — files an owner-only approval card and waits; a deliberate bump.

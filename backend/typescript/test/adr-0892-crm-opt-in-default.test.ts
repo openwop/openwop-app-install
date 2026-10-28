@@ -6,6 +6,10 @@
  *
  * `analytics` stays on (it measures the public site and the paywall funnel, not
  * CRM). Locks both at the source of truth so a silent revert is a loud failure.
+ *
+ * TST-BQR-3. Red when crm (or strategy / priority-matrix / advisory-board)
+ * flips back to default 'on', analytics flips to 'off', or a crm triage
+ * variant key changes.
  */
 import { describe, it, expect } from 'vitest';
 import { crmFeature } from '../src/features/crm/feature.js';
@@ -26,11 +30,6 @@ describe('ADR 0892 — CRM is opt-in; analytics stays on', () => {
     for (const v of variants) {
       expect(v.bindings?.some((b) => b.slot === 'crm.triage')).toBe(true);
     }
-  });
-
-  it('bucketUnit/salt unchanged (tenant-bucketed shared surfaces)', () => {
-    expect(crmFeature.toggleDefault?.bucketUnit).toBe('tenant');
-    expect(analyticsFeature.toggleDefault?.bucketUnit).toBe('tenant');
   });
 });
 

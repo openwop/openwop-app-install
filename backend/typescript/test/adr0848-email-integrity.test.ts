@@ -377,7 +377,9 @@ describe('ADR 0848 D9 — engagement erasure follows the address, and an unread 
     vi.spyOn(DurableCollection.prototype, 'listByPrefix').mockRejectedValue(new Error('kv down'));
     vi.spyOn(DurableCollection.prototype, 'listForTenantIndexed').mockRejectedValue(new Error('kv down'));
     const out = await deleteSubjectEngagement(`org:a0848-er-${n++}`, 'ct-x');
-    expect(out.failed).toBe(2); // BOTH unread stores count — the token leg and the event leg
+    // EVERY unread store counts — the token leg, the event leg and (ADR 0955 P0) the
+    // per-contact index leg. Was 2 before the index existed.
+    expect(out.failed).toBe(3);
   });
 });
 

@@ -42,9 +42,13 @@ import {
   type EmailBodyFormat, type EmailTemplate, type Campaign,
 } from './emailService.js';
 import { CONTACT_STAGES, type ContactStage } from '../crm/contactsService.js';
+import { submitForReview } from './sendApproval.js';
+import { runOrgScopeSubject } from '../../host/accessControlService.js';
+import { OpenwopError } from '../../types.js';
 
 export const EMAIL_GET_CAMPAIGN_TOOL_ID = 'openwop:email.get-campaign';
 export const EMAIL_SAVE_DRAFT_TOOL_ID = 'openwop:email.save-draft';
+export const EMAIL_SUBMIT_FOR_REVIEW_TOOL_ID = 'openwop:email.submit-for-review';
 
 type ToolResult = { content: string; isError?: boolean };
 
@@ -226,6 +230,46 @@ export function registerEmailAgentTools(): void {
       const tpl = await createTemplate({ tenantId: scope.tenantId, orgId: gate.orgId, name, subject, body, createdBy, templateId: tplId, ...(format ? { format } : {}) });
       const cmp = await createCampaign({ tenantId: scope.tenantId, orgId: gate.orgId, templateId: tpl.templateId, createdBy, campaignId: cmpId, ...(stage ? { stage } : {}) });
       return { content: JSON.stringify({ campaignId: cmp.campaignId, templateId: tpl.templateId, created: true, note: 'Draft campaign created (not sent). Tell the user the campaign name and that they can review and send it.' }) };
+    },
+  });
+
+  // ── ADR 0905 D5 — submit a draft for SEND REVIEW. The agent may ask; it can never
+  //    approve (the decision is a human's, in the Approvals inbox) or send (there is
+  //    no send tool). Pack-allowlisted only (never the ADR 0315 default baseline). ──
+  registerFeatureAgentTool({
+    contentTrust: 'untrusted',
+    effect: 'write',
+    def: {
+      name: EMAIL_SUBMIT_FOR_REVIEW_TOOL_ID,
+      description:
+        'Submit a DRAFT email campaign for send review. Pass `campaignId` (from get-campaign or save-draft). It queues '
+        + 'ONE approval in the Approvals inbox, pinned to the template version, sender and audience as they are now, '
+        + 'and returns { campaignId, status:"in_review", approvalId, templateVersion }. A resubmit re-pins the open '
+        + 'review. You can NOT approve or send — an admin or a configured approver decides in the inbox.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          campaignId: { type: 'string', description: 'The draft campaign to submit for review.' },
+          orgId: { type: 'string', description: 'Organization id — only needed when the workspace has more than one organization.' },
+        },
+        required: ['campaignId'],
+      },
+    },
+    async run(input, scope) {
+      if (!(await emailEnabled(scope.tenantId, scope.actingUserId))) {
+        return toolError('feature_disabled', 'Email Marketing is not enabled for this workspace — tell the user you cannot submit campaigns for review here.');
+      }
+      const gate = await resolveOrgScope(scope, str(input.orgId), 'workspace:write');
+      if ('content' in gate) return gate;
+      const campaignId = str(input.campaignId);
+      if (!campaignId) return toolError('validation_error', 'Pass the `campaignId` of the draft to submit.', { defects: ['`campaignId` is required.'] });
+      try {
+        const { campaign, approval } = await submitForReview(scope.tenantId, gate.orgId, campaignId, gate.actingUserId, gate.actingUserId ? undefined : runOrgScopeSubject(scope));
+        return { content: JSON.stringify({ campaignId: campaign.campaignId, status: campaign.status, approvalId: approval.approvalId, templateVersion: campaign.review?.pin.templateVersion ?? null, note: 'Submitted for review (NOT approved, NOT sent). Tell the user an approver will decide it in the Approvals inbox.' }) };
+      } catch (e) {
+        if (e instanceof OpenwopError) return toolError(String(e.details?.reason ?? e.code), e.message);
+        throw e;
+      }
     },
   });
 }

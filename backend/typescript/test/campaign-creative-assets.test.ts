@@ -97,13 +97,13 @@ describe('media asset lineage (ADR 0229)', () => {
     expect(viewAsset(read!).lineage?.model).toBe('gpt-image-1');
   });
 
-  it('an asset created WITHOUT lineage has none; update sets and null clears it', async () => {
+  it('lineage edits clear descriptive fields while retaining the AI-origin fact (ADR 0945 D4)', async () => {
     const a = await mkAsset();
     expect(a.lineage).toBeUndefined();
     const set = await updateAsset('tA', 'o1', a.assetId, { lineage: { generatedBy: 'ai', prompt: 'later' } });
     expect(set?.lineage).toEqual({ generatedBy: 'ai', prompt: 'later' });
     const cleared = await updateAsset('tA', 'o1', a.assetId, { lineage: null });
-    expect(cleared?.lineage).toBeUndefined();
+    expect(cleared?.lineage).toEqual({ generatedBy: 'ai' });
   });
 });
 
@@ -137,7 +137,12 @@ describe('ctx.features.media.createAssetFromServeUrl (ADR 0229)', () => {
     // legitimately sees it, instead of from a tenant-readable run output.
     expect(read?.serveToken).toBeTruthy();
     expect(read?.serveToken).not.toBe(stored.token);
-    expect(read?.lineage).toEqual({ generatedBy: 'ai', prompt: 'a red square', model: 'mock-image-1' });
+    // ADR 0945 D4 — a node's `generatedBy:'ai'` claim with no adapter record
+    // (these bytes were stored directly) still gets the provenance stamp, from
+    // the claim, with the run that registered it.
+    const { grounding, ...rest } = read?.lineage ?? {};
+    expect(rest).toEqual({ generatedBy: 'ai', prompt: 'a red square', model: 'mock-image-1' });
+    expect(grounding).toMatchObject({ mode: 'none', sources: [], provider: 'unknown', model: 'mock-image-1', op: 'generate', runId: 'run-1' });
     expect(read?.uploadedBy).toBe('run-1');
   });
 

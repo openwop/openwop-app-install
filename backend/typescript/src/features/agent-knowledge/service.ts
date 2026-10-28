@@ -466,8 +466,9 @@ export async function retrieveForAgent(
   tenantId: string,
   agentId: string,
   query: string,
-  /** ADR 0643 R3 (Blocker 2) — the HTTP read re-resolves with the READER; a run/chat
-   *  lane omits it and reads the binding as the owner-scoped grant it is. */
+  /** ADR 0643 R3 (Blocker 2) — the HTTP read re-resolves with the READER. ADR 0979 D3 —
+   *  so does the workflow retrieve node (the run's actor, else a subject-less caller):
+   *  omitting it reads every bound corpus pre-authorized, which only an agent TURN may. */
   caller?: SubjectCaller,
 ): Promise<{
   chunks: Array<{ content: string; title?: string; kind: 'kb' | 'memory'; contentTrust: 'trusted' | 'untrusted' }>;

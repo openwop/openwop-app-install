@@ -6,23 +6,37 @@
  *  - once published, the crawler HTML gives the post its `<h1>` (post chrome, not
  *    a section), Article JSON-LD with `datePublished`, and the prose block grammar
  *    (`<h3>` subheadings, `<ul>`/`<ol>` lists).
+ * Tracker: TST-BNC-1.
+ *
+ * Each case seeds its OWN fresh post (`seedFresh`: delete the page and the
+ * seed marker, then run the real ensure), so no case depends on another's
+ * publish, and a seed failure fails the case instead of skipping the file.
+ *
+ * Red when (wave 60 probes w60g4-blog-*, byline-me): the post is not seeded as
+ * a `post`; a re-seed adds media rows (the dedupe by name); the social card is
+ * not one of the post's images; the crawler HTML loses the post `<h1>` or
+ * `datePublished`; `authorId: "me"` is not resolved to the caller.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { ensureSystemSiteBlog, __resetSystemSiteBlogEnsure, LAUNCH_POST_PAGE_ID, LAUNCH_POST_SLUG } from '../src/host/systemSiteBlog.js';
-import { getPage, transitionPage, updatePage } from '../src/features/cms/cmsService.js';
+import { deletePage, getPage, transitionPage, updatePage } from '../src/features/cms/cmsService.js';
 import { getSeo } from '../src/features/publishing/publishingService.js';
 import { prerenderPage } from '../src/features/publishing/prerenderService.js';
 import { listAssets } from '../src/features/media/mediaService.js';
 import { SYSTEM_SITE_TENANT, SYSTEM_SITE_ORG } from '../src/host/systemSite.js';
 import { getSetCookies } from './headerCookies.js';
-import { saveConfig } from '../src/host/featureToggles/service.js';
+import { deleteConfig, getStoredConfig, saveConfig } from '../src/host/featureToggles/service.js';
+import type { ToggleConfig } from '../src/host/featureToggles/types.js';
+import type { Storage } from '../src/storage/storage.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 
 let BASE: string;
 let server: http.Server;
+let storage: Storage;
+let savedUsersToggle: ToggleConfig | null = null;
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -30,12 +44,29 @@ beforeAll(async () => {
   process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+  storage = app.locals.storage as Storage;
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  savedUsersToggle = await getStoredConfig('users');
   const d = getToggleDefault('users');
   if (d) await saveConfig({ ...d, status: 'on' }, 'test');
-  await ensureSystemSiteBlog(); // boot fires it async; await deterministically here
 });
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
+afterAll(async () => {
+  if (savedUsersToggle) await saveConfig(savedUsersToggle, 'test'); else await deleteConfig('users', 'test');
+  await new Promise<void>((res) => server.close(() => res()));
+});
+
+/** A fresh, untouched system draft: drop the post and the seed marker, then run
+ *  the real ensure (boot fires it async; awaited here, inside the case). The
+ *  media rows are KEPT, so a re-seed exercises the by-name dedupe. */
+async function seedFresh(): Promise<void> {
+  await settleBootEnsure();
+  await deletePage(SYSTEM_SITE_TENANT, SYSTEM_SITE_ORG, LAUNCH_POST_PAGE_ID);
+  await storage.kvDelete('hostext:systemsite:blog-seed:seed');
+  __resetSystemSiteBlogEnsure();
+  await ensureSystemSiteBlog();
+}
+/** The boot-time ensure may still be in flight; join it before resetting. */
+async function settleBootEnsure(): Promise<void> { await ensureSystemSiteBlog(); }
 
 const seedAssets = async () => (await listAssets(SYSTEM_SITE_TENANT, SYSTEM_SITE_ORG)).filter((a) => a.uploadedBy === 'system:blog-seed');
 
@@ -51,6 +82,7 @@ async function finishTodos(): Promise<void> {
 
 describe('ADR 0813 — the launch post seed', () => {
   it('seeds a DRAFT blog post that the public blog does not list', async () => {
+    await seedFresh();
     const page = await getPage(SYSTEM_SITE_TENANT, SYSTEM_SITE_ORG, LAUNCH_POST_PAGE_ID);
     expect(page?.status).toBe('draft');
     expect(page?.kind).toBe('post');
@@ -62,6 +94,7 @@ describe('ADR 0813 — the launch post seed', () => {
   });
 
   it('stores both diagrams as PNG media rows, referenced by the image sections and the social card', async () => {
+    await seedFresh();
     const assets = await seedAssets();
     expect(assets).toHaveLength(2);
     expect(assets.every((a) => a.contentType === 'image/png')).toBe(true);
@@ -74,12 +107,16 @@ describe('ADR 0813 — the launch post seed', () => {
   });
 
   it('is idempotent: a re-run adds no media rows', async () => {
-    __resetSystemSiteBlogEnsure();
-    await ensureSystemSiteBlog();
+    await seedFresh();
+    expect(await seedAssets()).toHaveLength(2);
+    // A second full seed (marker cleared, so the diagram step runs again)
+    // reuses the stored rows by name instead of uploading two more.
+    await seedFresh();
     expect(await seedAssets()).toHaveLength(2);
   });
 
   it('once published, the crawler HTML has the post <h1>, Article JSON-LD and the prose blocks', async () => {
+    await seedFresh();
     await finishTodos();
     await transitionPage(SYSTEM_SITE_TENANT, SYSTEM_SITE_ORG, LAUNCH_POST_PAGE_ID, 'publish', 'user:editor');
     const result = await prerenderPage(SYSTEM_SITE_ORG, LAUNCH_POST_SLUG, 'https://app.test', null);
@@ -97,14 +134,15 @@ describe('ADR 0813 — the launch post seed', () => {
 describe('ADR 0813 — the editor sets the byline with authorId "me"', () => {
   it('resolves "me" to the caller on create and patch, and null clears it', async () => {
     let cookie = '';
-    const call = async (method: string, path: string, body?: unknown): Promise<{ status: number; body: any }> => {
+    interface PageBody { pageId: string; authorId?: string; createdBy: string; category?: string; orgId?: string }
+    const call = async (method: string, path: string, body?: unknown): Promise<{ status: number; body: PageBody }> => {
       const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-      for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]!; }
-      return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+      for (const c of getSetCookies(res.headers)) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]!; }
+      return { status: res.status, body: (await res.json().catch(() => ({}))) as PageBody };
     };
     await call('POST', '/host/openwop-app/test/login', { email: `byline-${Date.now()}@acme.test` });
     const org = await call('POST', '/host/openwop-app/orgs', { name: 'Byline Co' });
-    const base = `/host/openwop-app/cms/orgs/${encodeURIComponent(org.body.orgId as string)}/pages`;
+    const base = `/host/openwop-app/cms/orgs/${encodeURIComponent(org.body.orgId ?? '')}/pages`;
     const created = await call('POST', base, { title: 'A post', kind: 'post', authorId: 'me', sections: [] });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
     expect(created.body.authorId).toBe(created.body.createdBy);

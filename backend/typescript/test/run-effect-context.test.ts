@@ -15,11 +15,25 @@
  * context today. If pack execution ever moves out-of-process (RFC 0035 sandbox,
  * RFC 0008 WASM ABI) the backstop degrades SILENTLY to no guard — and that test
  * is what goes red.
+ *
+ * Breaks it (round-1 probes, witnessed): the replay branch of the guard
+ * (8fw2g2-rec-replay), counting a denied or out-of-run effect (rec-denied,
+ * rec-outside), the executor never marking a replay (rec-execctx), and each
+ * seam's own guard call: SMTP (rec-smtp), sub-run dispatch (rec-subrun),
+ * ctx.http.safeFetch (rec-safefetch, also reds the TRIPWIRE scan), brokeredPost
+ * (rec-brokeredpost).
+ *
+ * Order independence (verified under --sequence.shuffle): the e2e cases assert
+ * the notification count RELATIVE to their own start, and the "establishes
+ * the context" case drives its own live run + replay fork and reads only the
+ * `seenContext` entries pushed after it began. `settle()` is a 25 ms run-status
+ * poll: an honest ceiling (no settle hook to await).
  */
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { mkdtempSync, writeFileSync, readdirSync, readFileSync, existsSync } from 'node:fs';
+import { Agent } from 'undici';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -35,6 +49,7 @@ import {
   __resetEffectCountsForTest,
 } from '../src/host/runEffectContext.js';
 import { getNotificationEmitter } from '../src/notifications/emitter.js';
+import { openStorage } from '../src/storage/index.js';
 
 let server: http.Server;
 let BASE: string;
@@ -70,7 +85,7 @@ beforeAll(async () => {
       // A real await before the effect — ALS must survive it.
       await new Promise((r) => setTimeout(r, 1));
       await getNotificationEmitter().emit({
-        tenantId: (ctx as { tenantId?: string }).tenantId ?? '_anon',
+        tenantId: ctx.tenantId || '_anon',
         type: 'adr0531.probe',
         priority: 'normal',
         title: 'probe',
@@ -196,8 +211,9 @@ describe('the scenario actually exercises the BACKSTOP, not the fast path', () =
 
 describe('end-to-end: a replay fork cannot re-notify', () => {
   it('a live run notifies once; its replay fork fails closed and does NOT notify again', async () => {
+    const before = probesEmitted;
     const runId = await runWorkflow('adr0531.notify', 'test.unclassified-notifier');
-    expect(probesEmitted).toBe(1);
+    expect(probesEmitted).toBe(before + 1);
 
     const fork = await api<{ runId: string }>(`/runs/${runId}:fork`, {
       method: 'POST',
@@ -216,12 +232,21 @@ describe('end-to-end: a replay fork cannot re-notify', () => {
     expect(failure?.payload?.error?.code).toBe('replay_source_missing');
 
     // The invariant that actually matters: no second notification reached a human.
-    expect(probesEmitted).toBe(1);
+    expect(probesEmitted).toBe(before + 1);
   });
 
-  it('the executor establishes the context on EVERY node execution, live and replay', () => {
-    const forNode = seenContext.filter((s) => s.typeId === 'test.unclassified-notifier');
-    expect(forNode.length).toBeGreaterThanOrEqual(2); // the live run + the fork
+  it('the executor establishes the context on EVERY node execution, live and replay', async () => {
+    // Its OWN live run + replay fork, reading only the entries pushed since it began.
+    const start = seenContext.length;
+    const runId = await runWorkflow('adr0531.ctx', 'test.unclassified-notifier');
+    const fork = await api<{ runId: string }>(`/runs/${runId}:fork`, {
+      method: 'POST',
+      body: JSON.stringify({ mode: 'replay' }),
+    });
+    expect(fork.status).toBe(201);
+    await settle(fork.body.runId);
+    const forNode = seenContext.slice(start).filter((s) => s.typeId === 'test.unclassified-notifier');
+    expect(forNode).toHaveLength(2); // the live run + the fork
     // Never 'absent'. If the context were established only during replays,
     // "absent" would silently mean "not replaying" — the same fail-open shape
     // this guard exists to remove.
@@ -375,7 +400,7 @@ describe('ADR 0533 — the undici egress dispatcher is a guarded seam', () => {
   it('webhookEgressDispatcher() stays live outside a replay', async () => {
     const { webhookEgressDispatcher } = await import('../src/host/webhookEgressGuard.js');
     runWithEffectContext({ runId: 'r', replaying: false }, () => {
-      expect(webhookEgressDispatcher()).toBeDefined();
+      expect(webhookEgressDispatcher()).toBeInstanceOf(Agent);
     });
   });
 
@@ -403,7 +428,7 @@ describe('ADR 0533 — the undici egress dispatcher is a guarded seam', () => {
     // by an event-log failure — passing for a reason unrelated to the guard.
     const { makeConnectionSafeFetch } = await import('../src/host/connectionInjection.js');
     const safeFetch = makeConnectionSafeFetch({
-      storage: {} as never,
+      storage: await openStorage('memory://'),
       tenantId: '_anon',
       runId: 'r',
       allowedProviders: [],
@@ -417,7 +442,7 @@ describe('ADR 0533 — the undici egress dispatcher is a guarded seam', () => {
     const { dispatchSubRun } = await import('../src/subruns/subRunDispatcher.js');
     await expect(
       runWithEffectContext({ runId: 'r', replaying: true }, () =>
-        dispatchSubRun({ workflowId: 'wf', inputs: {}, tenantId: '_anon' } as Parameters<typeof dispatchSubRun>[0]),
+        dispatchSubRun({ workflowId: 'wf', inputs: {}, budgetMs: 1_000, tenantId: '_anon' }),
       ),
     ).rejects.toBeInstanceOf(ReplayEffectError);
   });

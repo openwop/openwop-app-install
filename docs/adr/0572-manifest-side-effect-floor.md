@@ -657,3 +657,22 @@ because the test re-derives it from the manifests rather than trusting it.
 ## Wire
 
 None. Host-internal classification and a build gate. No RFC needed.
+
+
+### ADR 0942 recovery — one gate’s replay semantics resolved (2026-10-25)
+
+`feature.campaign-orchestration.nodes.autonomy-gate` keeps role `gate` for
+builder safety and declares `side-effectful` because it can create addressed
+notices and veto records. The generic generator still holds back gate semantics.
+The existing runtime classifier explicitly serves this one gate’s recorded
+terminal outcome; its existing hand-list is included by the served-set census.
+No other gate is widened. A missing source outcome refuses the replay. A branch
+fork still creates a fresh gate and cannot inherit a covering grant.
+
+The real source/timer/replay witness is
+`test/adr0942-p4b-veto-window.test.ts`; it registers the actual pack function
+without a test-only `sideEffecting` flag, so removing the runtime classification
+must fail the fork. Validation remains pending until that witness and full CI
+pass. The paid ad-budget host node self-declares through the existing NodeModule
+flag, and the ad publisher declares the same manifest capability; source/fork
+wait tests separately cover missing and recorded paid outcomes.

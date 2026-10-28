@@ -3,6 +3,13 @@
  * `values` stream is ONE synthesized `state.snapshot` per `updates`-tier
  * transition (never the raw event), and a `Last-Event-ID` resumption emits a
  * snapshot FIRST. (v1 `values` kept its raw frames; that leg went with major 1.)
+ *
+ * DOUBLE GUARD (named, so a single-guard probe is not mistaken for a hole): "never
+ * re-emits the resumption point" is held by TWO independent pieces in
+ * `routes/streams.ts` — the EXCLUSIVE storage cursor (`listEvents({ fromSeq })`
+ * returns sequences > fromSeq) and the `deliverOnce` watermark
+ * (`ev.sequence <= deliveredThrough`). Breaking either alone stays green by design.
+ * Probes: 8fw4g1-sv-event / -sv-resume / -sv-silent (each witnessed in round 1).
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -53,6 +60,10 @@ describe('v2 values stream = synthesized state.snapshot frames', () => {
     expect(r.status).toBe(200);
     expect(r.headers.get('content-type')).toContain('text/event-stream');
     const fs = frames(await r.text());
+    // The frame IS the run snapshot: its owner equals the one GET /runs/{runId} serves.
+    const rest = await (await fetch(`${base}/runs/${encodeURIComponent(id)}`, { headers: V2 })).json() as { owner?: unknown };
+    const restOwner = rest.owner;
+    expect(restOwner, 'precondition: the REST snapshot carries an owner').toBeTruthy();
     expect(fs.length, 'at least one updates-tier transition').toBeGreaterThan(0);
     expect(new Set(fs.map((f) => f.event))).toEqual(new Set(['state.snapshot']));
     for (const f of fs) {
@@ -60,7 +71,7 @@ describe('v2 values stream = synthesized state.snapshot frames', () => {
       const snap = JSON.parse(f.data ?? '{}') as Record<string, unknown>;
       expect(snap.runId).toBe(id);
       expect(typeof snap.status).toBe('string');
-      expect(snap.owner, 'v2 snapshot carries owner').toBeDefined();
+      expect(snap.owner, 'v2 snapshot carries owner').toEqual(restOwner);
     }
     expect((JSON.parse(fs[fs.length - 1]!.data!) as { status: string }).status).toBe('completed');
   });

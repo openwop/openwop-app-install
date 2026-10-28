@@ -10,6 +10,13 @@
  *   `400 validation_error` naming the seat, and no run. The suite observes
  *   this half through the fixture `conformance-dispatch-fanout-race`, which is
  *   loaded without registration validation (`host/index.ts`).
+ *
+ * The advertised VALUES are pinned as literals as well as the projection: an
+ * expectation read from `dispatchCapability()` alone would move with a sabotage
+ * inside it. Note (grade-code row FANOUT-TWO-COPIES-1, outside this file's claim):
+ * the load-time refusal (`workflowDefinitionValidation.ts` checkMappingCapability)
+ * re-implements the join checks rather than calling `fanOutAdmissionRefusal`, so
+ * the two refusals are two copies, each witnessed by its own describe below.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';
@@ -21,6 +28,7 @@ import Ajv2020 from 'ajv/dist/2020.js';
 import { createApp } from '../src/index.js';
 import { dispatchCapability, fanOutAdmissionRefusal, v2FanOutFacet } from '../src/host/dispatchFanOut.js';
 import { checkMappingCapability } from '../src/host/workflowDefinitionValidation.js';
+import { OpenwopError } from '../src/types.js';
 import { corpusSchema } from './support/corpusSchema.js';
 
 const FIXTURE = 'conformance-dispatch-fanout-race';
@@ -72,13 +80,19 @@ describe('v2 discovery advertises agents.fanOut (RFC 0243)', () => {
       perItemInput: cap.perItemInput,
     });
     expect(agents['fanOut']).toEqual(v2FanOutFacet());
+    // What THIS host advertises, as literals (HOST_MAX_FAN_OUT = 16; perItemInput is
+    // on unless OPENWOP_DISPATCH_PER_ITEM_INPUT=false, which this file never sets).
+    expect(agents['fanOut']).toEqual({ joinModes: ['wait-all'], onChildFailureModes: ['collect', 'absorb'], maxFanOut: 16, perItemInput: true });
 
     const ajv = new Ajv2020({ strict: false, allErrors: true });
     const caps = corpusSchema('v2/capabilities.schema.json') as { $id?: string };
     const dir = dirname(createRequire(`${process.cwd()}/`).resolve('@openwop/spec-artifacts/schemas/v2/capabilities.schema.json'));
+    let added = 0;
     for (const f of readdirSync(dir).filter((n) => n.endsWith('.json'))) {
-      try { ajv.addSchema(JSON.parse(readFileSync(join(dir, f), 'utf8')) as Record<string, unknown>); } catch { /* a malformed sibling is its own test's problem */ }
+      try { ajv.addSchema(JSON.parse(readFileSync(join(dir, f), 'utf8')) as Record<string, unknown>); added += 1; } catch { /* a malformed sibling is its own test's problem */ }
     }
+    // A broken corpus path must not let the $ref compile against nothing.
+    expect(added, 'no v2 schema sibling was loaded').toBeGreaterThanOrEqual(1);
     const validate = ajv.compile({ $ref: `${caps.$id ?? ''}#/properties/agents` });
     expect(validate(agents), JSON.stringify(validate.errors)).toBe(true);
   });
@@ -89,7 +103,8 @@ describe('the refusal at load names the seat', () => {
     try {
       checkMappingCapability([{ nodeId: 'dispatch', typeId: 'core.dispatch', config }]);
     } catch (err) {
-      return (err as { details?: Record<string, unknown> }).details;
+      if (!(err instanceof OpenwopError)) throw err;
+      return err.details;
     }
     return undefined;
   }

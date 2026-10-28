@@ -22,7 +22,9 @@ async function asJson<T>(res: Response, ctx: string): Promise<T> {
 export type ModelState = 'planning' | 'active' | 'archived';
 export interface TerritoryModel { modelId: string; name: string; state: ModelState; createdAt: string; activatedAt?: string }
 export interface Territory { territoryId: string; modelId: string; name: string; parentTerritoryId: string | null; managerSubjectId?: string; memberSubjectIds: string[]; regionId?: string }
-export interface AssignmentRule { ruleId: string; territoryId: string; target: 'company' | 'deal'; priority: number; filter: unknown }
+/** ADR 0954 D5 — `contact` rules route leads (Campaign Studio lead routing). */
+export type RuleTarget = 'company' | 'deal' | 'contact';
+export interface AssignmentRule { ruleId: string; territoryId: string; target: RuleTarget; priority: number; filter: unknown }
 export interface Quota { quotaId: string; territoryId: string; period: string; amount: number; currency?: string; repSplits: Array<{ subjectId: string; amount: number }> }
 export interface PreviewSummary { perTerritory: Array<{ territoryId: string; name: string; companies: number; deals: number }>; unassigned: { companies: number; deals: number }; totals: { companies: number; deals: number } }
 export interface TerritoryAttainment {
@@ -95,7 +97,7 @@ export async function listRules(orgId: string, modelId: string): Promise<Assignm
   const res = await fetch(`${base(orgId)}/models/${encodeURIComponent(modelId)}/rules`, fetchOpts({ headers: authedHeaders() }));
   return (await asJson<{ rules: AssignmentRule[] }>(res, 'listRules')).rules;
 }
-export async function createRule(orgId: string, modelId: string, input: { territoryId: string; target: 'company' | 'deal'; priority?: number; filter: unknown }): Promise<AssignmentRule> {
+export async function createRule(orgId: string, modelId: string, input: { territoryId: string; target: RuleTarget; priority?: number; filter: unknown }): Promise<AssignmentRule> {
   const res = await fetch(`${base(orgId)}/models/${encodeURIComponent(modelId)}/rules`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify(input) }));
   return asJson(res, 'createRule');
 }

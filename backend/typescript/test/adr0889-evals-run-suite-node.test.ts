@@ -17,13 +17,17 @@
  * goes red; with the timeout's `cancelQuietly` removed the timeout case goes red;
  * with `startSuiteRun` back on plain `createAgentEvalRun` the re-dispatch case goes
  * red (a second eval run, a second bill).
+ *
+ * Tracker TST-BHG-4. Red when (sabotage-witnessed, wave 62): `ok` ignores `regressed`
+ * (or is always true, so a failing suite clears the gate); the timeout or the abort
+ * stops cancelling the child run; a failed eval run reads as success; or the
+ * once-only key (`<run>:<node>`, host/evals/surface.ts) is dropped or loses its node.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import { createApp } from '../src/index.js';
 import { getChain, expandChain, findUnfilledExpansionParams } from '../src/host/workflowChainPackLoader.js';
-import type { WorkflowDefinition } from '../src/executor/types.js';
 import { registerWorkflow } from '../src/host/workflowsRegistry.js';
 import { SCRIPTED_AGENT_ID } from '../src/host/evals/fixtureSuites.js';
 import { buildFeatureSurfaces } from '../src/host/featureSurfaces.js';
@@ -121,6 +125,12 @@ const scriptedSuite = (suiteId: string, expectOutput: string) => ({
 
 let tenantId = ''; let userId = '';
 
+interface BundleEvent { type: string; nodeId?: string; payload?: { outputs?: Record<string, unknown>; error?: { code?: string; message?: string } } }
+/** A narrow guard over the debug bundle's wire JSON (no cast). */
+function isBundleEvent(x: unknown): x is BundleEvent {
+  return typeof x === 'object' && x !== null && typeof (x as { type?: unknown }).type === 'string';
+}
+
 describe('agents.eval-regression-gate chain (real executor, ctx.features.evals)', () => {
   beforeAll(async () => {
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -139,7 +149,7 @@ describe('agents.eval-regression-gate chain (real executor, ctx.features.evals)'
   }, 120_000);
   afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
 
-  async function runGate(suiteId: string, expectOutput: string, extraInputs: Record<string, unknown> = {}): Promise<{ runId: string; status: string; events: Array<{ type: string; nodeId?: string; payload?: { outputs?: Record<string, unknown> } }> }> {
+  async function runGate(suiteId: string, expectOutput: string, extraInputs: Record<string, unknown> = {}): Promise<{ runId: string; status: string; events: BundleEvent[] }> {
     const put = await send('PUT', `/host/openwop-app/agent-evals/suites/${suiteId}@1.0.0`, scriptedSuite(suiteId, expectOutput));
     expect(put.status, put.text.slice(0, 300)).toBe(200);
     const found = getChain('agents.eval-regression-gate');
@@ -156,12 +166,13 @@ describe('agents.eval-regression-gate chain (real executor, ctx.features.evals)'
       return String(r.json['status']);
     }, { timeout: 15_000, interval: 50 });
     const debug = await send('GET', `/host/openwop-app/runs/${bareRunId(runId)}/debug-bundle`);
-    return { runId, status, events: (debug.json['events'] ?? []) as never };
+    const raw = debug.json['events'];
+    return { runId, status, events: Array.isArray(raw) ? raw.filter(isBundleEvent) : [] };
   }
 
   it('a param-less copy freezes no empty value: defaults name the shipped Agent Author suite (ADR 0504 ratchet)', () => {
     const found = getChain('agents.eval-regression-gate');
-    const def = expandChain(found!.chain, {}) as unknown as WorkflowDefinition;
+    const def = expandChain(found!.chain, {});
     expect(findUnfilledExpansionParams(def)).toEqual([]);
     const evalNode = def.nodes.find((n) => n.nodeId.endsWith('eval'));
     expect(evalNode?.inputs).toEqual({
@@ -173,7 +184,7 @@ describe('agents.eval-regression-gate chain (real executor, ctx.features.evals)'
   it('a baselineRunId run input reaches the eval node (an unknown baseline is a typed failure, never a pass)', async () => {
     const r = await runGate('test.evals.gate-baseline', 'all done', { baselineRunId: 'no-such-eval-run' });
     expect(r.status).toBe('failed');
-    const failed = r.events.find((e) => e.type === 'node.failed' && (e.nodeId ?? '').endsWith('eval')) as { payload?: { error?: { code?: string; message?: string } } } | undefined;
+    const failed = r.events.find((e) => e.type === 'node.failed' && (e.nodeId ?? '').endsWith('eval'));
     expect(failed?.payload?.error?.message ?? '', JSON.stringify(failed)).toMatch(/baseline/i);
   });
 

@@ -8,6 +8,9 @@
  * Pins every `createLink(` call site in `src/`: the one member route passes the
  * signed-in user; every other site passes a `'system:<feature>'` literal (directly
  * or through a same-file const). A new call site fails here until it is reviewed.
+ *
+ * Tracker TST-BHF-4. Red when (sabotage-witnessed, wave 62): a host-side mint drops
+ * its `system:` actor (e.g. the CRM sign link).
  */
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
@@ -41,6 +44,12 @@ describe('ADR 0887 — every share-link mint names its lane', () => {
       'features/commerce/commerceService.ts': ['system:commerce'],
       'features/crm/bookingService.ts': ['system:crm-booking'],
       'features/crm/signService.ts': ['system:crm-sign'],
+      // ADR 0924 D5 — the client approver link, minted on the visitor lane.
+      'features/campaign-ops/portal.ts': ['system:campaign-ops-portal'],
+      // ADR 0958 D2 — the collaborator invite. System-minted on purpose: accepting
+      // binds an identity and grants nothing. Every grant is minted separately by a
+      // member and re-checks that member on each use (`checkGrantUse` granter check).
+      'features/campaign-ops/collaboration/routes.ts': ['system:campaign-ops-collab'],
     });
   });
 });

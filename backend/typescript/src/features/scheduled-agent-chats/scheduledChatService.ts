@@ -22,13 +22,18 @@ import { DurableCollection, hostExtStorage } from '../../host/hostExtPersistence
 import { onWorkflowForked } from '../../host/workflowsRegistry.js';
 import { casRepoint } from '../../host/forkRepoint.js';
 import { OpenwopError } from '../../types.js';
-import { registerJob, setJobEnabled, deleteJob, getJob, updateJob } from '../../host/schedulingService.js';
+import { registerJob, setJobEnabled, deleteJob, getJob, updateJob, isErasedJob, ONE_SHOT_CRON, type ScheduledJob, type ScheduleSkipReason } from '../../host/schedulingService.js';
 import { registerSubjectEraser, type SubjectEraseReport } from '../../host/subjectErasure.js';
 import { subjectKeyForms } from '../../host/subjectErasureRedaction.js';
-import { parseCron } from '../../host/cronSchedule.js';
+import { parseCron, computeNextFire } from '../../host/cronSchedule.js';
 import { getConversationMeta } from '../../host/conversationStore.js';
 import { isVisibleToAsync } from '../../host/conversationVisibility.js';
 import { registerScheduledJobReadGate } from '../../host/scheduledJobReadGates.js';
+import { registerScheduledJobFireGate } from '../../host/scheduledJobFireGates.js';
+import { authorizeRunConversationWrite } from '../../host/runConversationWrite.js';
+import { hasWorkflowScope } from '../../host/workflowWriteAuthority.js';
+import { resolveAgentForTenant } from '../../host/agentVisibility.js';
+import { createLogger } from '../../observability/logger.js';
 import { SCHEDULED_CHAT_TURN_WORKFLOW_ID, SCHEDULED_CHAT_CREDENTIAL_REF } from './scheduledChatTurnWorkflow.js';
 
 /** The owner a scheduled chat is scoped + authorized under. Exactly one arm:
@@ -71,6 +76,85 @@ export const SCHEDULED_AGENT_CHATS_TOGGLE = 'scheduled-agent-chats';
  *  `grantService`; a schedchat row's key is scope-derived, never the actor, so this
  *  scrub updates in place without a re-key). */
 const ERASED_SUBJECT = 'erased:subject';
+const log = createLogger('features.scheduled-agent-chats.service');
+
+/** ADR 0985 D2 — the tightest cadence a scheduled chat may have: hourly, the
+ *  product's offered cadences (hourly / daily / weekdays / weekly). Finer is an
+ *  autonomous-cost runaway on the host's managed key. */
+export const MIN_SCHEDULED_CHAT_INTERVAL_MS = 3_600_000;
+export const CADENCE_TOO_FREQUENT_MESSAGE = 'Scheduled chats can run at most once an hour — use a coarser schedule (hourly, daily, weekly).';
+
+/**
+ * ADR 0985 D2 — the ONE cadence floor every door shares: create (org + channel),
+ * the recurring chat tool, the scheduler route's PATCH and the fire gate. Walks
+ * 25 adjacent fires (more than a day) so an intra-day cluster (`0,30 9 * * *`)
+ * cannot hide behind a wide first gap. A one-shot or an unparseable cron is not
+ * this function's question (`null`); the caller that needs a parse refuses that.
+ */
+export function cadenceRefusal(cronExpr: string, timezone: string | undefined, now: number): string | null {
+  if (cronExpr === ONE_SHOT_CRON || parseCron(cronExpr) === null) return null;
+  let prev = computeNextFire(cronExpr, now, timezone);
+  if (prev === null) return null;
+  for (let i = 0; i < 25; i++) {
+    const next = computeNextFire(cronExpr, prev, timezone);
+    if (next === null) break;
+    if (next - prev < MIN_SCHEDULED_CHAT_INTERVAL_MS) return CADENCE_TOO_FREQUENT_MESSAGE;
+    prev = next;
+  }
+  return null;
+}
+
+const str = (v: unknown): string | undefined => (typeof v === 'string' && v.length > 0 ? v : undefined);
+
+/**
+ * ADR 0985 D1 — asked by the scheduler BEFORE a scheduled chat's run starts (and
+ * so before the model is paid), for every job this feature owns: `schedchat-*`,
+ * and the chat tools' `recurring:*` / `followup:*`. The agent-runner still asks
+ * the write gate at write time; this removes the spend, not that check.
+ *  1. the cadence floor (D2);
+ *  2. the person behind the job may still write in the workspace (the authority
+ *     arming it took, ADR 0985 D6) — a creator who left stays "visible" to their own
+ *     conversation, so (3) alone keeps firing; a member demoted to Viewer is
+ *     skipped too, and restoring the role resumes it (grade-code SC2CD-5);
+ *  3. the reply could land: `authorizeRunConversationWrite` on the inputs the
+ *     write will use.
+ * A refusal is a skip: non-destructive, recorded on the job, resumed by restoring access.
+ */
+export async function scheduledChatFireRefusal(job: ScheduledJob, now: number): Promise<ScheduleSkipReason | null> {
+  if (cadenceRefusal(job.cronExpr, job.timezone, now) !== null) return 'cadence-too-frequent';
+  const cfg = job.configurable ?? {};
+  const conversationId = str(cfg['conversationId']);
+  const agentId = str(cfg['agentId']) ?? job.agentId;
+  const actingUserId = str(job.metadata?.['actingUserId']);
+  const orgScopeSubject = str(job.metadata?.['orgScopeSubject']);
+  const personalTenant = str(job.metadata?.['personalTenant']);
+  const human = actingUserId ?? orgScopeSubject;
+  if (human && !(await hasWorkflowScope({ tenantId: job.tenantId, actingUserId: human, personalTenant }, 'workspace:write'))) {
+    log.info('scheduled_chat_fire_refused', { jobId: job.jobId, tenantId: job.tenantId, reason: 'person_not_member' });
+    return 'target-refused';
+  }
+  if (!conversationId) {
+    log.info('scheduled_chat_fire_refused', { jobId: job.jobId, tenantId: job.tenantId, reason: 'no_conversation' });
+    return 'target-refused';
+  }
+  const verdict = await authorizeRunConversationWrite(hostExtStorage(), { tenantId: job.tenantId, conversationId, agentId, actingUserId, orgScopeSubject, personalTenant });
+  if (verdict.ok) return null;
+  log.info('scheduled_chat_fire_refused', { jobId: job.jobId, tenantId: job.tenantId, reason: verdict.reason });
+  return 'target-refused';
+}
+
+registerScheduledJobFireGate('scheduled-agent-chats', {
+  // `featureId` is server-stamped (the scheduler route never reads it from a body).
+  owns: (job) => job.featureId === SCHEDULED_AGENT_CHATS_TOGGLE,
+  gate: scheduledChatFireRefusal,
+  refusal: 'dispatch-error',
+  // ADR 0985 D3 — the feature owns its config-bound jobs: the generic route may only
+  // disable them, so the page and the job cannot disagree. The chat tools' jobs are
+  // NOT reserved: their owner manages them from the Profile Schedules tab too.
+  reservedJobIdPrefix: 'schedchat-',
+  managedBy: { id: 'scheduled-chat', message: 'This schedule is a scheduled chat. Pause, resume or delete it from the Scheduled chats page.' },
+  cadenceRefusal,
+});
 
 const scopeSeg = (scope: ScheduledChatScope): string => ('orgId' in scope ? scope.orgId : `chan:${scope.channelId}`);
 const keyOf = (tenantId: string, scope: ScheduledChatScope, chatId: string): string => `${tenantId}:${scopeSeg(scope)}:${chatId}`;
@@ -97,6 +181,9 @@ export async function createScheduledChat(tenantId: string, scope: ScheduledChat
   if (parseCron(cronExpr) === null) {
     throw new OpenwopError('validation_error', 'Invalid schedule (cron expression could not be parsed).', 400, { field: 'cronExpr' });
   }
+  // ADR 0985 D2 — the one cadence floor, at the moment the caller asks.
+  const tooFrequent = cadenceRefusal(cronExpr, typeof input.timezone === 'string' ? input.timezone : undefined, Date.now());
+  if (tooFrequent !== null) throw new OpenwopError('validation_error', tooFrequent, 400, { field: 'cronExpr', code: 'cadence_too_frequent' });
   // ADR 0125 Phase 2b — default to the built-in turn-workflow so the chat FIRES
   // out-of-the-box (an explicit operator workflowId still overrides). This supersedes
   // Phase 1's inert-until-wired stance now that the turn-workflow exists.
@@ -159,7 +246,7 @@ export async function listScheduledChats(tenantId: string, scope: ScheduledChatS
   return rows.filter((c) => matchesScope(c, scope)).sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
 }
 
-/** A scheduled chat + its live scheduler status (ADR 0125 Phase 3c). */
+/** A scheduled chat + its live scheduler status (ADR 0125 Phase 3c; ADR 0985 D4). */
 export interface ScheduledChatWithStatus extends ScheduledChat {
   nextRunAt?: string;
   lastRunAt?: string;
@@ -167,25 +254,50 @@ export interface ScheduledChatWithStatus extends ScheduledChat {
    *  reply could not be posted). Shown to the owner so a schedule never fails
    *  silently. */
   lastError?: { code: string; message: string };
+  /** ADR 0985 D4 — the latest slot was SKIPPED (no run) and nothing ran since. */
+  lastSkip?: { reason: ScheduleSkipReason; at: string };
+  /** ADR 0985 D4 — the scheduler job is gone (deleted by another door): nothing fires. */
+  unscheduled?: true;
+  /** ADR 0985 D4 — the agent's display name (its persona), else absent. */
+  agentName?: string;
+  /** A one-shot follow-up whose only slot is used: it will never fire again. */
+  spent?: true;
 }
 
-/** The list enriched with each job's next/last fire time (joined from the scheduler —
- *  the single owner of fire timing; no parallel schedule state). */
+/** ADR 0985 D4 — the status a schedule's JOB reports: the scheduler row is the one
+ *  truth for whether, when and how it fires (the config keeps no copy that can drift). */
+export async function jobStatus(tenantId: string, job: ScheduledJob | null, agentId: string): Promise<Pick<ScheduledChatWithStatus, 'enabled' | 'nextRunAt' | 'lastRunAt' | 'lastError' | 'lastSkip' | 'unscheduled' | 'agentName' | 'timezone' | 'spent'>> {
+  const agent = await resolveAgentForTenant(agentId, tenantId).catch(() => null);
+  const agentName = agent?.persona && agent.persona !== agentId ? { agentName: agent.persona } : {};
+  if (!job) return { enabled: false, unscheduled: true, ...agentName };
+  const lastRun = job.lastRunId ? await hostExtStorage().getRun(job.lastRunId).catch(() => null) : null;
+  const lastError = lastRun && lastRun.tenantId === tenantId && lastRun.status === 'failed'
+    ? { code: String(lastRun.error?.code ?? 'failed'), message: String(lastRun.error?.message ?? 'The last run failed.') }
+    : undefined;
+  // `no-next-fire` records that the cadence has no further slot, not a slot that did
+  // not run (the Profile panel renders it as its own chip); a spent one-shot says so
+  // through `spent` below.
+  const skippedSinceRun = job.lastSkippedAt !== undefined && job.lastSkipReason !== undefined && job.lastSkipReason !== 'no-next-fire'
+    && (job.lastRunAt === undefined || Date.parse(job.lastSkippedAt) > Date.parse(job.lastRunAt));
+  return {
+    enabled: job.enabled,
+    ...(job.nextFireAt != null ? { nextRunAt: new Date(job.nextFireAt).toISOString() } : {}),
+    ...(job.lastRunAt ? { lastRunAt: job.lastRunAt } : {}),
+    ...(lastError ? { lastError } : {}),
+    ...(skippedSinceRun ? { lastSkip: { reason: job.lastSkipReason!, at: job.lastSkippedAt! } } : {}),
+    ...(job.timezone ? { timezone: job.timezone } : {}),
+    // A one-shot whose only slot is used (it ran or was skipped) can never fire
+    // again, though the row still says `enabled` (review M3).
+    ...(job.cronExpr === ONE_SHOT_CRON && job.nextFireAt == null ? { spent: true as const } : {}),
+    ...agentName,
+  };
+}
+
+/** The list enriched with each job's live status (joined from the scheduler — the
+ *  single owner of fire timing and of `enabled`; ADR 0985 D4). */
 export async function listScheduledChatsWithStatus(tenantId: string, scope: ScheduledChatScope): Promise<ScheduledChatWithStatus[]> {
   const list = await listScheduledChats(tenantId, scope);
-  return Promise.all(list.map(async (c) => {
-    const job = await getJob(jobIdOf(c.chatId));
-    const lastRun = job?.lastRunId ? await hostExtStorage().getRun(job.lastRunId).catch(() => null) : null;
-    const lastError = lastRun && lastRun.tenantId === tenantId && lastRun.status === 'failed'
-      ? { code: String(lastRun.error?.code ?? 'failed'), message: String(lastRun.error?.message ?? 'The last run failed.') }
-      : undefined;
-    return {
-      ...c,
-      ...(job?.nextFireAt != null ? { nextRunAt: new Date(job.nextFireAt).toISOString() } : {}),
-      ...(job?.lastRunAt ? { lastRunAt: job.lastRunAt } : {}),
-      ...(lastError ? { lastError } : {}),
-    };
-  }));
+  return Promise.all(list.map(async (c) => ({ ...c, ...(await jobStatus(tenantId, await getJob(jobIdOf(c.chatId)), c.agentId)) })));
 }
 
 export async function getScheduledChat(tenantId: string, scope: ScheduledChatScope, chatId: string): Promise<ScheduledChat | null> {
@@ -218,13 +330,46 @@ async function mustGet(tenantId: string, scope: ScheduledChatScope, chatId: stri
   return c;
 }
 
+/**
+ * Pause (`false`) or resume (`true`). ADR 0985 D5 — the config row goes through a
+ * compare-and-swap FIRST, with the erased-creator check inside it, and only then is
+ * the job flipped: flipping the job first armed it before a concurrent erasure
+ * could be seen. A resume is refused for an erased creator (nobody to post for)
+ * and for a row whose job is gone (it would arm nothing). The host refuses to
+ * re-enable an erased job at the job too (`isErasedJob`).
+ */
+/** ADR 0985 (grade-code SC2CD-6) — every writer of a config row re-reads it inside a
+ *  compare-and-swap, so a stale copy can never write back what a concurrent writer
+ *  (the subject eraser) removed. `rewrite` returns the next row, or `null` to stop. */
+async function casChat(key: string, rewrite: (row: ScheduledChat) => ScheduledChat | null): Promise<ScheduledChat | null> {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const current = await chats.get(key);
+    if (!current) return null;
+    const next = rewrite(current);
+    if (!next) return null;
+    if (await chats.compareAndSwap(current, next)) return next;
+  }
+  throw new OpenwopError('conflict', 'The scheduled chat changed while it was being updated — try again.', 409, { code: 'write_contention' });
+}
+const keyOfRow = (c: ScheduledChat): string => (c.channelId ? `${c.tenantId}:chan:${c.channelId}:${c.chatId}` : `${c.tenantId}:${c.orgId}:${c.chatId}`);
+
+const creatorErased = (chatId: string): OpenwopError => new OpenwopError('conflict',
+  'The person who created this scheduled chat was removed, so it has nobody to post for — delete it and create a new one.', 409, { chatId, code: 'creator_erased' });
+
 export async function setScheduledChatEnabled(tenantId: string, scope: ScheduledChatScope, chatId: string, enabled: boolean): Promise<ScheduledChat> {
-  const c = await mustGet(tenantId, scope, chatId);
+  await mustGet(tenantId, scope, chatId);
+  const job = enabled ? await getJob(jobIdOf(chatId)) : null;
+  if (enabled && !job) {
+    throw new OpenwopError('conflict', 'This scheduled chat is no longer scheduled — delete it and create it again.', 409, { chatId, code: 'unscheduled' });
+  }
+  if (job && isErasedJob(job)) throw creatorErased(chatId);
+  const next = await casChat(keyOf(tenantId, scope, chatId), (current) => {
+    if (enabled && current.createdBy === ERASED_SUBJECT) throw creatorErased(chatId);
+    return { ...current, enabled, updatedAt: new Date().toISOString() };
+  });
+  if (!next) throw new OpenwopError('not_found', 'Scheduled chat not found.', 404, { chatId });
   await setJobEnabled(jobIdOf(chatId), enabled);
-  c.enabled = enabled;
-  c.updatedAt = new Date().toISOString();
-  await chats.put(c);
-  return c;
+  return next;
 }
 
 /**
@@ -240,10 +385,7 @@ export async function pauseScheduledChatsForDeletedAgent(tenantId: string, ids: 
     if (!c.enabled) continue;
     if (c.agentId !== ids.rosterId && c.agentId !== ids.agentId) continue;
     await setJobEnabled(jobIdOf(c.chatId), false);
-    c.enabled = false;
-    c.updatedAt = new Date().toISOString();
-    await chats.put(c);
-    paused += 1;
+    if (await casChat(keyOfRow(c), (row) => (row.enabled ? { ...row, enabled: false, updatedAt: new Date().toISOString() } : null))) paused += 1;
   }
   return paused;
 }
@@ -274,7 +416,7 @@ export async function eraseScheduledChatsSubject(tenantId: string, subjectKey: s
     if (c.tenantId !== tenantId) continue;      // defensive: a foreign-tenant prefix collision
     if (!forms.has(c.createdBy)) continue;      // only rows this subject authored
     await setJobEnabled(jobIdOf(c.chatId), false);   // stop it firing (idempotent)
-    await chats.put({ ...c, enabled: false, createdBy: ERASED_SUBJECT, updatedAt: new Date().toISOString() });
+    await casChat(keyOfRow(c), (row) => (forms.has(row.createdBy) ? { ...row, enabled: false, createdBy: ERASED_SUBJECT, updatedAt: new Date().toISOString() } : null));
     rowsTouched += 1;
   }
   return { rowsTouched };

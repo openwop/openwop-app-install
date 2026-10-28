@@ -24,7 +24,7 @@ import { isDeniedWebhookHost, webhookEgressDispatcher, webhookPrivateEgressAllow
 import { createLogger } from '../observability/logger.js';
 import { classifySandboxError, recordSandboxExecution, type SandboxRuntime } from '../observability/metricSeams.js';
 import type { SandboxExecRequest, SandboxExecResult } from '../executor/types.js';
-import { checkCodeExecBudget, recordCodeExec } from './codeExecBudget.js';
+import { releaseCodeExec, reserveCodeExec } from './codeExecBudget.js';
 import { meterPlatformUnits } from './managedCredits.js';
 import { runWasiSandboxedCode, wasiRuntimeEnabled, wasiAllowedLanguages } from './wasiSandbox.js';
 import { runE2bSandboxedCode } from './sandboxAdapters/e2bAdapter.js';
@@ -108,6 +108,73 @@ export function err(code: string, message: string): Error {
   return Object.assign(new Error(message), { code });
 }
 
+/** The cap on captured stdout/stderr: the same `OPENWOP_CODE_EXEC_MAX_OUTPUT_BYTES` knob and default the WASI runtime reads for its read-back cap (`wasiSandbox.ts` keeps its own reader to avoid an import cycle). */
+export function maxOutputBytes(): number {
+  const n = parseInt(process.env.OPENWOP_CODE_EXEC_MAX_OUTPUT_BYTES ?? '1000000', 10);
+  return Number.isFinite(n) && n > 0 ? n : 1_000_000;
+}
+export const MAX_RESULT_FILES = 16;
+export const MAX_RESULT_FILE_BASE64 = 8_000_000;
+
+/** ADR 0995 D5 — the largest response body an external sandbox may send: room for both capped
+ *  streams, the files and JSON overhead. A larger body is refused, never buffered. */
+export function maxResponseBytes(): number {
+  return 4 * maxOutputBytes() + MAX_RESULT_FILE_BASE64 + 64_000;
+}
+
+function capText(v: unknown, cap: number): string {
+  const s = typeof v === 'string' ? v : '';
+  return s.length > cap ? `${s.slice(0, cap)}\n…[output truncated at ${cap} bytes]` : s;
+}
+
+/**
+ * ADR 0995 D5 — the ONE place an external sandbox's answer becomes a `SandboxExecResult`. Every
+ * field is type-checked (the Code-API path used to pass `body.stdout ?? ''` through, whatever it
+ * was), stdout/stderr are capped like the WASI runtime caps them, and files are capped by count
+ * and total base64. That output goes to the event log, an artifact and the model, so it is bounded
+ * before it leaves this module.
+ */
+export function normalizeSandboxResult(body: Record<string, unknown>, fallbackExit: number): SandboxExecResult {
+  const cap = maxOutputBytes();
+  const files: Array<{ name: string; mimeType: string; base64: string }> = [];
+  let budget = MAX_RESULT_FILE_BASE64;
+  let dropped = 0;
+  for (const f of Array.isArray(body.files) ? body.files : []) {
+    const r = f && typeof f === 'object' ? (f as Record<string, unknown>) : undefined;
+    if (!r || typeof r.name !== 'string' || typeof r.base64 !== 'string') continue;
+    if (files.length >= MAX_RESULT_FILES || r.base64.length > budget) { dropped++; continue; }
+    budget -= r.base64.length;
+    files.push({ name: r.name.slice(0, 255), mimeType: typeof r.mimeType === 'string' ? r.mimeType : 'application/octet-stream', base64: r.base64 });
+  }
+  const stderr = capText(body.stderr, cap);
+  return {
+    exitCode: typeof body.exitCode === 'number' && Number.isFinite(body.exitCode) ? body.exitCode : fallbackExit,
+    stdout: capText(body.stdout, cap),
+    stderr: dropped > 0 ? `${stderr}${stderr ? '\n' : ''}…[${dropped} file(s) dropped: over the ${MAX_RESULT_FILES}-file / ${MAX_RESULT_FILE_BASE64}-byte cap]` : stderr,
+    timedOut: body.timedOut === true,
+    files,
+  };
+}
+
+/** ADR 0995 D5 — read a JSON response body, refusing one larger than `maxBytes` without buffering
+ *  it. An unparseable body reads as `{}` (the adapters map that to their fallback exit code). */
+export async function readJsonCapped(res: { body: AsyncIterable<Uint8Array> | null }, maxBytes: number): Promise<Record<string, unknown>> {
+  if (!res.body) return {};
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for await (const chunk of res.body) {
+    total += chunk.byteLength;
+    if (total > maxBytes) throw err('sandbox_transport_error', 'sandbox_response_too_large');
+    chunks.push(chunk);
+  }
+  try {
+    const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
 /** ADR 0114 Phase 2/7 — the pre-egress request validation shared by EVERY adapter: code required +
  *  size-capped, stdin size-capped (CXE-5), and the language allowlist (defense-in-depth, before any
  *  egress). Returns the normalized (lowercased) language. Shared so the E2B adapter (Phase 8)
@@ -179,21 +246,15 @@ async function runCodeApiSandbox(req: SandboxExecRequest): Promise<SandboxExecRe
         dispatcher: webhookEgressDispatcher(),
         signal: ctrl.signal,
       });
-      const body = (await res.json().catch(() => ({}))) as Partial<SandboxExecResult>;
-      const result = {
-        exitCode: typeof body.exitCode === 'number' ? body.exitCode : (res.ok ? 0 : 1),
-        stdout: body.stdout ?? '',
-        stderr: body.stderr ?? '',
-        timedOut: body.timedOut ?? false,
-        files: Array.isArray(body.files) ? body.files : [],
-      };
+      const result = normalizeSandboxResult(await readJsonCapped(res, maxResponseBytes()), res.ok ? 0 : 1);
       // CXE-6: audit the dispatch outcome (language + exit + timed-out; never code/stdin/endpoint).
       log.info('code_exec_dispatched', { language, exitCode: result.exitCode, timedOut: result.timedOut });
       return result;
     } catch (e) {
       // §D — never echo the endpoint location; a timeout reads as a transport error.
       const aborted = e instanceof Error && e.name === 'AbortError';
-      throw err('sandbox_transport_error', aborted ? 'sandbox_timeout' : 'sandbox_transport_error');
+      const tooLarge = e instanceof Error && e.message === 'sandbox_response_too_large';
+      throw err('sandbox_transport_error', aborted ? 'sandbox_timeout' : tooLarge ? 'sandbox_response_too_large' : 'sandbox_transport_error');
     } finally {
       clearTimeout(timer);
     }
@@ -228,16 +289,30 @@ function resolveSandboxExecutor():
   return undefined;
 }
 
+/** ADR 0995 D7 — which executor is selected, for the tests that pin the precedence ladder by
+ *  reference identity. Production code never calls an executor directly: it goes through
+ *  `createSandboxRunner(tenantId)`, which adds the toggle, the budget and the metering. */
+export function selectSandboxExecutor(): ((req: SandboxExecRequest) => Promise<SandboxExecResult>) | undefined {
+  return resolveSandboxExecutor()?.exec;
+}
+
+/** ADR 0995 D6 — refusals raised before anything reached a sandbox. These release the budget
+ *  reservation; everything else (a result, a far-end timeout, a transport error) was a dispatch
+ *  and stays charged. */
+const PRE_DISPATCH_CODES: ReadonlySet<string> = new Set(['validation_error', 'content_too_long', 'resource_exhausted', 'capability_not_provided']);
+
 /** The `ctx.runSandboxedCode` binding — `undefined` (honest-off) unless a sandbox executor is
  *  available (an external endpoint OR the opt-in WASI runtime). Wiring it only-when-available
- *  preserves the Phase-1 `capability_not_provided` behavior on a host with no sandbox. */
-export function createSandboxRunner(tenantId?: string): ((req: SandboxExecRequest) => Promise<SandboxExecResult>) | undefined {
+ *  preserves the Phase-1 `capability_not_provided` behavior on a host with no sandbox.
+ *
+ *  CORRECTED (ADR 0995 D7) — `tenantId` used to be optional, and with none the bare executor came
+ *  back with no toggle check and no budget. Both callers passed one, so the gate held by
+ *  convention; it is now required, so a third caller cannot skip it. */
+export function createSandboxRunner(tenantId: string): ((req: SandboxExecRequest) => Promise<SandboxExecResult>) | undefined {
   const resolved = resolveSandboxExecutor();
   if (!resolved) return undefined;
   const exec = resolved.exec;
-  if (!tenantId) return exec; // no tenant context → no budget (back-compat)
-  // ADR 0114 Phase 5 — gate each run on the tenant's daily exec budget; record on
-  // success. Over budget ⇒ `resource_exhausted` (no execution, no charge).
+  // ADR 0114 Phase 5 — gate each run on the tenant's daily exec budget.
   return async (req: SandboxExecRequest): Promise<SandboxExecResult> => {
     // ADR 0820 §8.2 — the `code-exec` ACCESS gate (toggle + plan; the feature is sold
     // in the Developer bundle). Here, in the one runner both lanes share (the
@@ -250,8 +325,13 @@ export function createSandboxRunner(tenantId?: string): ((req: SandboxExecReques
       log.info('code_exec_feature_refused', { tenantId, blockedBy: access?.blockedBy ?? 'off' });
       throw Object.assign(new Error('code execution is not enabled for this workspace.'), { code: 'feature_disabled' });
     }
+    // ADR 0995 D6 — RESERVE before dispatch. This used to check, run, then record on success
+    // only: an execution that threw (a far-end timeout, a transport error) was never counted, so
+    // code that always ran out the clock ran without limit, and N concurrent calls at max-1 all
+    // passed the check. The reservation is an atomic CAS increment below the max; the day is
+    // captured so a run that crosses midnight releases the bucket it took.
     const day = new Date().toISOString().slice(0, 10);
-    const budget = await checkCodeExecBudget(tenantId, day);
+    const budget = await reserveCodeExec(tenantId, day);
     if (!budget.allowed) {
       log.info('code_exec_budget_exceeded', { tenantId, used: budget.used, max: budget.max }); // CXE-6
       // ADR 0556 P1 — a budget refusal never reaches `meteredSandboxExec` (no
@@ -260,15 +340,32 @@ export function createSandboxRunner(tenantId?: string): ((req: SandboxExecReques
       // reasons" is one condition, whether the cap was per-tenant-daily or
       // per-process-concurrent.
       recordSandboxExecution(resolved.runtime, 'resource_exhausted');
-      throw Object.assign(new Error(`code execution daily budget reached (${budget.used}/${budget.max}).`), { code: 'resource_exhausted' });
+      throw Object.assign(new Error(budget.contended
+        ? 'code execution budget is busy; try again shortly.'
+        : `code execution daily budget reached (${budget.used}/${budget.max}).`), { code: 'resource_exhausted' });
     }
     const startedAt = Date.now();
-    const result = await exec(req);
-    await recordCodeExec(tenantId, day);
-    // ADR 0821 D3 — every runtime here is platform-paid (E2B / Code-API on the
-    // operator's key, WASI on the host's CPU): meter whole seconds beside the
-    // daily exec budget (no draw while `codeExecSecond` has no rate).
-    await meterPlatformUnits({ tenantId, unit: 'codeExecSecond', quantity: Math.max(1, Math.ceil((Date.now() - startedAt) / 1000)), featureId: 'code-exec' });
-    return result;
+    let dispatched = true;
+    try {
+      return await exec(req);
+    } catch (e) {
+      const code = (e as { code?: unknown } | null)?.code;
+      if (typeof code === 'string' && PRE_DISPATCH_CODES.has(code)) {
+        dispatched = false;
+        if (budget.reserved) await releaseCodeExec(tenantId, day);
+      }
+      throw e;
+    } finally {
+      // ADR 0821 D3 — every runtime here is platform-paid (E2B / Code-API on the
+      // operator's key, WASI on the host's CPU): meter whole seconds beside the
+      // daily exec budget (no draw while `codeExecSecond` has no rate). ADR 0995 D6 —
+      // in `finally`, so a failed dispatch is metered too.
+      if (dispatched) {
+        // A metering failure must neither mask the execution's own error nor turn a result the
+        // caller already paid for into a throw.
+        await meterPlatformUnits({ tenantId, unit: 'codeExecSecond', quantity: Math.max(1, Math.ceil((Date.now() - startedAt) / 1000)), featureId: 'code-exec' })
+          .catch((e: unknown) => log.warn('code_exec_meter_failed', { tenantId, error: e instanceof Error ? e.message : String(e) }));
+      }
+    }
   };
 }

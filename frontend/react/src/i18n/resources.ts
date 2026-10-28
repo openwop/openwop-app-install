@@ -114,15 +114,19 @@ for (const [path, loader] of Object.entries(import.meta.glob('/src/features/*/i1
  * ADR 0862 D3 — `assistantAction` qualifies for the same reason: its only renderer is
  * `assistantAction/AssistantActionFields.tsx`, which every consumer lazy-imports and
  * which owns its own Suspense boundary.
+ *
+ * `workforces` and `settings` qualify for the featureToggles reason (shared-chunk
+ * headroom, 2026-10-26): every renderer is a page `chrome/features.tsx` lazy-imports
+ * as a route, and nothing outside either directory reads the namespace.
  */
-for (const [path, loader] of Object.entries(import.meta.glob(['/src/featureToggles/i18n/en.ts', '/src/assistantAction/i18n/en.ts']))) {
+for (const [path, loader] of Object.entries(import.meta.glob(['/src/featureToggles/i18n/en.ts', '/src/assistantAction/i18n/en.ts', '/src/workforces/i18n/en.ts', '/src/settings/i18n/en.ts']))) {
   enFeatureLoaders[nsFromPath(path)] = loader;
 }
 
 const en = build({
   ...import.meta.glob('/src/i18n/locales/en/*.ts', { eager: true }),
   ...shellFeatureCatalogs,
-  ...import.meta.glob(['/src/*/i18n/en.ts', '!/src/featureToggles/i18n/en.ts', '!/src/assistantAction/i18n/en.ts'], { eager: true }),
+  ...import.meta.glob(['/src/*/i18n/en.ts', '!/src/featureToggles/i18n/en.ts', '!/src/assistantAction/i18n/en.ts', '!/src/workforces/i18n/en.ts', '!/src/settings/i18n/en.ts'], { eager: true }),
 });
 
 /** Namespaces deferred out of the eager `en` bundle (feature pages own them). */

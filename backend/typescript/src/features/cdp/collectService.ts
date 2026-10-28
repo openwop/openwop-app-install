@@ -6,11 +6,12 @@
  * The generic `cdp/collect` endpoint the collection SDKs target.
  */
 import { randomUUID, createHash } from 'node:crypto';
-import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { OpenwopError } from '../../types.js';
+import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { looksLikePiiName } from '../../host/dataClassification.js';
 import { registerRetentionPurger, purgeRowsByAge } from '../../host/retentionPurger.js';
 import { validateEvent } from './eventSchemaService.js';
+import { collectedEvents as store, isLiveCollectedEvent, persistCollectedEvent, replayCollectedEvent, deleteCollectedEvent } from './visitorEventIndex.js';
 
 export interface CollectedEvent {
   eventId: string;
@@ -22,8 +23,6 @@ export interface CollectedEvent {
   schemaVersion?: number;
   at: string;
 }
-
-const store = new DurableCollection<CollectedEvent>('cdp:collected-event', (e) => e.eventId, undefined, (e) => e.tenantId);
 
 /** Shallow PII-field detection over the payload keys (the ingest tag). */
 function tagPiiFields(payload: Record<string, unknown>): string[] {
@@ -51,8 +50,8 @@ export async function collectEvent(tenantId: string, eventType: string, payload:
     ? `evt:ck:${createHash('sha256').update(`${tenantId}\n${et}\n${dedupeKey}`).digest('hex').slice(0, 40)}`
     : undefined;
   if (dedupId) {
-    const existing = await store.get(dedupId);
-    if (existing && existing.tenantId === tenantId) {
+    const existing = await replayCollectedEvent(tenantId, dedupId, et, body);
+    if (existing) {
       return { eventId: existing.eventId, hasSchema: existing.schemaVersion !== undefined, ...(existing.schemaVersion !== undefined ? { schemaVersion: existing.schemaVersion } : {}), piiFields: existing.piiFields };
     }
   }
@@ -70,13 +69,13 @@ export async function collectEvent(tenantId: string, eventType: string, payload:
     ...(result.version !== undefined ? { schemaVersion: result.version } : {}),
     at: new Date().toISOString(),
   };
-  await store.put(rec);
-  return { eventId: rec.eventId, hasSchema: result.hasSchema, ...(result.version !== undefined ? { schemaVersion: result.version } : {}), piiFields };
+  const stored = await persistCollectedEvent(rec);
+  return { eventId: stored.eventId, hasSchema: stored.schemaVersion !== undefined, ...(stored.schemaVersion !== undefined ? { schemaVersion: stored.schemaVersion } : {}), piiFields: stored.piiFields };
 }
 
 /** Recent collected events for a tenant (newest first) — the debugger/observability read. */
 export async function listCollectedEvents(tenantId: string, limit = 100): Promise<CollectedEvent[]> {
-  return (await store.listForTenantIndexed(tenantId)).sort((a, b) => b.at.localeCompare(a.at)).slice(0, limit);
+  return (await store.listForTenantIndexed(tenantId)).filter(isLiveCollectedEvent).filter((row) => row.tenantId === tenantId).sort((a, b) => b.at.localeCompare(a.at)).slice(0, limit);
 }
 
 /** Hard cap on a single batch — a batch endpoint fans out N writes per request, so an
@@ -134,8 +133,36 @@ registerRetentionPurger({
   dryRun: 'rows-by-age',
   async purge(tenantId, classification, cutoffIso) {
     if (!tenantId || classification !== 'confidential-pii') return 0;
-    return purgeRowsByAge('cdp:collected-event', await store.listForTenantIndexed(tenantId), tenantId, cutoffIso,
+    return purgeRowsByAge('cdp:collected-event', (await store.listForTenantIndexed(tenantId)).filter(isLiveCollectedEvent), tenantId, cutoffIso,
       (e) => ({ tenantId: e.tenantId, updatedAt: e.at, id: e.eventId }),
-      (id) => store.delete(id));
+      async (id) => {
+        // Commit the coverage barrier before an event can disappear. An
+        // ambiguous delete acknowledgement must never leave a complete rollup.
+        // This callback is not called by the retention dry-run lane.
+        await advanceRetentionWatermark(tenantId, cutoffIso);
+        return deleteCollectedEvent(tenantId, id);
+      });
   },
 });
+
+/** ADR 0949 P1b — per tenant, the newest cutoff admitted for event deletion.
+ *  It can conservatively report partial coverage after a failed delete, but
+ *  never complete coverage after a committed one. Subject erasure does not
+ *  advance it: that removes one person's events, not a time range. */
+const watermarks = new DurableCollection<{ tenantId: string; purgedBefore: string }>(
+  'cdp:retention-watermark', (w) => w.tenantId, undefined, (w) => w.tenantId,
+);
+
+async function advanceRetentionWatermark(tenantId: string, cutoffIso: string): Promise<void> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const cur = await watermarks.get(tenantId);
+    if (cur && cur.purgedBefore >= cutoffIso) return;
+    if (await watermarks.compareAndSwap(cur, { tenantId, purgedBefore: cutoffIso })) return;
+  }
+  throw new OpenwopError('conflict', 'Retention coverage could not be recorded; the event was retained.', 409, { reason: 'retention_watermark_conflict' });
+}
+
+/** Events collected before this instant may have been purged (null: none were). */
+export async function collectedEventsRetainedSince(tenantId: string): Promise<string | null> {
+  return (await watermarks.get(tenantId))?.purgedBefore ?? null;
+}

@@ -2,6 +2,10 @@
  * A10 — verifier/critic in the live dispatch (RFC 0090). An injected critic runs
  * over the actor's result before commit; it emits `agent.verified`, and on a
  * gating host a non-`pass` verdict escalates instead of completing.
+ *
+ * Tracker TST-BKX-8. Red when gating ignores `verifierGating`, a `pass` verdict
+ * gates, or the verdict's criteria are dropped from `agent.verified` — each
+ * sabotage-witnessed (w65).
  */
 
 import { afterEach, describe, expect, it } from 'vitest';

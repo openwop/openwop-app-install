@@ -47,7 +47,7 @@ import type {
   RelayDeviceRecord,
 } from '../../messaging/types.js';
 import { egressExtraJson, applyEgressExtra } from '../../messaging/types.js';
-import { IdempotentCommitRejectedError, PAYLOAD_KEY_RE, RUN_FINAL_STATUSES, type Storage } from '../storage.js';
+import { ADMISSION_HOLDING_STATUSES, AdmissionRefusedError, IdempotentCommitRejectedError, PAYLOAD_KEY_RE, RUN_FINAL_STATUSES, type Storage } from '../storage.js';
 import { applyMigrations } from './schema.js';
 import { isForwardExecutionEvent, RunLogClosedError, TERMINAL_RUN_EVENT_TYPES } from '../runLogClosure.js';
 import { nextChatMessageCreatedAt } from '../chatMessageOrder.js';
@@ -297,6 +297,17 @@ export function openSqliteStorage(dbPath: string): Storage {
     WHERE run_id = @runId AND type = @type AND json_extract(payload, @path) = @value
     ORDER BY sequence ASC
     LIMIT 1
+  `);
+  const findLastEventByPayloadStmt = db.prepare(`
+    SELECT * FROM events
+    WHERE run_id = @runId AND type = @type AND json_extract(payload, @path) = @value
+      AND (@nodeId IS NULL OR node_id = @nodeId)
+    ORDER BY sequence DESC LIMIT 1
+  `);
+  const findFirstNodeEventByPayloadStmt = db.prepare(`
+    SELECT * FROM events
+    WHERE run_id = @runId AND type = @type AND node_id = @nodeId AND json_extract(payload, @path) = @value
+    ORDER BY sequence ASC LIMIT 1
   `);
   const listEventsStmt = db.prepare(`
     SELECT * FROM events
@@ -884,13 +895,26 @@ export function openSqliteStorage(dbPath: string): Storage {
   // caller's token no longer holds the row (reclaimed) and the THROW rolls the
   // run + outbox rows back with it — better-sqlite3 rolls back a transaction
   // whose function throws.
+  // ADR 0987 D2 — admission counted from run state inside the insert. SQLite has
+  // one writer, and this runs inside its write transaction, so the count and the
+  // insert cannot interleave with another admission. Mirrors the Postgres adapter.
+  const countAdmissionHoldingStmt = db.prepare(
+    `SELECT count(*) AS n FROM runs WHERE admission_key = ? AND status IN (${ADMISSION_HOLDING_STATUSES.map(() => '?').join(',')})`,
+  );
+  const setAdmissionKeyStmt = db.prepare(`UPDATE runs SET admission_key = ? WHERE run_id = ?`);
   const insertRunWithOutboxTxn = db.transaction(
     (
       runParams: Record<string, unknown>,
       outboxParams: Record<string, unknown> | null,
       idemParams: (Record<string, unknown> & { key: string }) | null,
+      admission: { key: string; cap: number } | null = null,
     ): void => {
+      if (admission) {
+        const row = countAdmissionHoldingStmt.get(admission.key, ...ADMISSION_HOLDING_STATUSES) as { n: number };
+        if (row.n >= admission.cap) throw new AdmissionRefusedError(admission.cap, row.n);
+      }
       insertRunStmt.run(runParams);
+      if (admission) setAdmissionKeyStmt.run(admission.key, runParams.runId);
       if (outboxParams) insertDispatchOutboxStmt.run(outboxParams);
       if (idemParams) {
         const res = completeIdemResponseStmt.run(idemParams);
@@ -1265,7 +1289,7 @@ export function openSqliteStorage(dbPath: string): Storage {
       // the run and the intent are visible together or not at all.
       // ADR 0549 H56 — and the HTTP idempotency commit rides in the SAME
       // transaction when present (see `InsertRunOptions.idempotencyCommit`).
-      if (opts?.dispatchOutbox || opts?.idempotencyCommit) {
+      if (opts?.dispatchOutbox || opts?.idempotencyCommit || opts?.admission) {
         insertRunWithOutboxTxn(
           runParams,
           opts.dispatchOutbox
@@ -1289,6 +1313,7 @@ export function openSqliteStorage(dbPath: string): Storage {
                 claimToken: opts.idempotencyCommit.claimToken,
               }
             : null,
+          opts.admission ?? null,
         );
         return;
       }
@@ -1380,7 +1405,9 @@ export function openSqliteStorage(dbPath: string): Storage {
             SET metadata = json_patch(COALESCE(metadata, '{}'), @patch),
                 updated_at = @updatedAt
           WHERE run_id = @runId
-            AND (@absentKey IS NULL OR json_extract(COALESCE(metadata, '{}'), '$.' || @absentKey) IS NULL)`,
+            AND (@absentKey IS NULL OR NOT EXISTS (
+              SELECT 1 FROM json_each(COALESCE(metadata, '{}')) WHERE key = @absentKey
+            ))`,
       ).run({
         runId,
         patch: JSON.stringify(patch),
@@ -1586,9 +1613,13 @@ export function openSqliteStorage(dbPath: string): Storage {
       return rows.map(rowToEvent);
     },
 
-    async findFirstEventByPayload(runId, type, payloadKey, payloadValue) {
+    async findFirstEventByPayload(runId, type, payloadKey, payloadValue, opts) {
       if (!PAYLOAD_KEY_RE.test(payloadKey)) throw new Error(`findFirstEventByPayload: invalid payload key ${payloadKey}`);
-      const row = findFirstEventByPayloadStmt.get({ runId, type, path: `$.${payloadKey}`, value: payloadValue });
+      const base = { runId, type, path: `$.${payloadKey}`, value: payloadValue };
+      const row = opts?.newestFirst
+        ? findLastEventByPayloadStmt.get({ ...base, nodeId: opts.nodeId ?? null })
+        : opts?.nodeId !== undefined ? findFirstNodeEventByPayloadStmt.get({ ...base, nodeId: opts.nodeId })
+        : findFirstEventByPayloadStmt.get(base);
       return row ? rowToEvent(row as Parameters<typeof rowToEvent>[0]) : null;
     },
 
@@ -2512,6 +2543,32 @@ export function openSqliteStorage(dbPath: string): Storage {
       const row = countChatMessagesStmt.get(sessionId) as { n: number } | undefined;
       return row?.n ?? 0;
     },
+    async searchChatMessages(sessionIds, needles, opts) {
+      if (sessionIds.length === 0 || needles.length === 0 || opts.limit <= 0) return [];
+      type Row = { message_id: string; session_id: string; role: string; content: string; meta: string | null; author_subject: string | null; created_at: string };
+      // ADR 0997 D1 — one `LIKE … ESCAPE '\'` per needle (AND). SQLite's LIKE folds
+      // ASCII case only; the caller's re-check is case-insensitive for all scripts.
+      const patterns = needles.map((n) => `%${n.replace(/[\\%_]/g, (c) => `\\${c}`)}%`);
+      const likes = patterns.map(() => `AND content LIKE ? ESCAPE '\\'`).join(' ');
+      const rows = db.prepare(
+        `SELECT message_id, session_id, role, content, meta, author_subject, created_at
+         FROM chat_messages
+         WHERE session_id IN (SELECT value FROM json_each(?))
+           AND content <> '{"deleted":true}'
+           ${likes}
+         ORDER BY created_at DESC, message_id DESC
+         LIMIT ?`,
+      ).all(JSON.stringify(sessionIds), ...patterns, opts.limit) as Row[];
+      return rows.map((r): ChatMessageRecord => ({
+        messageId: r.message_id,
+        sessionId: r.session_id,
+        role: r.role as ChatMessageRecord['role'],
+        content: r.content,
+        meta: r.meta,
+        authorSubject: r.author_subject,
+        createdAt: r.created_at,
+      }));
+    },
     async listChatSessionMessages(sessionId, opts) {
       type Row = { message_id: string; session_id: string; role: string; content: string; meta: string | null; author_subject: string | null; created_at: string };
       let rows: Row[];
@@ -3271,6 +3328,10 @@ export function openSqliteStorage(dbPath: string): Storage {
     },
     async kvDelete(key) {
       const info = db.prepare(`DELETE FROM host_ext_kv WHERE k = ?`).run(key);
+      return info.changes > 0;
+    },
+    async kvCompareAndDelete(key, expected) {
+      const info = db.prepare('DELETE FROM host_ext_kv WHERE k = ? AND v = ?').run(key, expected);
       return info.changes > 0;
     },
     async kvCompareAndSwap(key, expected, next) {

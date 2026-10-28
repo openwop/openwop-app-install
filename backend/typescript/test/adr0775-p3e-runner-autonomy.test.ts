@@ -11,13 +11,18 @@
  *
  * Each refusal has a control that differs in exactly one input, so a pass is
  * never "the node failed for some other reason".
+ *
+ * Red when (wave 60 probes, tracker TST-BRC-6): a run a person started is gated; the
+ * paused or never-list refusal is dropped; the verdict loses the run's workflowId; a
+ * run that cannot pause is let through; a rejection is accepted; the memory entry id
+ * stops being per run node, a replay writes, or the entry is not marked untrusted.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
 import agentRunnerNode from '../src/host/agentRunnerNode.js';
-import { getAgentRegistry, type ResolvedAgentManifest } from '../src/executor/agentRegistry.js';
+import { getAgentRegistry } from '../src/executor/agentRegistry.js';
 import { createRosterEntry, updateRosterEntry } from '../src/host/rosterService.js';
 import { upsertAgentProfile } from '../src/host/agentProfileService.js';
 import { agentMemoryScope } from '../src/host/agentMemoryAdapter.js';
@@ -39,7 +44,7 @@ beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'p3e', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  deps = { storage: app.locals.storage, hostSuite: app.locals.hostSuite } as unknown as StartRunDeps;
+  deps = { storage: app.locals.storage, hostSuite: app.locals.hostSuite };
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
 }, 120_000);
 afterAll(async () => {
@@ -52,20 +57,29 @@ async function member(opts: { longTerm?: boolean } = {}): Promise<string> {
     agentId, persona: 'P3e', modelClass: 'chat', systemPrompt: 'You triage invoices.',
     packName: 'test', packVersion: '0', toolAllowlist: [],
     ...(opts.longTerm ? { memoryShape: { longTerm: true } } : {}),
-  } as ResolvedAgentManifest);
+  });
   const entry = await createRosterEntry({ tenantId: T, persona: `P3e ${n++}`, agentRef: { agentId, version: '0' } });
   return entry.rosterId;
 }
 
-function run(rosterId: string, over: Partial<NodeContext> & { conversationId?: string } = {}): Promise<NodeOutcome> {
+async function run(rosterId: string, over: Partial<NodeContext> & { conversationId?: string } = {}): Promise<NodeOutcome> {
   const { conversationId, ...ctxOver } = over;
   const callAI = vi.fn<(req: AiCallRequest) => Promise<AiCallResult>>(async () => ({ content: 'triaged 3 invoices' }));
-  return agentRunnerNode.execute({
-    tenantId: T, runId: `run-p3e-${n++}`, nodeId: 'agent', workflowId: 'wf.p3e', config: { offerTools: [] }, configurable: {},
+  const ctx: NodeContext = {
+    tenantId: T, runId: `run-p3e-${n++}`, nodeId: 'agent', workflowId: 'wf.p3e', attempt: 1, secrets: {},
+    config: { offerTools: [] }, configurable: {},
     inputs: { agentId: rosterId, task: 'triage the inbox', credentialRef: 'managed:openwop-free', ...(conversationId ? { conversationId } : {}) },
-    emit: async () => {}, callAI, callAIWithTools: vi.fn(async () => { throw new Error('no tools offered'); }),
+    emit: async () => ({ eventId: 'evt-p3e', sequence: 0 }), callAI, callAIWithTools: vi.fn(async () => { throw new Error('no tools offered'); }),
     ...ctxOver,
-  } as unknown as NodeContext);
+  };
+  // ADR 0944 resolves the client binding from the durable run, even for an
+  // unscoped agent. An absent run correctly refuses shared-memory writes.
+  if (!await deps.storage.getRun(ctx.runId)) {
+    const at = new Date().toISOString();
+    await deps.storage.insertRun({ runId: ctx.runId, tenantId: T, workflowId: ctx.workflowId!, status: 'running',
+      inputs: {}, configurable: {}, metadata: {}, createdAt: at, updatedAt: at });
+  }
+  return agentRunnerNode.execute(ctx);
 }
 
 const code = (out: NodeOutcome): string | undefined => (out as { error?: { code?: string } }).error?.code;
@@ -108,7 +122,7 @@ describe('a workflow on the agent\'s hitl list', () => {
   it('pauses the node for approval before the agent acts', async () => {
     const rosterId = await hitlMember();
     const suspend = vi.fn(async (_payload: Record<string, unknown>): Promise<unknown> => { throw new Error('suspended'); });
-    await expect(run(rosterId, { suspend } as Partial<NodeContext>)).rejects.toThrow('suspended');
+    await expect(run(rosterId, { suspend })).rejects.toThrow('suspended');
     expect(suspend).toHaveBeenCalledTimes(1);
     expect(suspend.mock.calls[0]![0]).toMatchObject({ kind: 'approval', key: `agent-hitl:${rosterId}`, actions: ['approve', 'reject'] });
   });
@@ -116,9 +130,9 @@ describe('a workflow on the agent\'s hitl list', () => {
   it('approved, the agent acts; rejected, the node fails as approval_rejected', async () => {
     const rosterId = await hitlMember();
     for (const action of ['approve', 'accept']) {
-      expect((await run(rosterId, { suspend: async () => ({ action }) } as Partial<NodeContext>)).status).toBe('success');
+      expect((await run(rosterId, { suspend: async () => ({ action }) })).status).toBe('success');
     }
-    const rejected = await run(rosterId, { suspend: async () => ({ action: 'reject' }) } as Partial<NodeContext>);
+    const rejected = await run(rosterId, { suspend: async () => ({ action: 'reject' }) });
     expect(code(rejected)).toBe('approval_rejected');
     expect((rejected as { retryable?: boolean }).retryable).toBe(false);
   });
@@ -130,8 +144,8 @@ describe('a workflow on the agent\'s hitl list', () => {
   it('another workflow, or a run a person started, does not ask', async () => {
     const rosterId = await hitlMember();
     const suspend = vi.fn(async (_payload: Record<string, unknown>): Promise<unknown> => ({ action: 'reject' }));
-    expect((await run(rosterId, { suspend, workflowId: 'wf.p3e-other' } as Partial<NodeContext>)).status).toBe('success');
-    expect((await run(rosterId, { suspend, actingUserId: 'user-p3e' } as Partial<NodeContext>)).status).toBe('success');
+    expect((await run(rosterId, { suspend, workflowId: 'wf.p3e-other' })).status).toBe('success');
+    expect((await run(rosterId, { suspend, actingUserId: 'user-p3e' })).status).toBe('success');
     expect(suspend).not.toHaveBeenCalled();
   });
 });
@@ -200,7 +214,7 @@ describe('through the executor: a run nobody started', () => {
       run = await storage.getRun(runId!);
     }
     expect(run?.status).toBe('failed');
-    expect(JSON.stringify(run)).toContain('policy_denied');
+    expect(run?.error?.code, JSON.stringify(run?.error)).toBe('policy_denied');
   });
 
   it('a hitl-listed workflow pauses the run on an approval; rejecting it fails the run as approval_rejected', async () => {
@@ -225,12 +239,13 @@ describe('through the executor: a run nobody started', () => {
     };
     expect((await settle(['waiting-approval', 'completed', 'failed']))?.status).toBe('waiting-approval');
     const open = await call('GET', `/host/openwop-app/runs/${runId}/interrupts`);
-    expect(JSON.stringify(open.body)).toContain('approval');
+    const interrupts = (open.body.interrupts ?? []) as Array<{ kind?: string; nodeId?: string }>;
+    expect(interrupts.map((i) => [i.kind, i.nodeId]), JSON.stringify(open.body)).toEqual([['approval', 'agent']]);
 
     const resolved = await call('POST', `/runs/${encodeURIComponent(toWireRunId(runId!, tenantId))}/interrupts/agent`, { resumeValue: { action: 'reject' } });
     expect(resolved.status, JSON.stringify(resolved.body)).toBeLessThan(300);
     const after = await settle(['completed', 'failed', 'cancelled']);
     expect(after?.status).toBe('failed');
-    expect(JSON.stringify(after)).toContain('approval_rejected');
+    expect(after?.error?.code, JSON.stringify(after?.error)).toBe('approval_rejected');
   });
 });

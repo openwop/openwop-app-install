@@ -30,9 +30,16 @@ export const OPERATOR_WORKSPACE = 'host-kicktodo';
 const DURATIONS = [60, 120, 240, 480] as const;
 const MIN_JUSTIFICATION = 10;
 
-/** Whole minutes left before `iso`, never negative. */
-export function minutesLeft(iso: string, nowMs: number): number {
-  return Math.max(0, Math.ceil((Date.parse(iso) - nowMs) / 60_000));
+/**
+ * Whole minutes left before `iso`, never negative. With `sinceIso` (the
+ * activation's start, stamped by the same server clock as `iso`), it never
+ * exceeds the activation's own length: a client clock running behind the server
+ * would otherwise round an 8 h activation up to "481 minutes".
+ */
+export function minutesLeft(iso: string, nowMs: number, sinceIso?: string): number {
+  const left = Math.max(0, Math.ceil((Date.parse(iso) - nowMs) / 60_000));
+  if (sinceIso === undefined) return left;
+  return Math.min(left, Math.round((Date.parse(iso) - Date.parse(sinceIso)) / 60_000));
 }
 
 type Phase = 'idle' | 'working' | 'code';
@@ -158,7 +165,7 @@ export function OperatorAccessPanel(): JSX.Element | null {
 
       {rows && live ? (
         <div>
-          <Notice variant="success" {...(justActivated ? { announce: t('operatorActivated') } : {})}>{t('operatorLive', { count: minutesLeft(live.expiresAt, now) })}</Notice>
+          <Notice variant="success" {...(justActivated ? { announce: t('operatorActivated') } : {})}>{t('operatorLive', { count: minutesLeft(live.expiresAt, now, live.activatedAt) })}</Notice>
           <div className="action-bar">
             <Button onClick={() => void switchIn()}>{t('operatorSwitch')}</Button>
             <Button variant="secondary" onClick={() => void endNow()}>{t('operatorEnd')}</Button>

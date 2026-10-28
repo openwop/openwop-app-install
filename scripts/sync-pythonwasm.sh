@@ -2,6 +2,10 @@
 # ADR 0146 Phase 4a — vendor the CPython-WASI runtime for the in-process code-exec sandbox.
 # Downloads a PINNED python.wasm (wasi-preview1) + verifies its SHA-256. The Docker image runs
 # this (like sync-{schemas,fixtures,packs}.sh); the binary is gitignored, never committed.
+# `npm run ci` and the Tracegate daemon run it too (WASI-GATE-1), so the sandbox escape suite
+# runs in the gate instead of skipping. A verified copy is kept in a per-user cache
+# (OPENWOP_VENDOR_CACHE, default ~/.cache/openwop-vendor) so a fresh train worktree does not
+# re-download 25 MB; the cached copy is checksum-verified on the way in, exactly like a download.
 set -euo pipefail
 
 VERSION="3.12.0+20231211-040d5a6"
@@ -12,15 +16,27 @@ DEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/backend/typescript/ve
 DEST="${DEST_DIR}/python-3.12.0.wasm"
 mkdir -p "${DEST_DIR}"
 
-verify() { echo "${SHA256}  ${DEST}" | shasum -a 256 -c - >/dev/null 2>&1; }
+verify() { echo "${SHA256}  ${1:-${DEST}}" | shasum -a 256 -c - >/dev/null 2>&1; }
+CACHE_DIR="${OPENWOP_VENDOR_CACHE:-${HOME:-/tmp}/.cache/openwop-vendor}"
+CACHED="${CACHE_DIR}/python-3.12.0-${SHA256:0:16}.wasm"
 
 if [[ -f "${DEST}" ]] && verify; then
   echo "python-wasi: present + checksum OK (${VERSION})"
   exit 0
 fi
 
+if [[ -f "${CACHED}" ]] && verify "${CACHED}"; then
+  cp "${CACHED}" "${DEST}"
+  if verify; then echo "python-wasi: copied from cache + checksum OK (${VERSION})"; exit 0; fi
+fi
+
 echo "python-wasi: downloading ${VERSION} (~25 MB) ..."
-curl -sSL --retry 3 --retry-delay 2 -o "${DEST}" "${URL}"
+if ! curl -fsSL --retry 3 --retry-delay 2 -o "${DEST}" "${URL}"; then
+  rm -f "${DEST}"
+  echo "python-wasi: DOWNLOAD FAILED (${URL}) and no verified copy in ${CACHE_DIR}." >&2
+  echo "python-wasi: offline? Copy a verified python-3.12.0.wasm (sha256 ${SHA256}) to ${DEST} or ${CACHED}." >&2
+  exit 1
+fi
 
 if ! verify; then
   echo "python-wasi: CHECKSUM MISMATCH — refusing to use the file (supply-chain guard)." >&2
@@ -28,3 +44,5 @@ if ! verify; then
   exit 1
 fi
 echo "python-wasi: downloaded + verified (${VERSION})"
+# Best effort: a cache that cannot be written only costs the next run a download.
+{ mkdir -p "${CACHE_DIR}" && cp "${DEST}" "${CACHED}.tmp.$$" && mv "${CACHED}.tmp.$$" "${CACHED}"; } 2>/dev/null || rm -f "${CACHED}.tmp.$$"

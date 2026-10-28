@@ -8,6 +8,10 @@
  * P12 — a node's declared feature surface appears in the catalog as
  * `host.sample.<id>`; missing when the host does not compose the feature, and on
  * the per-tenant catalog when the tenant has it off.
+ *
+ * Tracker TST-BJV. Red when (probe-witnessed, w65): the id folds params with the old
+ * array replacer (nested values collapse); nested keys are not sorted (and the flat
+ * id moves); a tenant-off feature surface is not reported missing.
  */
 import { createHash } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';

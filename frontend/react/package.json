@@ -1,6 +1,6 @@
 {
   "name": "@openwop/app-web",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "private": true,
   "type": "module",
   "description": "OpenWOP application frontend — React SPA consuming @openwop/openwop.",
@@ -104,8 +104,8 @@
     "jsdom": "^25.0.1",
     "typescript": "^5.6.0",
     "typescript-eslint": "^8.60.1",
-    "vite": "^7.3.5",
-    "vitest": "^4.1.11"
+    "vite": "^7.3.7",
+    "vitest": "^4.1.12"
   },
   "overrides": {
     "esbuild": "^0.28.1",

@@ -23,6 +23,8 @@ import { getEventLog } from '../executor/eventLog.js';
 import { createLogger } from '../observability/logger.js';
 import { ATTRIBUTION_KEYS } from './agentRunActivityIndex.js';
 import { CALLER_LINKAGE_KEYS } from './runLinkage.js';
+import { RUN_START_GRANT_METADATA_KEY } from './runStartGrant.js';
+import { PROMOTION_READ_PREFIX } from './experiments/promotionReadKey.js';
 import { unwindOnDispatchTerminal } from './compensationRuntime.js';
 
 const log = createLogger('run-dispatch');
@@ -78,7 +80,22 @@ const log = createLogger('run-dispatch');
 // supply one would choose when an approved mission expires — a far-future anchor
 // never expires, a past one ends the mission at once. Only the conversation tool
 // gate writes them (`storage.updateRun`, not a strip site); `:fork` copies them.
-const RESERVED_RUN_METADATA_KEYS = ['definitionRevision', 'definitionResolvedFrom', 'launchResolved', 'costUsd', 'costTokens', 'costByNode', 'debug', 'eval', 'redriveOf', 'onlineEvalScored', 'compaction', 'personalTenant', 'owner', 'traceContext', 'nodePinMismatches', 'teamLedger', 'orgScopeSubject', 'intentLedger', 'intentLedgerApprovals'] as const;
+// `openwop-app.playbook` (ADR 0959 D8) names which playbook version made a run; only the
+// campaign-playbooks run-start contributor writes it, from a host-written index.
+// `clientContext` (ADR 0944 D5) references the client-context snapshot a run's
+// agents read. A caller who could set it would point a run at a snapshot of their
+// choosing; only the campaign-ops run-start contributor writes it.
+// `openwop-app.agentBindings` (ADR 0943 D2) names the agent and key each agent-runner
+// node runs as; a caller who could set it would pick the agent (and the key) of
+// any node. Only the campaign-ops run-start contributor writes it.
+// `campaignGoal` (ADR 0941 D2b) is the campaign's goal frozen at run start; the
+// spend caps and experiment guardrails read it, so a caller who could supply one
+// would choose the limits their own run is held to. Only the campaign run-start
+// contributor writes it; `:fork` and sub-workflow children copy it.
+// `campaignAutonomy` / `campaignForkPosture` (ADR 0942 D4, D10.4) are the campaign's
+// autonomy policy frozen at run start and the attended posture of a branch fork or
+// redrive. A caller who could supply either would choose its own HITL level.
+const RESERVED_RUN_METADATA_KEYS = ['definitionRevision', 'definitionResolvedFrom', 'launchResolved', 'costUsd', 'costTokens', 'costByNode', 'debug', 'eval', 'redriveOf', 'onlineEvalScored', 'compaction', 'personalTenant', 'owner', 'traceContext', 'nodePinMismatches', 'teamLedger', 'orgScopeSubject', 'intentLedger', 'intentLedgerApprovals', 'campaignGoal', 'campaignAutonomy', 'campaignForkPosture', 'openwop-app.experiments', 'openwop-app.agentBindings', 'clientContext', 'openwop-app.playbook'] as const;
 /**
  * The run-attribution blocks (`heartbeat`/`schedule`/`kanban`/`approval`) are
  * host-written: the scheduler, the kanban trigger, the heartbeat and approval
@@ -97,14 +114,33 @@ const RESERVED_RUN_METADATA_KEYS = ['definitionRevision', 'definitionResolvedFro
 // (client, approval, approved change-set hash). Only the campaign-ops run starters
 // write it; the execute surface trusts it to name the approved run, so a caller
 // who could set it could carry out an approved change from a run of their own.
-const CAMPAIGN_ATTRIBUTION_KEYS = ['campaignOrchestration', 'campaignChannel', 'openwop-app.campaignOps'] as const;
+// ADR 0954 D2 — `crmLeadIntel` names the client and lead a grading run is for;
+// the CRM `gradeLead` surface op trusts it, so a caller who could set it could
+// grade another client's lead from a run of their own.
+const CAMPAIGN_ATTRIBUTION_KEYS = ['campaignOrchestration', 'campaignChannel', 'openwop-app.campaignOps', 'crmLeadIntel'] as const;
+
+/**
+ * ADR 0075 §D4 — `approverOrgId` is the org a run's group/role approvers resolve
+ * on (`routes/interrupts.ts`, `approverResolution.ts`). Host-written only: POST
+ * /runs derives it fail-closed from the tenant's orgs, and the campaign stamps
+ * write it from the client a run is bound to. A caller who could set it chose the
+ * org whose admins approve their run. `POST /runs` wrote the host value only when
+ * the workflow had group/role gates, so on any other workflow the caller's value
+ * survived the spread. Not reserved globally: host paths write it on purpose.
+ */
+export const APPROVER_SCOPE_KEYS = ['approverOrgId'] as const;
 
 // ADR 0902 D2 — and the task-deck parent linkage (`runLinkage.ts`).
 export function stripCallerAttribution(metadata: Record<string, unknown>): Record<string, unknown> {
   const out = { ...metadata };
   for (const k of ATTRIBUTION_KEYS) delete out[k];
   for (const k of CAMPAIGN_ATTRIBUTION_KEYS) delete out[k];
+  for (const k of APPROVER_SCOPE_KEYS) delete out[k];
   for (const k of CALLER_LINKAGE_KEYS) delete out[k];
+  // ADR 0975 D8 — the start-grant stamp is what a feature's follow-up grant
+  // trusts to say "this run was started under MY grant"; a caller who could
+  // write it could continue a run the grant never admitted.
+  delete out[RUN_START_GRANT_METADATA_KEY];
   return out;
 }
 
@@ -112,6 +148,9 @@ export function stripReservedRunMetadata(metadata: Record<string, unknown> | und
   if (!metadata) return {};
   const out = { ...metadata };
   for (const k of RESERVED_RUN_METADATA_KEYS) delete out[k];
+  // Host-written as-executed safety evidence; public and scheduler metadata
+  // must never be able to fabricate a promotion replay's decision.
+  for (const k of Object.keys(out)) if (k.startsWith(PROMOTION_READ_PREFIX)) delete out[k];
   return out;
 }
 

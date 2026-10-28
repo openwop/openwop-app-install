@@ -9,7 +9,8 @@
  * `_bulk` + `_search`/`multi_match` surface used here is common to both).
  *
  * Tenant isolation: each (tenant, index) maps to its own physical OS index
- * `<prefix><tenant>-<index>` (lowercased), so no query can cross a tenant.
+ * (`physicalIndexName`), so no query can cross a tenant. The mapping is
+ * INJECTIVE: two different (tenant, index) pairs never share a physical index.
  *
  * Config (env):
  *   OPENWOP_SEARCH_OS_ENDPOINT      (required, e.g. https://os.internal:9200)
@@ -17,6 +18,7 @@
  *   OPENWOP_SEARCH_OS_INDEX_PREFIX  (default "openwop-")
  */
 
+import { createHash } from 'node:crypto';
 import type { BundleScope, SearchSurface } from '../inMemorySurfaces.js';
 import { registerSurfaceAdapter, resolveBackendId } from '../surfaceBackends.js';
 
@@ -52,7 +54,51 @@ export function loadOpenSearchConfigFromEnv(): { config: OpenSearchConfig | null
   };
 }
 
-const osName = (s: string) => s.toLowerCase().replace(/[^a-z0-9._-]/g, '-');
+/** OpenSearch's ceiling on an index name, in bytes. */
+export const OS_INDEX_NAME_MAX_BYTES = 255;
+const B32 = 'abcdefghijklmnopqrstuvwxyz234567';
+
+/** RFC 4648 base32, lowercase, unpadded: injective on byte strings, and its
+ *  alphabet (`a-z2-7`) is inside OpenSearch's index-name charset and never
+ *  contains the `.` separator. */
+function base32(s: string): string {
+  const bytes = Buffer.from(s, 'utf8');
+  let out = '';
+  let bits = 0;
+  let value = 0;
+  for (const b of bytes) {
+    value = (value << 8) | b;
+    bits += 8;
+    while (bits >= 5) {
+      out += B32[(value >>> (bits - 5)) & 31];
+      bits -= 5;
+    }
+  }
+  if (bits > 0) out += B32[(value << (5 - bits)) & 31];
+  return out;
+}
+
+/**
+ * The physical OpenSearch index for one (tenant, index) pair.
+ *
+ * This used to be `<prefix><lower(tenant)>-<lower(index)>` with every other
+ * character replaced by `-`. That mapping was lossy in three ways: tenant `a-b`
+ * + index `c` and tenant `a` + index `b-c` shared one index (a cross-tenant
+ * read), `Docs` and `docs` shared one, and a host index named `wf-x` shared the
+ * index of a run's `x` (ADR 0998 stores it as `wf:x`).
+ *
+ * Now each segment is base32-encoded (case- and byte-preserving) and joined with
+ * `.`, which base32 never emits, under a `v2.` scheme marker:
+ * `<prefix>v2.<b32(tenant)>.<b32(index)>`. A pair too long for the 255-byte
+ * limit falls back to `<prefix>h.<sha256(len(tenant):tenant index)>` (length-prefixed,
+ * so the split is unambiguous); the two forms
+ * cannot collide because they differ right after the constant prefix.
+ */
+export function physicalIndexName(prefix: string, tenantId: string, index: string): string {
+  const name = `${prefix}v2.${base32(tenantId)}.${base32(index)}`;
+  if (Buffer.byteLength(name, 'utf8') <= OS_INDEX_NAME_MAX_BYTES) return name;
+  return `${prefix}h.${createHash('sha256').update(`${tenantId.length}:${tenantId}${index}`).digest('hex')}`;
+}
 
 interface SearchDoc { id: string; fields: Record<string, string | number | boolean> }
 
@@ -62,7 +108,7 @@ export function createOpenSearchSearch(scope: BundleScope, deps: OpenSearchDeps 
   if (!cfg) {
     throw new Error('host.search backend "opensearch" selected but not configured — set OPENWOP_SEARCH_OS_ENDPOINT (+ auth).');
   }
-  const indexName = (index: unknown) => `${cfg.indexPrefix}${osName(scope.tenantId)}-${osName(String(index ?? 'default'))}`;
+  const indexName = (index: unknown) => physicalIndexName(cfg.indexPrefix, scope.tenantId, String(index ?? 'default'));
   const headers = (ct = 'application/json') => {
     const h: Record<string, string> = { 'content-type': ct };
     if (cfg.authHeader) h.authorization = cfg.authHeader;

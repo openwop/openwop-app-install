@@ -4,6 +4,15 @@
  * load-bearing bit — rebind-safe SSRF validation of the RESOLVED address (a host
  * that resolves to a private IP is refused BEFORE any socket, closing the
  * DNS-rebinding TOCTOU). `node:dns` is mocked so no real resolution/network runs.
+ * (`assertSmtpDialAllowed` never dials: "before any socket" means it refuses
+ * before RETURNING a dial target, which is what the cases assert.)
+ *
+ * What breaks it (sabotage-witnessed, /grade-tests wave 61, 8fw3g1-smtpe-*): the
+ * port allowlist, the resolved-address SSRF check (the REBIND case; an IP
+ * literal is refused one step EARLIER, by the host policy, so the literal case
+ * does not witness the resolved check — round-1 probe 8fw3g1-smtpe-ssrf was
+ * re-keyed to the rebind case alone), the shared ADR 0187 allow/deny policy,
+ * and the pinned address. Egress rules are reset in `finally`.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
@@ -50,7 +59,7 @@ describe('smtpEgress — TCP-egress firewall (ADR 0201)', () => {
     expect(t).toMatchObject({ host: 'good.smtp.test', address: '93.184.216.34', port: 587 });
   });
 
-  it('REBIND-SAFE: refuses a host that RESOLVES to a private IP (no socket opened)', async () => {
+  it('REBIND-SAFE: refuses a host that RESOLVES to a private IP (before any dial target is returned)', async () => {
     await blocked('rebind.evil.test', 465, 'ssrf_private_range');
     await blocked('metadata.rebind.test', 587, 'ssrf_private_range'); // 169.254.169.254 cloud metadata
   });
@@ -62,15 +71,21 @@ describe('smtpEgress — TCP-egress firewall (ADR 0201)', () => {
 
   it('honors the per-tenant ADR 0187 allowlist (shared policy, not a second firewall)', async () => {
     await putEgressRules(T, 'allowlist', ['good.smtp.test']);
-    const t = await assertSmtpDialAllowed(T, 'good.smtp.test', 587);
-    expect(t.address).toBe('93.184.216.34');
-    await blocked('other-public.smtp.test', 587, 'not_on_allowlist'); // resolves to [] but policy denies first
-    await putEgressRules(T, 'off', []); // reset
+    try {
+      const t = await assertSmtpDialAllowed(T, 'good.smtp.test', 587);
+      expect(t.address).toBe('93.184.216.34');
+      await blocked('other-public.smtp.test', 587, 'not_on_allowlist'); // resolves to [] but policy denies first
+    } finally {
+      await putEgressRules(T, 'off', []); // reset
+    }
   });
 
   it('honors the per-tenant denylist', async () => {
     await putEgressRules(T, 'denylist', ['good.smtp.test']);
-    await blocked('good.smtp.test', 587, 'denylist_match');
-    await putEgressRules(T, 'off', []);
+    try {
+      await blocked('good.smtp.test', 587, 'denylist_match');
+    } finally {
+      await putEgressRules(T, 'off', []);
+    }
   });
 });

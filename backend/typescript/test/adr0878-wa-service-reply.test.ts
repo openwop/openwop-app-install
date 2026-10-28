@@ -10,8 +10,14 @@
  *  - every other send stays strict (the generic `sendWhatsApp` still needs the opt-in);
  *  - exactly ONE caller in the tree (the service desk's reply delivery), and nothing
  *    reaches it from the whatsapp surface, the node pack, chat tools or MCP.
+ *
+ * Tracker TST-BHB-4. Red when (sabotage-witnessed, wave 62): the strict lane stops
+ * requiring the opt-in, or the support-reply lane starts requiring it; the 24h window
+ * is skipped or not tied to the connection; a STOP or a full marketing opt-out is
+ * ignored; an erasure tombstone is ignored; a template is accepted; a second caller
+ * appears in src; or a pack/surface/tool names the lane.
  */
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
@@ -104,7 +110,9 @@ describe('ADR 0878 OQ-1 — the support-reply lane', () => {
   it('REFUSES a template — the lane is session messages only', async () => {
     const to = num();
     await recordInboundMessage(TENANT, connectionId, `whatsapp:${to}`, new Date());
-    const smuggled = { connectionId, to, body: 'x', idempotencyKey: 'k-t', templateId: 'HX1' } as unknown as Parameters<typeof sendTicketReplyWhatsApp>[1]; // test-only justified cast: smuggles a field the signature forbids, to pin the runtime refusal
+    // A field the signature does not declare, smuggled through an intersection type
+    // (assignable without a cast) to pin the RUNTIME refusal.
+    const smuggled: Parameters<typeof sendTicketReplyWhatsApp>[1] & { templateId: string } = { connectionId, to, body: 'x', idempotencyKey: 'k-t', templateId: 'HX1' };
     expect(await sendTicketReplyWhatsApp(DEPS(), smuggled)).toMatchObject({ sent: false, error: 'validation_error' });
   });
 });
@@ -132,8 +140,17 @@ describe('ADR 0878 OQ-1 — exactly one caller (ratchet)', () => {
   });
 
   it('no pack, surface or tool can name it', () => {
-    const named = [...walk(PACKS), join(SRC, 'features/whatsapp/surface.ts'), join(SRC, 'features/whatsapp/agentTools.ts')]
-      .filter((p) => { try { return /sendTicketReplyWhatsApp|service-reply/.test(readFileSync(p, 'utf8')); } catch { return false; } });
+    // Every file of the whatsapp feature except the lane's own definition — its surface,
+    // feature registration (where chat tools would be declared) and routes. Wave 62:
+    // this used to name `features/whatsapp/agentTools.ts`, which does not exist, and a
+    // try/catch read the missing file as "names nothing". Non-vacuity is now asserted.
+    const featureDir = join(SRC, 'features/whatsapp');
+    const featureFiles = walk(featureDir).filter((p) => !p.endsWith('whatsappService.ts'));
+    expect(featureFiles.map((p) => relative(featureDir, p)).sort()).toEqual(expect.arrayContaining(['feature.ts', 'surface.ts']));
+    expect(existsSync(join(featureDir, 'whatsappService.ts'))).toBe(true);
+    const packFiles = walk(PACKS);
+    expect(packFiles.some((p) => p.includes('feature.whatsapp.nodes')), 'the pack walk reaches the whatsapp pack').toBe(true);
+    const named = [...packFiles, ...featureFiles].filter((p) => /sendTicketReplyWhatsApp|service-reply/.test(readFileSync(p, 'utf8')));
     expect(named).toEqual([]);
   });
 });

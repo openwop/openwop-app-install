@@ -15,7 +15,7 @@
 import { randomUUID } from 'node:crypto';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { OpenwopError } from '../../types.js';
-import { cleanString } from '../../host/boundedStrings.js';
+import { cleanContent, cleanString } from '../../host/boundedStrings.js';
 
 export interface HookVariant {
   /** The hook line itself (the scroll-stopper). */
@@ -77,9 +77,9 @@ export interface AngleValidationFinding {
 export function validateAngleCandidate(raw: AngleCandidateInput, index: number, validEvidenceIds: ReadonlySet<string>):
   | { ok: true; item: Pick<AdAngle, 'claim' | 'positioningLens' | 'proofRefs' | 'hookVariants'> }
   | { ok: false; finding: AngleValidationFinding } {
-  const claim = cleanString(raw.claim, CLAIM_MAX);
+  const claim = cleanContent(raw.claim, CLAIM_MAX, 'claim');
   if (!claim) return { ok: false, finding: { index, field: 'claim', message: 'An angle needs a non-empty positioning claim.' } };
-  const positioningLens = cleanString(raw.positioningLens, LENS_MAX);
+  const positioningLens = cleanContent(raw.positioningLens, LENS_MAX, 'positioningLens');
   if (!positioningLens) return { ok: false, finding: { index, field: 'positioningLens', message: 'A positioning lens is required.' } };
   const rawRefs = Array.isArray(raw.proofRefs) ? raw.proofRefs.filter((r): r is string => typeof r === 'string' && r.length > 0) : [];
   const proofRefs = [...new Set(rawRefs)].slice(0, MAX_PROOF_REFS);
@@ -94,7 +94,7 @@ export function validateAngleCandidate(raw: AngleCandidateInput, index: number, 
     .slice(0, MAX_HOOKS_PER_ANGLE)
     .flatMap((h) => {
       const hv = (h ?? {}) as Record<string, unknown>;
-      const text = cleanString(hv.text, HOOK_TEXT_MAX);
+      const text = cleanContent(hv.text, HOOK_TEXT_MAX, 'hooks.text');
       if (!text) return [];
       return [{ text, format: cleanString(hv.format, FORMAT_MAX) || 'unspecified' }];
     });

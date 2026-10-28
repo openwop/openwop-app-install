@@ -3,17 +3,17 @@
  * paid, high-blast-radius surface).
  *
  * Breaks if the cap is checked after dispatch instead of before, if a successful run is
- * not recorded, if `max=0` stops meaning uncapped, or if concurrent records lose
- * increments (CXE-3). The `it.fails` case pins a KNOWN defect (BLOCKED-ON-PRODUCT, filed
- * to grade-code): check → execute → record is not atomic, so concurrent calls at the cap
- * all pass the check and all execute.
+ * not charged, if `max=0` stops meaning uncapped, or if concurrent reservations lose
+ * increments (CXE-3). The race case used to be `it.fails` (BLOCKED-ON-PRODUCT, w24 g2):
+ * check → execute → record was not atomic. ADR 0995 D6 made it a reservation, so it is a
+ * plain `it` now.
  */
 import { describe, it, expect, beforeAll, afterEach } from 'vitest';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openStorage } from '../src/storage/index.js';
-import { checkCodeExecBudget, recordCodeExec } from '../src/host/codeExecBudget.js';
+import { checkCodeExecBudget, releaseCodeExec, reserveCodeExec } from '../src/host/codeExecBudget.js';
 import { createSandboxRunner } from '../src/host/sandboxAdapter.js';
 import { registerToggleDefault } from '../src/host/featureToggles/registry.js';
 import { codeExecFeature } from '../src/features/code-exec/feature.js';
@@ -39,21 +39,24 @@ describe('codeExecBudget', () => {
   it('allows under the cap, denies at it', async () => {
     process.env.OPENWOP_CODE_EXEC_MAX_PER_DAY = '2';
     expect((await checkCodeExecBudget('t1', DAY)).allowed).toBe(true);
-    await recordCodeExec('t1', DAY);
-    await recordCodeExec('t1', DAY);
+    expect((await reserveCodeExec('t1', DAY)).reserved).toBe(true);
+    expect((await reserveCodeExec('t1', DAY)).reserved).toBe(true);
     expect((await checkCodeExecBudget('t1', DAY)).allowed).toBe(false); // 2/2
+    expect(await reserveCodeExec('t1', DAY)).toMatchObject({ allowed: false, reserved: false, used: 2 });
+    await releaseCodeExec('t1', DAY); // a pre-dispatch refusal gives its unit back
+    expect((await checkCodeExecBudget('t1', DAY)).used).toBe(1);
   });
 
   it('max=0 is uncapped', async () => {
     process.env.OPENWOP_CODE_EXEC_MAX_PER_DAY = '0';
-    for (let i = 0; i < 5; i++) await recordCodeExec('t2', DAY);
+    for (let i = 0; i < 5; i++) expect((await reserveCodeExec('t2', DAY)).allowed).toBe(true);
     expect((await checkCodeExecBudget('t2', DAY)).allowed).toBe(true);
   });
 
-  it('CXE-3: concurrent records do not lose increments (atomic CAS)', async () => {
+  it('CXE-3: concurrent reservations do not lose increments (atomic CAS)', async () => {
     process.env.OPENWOP_CODE_EXEC_MAX_PER_DAY = '1000';
     const N = 8;
-    await Promise.all(Array.from({ length: N }, () => recordCodeExec('t-cas', DAY)));
+    await Promise.all(Array.from({ length: N }, () => reserveCodeExec('t-cas', DAY)));
     expect((await checkCodeExecBudget('t-cas', DAY)).used).toBe(N); // a read-then-write would drop some
   });
 });
@@ -71,12 +74,11 @@ describe('tenant-bound sandbox runner', () => {
     expect(hits - before, 'the over-budget call must never reach the sandbox').toBe(2);
   });
 
-  // BLOCKED-ON-PRODUCT (w24 g2): `createSandboxRunner` reads the budget, awaits the sandbox,
-  // THEN records — so N concurrent calls under the cap all pass the check before any of them
-  // records. Asserts the CORRECT outcome (exactly `max` executions); `it.fails` until the
-  // check-and-reserve is atomic. Deterministic: each execution awaits network I/O, so every
-  // check resolves before the first record.
-  it.fails('concurrent calls at the cap execute at most max times (check→execute→record is not atomic)', async () => {
+  // Was `it.fails` (BLOCKED-ON-PRODUCT, w24 g2): the runner read the budget, awaited the sandbox,
+  // THEN recorded, so N concurrent calls under the cap all passed the check. ADR 0995 D6 reserves
+  // before dispatch. Deterministic: each execution awaits network I/O, so under the old order
+  // every check resolved before the first record.
+  it('concurrent calls at the cap execute at most max times (ADR 0995 D6 reservation)', async () => {
     process.env.OPENWOP_CODE_EXEC_ENDPOINT = `http://127.0.0.1:${PORT}/run`;
     process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE = 'true';
     process.env.OPENWOP_CODE_EXEC_MAX_PER_DAY = '1';

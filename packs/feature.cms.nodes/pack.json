@@ -1,7 +1,7 @@
 {
   "name": "feature.cms.nodes",
-  "version": "1.6.0",
-  "description": "CMS feature node pack (write verbs C6) — workflow nodes over the `ctx.features.cms` surface shipped by the CMS feature. Reads: `get-page` (published page resolved for a target locale, exact → language-family → base) and `list-pages`. Generative: `translate-section` (sparse per-locale overlay via the run-scoped ctx.callAI). Governed writes: `update-section-draft` (DRAFT-only section patch, sanitized like an editor save) and `submit-page` (the SAME approval-gate composition as the editor submit — a node can draft and submit but NEVER publish). Reads are role:action (outputs recorded; replay/fork read the recorded result). The three WRITERS are role:side-effect (ADR 0668 D5): `update-section-draft` and `submit-page` mutate the pages store and are replay-SERVED; `translate-section` also writes and is additionally NON-DETERMINISTIC (it calls the model), so the generator holds it back from the served set as an ai-invocation-log and it re-executes on replay by design — RFC 0041 §B divergence injection depends on…",
+  "version": "1.7.0",
+  "description": "CMS feature node pack (write verbs C6) — workflow nodes over the `ctx.features.cms` surface shipped by the CMS feature. Reads: `get-page` (published page resolved for a target locale, exact → language-family → base) and `list-pages`. Generative: `translate-section` (sparse per-locale overlay via the run-scoped ctx.callAI). Governed writes: `create-draft-page` (ADR 0948 P1 — a DRAFT page whose id is derived from the run and node, never an input), `update-section-draft` (DRAFT-only section patch, sanitized like an editor save) and `submit-page` (the SAME approval-gate composition as the editor submit — a node can draft and submit but NEVER publish). Reads are role:action (outputs recorded; replay/fork read the recorded result). The four WRITERS are role:side-effect (ADR 0668 D5, ADR 0948 P1): `create-draft-page`, `update-section-draft` and `submit-page` mutate the pages store and are replay-SERVED; `translate-section` also writes and is additionally NON-DETERMINISTIC (it calls the model), so the generator holds it back from the served set as an ai-invocation-log and it re-executes on replay by design — RFC 0041 §B divergence injection depends on…",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": [
@@ -64,6 +64,14 @@
       "version": "1.1.0",
       "label": "CMS Submit Page (for review)",
       "description": "Submit a DRAFT page for editorial review via ctx.features.cms.submitPage (ADR 0204 C6) — the SAME approval-gate composition as the editor's submit: an ApprovalsInbox row is queued UNCONDITIONALLY (ADR 0593 C1 — under both toggle states; the toggle gates whether a direct publish is refused, not whether the review row exists); a node can draft and submit but NEVER publish. Inputs: { orgId, pageId }. Output: { submitted, status }. A REFUSAL is a node FAILURE with `not_found` as the error code — a green step here means an approval row really exists.",
+      "category": "integration",
+      "role": "side-effect"
+    },
+    {
+      "typeId": "feature.cms.nodes.create-draft-page",
+      "version": "1.0.0",
+      "label": "CMS Create Draft Page",
+      "description": "Creates a DRAFT CMS page (ADR 0948 P1 / ADR 0162) over ctx.features.cms.createDraftPage. Draft-only: it never publishes (submit-page queues the human review). The page id is derived from the run, the node and `key` (`page:<runId>:<nodeId>[:<key>]`), never an input, so a re-delivered call returns the same page and a replay fork is served the recorded output. Running the node again in the same run with a different title, or after the page was published, fails `run_page_exists`. Inputs: orgId, sections:[{type, data}] (type one of hero, richText, image, cta, columns, productGrid, form, pricing, entityList, entityDetail, comparison, faq, quotes, fields, video; sanitized like an editor save), title? (default \"Untitled campaign page\"), slug? (made unique in the org, e.g. `-2`), key? (separates pages drafted by one node in a loop; letters, digits, `-` and `_` only, others dropped). Output: { page: { pageId, slug, status, title } }.",
       "category": "integration",
       "role": "side-effect"
     }

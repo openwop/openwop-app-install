@@ -40,6 +40,7 @@
 import type { BundleScope, VectorSurface } from '../inMemorySurfaces.js';
 import { registerSurfaceAdapter, resolveBackendId } from '../surfaceBackends.js';
 import { registerVectorTenantPurger, registerVectorNamespacePurger } from './vectorTenantPurge.js';
+import { createLexicalIndexSql, createLexicalTableSql, createLexicalStateTableSql, lexicalStorageUpgradeSql, createPgLexical, setLexicalIndex } from './pgLexical.js';
 import { createLogger } from '../../observability/logger.js';
 
 const log = createLogger('host.vector.pgvector');
@@ -237,6 +238,7 @@ export function poolMaxFromEnv(name: string, fallback = 10): number {
 export function registerPgVectorAdapter(): void {
   bootCheck = null;
   statsProbe = null;
+  setLexicalIndex(null);
   const dimRaw = process.env.OPENWOP_VECTOR_PG_DIM;
   const dsn = process.env.OPENWOP_VECTOR_PG_DSN;
   const table = process.env.OPENWOP_VECTOR_PG_TABLE || 'host_vectors';
@@ -252,10 +254,21 @@ export function registerPgVectorAdapter(): void {
           connectionString: dsn, max: poolMaxFromEnv('OPENWOP_VECTOR_PG_POOL_MAX'), idleTimeoutMillis: 30_000,
           statement_timeout: vectorStatementTimeoutMs(),
         });
-        await pool.query(CREATE_EXTENSION_SQL);
-        await pool.query(createTableSql(table, Number(dimRaw)));
         const run: SqlRunner = (sql, params) => pool.query(sql, params as unknown[]).then((r) => ({ rows: r.rows }));
-        await verifyPgVectorDimension(run, table, Number(dimRaw));
+        // After switching away from pgvector, configured maintenance still
+        // reaches retained lexical rows even if the old dimension was unset.
+        // Do not try to create vector(NaN) or install an unused extension.
+        if (resolveBackendId('vector') === 'pgvector' || dimRaw !== undefined) {
+          await pool.query(CREATE_EXTENSION_SQL);
+          await pool.query(createTableSql(table, Number(dimRaw)));
+          await verifyPgVectorDimension(run, table, Number(dimRaw));
+        }
+        // ADR 0904 P3 — the KB's persisted lexical side table lives beside the vectors,
+        // on THIS pool (no second pool against the connection budget).
+        await pool.query(createLexicalTableSql());
+        await pool.query(createLexicalStateTableSql());
+        for (const sql of lexicalStorageUpgradeSql()) await pool.query(sql);
+        await pool.query(createLexicalIndexSql());
         return run;
       })();
     }
@@ -302,6 +315,16 @@ export function registerPgVectorAdapter(): void {
       const { rows } = await (await getRunner())(`${purgeNamespaceSql(table)} RETURNING id`, [tenantId, namespace]);
       return rows.length;
     });
+    // ADR 0904 P3 — the lexical side table carries chunk text too, and its column is
+    // `tenant`, so the `tenant_id` introspection in account deletion never sees it.
+    registerVectorTenantPurger('pg-lexical', async (tenantId) => {
+      return createPgLexical(async (sql, params) => (await getRunner())(sql, params)).purgeTenant(tenantId);
+    });
+    registerVectorNamespacePurger('pg-lexical', async (tenantId, namespace) => {
+      return createPgLexical(async (sql, params) => (await getRunner())(sql, params)).purgeNamespace(tenantId, namespace);
+    });
+    setLexicalIndex(createPgLexical(async (sql, params) => (await getRunner())(sql, params)),
+      resolveBackendId('vector') === 'pgvector');
   }
 
   if (resolveBackendId('vector') === 'pgvector') {

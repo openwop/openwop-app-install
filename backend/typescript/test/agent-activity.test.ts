@@ -6,6 +6,11 @@
  *   - drops runs with no agent attribution
  *   - filters by rosterId and by status (the failures view)
  *   - newest-first ordering; carries persona/agentId/cardId; terminal timestamp
+ *
+ * RFC 0086 attribution → activity feed; ADR 0025 user-side mirror. Tracker
+ * TST-BKY-1. Red when the newest-first sort, the status / rosterId / userId
+ * filter, the unattributed-run drop or the completedAt-first timestamp is
+ * removed — each sabotage-witnessed (w65).
  */
 
 import { describe, expect, it } from 'vitest';

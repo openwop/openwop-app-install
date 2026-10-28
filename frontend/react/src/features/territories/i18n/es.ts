@@ -168,4 +168,12 @@ export const messages = {
   quotaMixedTitle: 'Este total suma cuotas con monedas distintas, por eso se muestra sin símbolo.',
   currencyRequired: 'Elige una moneda: un importe sin moneda no se puede comparar con los negocios.',
   currencyNone: "Sin moneda",
+  // ADR 0954 D5 — lead-routing rules.
+  targetLeads: "Leads (asignación de leads)",
+  ruleTarget_contact: "Lead",
+  field_band: "Calificación del lead",
+  field_source: "Origen del lead",
+  field_stage: "Etapa del ciclo de vida",
+  field_company: "Nombre de la empresa",
+  field_score: "Puntuación del lead",
 } as const;

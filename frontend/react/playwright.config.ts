@@ -1,4 +1,15 @@
 import { defineConfig, devices } from '@playwright/test';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { snapshotPathTemplate } from './e2e/snapshotPaths';
+
+// An adopter's own baselines in e2e/brand-snapshots/ replace upstream's (see snapshotPaths.ts).
+// Playwright's loader gives this module a `file:` URL, but vitest's jsdom environment does not
+// (e2eLaneWiring.test.ts imports this config). Calling fileURLToPath on that throws when the
+// config loads, so fall back to the frontend dir, which is the cwd for both Playwright and vitest.
+const E2E_URL = new URL('./e2e', import.meta.url);
+const E2E_DIR = E2E_URL.protocol === 'file:' ? fileURLToPath(E2E_URL) : resolve(process.cwd(), 'e2e');
+const SNAPSHOT_PATH_TEMPLATE = snapshotPathTemplate(E2E_DIR);
 
 /**
  * PER-WORKTREE PORT. Several checkouts of this repo run side by side, and a
@@ -25,7 +36,11 @@ export default defineConfig({
   // baseline fail identically on every run instead.
   updateSnapshots: 'none',
   testDir: './e2e',
+  ...(SNAPSHOT_PATH_TEMPLATE ? { snapshotPathTemplate: SNAPSHOT_PATH_TEMPLATE } : {}),
   fullyParallel: true,
+  // Release slots budget the entire process tree, including Chromium. Leave
+  // Playwright's default width intact unless the operator supplies a cap.
+  workers: process.env.OPENWOP_E2E_WORKERS ? Number(process.env.OPENWOP_E2E_WORKERS) : undefined,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,
   reporter: 'list',

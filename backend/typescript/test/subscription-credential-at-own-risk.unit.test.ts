@@ -1,6 +1,22 @@
 /**
  * RFC 0121 AT-OWN-RISK (ADR 0180) — pure unit coverage for the credential-ref
  * conventions + the two-gate provider helper.
+ *
+ * What each gate prevents, and the sabotage that reds it:
+ *  - ADR 0180 TWO-GATE: the provider list (`OPENWOP_SUBSCRIPTION_PROVIDERS`) and
+ *    the at-own-risk acceptance (`OPENWOP_SUBSCRIPTION_AT_OWN_RISK`) must BOTH
+ *    be set before any provider is enabled; dropping the
+ *    `subscriptionAcquisitionConfigured()` check reds "[] when only the
+ *    provider list is set" (8fw3g2-aor-gate).
+ *  - ADR 0756 PROHIBITED: anthropic and google (terms forbid third-party
+ *    routing through consumer plans) are filtered whatever the operator lists;
+ *    dropping `isSubscriptionProhibitedProvider` reds the ADR 0756 case
+ *    (8fw3g2-aor-prohibited).
+ *  - ADR 0757 CLEARED: github.copilot has its own lawful path and must never
+ *    fall back to paste-and-consent; dropping the CLEARED filter reds the ADR
+ *    0757 case (8fw3g2-aor-cleared).
+ *  - The credential-ref namespace (`subscription:<provider>`) and the operator
+ *    endpoint (dark by default) are pinned by 8fw3g2-aor-ref / -aor-endpoint.
  */
 
 import { describe, expect, it, afterEach } from 'vitest';

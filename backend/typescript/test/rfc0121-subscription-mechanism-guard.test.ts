@@ -14,6 +14,17 @@
  * Each block is a source-text assertion over the tracked trees, so a future
  * change that adds a private consumer endpoint, a direct Copilot HTTP call, a
  * vendor-CLI spawn in the provider path, or a second login flow fails here.
+ *
+ * Floors are measured (2026-10-22, 2404797bf): backend src 1,993 files, provider
+ * path 47, sidecar 3, shim 4. The backend floor is 1,901 (a tree emptied or moved
+ * reads far below it); the provider floor is 45; the sidecar and shim trees are
+ * pinned by NAME, so a renamed or emptied tree is seen.
+ *
+ * Double guard: "that flow requests no OAuth scope" is a source scan; its
+ * behavioural twin is `rfc0121-copilot-subscription.unit.test.ts` › "requests NO
+ * scope, uses PKCE S256, and a fixed callback path", which reads the URL actually
+ * minted. The scan matches `set` AND `append` and a literal `?scope=`/`&scope=`
+ * (round-1 probe 8fw2g1-mg-scope-append was vacuous when it matched `set` only).
  */
 
 import { describe, expect, it } from 'vitest';
@@ -52,9 +63,18 @@ const sidecarFiles = walk(SIDECAR_SRC);
 
 describe('RFC 0121 G2 — no borrowed-session / private-endpoint code anywhere on the rail', () => {
   it('the trees under guard are present (a vacuous walk is a failure, not a pass)', () => {
-    expect(backendFiles.length).toBeGreaterThan(100);
-    expect(sidecarFiles.length).toBeGreaterThan(0);
-    expect(shimFiles.length).toBeGreaterThan(0);
+    expect(backendFiles.length).toBeGreaterThanOrEqual(1_901);
+    expect(sidecarFiles.map(rel).sort()).toEqual([
+      'clients/copilot-provider/src/bin.js',
+      'clients/copilot-provider/src/copilot.js',
+      'clients/copilot-provider/src/server.js',
+    ]);
+    expect(shimFiles.map(rel).sort()).toEqual([
+      'clients/subscription-provider/src/bin.js',
+      'clients/subscription-provider/src/cliRunner.js',
+      'clients/subscription-provider/src/detect.js',
+      'clients/subscription-provider/src/server.js',
+    ]);
   });
 
   // Consumer web/private API hosts a borrowed-session integration would call.
@@ -78,7 +98,7 @@ describe('RFC 0121 G2 — Copilot is reached ONLY through the official SDK harne
 describe('RFC 0121 G2 / ADR 0182 — no vendor-CLI spawn in the backend provider path', () => {
   it('the provider/subscription modules import no child_process', () => {
     const providerPath = backendFiles.filter((f) => /\/src\/(aiProviders|byok|providers|host\/exchange)\//.test(f));
-    expect(providerPath.length).toBeGreaterThan(5);
+    expect(providerPath.length).toBeGreaterThanOrEqual(45);
     expect(filesMatching(providerPath, /child_process/)).toEqual([]);
   });
 });
@@ -90,6 +110,6 @@ describe('RFC 0121 G2 — exactly ONE login flow on the rail, scoped to Copilot'
 
   it('that flow requests no OAuth scope (least scope)', () => {
     const src = read(join(BACKEND_SRC, 'byok/copilotOAuth.ts'));
-    expect(src).not.toMatch(/searchParams\.set\(\s*'scope'/);
+    expect(src).not.toMatch(/searchParams\.(set|append)\(\s*['"`]scope['"`]|[?&]scope=/);
   });
 });

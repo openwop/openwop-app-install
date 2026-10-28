@@ -47,6 +47,7 @@ const EXPECTED_SILENT = [
   ['a11y/A11yIssuesPanel.tsx', 'success', 'the empty-issues state display, not the act of checking'],
   ['agents/AgentConnectionStatusPanel.tsx', 'success', '`allConfigured` is standing status, not an outcome'],
   ['features/kicktodo/ProgressPage.tsx', 'success', '`completed` celebration re-renders on every visit'],
+  ['settings/FreeTierSettingsPage.tsx', 'success', 'the "Serving: …" banner describes the current setting'],
   ['settings/HeartbeatSettingsPage.tsx', 'success', 'a banner describing current settings'],
   ['workforces/WorkforcesGalleryPage.tsx', 'success', '`allClear` is standing status'],
   // Same file also has an ANNOUNCED notice (the placed demo order) — this entry

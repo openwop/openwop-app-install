@@ -15,6 +15,12 @@
  *   - unknown agent → throws AgentNotFoundError
  *
  * No live credentials needed — callAI is injected.
+ *
+ * RFC 0002 §D/§F + RFC 0003 §A14 floor contracts on the live path. Tracker
+ * TST-BKX-1. Red when the live task check, the return-schema code, the
+ * `_confidence` read (or a bare `confidence` read), the provider error code,
+ * the §A14 tool filter, the system prompt or the plain-content result is
+ * sabotaged — each sabotage-witnessed (w65).
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -119,6 +125,8 @@ describe('runAgentDispatchLive', () => {
     const callAI: CallAi = async () => ({ data: { answer: 'sure', confidence: 0.1 } });
     const result = await runAgentDispatchLive({ agentId: 'test.agent' }, { callAI });
     expect(result.status).toBe('completed');
+    expect(result.result).toEqual({ answer: 'sure', confidence: 0.1 }); // the domain field rides as data
+    expect(result.events.some((e) => e.type === 'agent.decided' && e.decision === 'escalate')).toBe(false);
   });
 
   it('returns failed (not thrown) when the provider call errors, carrying the code', async () => {

@@ -200,9 +200,13 @@ export async function clearWorkforceHistory(
   return { runs: mine.length };
 }
 
-/** The hero workflow a workforce's history runs against. */
-function heroWorkflowId(w: Workforce): string {
-  return w.workflowCatalog[w.workflowCatalog.length - 1] ?? w.workflowCatalog[0] ?? w.workforceId;
+/** The id a workforce's synthetic history is stamped with (ARWF-15): the
+ *  declared historical id, never a catalog entry. The synthetic event log
+ *  records fixed demo nodes, so naming a real workflow would claim the run
+ *  executed a graph it never touched. */
+function historyWorkflowId(w: Workforce): string {
+  if (!w.historyWorkflowId) throw new Error(`workforce '${w.workforceId}' has history but no historyWorkflowId`);
+  return w.historyWorkflowId;
 }
 
 export interface WorkforceHistorySeedOptions {
@@ -245,7 +249,7 @@ export async function seedWorkforceHistory(
     const history = generateWorkforceHistory({
       workforceId: w.workforceId,
       tenantId,
-      workflowId: heroWorkflowId(w),
+      workflowId: historyWorkflowId(w),
       // deterministic per (tenant, workforce); placement/ids vary by tenant.
       seed: `${tenantId}:${w.workforceId}`,
       // window ends ~now; the generator never reads the wall clock itself.

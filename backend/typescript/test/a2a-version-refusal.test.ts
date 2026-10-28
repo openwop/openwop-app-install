@@ -17,6 +17,11 @@
  * grew, the rule did not move. The refusal is still asserted at the wire: a
  * real POST carrying a real header, checking that the body is an error AND that
  * no dispatch happened.
+ *
+ * Tracker TST-BG1-13. Red when (probe-witnessed, wave 58): the route stops
+ * refusing an `unsupported` disposition; a conflicting duplicate header is read
+ * as its first value; an explicit 1.0 header reaches the 0.3 codec; header-less
+ * stops resolving to 0.3; the refusal's `supportedVersions` metadata is emptied.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -137,10 +142,15 @@ describe('RFC 0152 §B — A2A version negotiation refuses rather than downgrade
 
   it('the advertised card version is one this host actually serves', async () => {
     // Pins the pairing the refusal depends on: refusing everything outside
-    // A2A_SUPPORTED_VERSIONS is only honest if the card advertises from it.
-    const { body } = await post({});
-    const advertised = (body.result as { protocolVersion?: string } | undefined)?.protocolVersion;
-    expect(A2A_SUPPORTED_VERSIONS as readonly string[]).toContain(advertised);
+    // A2A_SUPPORTED_VERSIONS is only honest if the card advertises from it. The
+    // advertisement that lists versions is the 1.0 card's `supportedInterfaces[]`
+    // (the header-less 0.3 card is already the case above), so read THAT.
+    const res = await fetch(`${BASE}/.well-known/agent-card.json`, { headers: { 'A2A-Version': '1.0' } });
+    expect(res.status).toBe(200);
+    const card = (await res.json()) as { supportedInterfaces?: Array<{ protocolVersion?: string }> };
+    const advertised = (card.supportedInterfaces ?? []).map((i) => i.protocolVersion);
+    for (const v of advertised) expect(A2A_SUPPORTED_VERSIONS as readonly (string | undefined)[]).toContain(v);
+    expect([...new Set(advertised)].sort()).toEqual(['0.3', '1.0']);
   });
 
   it('every served version has a codec — the advert cannot outrun the handler', async () => {

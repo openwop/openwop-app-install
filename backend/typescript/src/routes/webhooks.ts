@@ -48,7 +48,10 @@ import {
   hostEventsV2Enabled,
   type HostEventEnvelope,
 } from '../host/hostEventTypes.js';
-import { publishHostEventToStream } from '../host/hostEventStream.js';
+import { hostEventPublishWouldBeLocalOnly, publishHostEventToStream } from '../host/hostEventStream.js';
+import { appendHostEventWithRetry, deadLetterHostEvent, hostEventAppendable, rfc0250WireAvailable } from '../host/hostEventLog.js';
+import { readInstanceTopology } from '../host/instanceTopology.js';
+import { recordHostEventAppendFailed } from '../observability/metricSeams.js';
 import { projectV2Payload, stampV2SchemaVersion } from '../storage/v2PayloadProjection.js';
 import type { Storage } from '../storage/storage.js';
 import { hostExtStorage } from '../host/hostExtPersistence.js';
@@ -557,7 +560,27 @@ export async function fanOutHostEvent(
   envelope: HostEventEnvelope,
   tenantSubscriptions?: Awaited<ReturnType<Storage['listWebhooks']>>,
 ): Promise<void> {
-  await publishHostEventToStream(storage, tenantId, envelope);
+  // ADR 0973 D2 — with the RFC 0250 wire on, a durable event is committed to the
+  // replay log BEFORE it is published, so a cursor naming it always resolves and
+  // the NOTIFY can carry its sequence.
+  // ADR 0988 D2 — a failed append is retried (bounded, ~1 s). If it still fails,
+  // the event is published with its body when that reaches every instance. When
+  // it would reach this instance only (over NOTIFY's limit, multi-instance host),
+  // it is dead-lettered instead. The emitting write never fails because of this.
+  let seq: number | null = null;
+  let publish = true;
+  if (envelope.delivery === 'durable' && rfc0250WireAvailable() && hostEventAppendable(tenantId, envelope)) {
+    seq = await appendHostEventWithRetry(tenantId, envelope);
+    if (seq === null) {
+      if (readInstanceTopology() === 'multi' && hostEventPublishWouldBeLocalOnly(storage, tenantId, envelope)) {
+        publish = false;
+        recordHostEventAppendFailed(await deadLetterHostEvent(tenantId, envelope, 'append_failed_oversized') ? 'dead_lettered' : 'lost');
+      } else {
+        recordHostEventAppendFailed('published_full');
+      }
+    }
+  }
+  if (publish) await publishHostEventToStream(storage, tenantId, envelope, seq);
   if (envelope.delivery !== 'durable') return;
   const subs = tenantSubscriptions ?? await storage.listWebhooks({ tenantId });
   for (const sub of subs) {

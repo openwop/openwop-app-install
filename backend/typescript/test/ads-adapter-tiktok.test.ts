@@ -12,6 +12,7 @@
  * case-variant in extraHeaders even though the broker writes a CUSTOM auth-header name.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { answerCurrencyRead, platformRequests, currencyReads, fixtureCurrency } from './adsCurrencyFixture.js';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from '../src/index.js';
@@ -44,6 +45,7 @@ describe('TikTok Ads dispatch adapter (ADR 0167 Phase 3)', () => {
       req.on('data', (c) => (raw += c));
       req.on('end', () => {
         const path = req.url ?? '';
+        if (answerCurrencyRead(path, raw, res)) return;
         hits.push({ method: req.method ?? '', path, auth: req.headers.authorization, access: req.headers['access-token'] as string, extra: req.headers['x-custom'] as string, body: raw ? JSON.parse(raw) : {} });
         res.writeHead(200, { 'content-type': 'application/json' });
         if (failCode) { res.end(JSON.stringify({ code: failCode, message: 'rejected' })); return; }
@@ -56,6 +58,9 @@ describe('TikTok Ads dispatch adapter (ADR 0167 Phase 3)', () => {
     await new Promise<void>((r) => tk.listen(0, '127.0.0.1', r));
     process.env.OPENWOP_TIKTOK_ADS_API_BASE = `http://127.0.0.1:${(tk.address() as AddressInfo).port}`;
 
+    // ADR 0952 defect P9 — the account-currency read is a GET through brokeredFetch,
+    // which pins the provider's apiHosts (the production packs list the platform host).
+    registerProvider({ id: 'tiktok-ads', label: 'TikTok Ads', kind: 'oauth2', authFlow: 'manual', reach: 'openapi', scopes: { read: [] }, refreshable: true, defaultScopes: [], consumerNodes: [], apiHosts: ['127.0.0.1'] });
     await createSecretConnection({ tenantId: 'tt', provider: 'tiktok-ads', kind: 'bearer', secret: 'TT_TOKEN', scope: 'user', userId: 'u1' });
     await storage.insertRun({ runId: 'tr-1', workflowId: 'w', tenantId: 'tt', status: 'pending', inputs: null, metadata: {}, configurable: {}, createdAt: 'x', updatedAt: 'x' });
     await storage.insertRun({ runId: 'tr-2-fork', workflowId: 'w', tenantId: 'tt', status: 'pending', inputs: null, metadata: {}, configurable: {}, createdAt: 'x', updatedAt: 'x' });
@@ -66,11 +71,32 @@ describe('TikTok Ads dispatch adapter (ADR 0167 Phase 3)', () => {
     await new Promise<void>((r) => tk.close(() => r()));
   });
 
-  beforeEach(() => { hits = []; failCode = 0; adPlural = false; });
+  beforeEach(() => { hits = []; platformRequests.length = 0; currencyReads.length = 0; failCode = 0; adPlural = false; });
 
   const adapter = (runId: string, actingUserId = 'u1') =>
     makeAdsAdapter({ storage, tenantId: 'tt', runId, ...(actingUserId ? { actingUserId } : {}), orgId: 'tt' });
   const args = (briefId: string) => ({ platform: 'tiktok' as const, briefId, adAccountId: '700123', campaignName: 'TT Launch', copy: { headline: 'Pick faster', bodyText: 'Save time', ctaText: 'LEARN_MORE' }, dailyBudgetMinor: 5000, identityId: 'ident-9', landingUrl: 'https://example.com/lp' });
+
+  it('ADR 0945 D6 — AI media: refused until the AIGC flag is verified (zero creates); once verified the ad carries the self-disclosure', async () => {
+    hits = [];
+    const ai = { ...args('tbrief-AIGC'), aiGeneratedMedia: true };
+    expect(await adapter('tr-aigc-1').publishAd(ai)).toEqual({ outcome: 'failed', error: 'aigc_flag_not_verified' });
+    expect(hits.filter((h) => /\/create\/$/.test(h.path))).toHaveLength(0);
+    // A dry run previews the labelled creative without a call.
+    const dry = await adapter('tr-aigc-2').publishAd({ ...ai, dryRun: true });
+    expect(dry.outcome === 'preview' && JSON.stringify(dry.plan)).toContain('"aigc_disclosure_type":"SELF_DISCLOSURE"');
+    process.env.OPENWOP_ADS_VERIFIED_AIGC_FLAGS = 'tiktok';
+    try {
+      expect((await adapter('tr-aigc-3').publishAd(ai)).outcome).toBe('published');
+      const adCreate = hits.find((h) => h.path.includes('/ad/create/'));
+      expect((adCreate?.body.creatives as Array<Record<string, unknown>>)[0]).toMatchObject({ aigc_disclosure_type: 'SELF_DISCLOSURE' });
+    } finally { delete process.env.OPENWOP_ADS_VERIFIED_AIGC_FLAGS; }
+    // A non-AI creative never carries the flag.
+    hits = [];
+    await adapter('tr-aigc-4').publishAd(args('tbrief-NOAI'));
+    const plain = hits.find((h) => h.path.includes('/ad/create/'));
+    expect((plain?.body.creatives as Array<Record<string, unknown>>)[0]).not.toHaveProperty('aigc_disclosure_type');
+  });
 
   it('creates campaign→adgroup→ad with a RAW Access-Token header (no Bearer), adgroup+ad DISABLE', async () => {
     const out = await adapter('tr-1').publishAd(args('tbrief-A'));
@@ -110,7 +136,7 @@ describe('TikTok Ads dispatch adapter (ADR 0167 Phase 3)', () => {
     const first = await adapter('tr-1').publishAd(args('tbrief-FORK'));
     expect(first.outcome).toBe('published');
     if (first.outcome !== 'published') return;
-    hits = [];
+    hits = []; platformRequests.length = 0; currencyReads.length = 0;
     const forked = await adapter('tr-2-fork').publishAd(args('tbrief-FORK'));
     expect(forked.outcome).toBe('published');
     if (forked.outcome !== 'published') return;
@@ -124,7 +150,7 @@ describe('TikTok Ads dispatch adapter (ADR 0167 Phase 3)', () => {
     const { identityId: _omit, ...noIdent } = args('tbrief-NOIDENT');
     const out = await adapter('tr-1').publishAd(noIdent);
     expect(out).toEqual({ outcome: 'failed', error: 'missing_identity_id' });
-    expect(hits).toHaveLength(0);
+    expect(hits).toHaveLength(0); expect(platformRequests).toHaveLength(0);
   });
 
   it('uploads a media asset via /file/image/ad/upload/ and threads image_ids into the ad (ADR 0223 media leg)', async () => {
@@ -195,4 +221,19 @@ describe('TikTok Ads dispatch adapter (ADR 0167 Phase 3)', () => {
     expect(hit?.auth).toBeUndefined(); // the token has ONE carrier; a smuggled Authorization is stripped too
     expect(hit?.extra).toBe('ok');
   });
+  it('publishes KWD major units and refuses an inexact numeric budget before image upload', async () => {
+    fixtureCurrency.value = 'KWD';
+    try {
+      expect((await adapter('tr-1').publishAd({ ...args('brief-currency-kwd'), dailyBudgetMinor: 5000 })).outcome).toBe('published');
+      expect(hits.find((hit) => hit.path.includes('/campaign/create/'))?.body.budget).toBe(5);
+      hits = []; platformRequests.length = 0; currencyReads.length = 0;
+      fixtureCurrency.value = 'USD';
+      const { token } = await storeMediaAsset('tt', { contentBase64: Buffer.from('png').toString('base64'), contentType: 'image/png' });
+      expect(await adapter('tr-1').publishAd({ ...args('brief-currency-inexact'), mediaAssetId: token, dailyBudgetMinor: Number.MAX_SAFE_INTEGER })).toEqual({ outcome: 'failed', error: 'budget_not_representable' });
+      expect(hits).toHaveLength(0);
+      expect(platformRequests).toHaveLength(1);
+      expect(currencyReads).toHaveLength(1);
+    } finally { fixtureCurrency.value = 'USD'; }
+  });
+
 });

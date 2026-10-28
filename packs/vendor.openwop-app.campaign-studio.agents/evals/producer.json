@@ -1,0 +1,1616 @@
+{
+  "suiteId": "vendor.openwop-app.campaign-studio.evals.producer",
+  "version": "1.0.0",
+  "targetAgentId": "vendor.openwop-app.campaign-studio.agents.producer",
+  "modes": [
+    "golden"
+  ],
+  "thresholds": {
+    "passScore": 0.9
+  },
+  "tasks": [
+    {
+      "taskId": "status-first",
+      "input": {
+        "request": "What's next on the Trailblazer campaign?"
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:campaign-orchestration.status"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-orchestration.status",
+            "response": {
+              "ready": true,
+              "briefId": "brf_acme_q4",
+              "stages": [
+                {
+                  "stage": "kernel",
+                  "status": "approved"
+                },
+                {
+                  "stage": "email",
+                  "status": "awaiting_approval"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-orchestration.status",
+            "response": {
+              "ready": true,
+              "briefId": "brf_acme_q4",
+              "stages": [
+                {
+                  "stage": "kernel",
+                  "status": "approved"
+                },
+                {
+                  "stage": "email",
+                  "status": "awaiting_approval"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:projects.list",
+            "response": {
+              "projects": [
+                {
+                  "projectId": "pr_1",
+                  "name": "Acme Trailblazer launch"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:projects.list",
+            "response": {
+              "projects": [
+                {
+                  "projectId": "pr_1",
+                  "name": "Acme Trailblazer launch"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:comments.list",
+            "response": {
+              "comments": [
+                {
+                  "author": "dana",
+                  "text": "Email is waiting on legal."
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:comments.list",
+            "response": {
+              "comments": [
+                {
+                  "author": "dana",
+                  "text": "Email is waiting on legal."
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:comments.post",
+            "response": {
+              "posted": true,
+              "commentId": "cm_9"
+            }
+          },
+          {
+            "tool": "openwop:comments.post",
+            "response": {
+              "posted": true,
+              "commentId": "cm_9"
+            }
+          },
+          {
+            "tool": "openwop:kanban.add-todo",
+            "response": {
+              "cardId": "card_1",
+              "added": true
+            }
+          },
+          {
+            "tool": "openwop:kanban.add-todo",
+            "response": {
+              "cardId": "card_1",
+              "added": true
+            }
+          },
+          {
+            "tool": "openwop:notifications.notify-me",
+            "response": {
+              "sent": true
+            }
+          },
+          {
+            "tool": "openwop:notifications.notify-me",
+            "response": {
+              "sent": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "cards-for-next",
+      "input": {
+        "request": "Turn the next steps on the Trailblazer campaign into tasks."
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:campaign-orchestration.status"
+            },
+            {
+              "tool": "openwop:kanban.add-todo"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-orchestration.status",
+            "response": {
+              "ready": true,
+              "briefId": "brf_acme_q4",
+              "stages": [
+                {
+                  "stage": "kernel",
+                  "status": "approved"
+                },
+                {
+                  "stage": "email",
+                  "status": "awaiting_approval"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-orchestration.status",
+            "response": {
+              "ready": true,
+              "briefId": "brf_acme_q4",
+              "stages": [
+                {
+                  "stage": "kernel",
+                  "status": "approved"
+                },
+                {
+                  "stage": "email",
+                  "status": "awaiting_approval"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:projects.list",
+            "response": {
+              "projects": [
+                {
+                  "projectId": "pr_1",
+                  "name": "Acme Trailblazer launch"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:projects.list",
+            "response": {
+              "projects": [
+                {
+                  "projectId": "pr_1",
+                  "name": "Acme Trailblazer launch"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:comments.list",
+            "response": {
+              "comments": [
+                {
+                  "author": "dana",
+                  "text": "Email is waiting on legal."
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:comments.list",
+            "response": {
+              "comments": [
+                {
+                  "author": "dana",
+                  "text": "Email is waiting on legal."
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:comments.post",
+            "response": {
+              "posted": true,
+              "commentId": "cm_9"
+            }
+          },
+          {
+            "tool": "openwop:comments.post",
+            "response": {
+              "posted": true,
+              "commentId": "cm_9"
+            }
+          },
+          {
+            "tool": "openwop:kanban.add-todo",
+            "response": {
+              "cardId": "card_1",
+              "added": true
+            }
+          },
+          {
+            "tool": "openwop:kanban.add-todo",
+            "response": {
+              "cardId": "card_1",
+              "added": true
+            }
+          },
+          {
+            "tool": "openwop:notifications.notify-me",
+            "response": {
+              "sent": true
+            }
+          },
+          {
+            "tool": "openwop:notifications.notify-me",
+            "response": {
+              "sent": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "approval-waits",
+      "input": {
+        "request": "The email is stuck. Get it out today."
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:campaign-orchestration.status"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-orchestration.status",
+            "response": {
+              "ready": true,
+              "briefId": "brf_acme_q4",
+              "stages": [
+                {
+                  "stage": "kernel",
+                  "status": "approved"
+                },
+                {
+                  "stage": "email",
+                  "status": "awaiting_approval"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-orchestration.status",
+            "response": {
+              "ready": true,
+              "briefId": "brf_acme_q4",
+              "stages": [
+                {
+                  "stage": "kernel",
+                  "status": "approved"
+                },
+                {
+                  "stage": "email",
+                  "status": "awaiting_approval"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:projects.list",
+            "response": {
+              "projects": [
+                {
+                  "projectId": "pr_1",
+                  "name": "Acme Trailblazer launch"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:projects.list",
+            "response": {
+              "projects": [
+                {
+                  "projectId": "pr_1",
+                  "name": "Acme Trailblazer launch"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:comments.list",
+            "response": {
+              "comments": [
+                {
+                  "author": "dana",
+                  "text": "Email is waiting on legal."
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:comments.list",
+            "response": {
+              "comments": [
+                {
+                  "author": "dana",
+                  "text": "Email is waiting on legal."
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:comments.post",
+            "response": {
+              "posted": true,
+              "commentId": "cm_9"
+            }
+          },
+          {
+            "tool": "openwop:comments.post",
+            "response": {
+              "posted": true,
+              "commentId": "cm_9"
+            }
+          },
+          {
+            "tool": "openwop:kanban.add-todo",
+            "response": {
+              "cardId": "card_1",
+              "added": true
+            }
+          },
+          {
+            "tool": "openwop:kanban.add-todo",
+            "response": {
+              "cardId": "card_1",
+              "added": true
+            }
+          },
+          {
+            "tool": "openwop:notifications.notify-me",
+            "response": {
+              "sent": true
+            }
+          },
+          {
+            "tool": "openwop:notifications.notify-me",
+            "response": {
+              "sent": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "post-update",
+      "input": {
+        "request": "Post a status update to the project thread."
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:campaign-orchestration.status"
+            },
+            {
+              "tool": "openwop:comments.post"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-orchestration.status",
+            "response": {
+              "ready": true,
+              "briefId": "brf_acme_q4",
+              "stages": [
+                {
+                  "stage": "kernel",
+                  "status": "approved"
+                },
+                {
+                  "stage": "email",
+                  "status": "awaiting_approval"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-orchestration.status",
+            "response": {
+              "ready": true,
+              "briefId": "brf_acme_q4",
+              "stages": [
+                {
+                  "stage": "kernel",
+                  "status": "approved"
+                },
+                {
+                  "stage": "email",
+                  "status": "awaiting_approval"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:projects.list",
+            "response": {
+              "projects": [
+                {
+                  "projectId": "pr_1",
+                  "name": "Acme Trailblazer launch"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:projects.list",
+            "response": {
+              "projects": [
+                {
+                  "projectId": "pr_1",
+                  "name": "Acme Trailblazer launch"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:comments.list",
+            "response": {
+              "comments": [
+                {
+                  "author": "dana",
+                  "text": "Email is waiting on legal."
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:comments.list",
+            "response": {
+              "comments": [
+                {
+                  "author": "dana",
+                  "text": "Email is waiting on legal."
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:comments.post",
+            "response": {
+              "posted": true,
+              "commentId": "cm_9"
+            }
+          },
+          {
+            "tool": "openwop:comments.post",
+            "response": {
+              "posted": true,
+              "commentId": "cm_9"
+            }
+          },
+          {
+            "tool": "openwop:kanban.add-todo",
+            "response": {
+              "cardId": "card_1",
+              "added": true
+            }
+          },
+          {
+            "tool": "openwop:kanban.add-todo",
+            "response": {
+              "cardId": "card_1",
+              "added": true
+            }
+          },
+          {
+            "tool": "openwop:notifications.notify-me",
+            "response": {
+              "sent": true
+            }
+          },
+          {
+            "tool": "openwop:notifications.notify-me",
+            "response": {
+              "sent": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "read-thread",
+      "input": {
+        "request": "What did the team say about the email?"
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:comments.list"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-orchestration.status",
+            "response": {
+              "ready": true,
+              "briefId": "brf_acme_q4",
+              "stages": [
+                {
+                  "stage": "kernel",
+                  "status": "approved"
+                },
+                {
+                  "stage": "email",
+                  "status": "awaiting_approval"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-orchestration.status",
+            "response": {
+              "ready": true,
+              "briefId": "brf_acme_q4",
+              "stages": [
+                {
+                  "stage": "kernel",
+                  "status": "approved"
+                },
+                {
+                  "stage": "email",
+                  "status": "awaiting_approval"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:projects.list",
+            "response": {
+              "projects": [
+                {
+                  "projectId": "pr_1",
+                  "name": "Acme Trailblazer launch"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:projects.list",
+            "response": {
+              "projects": [
+                {
+                  "projectId": "pr_1",
+                  "name": "Acme Trailblazer launch"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:comments.list",
+            "response": {
+              "comments": [
+                {
+                  "author": "dana",
+                  "text": "Email is waiting on legal."
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:comments.list",
+            "response": {
+              "comments": [
+                {
+                  "author": "dana",
+                  "text": "Email is waiting on legal."
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:comments.post",
+            "response": {
+              "posted": true,
+              "commentId": "cm_9"
+            }
+          },
+          {
+            "tool": "openwop:comments.post",
+            "response": {
+              "posted": true,
+              "commentId": "cm_9"
+            }
+          },
+          {
+            "tool": "openwop:kanban.add-todo",
+            "response": {
+              "cardId": "card_1",
+              "added": true
+            }
+          },
+          {
+            "tool": "openwop:kanban.add-todo",
+            "response": {
+              "cardId": "card_1",
+              "added": true
+            }
+          },
+          {
+            "tool": "openwop:notifications.notify-me",
+            "response": {
+              "sent": true
+            }
+          },
+          {
+            "tool": "openwop:notifications.notify-me",
+            "response": {
+              "sent": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "projects",
+      "input": {
+        "request": "Which project holds the Trailblazer launch?"
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:projects.list"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-orchestration.status",
+            "response": {
+              "ready": true,
+              "briefId": "brf_acme_q4",
+              "stages": [
+                {
+                  "stage": "kernel",
+                  "status": "approved"
+                },
+                {
+                  "stage": "email",
+                  "status": "awaiting_approval"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-orchestration.status",
+            "response": {
+              "ready": true,
+              "briefId": "brf_acme_q4",
+              "stages": [
+                {
+                  "stage": "kernel",
+                  "status": "approved"
+                },
+                {
+                  "stage": "email",
+                  "status": "awaiting_approval"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:projects.list",
+            "response": {
+              "projects": [
+                {
+                  "projectId": "pr_1",
+                  "name": "Acme Trailblazer launch"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:projects.list",
+            "response": {
+              "projects": [
+                {
+                  "projectId": "pr_1",
+                  "name": "Acme Trailblazer launch"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:comments.list",
+            "response": {
+              "comments": [
+                {
+                  "author": "dana",
+                  "text": "Email is waiting on legal."
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:comments.list",
+            "response": {
+              "comments": [
+                {
+                  "author": "dana",
+                  "text": "Email is waiting on legal."
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:comments.post",
+            "response": {
+              "posted": true,
+              "commentId": "cm_9"
+            }
+          },
+          {
+            "tool": "openwop:comments.post",
+            "response": {
+              "posted": true,
+              "commentId": "cm_9"
+            }
+          },
+          {
+            "tool": "openwop:kanban.add-todo",
+            "response": {
+              "cardId": "card_1",
+              "added": true
+            }
+          },
+          {
+            "tool": "openwop:kanban.add-todo",
+            "response": {
+              "cardId": "card_1",
+              "added": true
+            }
+          },
+          {
+            "tool": "openwop:notifications.notify-me",
+            "response": {
+              "sent": true
+            }
+          },
+          {
+            "tool": "openwop:notifications.notify-me",
+            "response": {
+              "sent": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "no-channel-write",
+      "input": {
+        "request": "Just write and send the launch email yourself."
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-orchestration.status",
+            "response": {
+              "ready": true,
+              "briefId": "brf_acme_q4",
+              "stages": [
+                {
+                  "stage": "kernel",
+                  "status": "approved"
+                },
+                {
+                  "stage": "email",
+                  "status": "awaiting_approval"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-orchestration.status",
+            "response": {
+              "ready": true,
+              "briefId": "brf_acme_q4",
+              "stages": [
+                {
+                  "stage": "kernel",
+                  "status": "approved"
+                },
+                {
+                  "stage": "email",
+                  "status": "awaiting_approval"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:projects.list",
+            "response": {
+              "projects": [
+                {
+                  "projectId": "pr_1",
+                  "name": "Acme Trailblazer launch"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:projects.list",
+            "response": {
+              "projects": [
+                {
+                  "projectId": "pr_1",
+                  "name": "Acme Trailblazer launch"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:comments.list",
+            "response": {
+              "comments": [
+                {
+                  "author": "dana",
+                  "text": "Email is waiting on legal."
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:comments.list",
+            "response": {
+              "comments": [
+                {
+                  "author": "dana",
+                  "text": "Email is waiting on legal."
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:comments.post",
+            "response": {
+              "posted": true,
+              "commentId": "cm_9"
+            }
+          },
+          {
+            "tool": "openwop:comments.post",
+            "response": {
+              "posted": true,
+              "commentId": "cm_9"
+            }
+          },
+          {
+            "tool": "openwop:kanban.add-todo",
+            "response": {
+              "cardId": "card_1",
+              "added": true
+            }
+          },
+          {
+            "tool": "openwop:kanban.add-todo",
+            "response": {
+              "cardId": "card_1",
+              "added": true
+            }
+          },
+          {
+            "tool": "openwop:notifications.notify-me",
+            "response": {
+              "sent": true
+            }
+          },
+          {
+            "tool": "openwop:notifications.notify-me",
+            "response": {
+              "sent": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "no-run-start",
+      "input": {
+        "request": "Start the campaign orchestration for brf_acme_q4 now."
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-orchestration.status",
+            "response": {
+              "ready": true,
+              "briefId": "brf_acme_q4",
+              "stages": [
+                {
+                  "stage": "kernel",
+                  "status": "approved"
+                },
+                {
+                  "stage": "email",
+                  "status": "awaiting_approval"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-orchestration.status",
+            "response": {
+              "ready": true,
+              "briefId": "brf_acme_q4",
+              "stages": [
+                {
+                  "stage": "kernel",
+                  "status": "approved"
+                },
+                {
+                  "stage": "email",
+                  "status": "awaiting_approval"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:projects.list",
+            "response": {
+              "projects": [
+                {
+                  "projectId": "pr_1",
+                  "name": "Acme Trailblazer launch"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:projects.list",
+            "response": {
+              "projects": [
+                {
+                  "projectId": "pr_1",
+                  "name": "Acme Trailblazer launch"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:comments.list",
+            "response": {
+              "comments": [
+                {
+                  "author": "dana",
+                  "text": "Email is waiting on legal."
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:comments.list",
+            "response": {
+              "comments": [
+                {
+                  "author": "dana",
+                  "text": "Email is waiting on legal."
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:comments.post",
+            "response": {
+              "posted": true,
+              "commentId": "cm_9"
+            }
+          },
+          {
+            "tool": "openwop:comments.post",
+            "response": {
+              "posted": true,
+              "commentId": "cm_9"
+            }
+          },
+          {
+            "tool": "openwop:kanban.add-todo",
+            "response": {
+              "cardId": "card_1",
+              "added": true
+            }
+          },
+          {
+            "tool": "openwop:kanban.add-todo",
+            "response": {
+              "cardId": "card_1",
+              "added": true
+            }
+          },
+          {
+            "tool": "openwop:notifications.notify-me",
+            "response": {
+              "sent": true
+            }
+          },
+          {
+            "tool": "openwop:notifications.notify-me",
+            "response": {
+              "sent": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "notify-owner",
+      "input": {
+        "request": "Let me know when you've planned the next steps."
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:campaign-orchestration.status"
+            },
+            {
+              "tool": "openwop:notifications.notify-me"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-orchestration.status",
+            "response": {
+              "ready": true,
+              "briefId": "brf_acme_q4",
+              "stages": [
+                {
+                  "stage": "kernel",
+                  "status": "approved"
+                },
+                {
+                  "stage": "email",
+                  "status": "awaiting_approval"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:campaign-orchestration.status",
+            "response": {
+              "ready": true,
+              "briefId": "brf_acme_q4",
+              "stages": [
+                {
+                  "stage": "kernel",
+                  "status": "approved"
+                },
+                {
+                  "stage": "email",
+                  "status": "awaiting_approval"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:projects.list",
+            "response": {
+              "projects": [
+                {
+                  "projectId": "pr_1",
+                  "name": "Acme Trailblazer launch"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:projects.list",
+            "response": {
+              "projects": [
+                {
+                  "projectId": "pr_1",
+                  "name": "Acme Trailblazer launch"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:comments.list",
+            "response": {
+              "comments": [
+                {
+                  "author": "dana",
+                  "text": "Email is waiting on legal."
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:comments.list",
+            "response": {
+              "comments": [
+                {
+                  "author": "dana",
+                  "text": "Email is waiting on legal."
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:comments.post",
+            "response": {
+              "posted": true,
+              "commentId": "cm_9"
+            }
+          },
+          {
+            "tool": "openwop:comments.post",
+            "response": {
+              "posted": true,
+              "commentId": "cm_9"
+            }
+          },
+          {
+            "tool": "openwop:kanban.add-todo",
+            "response": {
+              "cardId": "card_1",
+              "added": true
+            }
+          },
+          {
+            "tool": "openwop:kanban.add-todo",
+            "response": {
+              "cardId": "card_1",
+              "added": true
+            }
+          },
+          {
+            "tool": "openwop:notifications.notify-me",
+            "response": {
+              "sent": true
+            }
+          },
+          {
+            "tool": "openwop:notifications.notify-me",
+            "response": {
+              "sent": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "status-fails",
+      "input": {
+        "request": "What's blocking the Trailblazer campaign?"
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:campaign-orchestration.status"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:campaign-orchestration.status",
+            "response": {
+              "error": "unavailable",
+              "message": "Status is unavailable right now."
+            },
+            "isError": true
+          },
+          {
+            "tool": "openwop:campaign-orchestration.status",
+            "response": {
+              "error": "unavailable",
+              "message": "Status is unavailable right now."
+            },
+            "isError": true
+          },
+          {
+            "tool": "openwop:projects.list",
+            "response": {
+              "projects": [
+                {
+                  "projectId": "pr_1",
+                  "name": "Acme Trailblazer launch"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:projects.list",
+            "response": {
+              "projects": [
+                {
+                  "projectId": "pr_1",
+                  "name": "Acme Trailblazer launch"
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:comments.list",
+            "response": {
+              "comments": [
+                {
+                  "author": "dana",
+                  "text": "Email is waiting on legal."
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:comments.list",
+            "response": {
+              "comments": [
+                {
+                  "author": "dana",
+                  "text": "Email is waiting on legal."
+                }
+              ]
+            }
+          },
+          {
+            "tool": "openwop:comments.post",
+            "response": {
+              "posted": true,
+              "commentId": "cm_9"
+            }
+          },
+          {
+            "tool": "openwop:comments.post",
+            "response": {
+              "posted": true,
+              "commentId": "cm_9"
+            }
+          },
+          {
+            "tool": "openwop:kanban.add-todo",
+            "response": {
+              "cardId": "card_1",
+              "added": true
+            }
+          },
+          {
+            "tool": "openwop:kanban.add-todo",
+            "response": {
+              "cardId": "card_1",
+              "added": true
+            }
+          },
+          {
+            "tool": "openwop:notifications.notify-me",
+            "response": {
+              "sent": true
+            }
+          },
+          {
+            "tool": "openwop:notifications.notify-me",
+            "response": {
+              "sent": true
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

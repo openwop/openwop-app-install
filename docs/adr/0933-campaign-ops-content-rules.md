@@ -127,6 +127,18 @@ ratio, fps, size, duration, format) do not apply to text change sets.
 `backend/typescript/src/host/contentRules/` (host, so later consumers such as the
 ads lane can use it without importing a feature):
 
+> **Note (2026-10-20, ADR 0946 P1):** the `host/contentRules/` directory now
+> exists. ADR 0946 P1 created it with the channel spec table
+> (`channelSpecs.json`), the ad text-policy rule list (`adPolicyRules.json`)
+> and `similarity.ts`, plus `scripts/gen-content-rules.mjs`. That generator is
+> how packs read library data, because packs cannot import host code. This
+> ADR's P0 adds its rule modules beside them; the "Later: CTA presets with the
+> first ad destination" row is covered by the table's verbatim CTA presets.
+> ADR 0946 P2 then added `findings.ts`, which holds this ADR's D1
+> `ContentFinding`, the D4 id and the report digest, verbatim. Its `ruleSet`
+> union already lists this ADR's seven values, so this ADR's P0 imports the
+> frame rather than defining a second one.
+
 ```ts
 interface ContentRulesInput {
   asOf: string;                         // ISO; the only clock input (rule 3)
@@ -156,6 +168,18 @@ interface ContentRulesReport {
   digest: string;                       // sha256(canonicalJSON({rulesetVersion, findings}))
 }
 ```
+
+> **Correction (2026-10-20, ADR 0946 P2; agreed with this ADR's owner):**
+> the frame above is built in `host/contentRules/findings.ts`, and this ADR's
+> P0 imports it. As built:
+> - `digest` hashes the findings **sorted by id**, so it does not depend on
+>   rule order (pinned by a golden vector in
+>   `test/content-rules-findings.test.ts`).
+> - **`rulesetVersion` names only the rule families that ran, each with its
+>   own version** (`rulesetVersionOf`, e.g. `creative@2026-10-20.1/…+trust@1`).
+>   A change to one family never re-versions another family's reports.
+> - Canonical JSON is the pure `host/canonicalJson.ts`, so the library imports
+>   no storage.
 
 `checkContent(input) → ContentRulesReport` is pure and deterministic. The rule
 tables (phrase lists, keyword map, shortener list, weights, recommendation texts)
@@ -209,6 +233,17 @@ agency is not blocked from fixing a date on a page that already says "limited
 time". `id = sha256(ruleId, assetId, field, normalized span text)`, stable across
 rescans.
 
+> **Correction (2026-10-20, ADR 0946 P2):** the id leaves out `introduced`,
+> the action and the span offsets, so two findings can share one (the same
+> phrase once on the page and once added). They are **merged
+> order-independently**:
+> - `introduced` is true if any copy is introduced;
+> - the action and severity are the strictest;
+> - the span is the earliest;
+> - the text is the strictest finding's.
+>
+> A blocking finding is never dropped because of caller order.
+
 ### D5 — Where it runs, and how it binds to approval
 
 - **At proposal** (ADR 0923 D5, after the edit validator): `checkContent` runs
@@ -260,6 +295,18 @@ as `ruleSet: 'brand' | 'consistency' | 'claims'`:
   `needs_review`; `uncited` → `info`. `verifyClaims` is moved from the
   campaign-channels pack into `host/contentRules/claims.ts`, and the pack imports
   the host copy, so there is one implementation.
+
+  > **Correction (2026-10-20, ADR 0946 P1; agreed with this ADR's owner):** a
+  > pack cannot import host code (packs are standalone `.mjs` so they stay
+  > signable and publishable). The pack therefore carries a **generated copy**
+  > of the host source. `scripts/gen-content-rules.mjs` writes it, with the
+  > source file names and their sha256 in its header. `scripts/ci.sh` runs
+  > `gen-content-rules.mjs --check`, which fails on any drift (witnessed:
+  > a one-line edit to a copy exits 1). A regenerated copy changes the pack's
+  > content, so `check-pack-version-bump` requires a version bump. None of the
+  > consuming packs is in production's `OPENWOP_INSTALL_PACKS` (read
+  > 2026-10-20), so no registry copy can take precedence over the vendored one
+  > (ADR 0370). `verifyClaims` moves the same way.
 
 ### D8 — B4: the commenter role
 

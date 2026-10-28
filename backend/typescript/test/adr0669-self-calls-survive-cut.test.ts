@@ -1,8 +1,10 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { Server } from 'node:http';
 import { createApp } from '../src/index.js';
 import { dispatchSubRun } from '../src/subruns/subRunDispatcher.js';
 import { createSelfHttpBridge } from '../src/messaging/bridge.js';
+import type { ChatIngressEnvelope } from '../src/messaging/types.js';
+import { openStorage } from '../src/storage/index.js';
 import { advertisedPath, runLinks, newestServedVersion, selfCallHeaders, protocolVersions, VENDOR_ROOT } from '../src/middleware/protocolVersion.js';
 
 /**
@@ -21,6 +23,21 @@ import { advertisedPath, runLinks, newestServedVersion, selfCallHeaders, protoco
  * This drives the real dispatcher and the real bridge against a real booted
  * host. Each leg was paired with a pre-cut control until ADR 0812 P3c removed
  * major 1; the legs still assert the run's OUTPUT, not only that a call returned.
+ *
+ * Tracker TST-BGF-4. Red when: the sub-run dispatcher or the bridge addresses
+ * `/v1/runs`; `selfCallHeaders` names a major the host does not serve;
+ * `advertisedPath` stops returning null for an operation with no v2 address;
+ * `runLinks` hands out a bare id.
+ *
+ * DOUBLE GUARD (vendor leg): `advertisedPath`'s `isVendorPath` early return is
+ * shadowed by `isV2MountedPath`, because the v2 path manifest declares a `/host`
+ * first segment, so `${VENDOR_ROOT}/mcp` is a mounted path too. Only a sabotage of
+ * BOTH lines reds the vendor leg (probe `sc-vendor-both-r2`).
+ *
+ * CEILING (derivation leg): with one served major, `newestServedVersion()` and the
+ * literal `'2.0'` are the same value, so "derived, not restated" cannot be
+ * witnessed until a second major is served. The leg still reds when the self-call
+ * header names a major the host does not serve.
  */
 let server: Server;
 let base = '';
@@ -47,56 +64,41 @@ async function subRun() {
 }
 
 describe('ADR 0669 — the host reaches itself after the cut', () => {
-  {
-    const side = 'RETIRED';
-    it(`${side}: a sub-run dispatched to this host completes, and its output comes back`, async () => {
-      const r = await subRun();
-      expect(r, `${side}: ${JSON.stringify(r)}`).toMatchObject({ status: 'completed' });
-      expect(r.runId).not.toBe('');
-      expect(JSON.stringify(r.status === 'completed' ? r.output : null), `${side}: the echoed payload`).toContain('adr0669-self-call');
-    }, 60_000);
-  }
+  it('RETIRED: a sub-run dispatched to this host completes, and its output comes back', async () => {
+    const r = await subRun();
+    expect(r, `RETIRED: ${JSON.stringify(r)}`).toMatchObject({ status: 'completed' });
+    expect(r.runId).not.toBe('');
+    expect(JSON.stringify(r.status === 'completed' ? r.output : null), 'RETIRED: the echoed payload').toContain('adr0669-self-call');
+  }, 60_000);
 });
 
-/** The bridge's own storage seams, stubbed: this leg is about its HTTP self-calls. */
-function bridgeStorage() {
-  return {
-    listMessagingRoutingRules: async () => [],
-    listMessagingTurns: async () => [],
-    appendMessagingTurn: async () => {},
-    listMessagingIdentities: async () => [],
-    listMessagingSessions: async () => [],
-    getRelayDevice: async () => null,
-    enqueueRelayOutbound: async () => {},
-    appendDeliveryLog: async () => {},
-  } as never;
-}
-
 describe('ADR 0669 — the messaging bridge starts runs after the cut', () => {
-  {
-    const side = 'RETIRED';
-    it(`${side}: an inbound message starts a run on this host, and no self-call names /v1`, async () => {
-      const calls: Array<{ path: string; status: number }> = [];
-      const fetchImpl = (async (url: string, init?: RequestInit) => {
-        const res = await fetch(url, init);
-        calls.push({ path: new URL(url).pathname, status: res.status });
-        return res;
-      }) as typeof fetch;
-      {
-        const bridge = createSelfHttpBridge({
-          storage: bridgeStorage(), baseUrl: base, bearer: 'dev-token', defaultWorkflowId: 'conformance-noop', fetchImpl,
-          pollIntervalMs: 50, timeoutMs: 200,
-        } as never);
-        const out = await bridge.onInbound({
-          device: { relayId: 'rl', tenantId: 'default', channel: 'signal' },
-          envelope: { channel: 'signal', platformMessageId: 'm1', conversationId: 'c1', peerId: 'p', text: 'hi', timestamp: '2026-09-30T00:00:00Z' } as never,
-          sessionKey: 'signal:c1',
-        });
-        expect(out && (out as { runId?: string }).runId, `${side}: calls ${JSON.stringify(calls)}`).toBeTruthy();
-        expect(calls.filter((c) => c.path.startsWith('/v1')), `${side}: self-calls on /v1`).toEqual([]);
-      }
-    }, 60_000);
-  }
+  it('RETIRED: an inbound message starts a run on this host, and no self-call names /v1', async () => {
+    const calls: Array<{ path: string; status: number }> = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      const res = await fetch(url, init);
+      calls.push({ path: new URL(url).pathname, status: res.status });
+      return res;
+    };
+    const bridge = createSelfHttpBridge({
+      storage: await openStorage('memory://'), baseUrl: base, bearer: 'dev-token', defaultWorkflowId: 'conformance-noop', fetchImpl,
+      pollIntervalMs: 10, timeoutMs: 5_000,
+    });
+    const envelope: ChatIngressEnvelope = {
+      channel: 'signal', platformMessageId: 'm1', conversationId: 'c1', peerId: 'p', text: 'hi', timestamp: '2026-09-30T00:00:00Z',
+    };
+    const out = await bridge.onInbound({
+      device: { relayId: 'rl', tenantId: 'default', channel: 'signal' },
+      envelope,
+      sessionKey: 'signal:c1',
+    });
+    expect(out ? out.runId : undefined, `RETIRED: calls ${JSON.stringify(calls)}`).toBeTruthy();
+    // The detached reply poll makes its own self-calls (`GET /runs/<id>`); wait for
+    // one so the "/v1" assertion covers the poll, not only the create.
+    await vi.waitFor(() => expect(calls.some((c) => c.path.startsWith('/runs/'))).toBe(true), { timeout: 5_000, interval: 10 });
+    expect(calls.filter((c) => c.path.startsWith('/v1')), 'RETIRED: self-calls on /v1').toEqual([]);
+  }, 60_000);
 });
 
 describe('ADR 0669 — what a response ADVERTISES follows the cut (advertisedPath / runLinks)', () => {

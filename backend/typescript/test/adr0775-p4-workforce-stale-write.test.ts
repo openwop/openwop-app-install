@@ -7,6 +7,16 @@
  * `adr0775-p4-stale-write-guards.test.ts`. Before this, `patchMigrationJourney`
  * merged into a read copy and `put` it, so a stage saved concurrently on another
  * key was silently dropped.
+ *
+ * Tracker: TST-BSW-4 (docs/steward/TEST-ASSESSMENT.md). Each case starts from
+ * no journey and no status overlay for either tenant (reset in `beforeEach`).
+ *
+ * Red when (sabotage-witnessed, wave 60): the journey or status `If-Match`
+ * check is skipped (service and route); the journey write falls back to a
+ * blind put after a lost swap; the status write stops retrying a lost swap;
+ * `migrationEtag` stops omitting `updatedAt` (an unsaved journey's version
+ * then moves on every read); a read's `ETag` header stops matching its body;
+ * `getWorkforce` reads another tenant's overlay.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -20,6 +30,7 @@ import {
   patchMigrationJourney,
 } from '../src/host/migrationService.js';
 import {
+  clearWorkforceStatuses,
   getWorkforce,
   seedWorkforceEntities,
   setWorkforceStatus,
@@ -29,6 +40,7 @@ import { createApp } from '../src/index.js';
 
 const T = 'tenant-p4-wf';
 const WF = 'workforce.finance.invoice-exception';
+const OTHER = 'tenant-p4-wf-other';
 
 describe('service: compare-and-swap + If-Match', () => {
   const storage = openSqliteStorage(':memory:');
@@ -55,6 +67,8 @@ describe('service: compare-and-swap + If-Match', () => {
     vi.restoreAllMocks();
     initHostExtPersistence(storage);
     await __clearMigrationJourneys();
+    await clearWorkforceStatuses(T);
+    await clearWorkforceStatuses(OTHER);
     await seedWorkforceEntities();
   });
 
@@ -79,9 +93,19 @@ describe('service: compare-and-swap + If-Match', () => {
   });
 
   it('refuses a journey write whose If-Match predates a concurrent edit, and leaves the row alone', async () => {
-    const seen = migrationEtag(await getMigrationJourney(T, WF));
-    // An unsaved journey is minted per read; its version must still be stable.
-    expect(migrationEtag(await getMigrationJourney(T, WF))).toBe(seen);
+    const first = await getMigrationJourney(T, WF);
+    const seen = migrationEtag(first);
+    // An unsaved journey is minted per read with a fresh `updatedAt`; its version
+    // must still be stable. Move the clock so the two stamps really differ.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(Date.now() + 5_000);
+      const second = await getMigrationJourney(T, WF);
+      expect(second.updatedAt).not.toBe(first.updatedAt);
+      expect(migrationEtag(second)).toBe(seen);
+    } finally {
+      vi.useRealTimers();
+    }
     const other = await patchMigrationJourney(T, WF, { stageStatus: { assess: 'done' } }, { ifMatch: seen });
     await expect(patchMigrationJourney(T, WF, { stageStatus: { target: 'done' } }, { ifMatch: seen })).rejects.toMatchObject({
       httpStatus: 409,
@@ -111,10 +135,14 @@ describe('service: compare-and-swap + If-Match', () => {
   });
 
   it("another tenant's cut-over does not stale this tenant's version", async () => {
+    // Statuses differ, so a leaked overlay would change what this tenant reads.
+    await setWorkforceStatus(T, WF, 'shadow');
     const seen = workforceEtag((await getWorkforce(T, WF))!);
-    await setWorkforceStatus('tenant-other', WF, 'piloting');
+    await setWorkforceStatus(OTHER, WF, 'piloting');
+    expect((await getWorkforce(OTHER, WF))!.status).toBe('piloting'); // the other write landed
+    expect((await getWorkforce(T, WF))!.status).toBe('shadow');
     expect(workforceEtag((await getWorkforce(T, WF))!)).toBe(seen);
-    expect((await setWorkforceStatus(T, WF, 'shadow', { ifMatch: seen }))!.status).toBe('shadow');
+    expect((await setWorkforceStatus(T, WF, 'piloting', { ifMatch: seen }))!.status).toBe('piloting');
   });
 });
 

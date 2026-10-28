@@ -1,6 +1,16 @@
 # ADR 0945 — Product-grounded creative and fidelity verification
 
-Status: Proposed
+Status: Accepted (P0–P5 source recovered; integration qualification and owed items pending)
+
+> **Recovery correction (2026-10-25):** the original phase implementation
+> records below describe the recovered source, before its integration gate.
+> A real API-key request reproduced a review lockout: after key revocation an
+> independent admin was refused because the saved submitter was an unresolved
+> key. Admission now freezes its human issuer through `canonicalDecider` and
+> `canonicalReviewerUserId`; the submitter still cannot approve, and revocation
+> no longer blocks another reviewer. All nine binding tests pass after the
+> reproduced failure. Full integration checks and the separately authorized
+> real-model evaluation remain pending; no paid model call was made.
 
 Date: 2026-10-19
 
@@ -94,7 +104,11 @@ ADR owns **resolving product media**:
   that resolves to no row, or to another org, is refused
   `product_media_unresolved` (closes G2 for every grounded path; the storefront is
   unchanged).
-- Media gains `getAssetByServeToken(tenantId, orgId, token)` (indexed, not a scan)
+- Media gains `getAssetByServeToken(tenantId, orgId, token)` (indexed, not a scan;
+  *P0: a `media:token-idx` collection keyed by the token's SHA-256 — a serve
+  token is a bearer credential and the index must not hold a second plaintext
+  copy — named off the `media:asset` prefix the legacy byte store shares; a
+  miss heals from the bounded tenant slice)*
   and two typed marketing fields: `productId` and `shotRole`
   (`hero | angle | detail | packaging | label | lifestyle`). Free-text
   `marketing.product` stays for untyped tagging; only `productId` links.
@@ -187,6 +201,34 @@ grounding?: {
 - Every existing generation path gets the facet in P0, so provenance does not
   depend on the new modes being used.
 
+> **CORRECTED 2026-10-20 (P0, architect + code review).** Five points the code
+> proved different from the text above:
+> 1. **`promptHash` is optional.** The ADR 0399 renderer has no prompt; it
+>    records `provider:'openwop'`, `model:'renderer@<version>'`, `op:'render'`
+>    and `composedFrom` instead. Every prompted path hashes the FULL prompt (the
+>    generate route's `lineage.prompt` is still cut at 500 chars; the video job
+>    now stores `promptHash` at submit beside its 2000-char snippet).
+> 2. **`grounding` is provenance, not an AI claim.** A composite of real photos
+>    carries it without `generatedBy:'ai'`; a composite with an AI layer is AI
+>    output. The PATCH write-once rule keeps `grounding` AND, when it was set,
+>    `generatedBy:'ai'`, so `lineage:null` cannot launder an AI asset past the
+>    P3 gate.
+> 3. **Trust boundary.** `cleanLineage` never accepts `grounding`; callers'
+>    `lineage` (upload body, PATCH body, node args) cannot write or forge it.
+>    Generating paths pass it through a separate server-only
+>    `createAsset({grounding})` input, sanitised by `cleanGrounding`.
+> 4. **Node paths stamp from host truth.** The AI providers adapter records
+>    `aiOrigin {provider, model, op, runId, nodeId, promptHash, inputSha256}` on
+>    the scratch bytes it mints; `ctx.features.media.createAssetFromServeUrl`
+>    builds `grounding` from it, so `generate-reel` (which passes no lineage) is
+>    stamped without a pack change. An edit op's input hash is matched to its
+>    source asset in the org. `runId`/`nodeId` are stamped only when the bytes
+>    came from the same run.
+> 5. **Write-once means first write wins.** Generation dedups by content hash,
+>    so a dedup hit on an unstamped row (a byte-identical upload) receives the
+>    first `grounding` write by CAS; an existing stamp is never replaced.
+> Speech (TTS) audio is not stamped: it is not creative imagery.
+
 ### D5 — One publish-edge gate
 
 `assertCreativePublishable(asset, destination)` in `host/creativeFidelity/`, called
@@ -238,6 +280,213 @@ bumps and the side-effect floor regenerated. The fidelity node is also
 event log). Each node carries `nodes[].agent.agentId` per 0943 (Creative Director
 on composition, Compliance Reviewer on `needs_review`).
 
+> **P0 note (2026-10-20).** `ProductSource.serveToken` is a bearer credential to
+> the bytes. P1's surface verb must project it out of any recorded node output
+> (MED2-R2). A product with no images resolves to `[]`; refusing it with
+> `product_depiction_ungrounded` is the generating caller's job (D2). The
+> refusal is the same for a foreign-org, unknown or deleted token (no existence
+> leak) and names only the token's index.
+
+> **CORRECTED 2026-10-20 (P1, architect + code review).**
+> 1. **AI calls stay in the node.** `compose-product-shot` makes the recorded
+>    `ctx.callImageEditor` (background-remove) and `ctx.callImageGenerator`
+>    (scene) calls itself, so policy, BYOK, the daily image budget and the
+>    invocation record apply as for every generation node. The host surface
+>    (`ctx.features['creative-briefs']`, the real surface id; "creativeBriefs"
+>    above is not a spelling that exists) supplies `productShotSource` (the
+>    source's bytes, in-node only, never a serve token), `composeProductShot`
+>    and `checkFidelity`. `resolveProductMedia` is not added to the commerce
+>    surface: `productShotSource` is its only consumer.
+> 2. **The cut-out is matched to the product by HASH**, not asset id: the same
+>    bytes can sit under two asset ids (dedup is per collection).
+> 3. **Composite repair is a no-op.** The renderer is deterministic, so
+>    re-composing reproduces the same pixels; a composite `fail` ends the node
+>    with `fidelity_failed`. D3's one repair applies to `edit` mode (P2).
+> 4. **Stage A as built (ruleset `fid-a-1`).** Rasterised through
+>    `@resvg/resvg-js` (Q4: no new dependency), on a 32×32 grid over the slot
+>    the renderer drew the product into (`imageLayerSlot`, the composer's own
+>    nudge math). The mask is the cut-out's alpha minus the slot's rounded
+>    corners. Checks: byte identity of the placed layer, source-product
+>    derivation, dHash ≤ 10, pHash ≤ 12, mean-colour CIEDE2000 ≤ 8; aspect is
+>    by construction (contain fit). Measured on the real renderer: identity
+>    0/0/0; a recolour 13/15/44.8 (fails); a missing half 8/17/18.5 (fails).
+>    Modes other than `composite` are `needs_review` until the P2 judge.
+> 5. **G5 reclassification bumps the PACKS, not the nodes.** `role` is how the
+>    host executes a node on a fork, not its I/O contract, and
+>    `creative-briefs-reel` exact-pins `generate-reel@1.0.0` (ADR 0766): a node
+>    version bump would have made this host refuse its own chain.
+> 6. **The sub-toggle also asks `commerce`** (ADR 0820 §7 / G11): every
+>    product-grounded method reads the catalog.
+> 7. **Filed, not fixed:** the older creative-briefs surface writers (`create`,
+>    `render`, `renderVariants`, `storeReel`) still sit at the membership floor;
+>    only the three new methods ask `workspace:write`. Widening the old ones
+>    changes viewer-run behaviour and is its own change.
+> 8. **Test seam:** the mock background removal now returns the input's pixels
+>    re-encoded (a constant transparent pixel made every mock cut-out an empty
+>    silhouette that no check can pass).
+
+> **CORRECTED 2026-10-20 (P2, architect + code review).**
+> 1. **The eval rides the ADR 0853/0855 headless-eval pattern, not ADR 0889.**
+>    ADR 0889 suites grade an AGENT's trajectory (tool calls are fixtures, so
+>    the judge would never run), and ADR 0477 sets use a text-only judge and
+>    cannot be pack-shipped. The P2 eval is `test/fixtures/fidelity-judge-eval.json`
+>    (identity, colour drift, logo swap, extra part, plus a CI-only fooled-judge
+>    case), run in CI with the judge scripted
+>    (`adr0945-p2-fidelity-judge.test.ts`) and against a real vision model by the
+>    manual merge gate `scripts/eval-fidelity-judge.mts` — **owed**, it needs
+>    `OPENWOP_EVAL_ANTHROPIC_KEY` (spend; not run by the builder).
+>
+>    > **CORRECTED 2026-10-27 (user decision): the live gate runs in the app on
+>    > the user's own BYOK key, not from a script with its own Anthropic key.**
+>    > The user: "We have BYOK in this app, the user should be able to specify
+>    > the provider and model and we use that." The script needed a dedicated
+>    > `OPENWOP_EVAL_ANTHROPIC_KEY` that no machine or Secret Manager held, so
+>    > the gate could never run; it also only spoke to Anthropic. It is
+>    > replaced by `POST /v1/host/openwop-app/creative-briefs/orgs/:orgId/fidelity/judge-check`
+>    > and a "Check the fidelity judge" panel under the client's grounding
+>    > settings. An admin of the client (`host:members:manage`, since it
+>    > spends the workspace's key) picks a provider (Anthropic, Google or
+>    > OpenAI), a vision model and one of the workspace's stored AI keys
+>    > (`resolveHeadlessAiForSpec`: the ref must be this tenant's and resolve
+>    > now, the provider must take images, and the key stays in the closure),
+>    > or sends none to test what the fidelity check uses today. The four live
+>    > fixture cases run one at a time through the same stage A, judge prompt,
+>    > repair and outcome rule as production (`host/creativeFidelity/judgeEval.ts`),
+>    > with at most two calls per case, and the first failure stops the run.
+>    > The pass bar is unchanged: every case must hold for the judge alone and
+>    > for the combined outcome. The fixture moved to
+>    > `host/creativeFidelity/judgeEvalFixture.ts` so CI and the check share
+>    > one copy. The result is returned to the admin and logged as
+>    > `fidelity_judge_check` (provider, model, per-case outcome; no images,
+>    > no key). Tests: `adr0945-judge-check.test.ts`,
+>    > `adr0945-judge-check-route.test.ts`, the frontend `judgeCheckPanel.test.tsx`.
+>    > **The real-model run itself is still owed** until an admin runs the
+>    > check in production and the result is recorded here.
+>    >
+>    > **2026-10-28: first production runs did not get an answer.** Four runs
+>    > on two Google keys (`gemini-2.5-pro`, and `gemini-3.0-pro`, which is not
+>    > in the catalog) each stopped on the first case with
+>    > `provider_unavailable`, after one call. The request shape is valid (the
+>    > same call with a fake key reaches Google's key check), and the log held
+>    > no reason, because every dispatch error was folded into that one code.
+>    > A failed case now carries `providerError: {status, codes}`: the HTTP
+>    > status and the provider's own error codes (`RESOURCE_EXHAUSTED`,
+>    > `model_not_found`), never its message, which can echo the key or the
+>    > prompt. It is logged as `providerStatus`/`providerCodes` and shown in
+>    > the panel. The run is still owed.
+> 2. **The outcome rule is one function** (`host/creativeFidelity/decide.ts`):
+>    the judge can add failures, never remove one; a non-critical mismatch
+>    (`proportions`, `part_count`, `extra_or_missing_parts`) is `needs_review`,
+>    a critical one is `fail`; composite may still pass on stage A alone when no
+>    judge exists (by construction); `none` is `needs_review` (product-presence
+>    judging for `productDepiction:'none'` is not built — D2's claim check is
+>    owed).
+> 3. **Edit-mode geometry.** A result whose aspect ratio drifts more than 2% from
+>    the source photo fails `aspect` before any pixel comparison — a reframed
+>    edit cannot show the product unchanged. OpenAI's fixed output sizes will
+>    fail a non-square photo; use Replicate (keeps the size). The protection
+>    mask is built from the cut-out's alpha at the photo's natural size and
+>    encoded per provider (Replicate repaints white: product black on white;
+>    OpenAI repaints transparent: product opaque).
+> 4. **A product binding must be verified, not claimed.** P0 took a generated
+>    asset's `productId` only from the source asset's `marketing.productId`,
+>    which catalog photos rarely carry. Nodes now pass `productId` to
+>    `createAssetFromServeUrl`, and media stamps it only when the catalog
+>    confirms the source bytes are one of that product's photos (a
+>    `registerProductSourceVerifier` seam commerce fills; media cannot import
+>    commerce). An unverified hint is dropped.
+> 5. **Repair.** The edit node re-edits ONCE with the failed checks and judge
+>    mismatches as constraints; a second `fail` is `fidelity_failed`. The judge's
+>    own output gets its one error-fed repair separately.
+> 6. **Q1 is still open for David:** edit mode is behind the same sub-toggle as
+>    composite and is reached only by choosing the edit node; a per-client
+>    opt-in waits on the ADR 0942 policy.
+> 7. **Test seam:** the mock inpaint "repaints the surroundings" (a flat backdrop
+>    behind the input), so an edit keeps the product's pixels in CI.
+
+> **CORRECTED 2026-10-20 (P3, architect + code review).**
+> 1. **The gate lives at `host/creativePublishGate.ts`**, not inside
+>    `host/creativeFidelity/`: it must read media, and the fidelity library
+>    stays free of feature imports. It reads the verdict from the STORE, in the
+>    asset's OWN org (the ads adapter runs with `orgId = tenantId`), never the
+>    asset's cached `grounding.fidelity`; an unreadable store refuses.
+> 2. **Two refusals the text above did not have.** AI bytes that are not a
+>    library asset (a bare scratch token carrying the adapter's `aiOrigin`) are
+>    `fidelity_unverified` — there is no record to check them against. And a
+>    reference is resolved by id, then by serve token, because `publishAd`
+>    falls back to treating `mediaAssetId` as a raw token.
+> 3. **The approval exemption cannot use `factsDigest`.** ADR 0942's
+>    `factsDigest` hashes the risk numbers (spend, audience, …) and cannot name
+>    an asset. `needs_review` passes only when a registered check
+>    (`registerCreativeReviewApproval`) confirms a person approved THIS asset at
+>    THIS verdict; the approvals owner (ADR 0942 / ADR 0947) fills it with a
+>    binding on a content hash of `{assetId, verdictId}`. Until then nothing is
+>    approved and `needs_review` never publishes — a correction ADR 0942 owes too.
+> 4. **`grounding.disclosure` is not stamped.** The stamp is write-once and the
+>    disclosure differs per destination; the decision is returned to the caller.
+> 5. **Disclosure rows as built** (`disclosureRules.ts`, `disc-2026-10-20`, all
+>    provisional until re-verified when each adapter ships, Q6): TikTok AI ⇒
+>    platform flag; Meta and Google political AI ⇒ platform flag. No adapter here
+>    can set a platform AI flag, so those REFUSE (`disclosure_unsupported`) —
+>    a behaviour change: AI media to TikTok, and AI media in political Meta or
+>    Google ads, no longer dispatches. **Owed:** EU AI Act Art. 50(4) (needs the
+>    audience's geography, ADR 0952) and the client "label more" policy (Q3).
+> 6. **Where it runs.** `publishAd`: after the idempotency read and before the
+>    dry run (a preview shows the refusal), skipped when this exact ad was
+>    already dispatched (a live ad is not un-published by a later verdict). The
+>    campaign-ops CMS adapter: in `preview` and again in `write`, for each image
+>    token the edit CHANGES (`creative_blocked`, with copy in four locales). The
+>    social adapter (ADR 0953) calls it when it ships; the
+>    `vendor.myndhyve.ads-publish-*` bypass stays ADR 0941 P4's ratchet.
+
+> **CORRECTED 2026-10-20 (P4, architect review).**
+> 1. **Image-to-video is the t2v job with a still**, not a new pipeline: job kind
+>    `i2v`, the Runway `image_to_video` task (the still as a data URI), the same
+>    job store, broker, spend meter and finaliser. The request hash folds the
+>    still's sha256 ONLY when present, so every pre-existing avatar/t2v hash is
+>    byte-identical (an in-flight job never re-submits).
+> 2. **The source check runs before the hash on every call**, so a dedup hit
+>    cannot skip it: a composite or edit whose STORED verdict is `pass`, or a
+>    photo the catalog confirms is the product's (media's product-source
+>    verifier, commerce-gated). Anything else is `product_depiction_ungrounded`
+>    with no spend; a still over 3.5 MB is refused before submit.
+> 3. **"Every product video stops at a gate"** is met by a recorded
+>    `needs_review` verdict (mode `animate`, "frames cannot be sampled yet"):
+>    the finaliser writes it, and the P3 publish gate refuses `needs_review`
+>    until a person approves (the approvals owner fills that check). Without the
+>    verdict the video would be `fidelity_unverified` and un-approvable.
+> 4. **Toggle:** rides `creative-video.t2v` only (same provider and meter); the
+>    creative-briefs `product-grounded` sub-toggle is not read across features.
+> 5. **Not built (G7):** frame sampling and judging the provider's thumbnail —
+>    the Runway task returns no thumbnail here.
+
+> **CORRECTED 2026-10-20 (P5, architect + code review).**
+> 1. **Built:** a fidelity chip on every generated media asset (the label says
+>    Checked / Needs review / Failed check / Not checked; the cached summary is
+>    display only, the publish gate reads the store); a lazily loaded
+>    provenance drawer (how it was made, the product photos beside the result,
+>    every check with its value and limit, the judge's answers with its
+>    evidence as plain text); and a Product shots panel in the product editor
+>    (the product's own photos by shot role, with the typed error when a photo
+>    no longer resolves). Two host-ext read routes back them:
+>    `…/media/orgs/:orgId/assets/:assetId/provenance` and
+>    `…/commerce/orgs/:orgId/products/:productId/media`.
+> 2. **Deferred:** the product picker in the brief and the campaign. Its data
+>    model is ADR 0941's `productRefs` on `MarketingCampaign`, not merged yet;
+>    a picker without it would be a second product link. It lands with 0941 /
+>    0946.
+> 3. **Found in review:** both lazily loaded readers first listed `t` as an
+>    effect dependency, so a host whose `t` changes identity per render (the
+>    unit-test i18n stub did) refetched in a loop until the worker ran out of
+>    memory. The fallback copy is now resolved at render and the effects depend
+>    on the ids only.
+> 4. **Q1 UI:** the briefs page shows an "Allow edit mode for this client"
+>    checkbox (lazy, only when `creative-briefs.product-grounded` is on); a
+>    non-admin's save is refused by the server and the box stays as stored.
+> 5. **Light/dark:** every element is a shared primitive (`surface-card`,
+>    `chip--*`, `Notice`, `Modal`, `card-grid`, `media-thumb`) on theme tokens,
+>    so both themes follow the token set; no colour literal was added.
+
 ## Feature evaluation matrix
 
 | # | Dimension | Decision |
@@ -278,6 +527,17 @@ on composition, Compliance Reviewer on `needs_review`).
 | P5 | Frontend (picker, panel, badge, drawer) | `npm run build` green; light/dark checked |
 | Later | Image embeddings (stage C), C2PA credentials, frame sampling, a portable-pack RFC | Each gated on its own trigger (Q4–Q7) |
 
+### Implementation record
+
+| Phase | Status | Commit / PR | Tests |
+|---|---|---|---|
+| P0 | implemented 2026-10-20 | #5067 (`feat/cs-0945-p0`) | `adr0945-p0-product-grounding.test.ts` (12), `adr0945-p0-render-video-grounding.test.ts` (3); sabotage-witnessed: PATCH clear, dedup first-write, token org check, full-prompt hash, unresolved refusal, render-id agreement each red a test |
+| P1 | implemented 2026-10-20 | #5074 (`feat/cs-0945-p1`, after #5067) | `adr0945-p1-stage-a.test.ts` (5: identity pass, recolour + missing-part sabotage fail, empty silhouette, CIEDE2000 reference pairs), `adr0945-p1-composite-run.test.ts` (5: a real run composes a passing composite, replay fork serves it with no second render/asset, the reclassified `render` node is served on a fork, a foreign cut-out is refused, toggle-off fails closed); sabotage-witnessed: ΔE threshold loosened, mask ignoring alpha, render/compose unclassified, toggle gate removed, byte-identity inverted, cut-out verification skipped each red a test |
+| P2 | implemented 2026-10-20 | #5080 (`feat/cs-0945-p2`, after #5074) | `adr0945-p2-fidelity-judge.test.ts` (16: prompt/parser parity, the one repair, 5 fixture eval cases with a scripted judge, judge-absent ⇒ needs_review, reframed edit ⇒ aspect fail, protection-mask encodings), `adr0945-p2-edit-run.test.ts` (4: a real edit run passes and a replay fork serves it without consulting the judge, no vision provider ⇒ needs_review, a twice-failing edit ends `fidelity_failed` after exactly one repair, an unverified product hint is not stamped); live gate `scripts/eval-fidelity-judge.mts` OWED (key + spend); **replaced 2026-10-27** by the in-app BYOK judge check (`…/fidelity/judge-check`, see the P2 correction above), real-model run still owed |
+| P3 | implemented 2026-10-20 | #5084 (`feat/cs-0945-p3`, after #5080) | `adr0945-p3-publish-gate.test.ts` (11: non-AI untouched everywhere; ungrounded / unchecked / failed refused; the store beats a lying summary; an unreadable store fails closed; token and URL resolve; needs_review only with an approval for this asset+verdict, a throwing check refuses; AI scratch bytes refused; disclosure rows; `publishAd` refuses before preview; the CMS adapter refuses in preview and write); sabotage-witnessed: publishAd unwired, summary trusted, store fail-open, scratch AI passed, CMS write ungated, token resolution dropped each red a test |
+| P4 | implemented 2026-10-20 | #5089 (`feat/cs-0945-p4`, after #5084) | `adr0945-p4-image-to-video.test.ts` (6: a checked shot animates on the one pipeline, stamped `animate` + `needs_review` and held by the publish gate; a product photo only with catalog confirmation; unchecked / under-review stills refused before any submit; one paid job per still; legacy avatar/t2v hashes unchanged; the adapter posts `image_to_video`) |
+| P5 | implemented 2026-10-20 | `feat/cs-0945-p5` (after #5089) | `adr0945-p5-read-routes.test.ts` (4: provenance returns the stamp, the stored verdict and in-org sources with no prompt text, a deleted source is `present:false`, another org's asset 404s; product media lists roles, an unresolvable photo is 422, commerce off refuses); FE `media/__tests__/provenance.test.tsx` (chip only for stamped assets and named in words; the drawer shows source beside result, value/limit, and judge evidence as text, never markup); `npm run build` green, entry chunk unchanged |
+
 ## Alternatives weighed
 
 - **Trust the provider's product mode** (Product Studio, Advantage+). Rejected:
@@ -302,14 +562,46 @@ inputs (G8). A `referenceImages` / `seedImage` addition needs an RFC in
 `../openwop` (the ADR 0411 P4 item); author it with `/prd` when a portable pack
 needs it. It is optional and not the program's recommended RFC (ADR 0941 D9).
 
+> **DECIDED 2026-10-20 — Q1 (team-lead; David can override): edit mode is OFF
+> per client org by default, with explicit opt-in per client org.** Edit mode
+> repaints the pixels around the client's real product, so the client whose
+> brand it is must say yes. The tenant sub-toggle `creative-briefs.product-grounded`
+> stays the master switch; composite mode needs no opt-in. As built (P3): one
+> `creative-briefs:grounding-settings` row per (tenant, client org)
+> (`editModeEnabled`, default false); `GET/PUT …/creative-briefs/orgs/:orgId/grounding-settings`
+> (read: membership; write: the org's admin authority, `host:members:manage`);
+> the `edit-product-scene` node is refused `edit_mode_not_enabled` (403) by
+> `productShotSource({mode:'edit'})` BEFORE any paid call, and again by
+> `protectionMask`. No client-settings record existed on `main` to extend (the
+> ADR 0921 `ClientAccount` holds no creative settings), so the row lives with
+> the feature that reads it.
+
+> **DECIDED 2026-10-20 — Q3 (team-lead; David can override): label AI content
+> wherever the destination offers a label, even where no rule requires it.**
+> Transparency is the brand-safe default and an extra label costs nothing. As
+> built: `DISCLOSURE_POLICY = 'label-where-offered'` in `disclosureRules.ts`
+> (rules version `disc-2026-10-20b`); each row says when a label is
+> `requiredWhen` and when it is `offeredWhen`, and the decision records
+> `requiredBy: 'rule' | 'policy'`. Today every row's offered and required
+> conditions coincide (TikTok's AIGC flag always; Meta's and Google's
+> advertiser AI disclosure only exists on political ads), so behaviour is
+> unchanged; a destination that offers a label without requiring one (e.g. a
+> caption on our own CMS pages, once built) is labelled by default. A per-client
+> override (label only where required) is not built; it waits on a client
+> creative-settings home (ADR 0942 policy) if a client ever asks for it.
+> TikTok stays refusing until the ads adapter's AIGC flag is sandbox-verified
+> (`adsAigcFlagEnabled`, ADR 0907 / #5093).
+
 ## Open questions
 
-1. **(David)** Should `composite` be the only mode allowed by default, with
-   `edit` opt-in per client? Proposed: yes.
+1. ~~**(David)** Should `composite` be the only mode allowed by default, with
+   `edit` opt-in per client? Proposed: yes.~~ **Decided 2026-10-20: yes** (see
+   the note above).
 2. **(David)** Is a fidelity `needs_review` a hard floor at every 0942 autonomy
    preset, including "Full autopilot"? Proposed: yes — not overridable by preset.
-3. **(David)** Label every AI-generated scene even where no platform requires it?
-   Proposed: per-client choice, default label.
+3. ~~**(David)** Label every AI-generated scene even where no platform requires it?
+   Proposed: per-client choice, default label.~~ **Decided 2026-10-20: label
+   wherever a label is offered** (see the note above).
 4. Perceptual hashing: rasterise through resvg (no new dependency) or add an
    image library? Proposed: resvg first; measure.
 5. Threshold calibration: who signs off the stage-A table? Proposed: the P2 eval
@@ -340,3 +632,85 @@ needs it. It is optional and not the program's recommended RFC (ADR 0941 D9).
   disclosure) on every generated asset; a publish-edge gate in the ads,
   campaign-ops and social adapters; dated AI-disclosure rules. Sub-toggle
   `creative-briefs.product-grounded` (OFF, tenant). Host-ext, no RFC.
+
+
+### Recovery correction — 2026-10-21 (P0 provenance concurrency)
+
+Existing asset metadata edits, dedup merges, usage increments and collection
+rehoming now share a bounded fresh-row CAS boundary. They preserve concurrent
+grounding/fidelity and AI classification, never resurrect deleted assets, and
+report exhausted retries. Grounding remains first-write-wins while a trusted AI
+path may monotonically promote generatedBy. Host aiOrigin also classifies a new
+surface-created asset even when caller lineage is absent. Storage-interleaving
+and deletion/exhaustion witnesses added; execution pending the next serialized
+validation slot.
+
+
+### Recovery corrections — 2026-10-25 (unvalidated source checkpoint)
+
+The original P1–P5, Q3 disclosure and creative-review binding histories are
+retained together. The current requester/waiter checks, submitter-cause
+redaction and email-review cards survive the merge. Channel rendering's replay
+classification uses a fresh1.15.1 pack rather than reverting current1.15.0.
+
+Prepared corrections refuse unreadable provenance, require the current
+product/bytes/mode/sources/rules to match the verdict, and never return an
+unconfirmed local verdict. Verdict identity now commits full judge evidence
+and the model-check invocation: equal outcome codes alone cannot preserve a
+review when its supporting evidence changes.
+
+Review creation confirms a deterministic immutable primary before publishing
+its binding index, retaining the first requester and policy across races and
+lost acknowledgements. Only the latest exact primary cycle can authorize
+publishing. Policy read failures refuse rather than silently selecting a
+default, and a named campaign must belong to the asset's client.
+
+Regression cases are authored for changed evidence, failed provenance reads,
+product reassignment, unconfirmed storage, concurrent review creation and lost
+binding acknowledgements. They have NOT run beside the current release gate.
+Generated metadata, native types, focused suites, canonical CI, delegated/key
+requester-cause review and a concrete asset/evidence review card still require
+qualification. The real-model judge eval required above remains owed; no paid
+AI calls have been made for this recovery.
+
+
+Recovery manual-eval checkpoint — 2026-10-25 (validation pending): the P2
+record above named `scripts/eval-fidelity-judge.mts`. The initial recovery
+check missed the existing backend-relative entry point; that earlier absence
+claim was incorrect. It is now a compatibility entry point to one root runner
+that defaults to a zero-call plan and retains the judge-alone acceptance bar. A live run requires an approved Anthropic model, the
+dedicated eval key, and a new private report path. It evaluates the four
+non-CI-only synthetic fixtures through the production stage-A, judge schema/
+repair, and outcome functions. Each must pass both the judge-alone and combined
+criteria. Its single-attempt Anthropic transport permits at most eight serial requests of 1,200
+output tokens each. It stops on the first provider error/refusal, records
+usage and fixture/commit hashes, and never falls back to a managed key.
+Strict typechecking and zero-call plans for both entry points passed during
+recovery. The required authorized live evaluation remains pending; this
+checkpoint claims no model qualification or production release.
+
+Recovery validation correction — 2026-10-25: a real delegated API-key request
+could freeze the revocable key as the submitter. Revoking it then stranded an
+independent human's decision in the shared fail-closed identity check. This was
+reproduced before freezing the canonical human while the delegation is live;
+all nine binding cases now pass, including the original self-approval refusal.
+The shared review card also passed its actual image/evidence and unreadable/
+changed-evidence checks in both inboxes.
+
+Image-to-video previously trusted a stored `pass` tied only to the asset id.
+A passing verdict for different bytes was reproduced authorizing a paid job.
+Eligibility now also binds actual bytes, product, mode, sources and current
+ruleset before any provider submission. The mismatched-evidence case and both
+animation/publish suites pass. Native types, strict manual-runner types,
+frontend lint, frontend test types (zero baseline) and all 65 focused frontend
+cases are green. Full canonical integration and the owed live judge evaluation
+remain required before declaring this recovered phase complete.
+
+Independent re-measurement — 2026-10-25, on the merge with main `7981e512c`
+(slot 73): the delegated-key binding case was shown RED again by sabotage
+(freeze replaced by the raw requester: that one case fails, 1/9) and GREEN
+restored (9/9). All 20 test files the recovery adds or changes pass (198
+tests); the manual judge runner typechecks under strict and `--plan` reports
+`calls_made: 0` (4 fixtures, at most 8 requests × 1,200 output tokens). No
+live model call was made. The live fidelity evaluation is still owed and needs
+the user's authorization; the merge train is the canonical integration gate.

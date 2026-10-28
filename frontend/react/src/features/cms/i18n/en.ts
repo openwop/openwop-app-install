@@ -798,4 +798,9 @@ export const messages = {
   pricingContactUrlAria: 'Contact link for unpriced plans',
   pricingContactUrlPlaceholder: 'Contact link for unpriced plans (e.g. /p/contact)',
   pricingCompareSwipeHint: 'Swipe the table sideways to see every plan →',
+  // ADR 0949 P0 — legacy result honesty (SRM, fixed-horizon).
+  expSrmNotice: "The traffic split does not match the weights you set, so no verdict is shown. Something is sending visitors to one version more than the other (a redirect, a cache or a bot filter). Fix that, then start a new test.",
+  expStopEarlyNote: "This verdict assumes you read it once, at the end. Checking repeatedly and stopping the first time it says \"significant\" makes false winners far more likely. Decide how long to run before you start, and run that long.",
+  expGatesUnavailable: "The promotion checks could not be read right now.",
+  expGatesWarn: "Some promotion checks do not pass. You can still promote by hand; an automatic promotion would refuse.",
 } as const;

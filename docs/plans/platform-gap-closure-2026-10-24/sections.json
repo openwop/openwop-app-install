@@ -1,0 +1,241 @@
+[
+  {
+    "number": 1,
+    "slug": "operator-installation-upgrades-and-branding",
+    "title": "Operator installation, upgrades and complete branding",
+    "gap_ids": [
+      "OPS-01",
+      "OPS-02",
+      "OPS-04",
+      "BRAND-01"
+    ],
+    "owner": "Release engineering / operator experience",
+    "dependencies": [],
+    "effort": "L",
+    "prd": "01-operator-installation-upgrades-and-branding.prd.md",
+    "gaps": "01-operator-installation-upgrades-and-branding.gaps.md",
+    "risks": "01-operator-installation-upgrades-and-branding.risks.md",
+    "status": "Proposed; requirements authored; implementation and evidence open"
+  },
+  {
+    "number": 2,
+    "slug": "secure-profiles-and-independent-assurance",
+    "title": "Secure deployment profiles and independent assurance",
+    "gap_ids": [
+      "SEC-01",
+      "SEC-02"
+    ],
+    "owner": "Security / identity engineering",
+    "dependencies": [
+      "01"
+    ],
+    "effort": "L",
+    "prd": "02-secure-profiles-and-independent-assurance.prd.md",
+    "gaps": "02-secure-profiles-and-independent-assurance.gaps.md",
+    "risks": "02-secure-profiles-and-independent-assurance.risks.md",
+    "status": "Proposed; requirements authored; implementation and evidence open"
+  },
+  {
+    "number": 3,
+    "slug": "distributed-admission-and-resource-budgets",
+    "title": "Distributed admission and resource budgets",
+    "gap_ids": [
+      "SCALE-01"
+    ],
+    "owner": "Runtime / storage engineering",
+    "dependencies": [
+      "02"
+    ],
+    "effort": "L",
+    "prd": "03-distributed-admission-and-resource-budgets.prd.md",
+    "gaps": "03-distributed-admission-and-resource-budgets.gaps.md",
+    "risks": "03-distributed-admission-and-resource-budgets.risks.md",
+    "status": "Proposed; requirements authored; implementation and evidence open"
+  },
+  {
+    "number": 4,
+    "slug": "host-event-durability-and-resync",
+    "title": "Host-event durability, fan-out and resynchronization",
+    "gap_ids": [
+      "EVENT-01"
+    ],
+    "owner": "Event runtime / storage engineering",
+    "dependencies": [
+      "02"
+    ],
+    "effort": "L",
+    "prd": "04-host-event-durability-and-resync.prd.md",
+    "gaps": "04-host-event-durability-and-resync.gaps.md",
+    "risks": "04-host-event-durability-and-resync.risks.md",
+    "status": "Proposed; requirements authored; implementation and evidence open"
+  },
+  {
+    "number": 5,
+    "slug": "data-integrity-leases-and-lifecycle",
+    "title": "Data integrity, lease fencing and lifecycle completeness",
+    "gap_ids": [
+      "DATA-01"
+    ],
+    "owner": "Storage / data integrity engineering",
+    "dependencies": [
+      "02"
+    ],
+    "effort": "L",
+    "prd": "05-data-integrity-leases-and-lifecycle.prd.md",
+    "gaps": "05-data-integrity-leases-and-lifecycle.gaps.md",
+    "risks": "05-data-integrity-leases-and-lifecycle.risks.md",
+    "status": "Proposed; requirements authored; implementation and evidence open"
+  },
+  {
+    "number": 6,
+    "slug": "release-qualification-recovery-and-slos",
+    "title": "Release qualification, full recovery and measured reliability",
+    "gap_ids": [
+      "OPS-03",
+      "REL-01",
+      "QA-01"
+    ],
+    "owner": "Reliability / release qualification",
+    "dependencies": [
+      "01",
+      "02",
+      "03",
+      "04",
+      "05"
+    ],
+    "effort": "XL",
+    "prd": "06-release-qualification-recovery-and-slos.prd.md",
+    "gaps": "06-release-qualification-recovery-and-slos.gaps.md",
+    "risks": "06-release-qualification-recovery-and-slos.risks.md",
+    "status": "Proposed; requirements authored; implementation and evidence open"
+  },
+  {
+    "number": 7,
+    "slug": "ux-accessibility-localization-and-first-value",
+    "title": "Recoverable UX, accessibility, localization and first value",
+    "gap_ids": [
+      "UX-01",
+      "UX-02",
+      "UX-03",
+      "UX-04",
+      "UX-05",
+      "LOC-01"
+    ],
+    "owner": "Frontend experience / accessibility / localization",
+    "dependencies": [
+      "01",
+      "02"
+    ],
+    "effort": "XL",
+    "prd": "07-ux-accessibility-localization-and-first-value.prd.md",
+    "gaps": "07-ux-accessibility-localization-and-first-value.gaps.md",
+    "risks": "07-ux-accessibility-localization-and-first-value.risks.md",
+    "status": "Proposed; requirements authored; implementation and evidence open"
+  },
+  {
+    "number": 8,
+    "slug": "functional-app-builder-and-governed-output",
+    "title": "Functional app-builder output and governed deployment",
+    "gap_ids": [
+      "APP-01"
+    ],
+    "owner": "App-builder / generated-runtime engineering",
+    "dependencies": [
+      "02",
+      "05",
+      "07"
+    ],
+    "effort": "XL",
+    "prd": "08-functional-app-builder-and-governed-output.prd.md",
+    "gaps": "08-functional-app-builder-and-governed-output.gaps.md",
+    "risks": "08-functional-app-builder-and-governed-output.risks.md",
+    "status": "Proposed; requirements authored; implementation and evidence open"
+  },
+  {
+    "number": 9,
+    "slug": "ai-outcomes-and-qualified-integrations",
+    "title": "AI outcome quality and maintained integration coverage",
+    "gap_ids": [
+      "AI-01",
+      "INT-01"
+    ],
+    "owner": "AI platform / integrations engineering",
+    "dependencies": [
+      "02",
+      "03",
+      "06"
+    ],
+    "effort": "XL",
+    "prd": "09-ai-outcomes-and-qualified-integrations.prd.md",
+    "gaps": "09-ai-outcomes-and-qualified-integrations.gaps.md",
+    "risks": "09-ai-outcomes-and-qualified-integrations.risks.md",
+    "status": "Proposed; requirements authored; implementation and evidence open"
+  },
+  {
+    "number": 10,
+    "slug": "publisher-marketplace-and-financial-operations",
+    "title": "Publisher lifecycle, marketplace trust and financial operations",
+    "gap_ids": [
+      "DEV-01",
+      "MKT-01",
+      "COM-01"
+    ],
+    "owner": "Marketplace / billing / developer experience",
+    "dependencies": [
+      "01",
+      "02",
+      "05",
+      "06",
+      "09"
+    ],
+    "effort": "XL",
+    "prd": "10-publisher-marketplace-and-financial-operations.prd.md",
+    "gaps": "10-publisher-marketplace-and-financial-operations.gaps.md",
+    "risks": "10-publisher-marketplace-and-financial-operations.risks.md",
+    "status": "Proposed; requirements authored; implementation and evidence open"
+  },
+  {
+    "number": 11,
+    "slug": "all-product-families-and-technical-debt",
+    "title": "All product families, complete journeys and technical-debt census",
+    "gap_ids": [
+      "FAM-01"
+    ],
+    "owner": "Product/domain engineering leads",
+    "dependencies": [
+      "02",
+      "05",
+      "07",
+      "08",
+      "09",
+      "10"
+    ],
+    "effort": "XL",
+    "prd": "11-all-product-families-and-technical-debt.prd.md",
+    "gaps": "11-all-product-families-and-technical-debt.gaps.md",
+    "risks": "11-all-product-families-and-technical-debt.risks.md",
+    "status": "Proposed; requirements authored; implementation and evidence open"
+  },
+  {
+    "number": 12,
+    "slug": "support-economics-and-ecosystem-evidence",
+    "title": "Support commitments, unit economics and independent ecosystem evidence",
+    "gap_ids": [
+      "SUP-01",
+      "MKT-02",
+      "TCO-01"
+    ],
+    "owner": "Product operations / support / commercial sponsor",
+    "dependencies": [
+      "01",
+      "06",
+      "10",
+      "11"
+    ],
+    "effort": "L plus elapsed customer observation",
+    "prd": "12-support-economics-and-ecosystem-evidence.prd.md",
+    "gaps": "12-support-economics-and-ecosystem-evidence.gaps.md",
+    "risks": "12-support-economics-and-ecosystem-evidence.risks.md",
+    "status": "Proposed; requirements authored; implementation and evidence open"
+  }
+]

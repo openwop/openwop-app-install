@@ -74,7 +74,8 @@ import {
   getCustomRole,
   updateCustomRole,
   deleteCustomRole,
-  isProtocolScope,
+  isCustomRoleScope,
+  DELEGABLE_HOST_SCOPES,
   PROTOCOL_SCOPES,
   type Scope,
   type EffectiveAccess,
@@ -89,7 +90,7 @@ import {
   decideProtocolAuthorization,
 } from '../host/protocolAuthorization.js';
 import { callerSubject, isOwnPersonalWorkspace, tenantOf } from '../host/requestSubject.js';
-import { isSuperadmin } from '../host/superadmin.js';
+import { isSuperadmin, superadminNeedsMfa } from '../host/superadmin.js';
 import { actingAccess, actingMemberId, callerOrgAccess, callerTenantAccess } from '../host/actingAccess.js';
 import { memberAdded, memberRolesChanged, registerMemberLifecycleEvents } from '../host/memberLifecycleEvents.js';
 
@@ -288,12 +289,12 @@ function parseScopes(value: unknown): Scope[] | undefined {
   }
   const out: Scope[] = [];
   for (const s of value) {
-    if (!isProtocolScope(s)) {
+    if (!isCustomRoleScope(s)) {
       throw new OpenwopError(
         'validation_error',
-        `Scope \`${String(s)}\` is not assignable to a custom role. Custom roles may carry only RFC 0049 protocol scopes; \`host:\` management scopes are reserved to the built-in admin/owner roles.`,
+        `Scope \`${String(s)}\` is not assignable to a custom role. Custom roles may carry the RFC 0049 protocol scopes and the delegable host scopes (${DELEGABLE_HOST_SCOPES.join(', ')}); \`host:\` management scopes are reserved to the built-in admin/owner roles.`,
         400,
-        { field: 'scopes', valid: PROTOCOL_SCOPES },
+        { field: 'scopes', valid: [...PROTOCOL_SCOPES, ...DELEGABLE_HOST_SCOPES] },
       );
     }
     out.push(s);
@@ -371,7 +372,12 @@ export function registerAccessControlRoutes(app: Express): void {
       // resolution: a ?memberId / ?subject / act-as preview describes someone
       // else, and superadmin is the caller's property, not theirs.
       const ownResolution = memberId === undefined && explicitSubject === undefined;
-      res.json(ownResolution ? { ...access, superadmin: isSuperadmin(req) } : access);
+      // ADR 0969 — say WHY superadmin is false when only the second factor is
+      // missing, so the SPA can point at Settings → Security instead of silently
+      // hiding every admin surface. Present only when true (additive).
+      res.json(ownResolution
+        ? { ...access, superadmin: isSuperadmin(req), ...(superadminNeedsMfa(req) ? { superadminNeedsMfa: true } : {}) }
+        : access);
     } catch (err) {
       next(err);
     }

@@ -6,6 +6,12 @@
  * work returns `continueTurn`; when the model then stops without a call, the
  * loop sends that text once (twice at most per turn) and grants the rounds to
  * act on it. These drive the REAL `runChatToolLoop` with a scripted model.
+ *
+ * Expectations are LITERALS (2 follow-ups, call counts), never the imported
+ * constants: a test that reads MAX_CONTINUATIONS moves with a sabotage of it
+ * (8f W4 probe uf-const-moves-with-test was vacuous for exactly that reason).
+ * Witnessed: uf-never-arm, uf-error-arms, uf-null-no-disarm, uf-disarm-on-send,
+ * uf-bound-off-by-one, uf-no-extra-rounds, uf-const-moves-with-test-r2.
  */
 import { describe, expect, it } from 'vitest';
 import { runChatToolLoop, MAX_CONTINUATIONS, CONTINUATION_ROUNDS, type CompiledTool } from '../src/host/agentDispatch.js';
@@ -80,7 +86,7 @@ describe('unfinished-work follow-up (ADR 0773 B.7)', () => {
     const m = scripted(['call', 'stop', 'call', 'stop', 'call', 'stop', 'call', 'stop']);
     await runChatToolLoop(opts, { callAIWithTools: m.callAIWithTools, executeTool: async () => ({ content: 'ok', continueTurn: NUDGE }) });
     const followUps = m.seen.filter((r) => lastUser(r) === NUDGE).length;
-    expect(followUps).toBe(MAX_CONTINUATIONS);
+    expect(followUps).toBe(2); // literal: ADR 0773 B.7, twice at most per turn
   });
 
   it(`grants rounds to act on it: a stop on the LAST round still gets its follow-up (budget +${CONTINUATION_ROUNDS})`, async () => {

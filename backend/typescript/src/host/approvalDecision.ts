@@ -26,9 +26,11 @@ import { fireJob } from './scheduleDaemon.js';
 import { getJob } from './schedulingService.js';
 import { resolveTenantWorkflow } from './resolveLaunchDefinition.js';
 import { resolveEffectiveAccess } from './accessControlService.js';
-import { isEligibleApprover, consumeVoteIdentity } from './approverResolution.js';
+import { isEligibleApprover, consumeVoteIdentity, policyApproverRefs } from './approverResolution.js';
 import { appendDecision, tallyDecisions, evaluateQuorumTally, readRejectionPolicy } from './reviewDecisionLedger.js';
 import { emitReviewUpdatedSignal } from '../notifications/notify.js';
+import { resumeRunsAwaitingApproval } from './autonomyPolicy/waiters.js';
+import { createLogger } from '../observability/logger.js';
 import {
   getApproval,
   resolveApproval,
@@ -36,12 +38,13 @@ import {
   attachRunId,
   getAssistantActionApprovalHandler,
   getContentApprovalHandler,
-  getEmailSendApprovalHandler,
+  getEmailSendApprovalHandler, getFunnelPublishApprovalHandler,
   getChallengePublishApprovalHandler,
   getKicktodoSignoffApprovalHandler,
   getAnonSurfaceWriteApprovalHandler,
   getStrategyActivationApprovalHandler,
   getCampaignChangeSetApprovalHandler,
+  getPlaybookRolloutApprovalHandler,
   getStrategyCheckInApprovalHandler,
   getScenarioSelectApprovalHandler,
   getContactMergeApprovalHandler,
@@ -53,6 +56,8 @@ import {
   getCommerceListingApprovalHandler,
   getComposedWorkflowApprovalHandler,
   type PendingApproval, reopenApproval } from './approvalService.js';
+
+const log = createLogger('host.approvalDecision');
 
 export interface ApprovalDecisionDeps {
   storage: Storage;
@@ -106,7 +111,8 @@ export interface ApprovalDecisionCtx {
    *  they approved. A SIBLING of `expectedDefinitionHash`, not a reuse of it: the two hash
    *  different objects, and one field meaning two things is how a check gets skipped. Read
    *  from the HTTP body by both thin decide routes; REQUIRED for an assistant-action
-   *  approve (the handler refuses without it). Ignored by every other kind. */
+   *  approve (the handler refuses without it). ADR 0905 email approvals use the same
+   *  request field for their separate full send-review digest, never the template hash. */
   expectedContentHash?: string;
   /** ADR 0924 D2 — the change-set hash the decider DISPLAYED. A third sibling of
    *  the two above, for the same reason: it hashes a different object. Required
@@ -170,11 +176,7 @@ async function evaluateQuorum(
   // A non-open gate admits ONLY the resolved subjects; an open gate (no refs of
   // any kind) keeps this surface's default-secure `approvals:respond` requirement
   // (the INTENTIONAL divergence from the interrupt path documented above).
-  const gateRefs = {
-    ...(approval.policy?.approverRefs ? { approverRefs: approval.policy.approverRefs } : {}),
-    ...(approval.policy?.approverGroupRefs ? { approverGroupRefs: approval.policy.approverGroupRefs } : {}),
-    ...(approval.policy?.approverRoleRefs ? { approverRoleRefs: approval.policy.approverRoleRefs } : {}),
-  };
+  const gateRefs = policyApproverRefs(approval.policy); // ADR 0942 D7 — carries allowDelegation
   const gateCtx = { tenantId: ctx.tenantId, ...(approval.orgId ? { orgId: approval.orgId } : {}) };
   const { eligible, openGate } = await isEligibleApprover(reviewerRef, gateRefs, gateCtx);
   if (!openGate) {
@@ -230,7 +232,10 @@ async function loadPending(tenantId: string, approvalId: string): Promise<Pendin
   if (!approval || approval.tenantId !== tenantId) {
     throw new OpenwopError('not_found', 'Approval not found.', 404, { approvalId });
   }
-  if (approval.status !== 'pending') {
+  // ADR 0959: the owner may need to reconcile the rollout after its approval
+  // committed. Eligibility still runs below; the owner cannot reverse that
+  // decision, and the dispatch reports the existing outcome as a conflict.
+  if (approval.status !== 'pending' && approval.kind !== 'playbook-rollout') {
     throw new OpenwopError('conflict', `Approval already ${approval.status}.`, 409, { status: approval.status });
   }
   return approval;
@@ -292,7 +297,7 @@ type FeatureApprovalHandler = (
   tenantId: string,
   approvalId: string,
   outcome: 'approved' | 'rejected',
-  opts: { decidedByUserId?: string; note?: string; isSuperadmin?: boolean; expectedDefinitionHash?: string; expectedChangeSetHash?: string },
+  opts: { decidedByUserId?: string; note?: string; isSuperadmin?: boolean; expectedDefinitionHash?: string; expectedChangeSetHash?: string; expectedContentHash?: string },
 ) => Promise<{ approval: PendingApproval; changed: boolean } | null>;
 
 /** One feature kind's decision recipe — everything the shared dispatcher needs to
@@ -307,7 +312,7 @@ interface FeatureKindDispatch {
   /** Extra handler opts derived from the decision context —
    *  commerce-listing-publish threads `isSuperadmin`; composed-workflow
    *  threads `expectedDefinitionHash` (ADR 0473). */
-  handlerOpts?: (ctx: ApprovalDecisionCtx) => { isSuperadmin?: boolean; expectedDefinitionHash?: string; expectedChangeSetHash?: string };
+  handlerOpts?: (ctx: ApprovalDecisionCtx) => { isSuperadmin?: boolean; expectedDefinitionHash?: string; expectedChangeSetHash?: string; expectedContentHash?: string };
   /** Extra result fields echoed to the caller (pageId / strategyId / the
    *  composed-workflow runId). Receives the DECIDED row (post-handler), so
    *  fields the handler attaches (`runId`) are visible. */
@@ -345,7 +350,15 @@ const KIND_DISPATCH = {
   'email-campaign-send': {
     getHandler: getEmailSendApprovalHandler,
     notComposedLabel: 'Email',
+    handlerOpts: (ctx) => ({ expectedContentHash: ctx.expectedContentHash }),
     audit: (a, o) => ({ action: o === 'approved' ? 'email.campaign.send-approved' : 'email.campaign.send-rejected', resource: `email-campaign:${a.emailSend?.campaignId ?? a.approvalId}`, payload: { ...baseAuditPayload(a), orgId: a.orgId, templateVersion: a.emailSend?.templateVersion, contentHash: a.emailSend?.contentHash } }),
+  },
+  // ADR 0948 P1b — funnel-publish: the funnels handler publishes the funnel exactly as
+  // pinned (approve) or leaves it a draft (reject). The only node-reachable publish.
+  'funnel-publish': {
+    getHandler: getFunnelPublishApprovalHandler,
+    notComposedLabel: 'Funnels',
+    audit: (a, o) => ({ action: o === 'approved' ? 'funnels.funnel.publish-approved' : 'funnels.funnel.publish-rejected', resource: `funnel:${a.funnelPublish?.funnelId ?? a.approvalId}`, payload: { ...baseAuditPayload(a), orgId: a.orgId, digest: a.funnelPublish?.digest } }),
   },
   // ADR 0264 / CDP-B — contact-merge: the CRM handler merges (approve) / declines.
   'contact-merge': {
@@ -400,6 +413,13 @@ const KIND_DISPATCH = {
     handlerOpts: (ctx) => (ctx.expectedChangeSetHash !== undefined ? { expectedChangeSetHash: ctx.expectedChangeSetHash } : {}),
     result: (a) => ({ changeSetId: a.changeSetId }),
   },
+  // ADR 0959 D7 — playbook-rollout: the campaign-playbooks handler re-plans, checks the
+  // plan hash the approver saw and separation of duties, then moves the rollout.
+  'playbook-rollout': {
+    getHandler: getPlaybookRolloutApprovalHandler,
+    notComposedLabel: 'Campaign playbooks',
+    audit: (a, o) => ({ action: o === 'approved' ? 'campaign-playbooks.rollout.approved' : 'campaign-playbooks.rollout.rejected', resource: `playbook-rollout:${a.playbookRolloutId}`, payload: { ...baseAuditPayload(a), playbookId: a.playbookId, planHash: a.playbookRolloutPlanHash } }),
+  },
   // ADR 0230 §B3 — strategy-activation: the strategy transition; echoes strategyId.
   'strategy-activation': {
     getHandler: getStrategyActivationApprovalHandler,
@@ -444,6 +464,8 @@ const KIND_DISPATCH = {
   // Bespoke finalizers, kept inline in claim/reject below.
   'run-proposal': 'run-proposal',
   'campaign-spend': 'campaign-spend',
+  // ADR 0945 × 0942 — the claim IS the decision; the publish gate re-checks it.
+  'creative-publish-review': 'campaign-spend',
   'assistant-action': 'assistant-action',
   // R2 UCP-P2-B1 (review B-1) — commerce-spend is a SPEND SIGN-OFF, not a run: the
   // claim IS the approve. It used to fall through to the run-proposal finalizer, which
@@ -571,6 +593,15 @@ async function dispatchFeatureDecision(
  *  - run-proposal     → resolve-before-dispatch CAS, then start the run + kanban.
  * Throws OpenwopError (404/409/422) on the same conditions as before.
  */
+/** ADR 0942 — resume the campaign runs waiting on a decided spend row. Never fails the decision: it has already committed. */
+async function resumeAwaitingRunsSafely(tenantId: string, approvalId: string, outcome: 'approved' | 'rejected'): Promise<void> {
+  try {
+    await resumeRunsAwaitingApproval(tenantId, approvalId, outcome);
+  } catch (err) {
+    log.warn('approval_waiters_resume_failed', { approvalId, error: err instanceof Error ? err.message : String(err) });
+  }
+}
+
 export async function claimApproval(
   deps: ApprovalDecisionDeps,
   ctx: ApprovalDecisionCtx,
@@ -616,6 +647,9 @@ export async function claimApproval(
       approvalId: approval.approvalId, tenantId, platform: approval.platform, spendKind: approval.spendKind, dailyBudgetMinor: approval.dailyBudgetMinor,
       ...(isCommerce ? { amountMinor: approval.amountMinor, amountCurrency: approval.amountCurrency } : {}),
     });
+    // ADR 0942 D5 — campaign runs waiting on this row resume after the CAS (and a
+    // non-campaign row simply has no waiters).
+    if (!isCommerce) await resumeAwaitingRunsSafely(tenantId, approval.approvalId, 'approved');
     return announceReview(tenantId, { approvalId: approval.approvalId, status: 'approved' });
   }
 
@@ -842,6 +876,7 @@ export async function rejectApproval(
     auditDecision(deps, ctx, approval.kind === 'commerce-spend' ? 'commerce.spend-rejected' : 'campaign.ads.spend-rejected', `${approval.kind === 'commerce-spend' ? 'commerce-spend' : 'campaign-spend'}:${approval.spendIdemKey ?? approval.approvalId}`, {
       approvalId: approval.approvalId, tenantId, platform: approval.platform, spendKind: approval.spendKind, dailyBudgetMinor: approval.dailyBudgetMinor,
     });
+    if (approval.kind === 'campaign-spend') await resumeAwaitingRunsSafely(tenantId, approval.approvalId, 'rejected');
     return announceReview(tenantId, { approvalId: approval.approvalId, status: 'rejected' });
   }
 

@@ -13,6 +13,14 @@
  *
  * Each refusal leg sits beside an allowed leg (same org, an owner, a system run,
  * a tenant-scoped KB namespace), so a floor that blocks everybody fails here too.
+ * Allowed legs assert the method's real result shape, so a refusal or an empty
+ * answer cannot pass for an allowed one.
+ *
+ * Tracker TST-BOS-1. Sabotage-witnessed (w62): red when the seam stops calling
+ * the org floor, the causing-member lane is dropped, the tenant-scoped KB
+ * namespaces lose their pass, a method's stricter scope is ignored, the method
+ * re-reads the caller's args instead of the floor's copy, a non-string orgId is
+ * accepted, or ctx.knowledge stops forwarding the causing member.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -43,14 +51,18 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+/** The response fields this file reads (test/login and orgs). */
+interface Body { user?: { userId: string }; orgId?: string }
+interface Res { status: number; body: Body }
 function client(): { post: (p: string, b?: unknown) => Promise<Res> } {
   let cookie = '';
   return {
     post: async (path, body) => {
       const res = await fetch(`${BASE}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
       for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-      return { status: res.status, body: await res.json().catch(() => undefined) };
+      // Narrowed to the fields this file reads (a non-JSON body reads as `{}`).
+      const parsed = (await res.json().catch(() => ({}))) as Body;
+      return { status: res.status, body: parsed };
     },
   };
 }
@@ -63,11 +75,12 @@ const SECRET = 'Finance-only acquisition target';
 async function fixture() {
   const tenantId = `org:seam832-${Date.now()}-${n++}`;
   const owner = client();
-  const ownerId: string = (await owner.post(`${H}/test/login`, { email: `s832-o-${n++}@acme.test`, tenantId })).body.user.userId;
+  const ownerId: string = (await owner.post(`${H}/test/login`, { email: `s832-o-${n++}@acme.test`, tenantId })).body.user?.userId ?? '';
   const member = client();
-  const memberId: string = (await member.post(`${H}/test/login`, { email: `s832-m-${n++}@acme.test`, tenantId })).body.user.userId;
-  const orgA: string = (await owner.post(`${H}/orgs`, { name: 'Everyone' })).body.orgId;
-  const orgB: string = (await owner.post(`${H}/orgs`, { name: 'Finance' })).body.orgId;
+  const memberId: string = (await member.post(`${H}/test/login`, { email: `s832-m-${n++}@acme.test`, tenantId })).body.user?.userId ?? '';
+  const orgA: string = (await owner.post(`${H}/orgs`, { name: 'Everyone' })).body.orgId ?? '';
+  const orgB: string = (await owner.post(`${H}/orgs`, { name: 'Finance' })).body.orgId ?? '';
+  expect(ownerId && memberId && orgA && orgB, 'fixture: both users and both orgs exist').toBeTruthy();
   const add = await owner.post(`${H}/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'M', subject: memberId, roles: ['editor'] });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
 
@@ -126,7 +139,7 @@ describe('the seam refuses a run whose person is not in the named org', () => {
     const s = surfaces({ tenantId: f.tenantId, runId: 'r1', orgScopeSubject: f.memberId });
     await expect(s.crm!.listCompanies!({ orgId: f.orgB })).rejects.toMatchObject(FORBIDDEN);
     // …and the member's own org still answers.
-    await expect(s.crm!.listCompanies!({ orgId: f.orgA })).resolves.toBeDefined();
+    await expect(s.crm!.listCompanies!({ orgId: f.orgA })).resolves.toMatchObject({ companies: expect.any(Array) });
   });
 });
 
@@ -151,7 +164,7 @@ describe('R8 in a shared personal workspace (grade M1)', () => {
     await expect(caused.crm!.listCompanies!({ orgId: org.orgId })).rejects.toMatchObject(FORBIDDEN);
     // …while the owner's own channel turn still reads it.
     const owner = surfaces({ tenantId, runId: 'r', orgScopeSubject: 'user:owner-832' });
-    await expect(owner.crm!.listCompanies!({ orgId: org.orgId })).resolves.toBeDefined();
+    await expect(owner.crm!.listCompanies!({ orgId: org.orgId })).resolves.toMatchObject({ companies: expect.any(Array) });
   });
 });
 
@@ -164,17 +177,17 @@ describe('what the floor refuses beyond a foreign org', () => {
     await expect(s['campaign-intel']!.anomalies!({ orgId: { toString: () => f.orgB } })).rejects.toMatchObject({ code: 'validation_error' });
     // '' and null name NO org, like an absent key: the floor does not check them
     // (an empty org reading the whole tenant is residue S-A, pinned separately).
-    await expect(s.crm!.listCompanies!({ orgId: '' })).resolves.toBeDefined();
-    await expect(s.crm!.listCompanies!({ orgId: null })).resolves.toBeDefined();
+    await expect(s.crm!.listCompanies!({ orgId: '' })).resolves.toMatchObject({ companies: expect.any(Array) });
+    await expect(s.crm!.listCompanies!({ orgId: null })).resolves.toMatchObject({ companies: expect.any(Array) });
   });
 
   it('a method whose door needs more than membership asks that scope (kicktodo-organizations.report)', async () => {
     const f = await fixture();
     const member = surfaces({ tenantId: f.tenantId, runId: 'r1', actingUserId: f.memberId });
     await expect(member['kicktodo-organizations']!.report!({ orgId: f.orgA })).rejects.toMatchObject(FORBIDDEN);
-    await expect(member['kicktodo-organizations']!.catalog!({ orgId: f.orgA })).resolves.toBeDefined();
+    await expect(member['kicktodo-organizations']!.catalog!({ orgId: f.orgA })).resolves.toHaveProperty('catalog');
     const owner = surfaces({ tenantId: f.tenantId, runId: 'r1', actingUserId: f.ownerId });
-    await expect(owner['kicktodo-organizations']!.report!({ orgId: f.orgA })).resolves.toBeDefined();
+    await expect(owner['kicktodo-organizations']!.report!({ orgId: f.orgA })).resolves.toHaveProperty('cells');
   });
 
   it('the floor and the method read the same orgId (an accessor cannot answer each differently)', async () => {
@@ -191,8 +204,8 @@ describe('positive controls (a floor that blocks everyone is a wall)', () => {
   it('the same run reads and writes its own org', async () => {
     const f = await fixture();
     const s = surfaces({ tenantId: f.tenantId, runId: 'r1', actingUserId: f.memberId });
-    await expect(s.crm!.listCompanies!({ orgId: f.orgA })).resolves.toBeDefined();
-    await expect(s.documents!.listDocuments!({ orgId: f.orgA })).resolves.toBeDefined();
+    await expect(s.crm!.listCompanies!({ orgId: f.orgA })).resolves.toMatchObject({ companies: expect.any(Array) });
+    await expect(s.documents!.listDocuments!({ orgId: f.orgA })).resolves.toMatchObject({ documents: expect.any(Array) });
     await expect(s.cms!.createDraftPage!({ orgId: f.orgA, title: 'mine' })).resolves.toMatchObject({ status: 'draft' });
   });
 
@@ -211,14 +224,14 @@ describe('positive controls (a floor that blocks everyone is a wall)', () => {
   it('a method with no orgId arg is not touched by the floor', async () => {
     const f = await fixture();
     const s = surfaces({ tenantId: f.tenantId, runId: 'r1', actingUserId: f.memberId });
-    await expect(s['campaign-brief']!.listBriefs!({})).resolves.toBeDefined();
+    await expect(s['campaign-brief']!.listBriefs!({})).resolves.toMatchObject({ briefs: expect.any(Array) });
   });
 
   it('KB keeps its tenant-scoped namespaces readable by name (`_team`, `_kickbot`)', async () => {
     const f = await fixture();
     const s = surfaces({ tenantId: f.tenantId, runId: 'r1', actingUserId: f.memberId });
-    await expect(s.kb!.listCollections!({ orgId: '_team' })).resolves.toBeDefined();
-    await expect(s.kb!.listCollections!({ orgId: '_kickbot' })).resolves.toBeDefined();
+    await expect(s.kb!.listCollections!({ orgId: '_team' })).resolves.toMatchObject({ collections: expect.any(Array) });
+    await expect(s.kb!.listCollections!({ orgId: '_kickbot' })).resolves.toMatchObject({ collections: expect.any(Array) });
     await expect(s.kb!.listCollections!({ orgId: '_unlisted' })).rejects.toMatchObject(NOT_FOUND);
   });
 });

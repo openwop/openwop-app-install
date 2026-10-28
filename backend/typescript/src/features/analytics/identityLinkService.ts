@@ -99,6 +99,19 @@ export async function contactForSession(tenantId: string, sessionKey: string): P
   return row && row.tenantId === tenantId ? row.contactId : null;
 }
 
+/** ADR 0956 D1 — every linked session of a tenant → its contact, in ONE bounded
+ *  read (the `${tenantId}::` prefix), for a report that resolves many sessions.
+ *  Fresh, never the snapshot: a path must not join a link that was erased. The
+ *  same grammar filter as `contactForSession` (ADR 0857 D1). */
+export async function contactsBySession(tenantId: string): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (!tenantId) return out;
+  for (const l of await links.listByPrefix(`${tenantId}::`)) {
+    if (l.tenantId === tenantId && isLinkableSessionKey(l.sessionKey)) out.set(l.sessionKey, l.contactId);
+  }
+  return out;
+}
+
 /** GDPR erasure: remove every link row for this tenant whose sessionKey OR
  *  contactId is the erased subject (the subject key may be either side —
  *  the beacon's anon session id or the CRM contactId). Returns count removed. */

@@ -15,7 +15,7 @@ import { join } from 'node:path';
 import { initInMemorySurfaces } from '../src/host/inMemorySurfaces.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openStorage } from '../src/storage/index.js';
-import { createUserTemplate, clearUserTemplatesForTest } from '../src/host/promptStore.js';
+import { createTenantTemplate } from '../src/host/tenantPromptTemplates.js';
 import { userIdFor } from '../src/features/users/usersService.js';
 import { createEntry, listEntries, getEntry, updateEntry, deleteEntry, renderEntry } from '../src/features/prompts/promptLibraryService.js';
 import { buildPromptSurface } from '../src/features/prompts/promptSurface.js';
@@ -25,20 +25,21 @@ const T = 'pl-tenant';
 let orgN = 0;
 let ORG = 'org-a'; // reassigned per test (the entries collection persists across tests)
 
-function seedTemplate(id: string): void {
-  const out = createUserTemplate({ templateId: id, version: '1.0.0', kind: 'user', text: 'Hello {{name}}', name: id });
+// ADR 0993 D5 — a user template belongs to ONE tenant (the entries' tenant).
+async function seedTemplate(id: string): Promise<void> {
+  const out = await createTenantTemplate(T, { templateId: id, version: '1.0.0', kind: 'user', text: 'Hello {{name}}', name: id });
   expect(out.ok, JSON.stringify(out)).toBe(true);
 }
 
 beforeAll(async () => {
   initInMemorySurfaces({ dataDir: mkdtempSync(join(tmpdir(), 'openwop-promptlib-')) });
-  initHostExtPersistence(await openStorage('memory://'));
 });
-beforeEach(() => { clearUserTemplatesForTest(); ORG = `org-${orgN++}`; });
+// A fresh store per test: templates are durable now, so ids would collide across tests.
+beforeEach(async () => { initHostExtPersistence(await openStorage('memory://')); ORG = `org-${orgN++}`; });
 
 describe('prompt-library service', () => {
   it('creates an entry referencing a real template', async () => {
-    seedTemplate('tpl-greet');
+    await seedTemplate('tpl-greet');
     const e = await createEntry(T, ORG, 'u1', { name: 'Greeting', promptRef: 'tpl-greet', tags: ['intro', 'demo'], visibility: 'org' });
     expect(e.entryId).toBeTruthy();
     expect(e.promptRef).toBe('tpl-greet');
@@ -52,44 +53,40 @@ describe('prompt-library service', () => {
   });
 
   it('requires a name', async () => {
-    seedTemplate('tpl-x');
+    await seedTemplate('tpl-x');
     await expect(createEntry(T, ORG, 'u1', { promptRef: 'tpl-x' })).rejects.toMatchObject({ code: 'validation_error' });
   });
 
   it('defaults visibility to private', async () => {
-    seedTemplate('tpl-p');
+    await seedTemplate('tpl-p');
     const e = await createEntry(T, ORG, 'u1', { name: 'P', promptRef: 'tpl-p' });
     expect(e.visibility).toBe('private');
   });
 
   it('lists, gets, updates, and deletes', async () => {
-    seedTemplate('tpl-1'); seedTemplate('tpl-2');
+    await seedTemplate('tpl-1'); await seedTemplate('tpl-2');
     const a = await createEntry(T, ORG, 'u1', { name: 'A', promptRef: 'tpl-1' });
     await createEntry(T, ORG, 'u1', { name: 'B', promptRef: 'tpl-2' });
     expect((await listEntries(T, ORG, 'u1')).length).toBe(2);
 
-    // ADR 0694 D1 — this used to be ONE call in which a NON-owner ('u2') both renamed
-    // 'u1's default-private entry AND widened it to 'shared'. The widening half is
-    // now refused (`PLC-6`: visibility is the read ACL, so letting any org writer
-    // flip it makes PLC-1's guarantee only as strong as `workspace:write`).
-    // Split rather than softened, so this test still pins BOTH halves of the rule:
-    // ordinary fields stay org-writable, visibility is owner-only.
-    const renamed = await updateEntry(T, ORG, a.entryId, 'u2', { name: 'A2' });
-    expect(renamed.name, 'a non-owner may still edit ordinary fields').toBe('A2');
-    expect(renamed.updatedBy).toBe('u2');
-    expect(renamed.visibility, 'and an edit that does not name visibility never changes it').toBe('private');
-
+    // ADR 0993 D2 — a private entry is its owner's on EVERY lane (ADR 0694 leg 4,
+    // which kept ordinary fields org-writable, is overturned): a non-owner gets the
+    // read lane's uniform 404. Once the owner widens it, any org writer edits it.
+    await expect(updateEntry(T, ORG, a.entryId, 'u2', { name: 'A2' })).rejects.toMatchObject({ code: 'not_found' });
     const updated = await updateEntry(T, ORG, a.entryId, 'u1', { visibility: 'shared' });
     expect(updated.visibility, 'the OWNER may widen it').toBe('shared');
-    expect(updated.name).toBe('A2');
+    const renamed = await updateEntry(T, ORG, a.entryId, 'u2', { name: 'A2' }); // a non-owner may edit an org-visible entry's fields
+    expect(renamed.name, 'an org-visible entry stays org-writable').toBe('A2');
+    expect(renamed.updatedBy).toBe('u2');
+    expect(renamed.visibility, 'and an edit that does not name visibility never changes it').toBe('shared');
 
-    await deleteEntry(T, ORG, a.entryId);
+    await deleteEntry(T, ORG, a.entryId, 'u1');
     expect(await getEntry(T, ORG, a.entryId, 'u1')).toBeNull();
     expect((await listEntries(T, ORG, 'u1')).length).toBe(1);
   });
 
   it('isolates by tenant + org (no cross-scope read)', async () => {
-    seedTemplate('tpl-iso');
+    await seedTemplate('tpl-iso');
     const e = await createEntry(T, ORG, 'u1', { name: 'Iso', promptRef: 'tpl-iso' });
     expect(await getEntry('other-tenant', ORG, e.entryId, 'u1')).toBeNull();
     expect(await getEntry(T, 'other-org', e.entryId, 'u1')).toBeNull();
@@ -97,7 +94,7 @@ describe('prompt-library service', () => {
   });
 
   it('rejects updating to a dangling promptRef', async () => {
-    seedTemplate('tpl-u');
+    await seedTemplate('tpl-u');
     const e = await createEntry(T, ORG, 'u1', { name: 'U', promptRef: 'tpl-u' });
     await expect(updateEntry(T, ORG, e.entryId, 'u1', { promptRef: 'gone' })).rejects.toMatchObject({ code: 'validation_error' });
   });
@@ -105,7 +102,7 @@ describe('prompt-library service', () => {
 
 describe('prompt-library renderEntry + ctx.prompts surface (ADR 0116 Phase 4)', () => {
   it('renderEntry resolves the template + substitutes {{var}} (missing stays literal)', async () => {
-    seedTemplate('tpl-r');
+    await seedTemplate('tpl-r');
     const e = await createEntry(T, ORG, 'u1', { name: 'R', promptRef: 'tpl-r' });
     expect((await renderEntry(T, ORG, e.entryId, { name: 'World' }, 'u1')).composed).toBe('Hello World');
     expect((await renderEntry(T, ORG, e.entryId, {}, 'u1')).composed).toBe('Hello {{name}}'); // missing binding literal
@@ -116,7 +113,7 @@ describe('prompt-library renderEntry + ctx.prompts surface (ADR 0116 Phase 4)', 
   });
 
   it('ctx.prompts surface lists + renders, tenant-scoped (closes over scope.tenantId)', async () => {
-    seedTemplate('tpl-s');
+    await seedTemplate('tpl-s');
     // `createdBy` is the CANONICAL user id (`userIdFor`); the run's `actingUserId` is
     // the RAW principal. The surface canonicalizes it so the owner's run matches.
     const owner = userIdFor(T, 'principal-s');
@@ -138,7 +135,7 @@ describe('prompt-library renderEntry + ctx.prompts surface (ADR 0116 Phase 4)', 
    * without canonicalization the owner would be locked out of their OWN private prompt.
    */
   it('an unbound-OIDC owner reads their OWN private prompt via the surface; a different principal cannot', async () => {
-    seedTemplate('tpl-oidc');
+    await seedTemplate('tpl-oidc');
     const owner = userIdFor(T, 'oidc:sub-1');           // what createEntry stamps for this caller
     const e = await createEntry(T, ORG, owner, { name: 'Priv', promptRef: 'tpl-oidc', visibility: 'private' });
     // The SAME human's workflow run (raw actingUserId) sees it — canonicalized match.
@@ -159,7 +156,7 @@ describe('prompt-library renderEntry + ctx.prompts surface (ADR 0116 Phase 4)', 
  */
 describe('PLC-1 — private visibility is enforced on read', () => {
   it('a private entry hides from a non-owner; org entries stay org-visible', async () => {
-    seedTemplate('tpl-priv'); seedTemplate('tpl-pub');
+    await seedTemplate('tpl-priv'); await seedTemplate('tpl-pub');
     const priv = await createEntry(T, ORG, 'alice', { name: 'Secret', promptRef: 'tpl-priv', visibility: 'private' });
     const org = await createEntry(T, ORG, 'alice', { name: 'Public', promptRef: 'tpl-pub', visibility: 'org' });
     // Owner sees both.
@@ -182,8 +179,8 @@ describe('PLC-1 — private visibility is enforced on read', () => {
  */
 describe('PLC-2 — a promptRef @version pin is honored', () => {
   it('a pinned ref renders that version; unpinned renders latest; trailing @ is unpinned', async () => {
-    expect(createUserTemplate({ templateId: 'tpl-v', version: '1.0.0', kind: 'user', text: 'ONE {{x}}', name: 'tpl-v' }).ok).toBe(true);
-    expect(createUserTemplate({ templateId: 'tpl-v', version: '2.0.0', kind: 'user', text: 'TWO {{x}}', name: 'tpl-v' }).ok).toBe(true);
+    expect((await createTenantTemplate(T, { templateId: 'tpl-v', version: '1.0.0', kind: 'user', text: 'ONE {{x}}', name: 'tpl-v' })).ok).toBe(true);
+    expect((await createTenantTemplate(T, { templateId: 'tpl-v', version: '2.0.0', kind: 'user', text: 'TWO {{x}}', name: 'tpl-v' })).ok).toBe(true);
     // A pinned ref is ACCEPTED (was rejected as dangling) and renders v1.0.0.
     const pinned = await createEntry(T, ORG, 'u1', { name: 'Pinned', promptRef: 'tpl-v@1.0.0' });
     expect((await renderEntry(T, ORG, pinned.entryId, { x: 'A' }, 'u1')).composed).toBe('ONE A');

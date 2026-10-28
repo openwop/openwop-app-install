@@ -92,6 +92,7 @@ const PREDICATE_CALLS: Record<string, number> = {
   'features/drawings/agentTools.ts': 1,
   'features/cad/agentTools.ts': 1,
   'features/campaign-studio/agentTools.ts': 1,
+  'features/campaign-studio/routes.ts': 1, // ADR 0941 P2 loadPlan(…, 'write'): who may link a plan to a campaign (no state write)
   'features/app-builder/surface.ts': 1,
   'features/documents/routes.ts': 1,
 };

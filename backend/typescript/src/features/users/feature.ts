@@ -25,7 +25,9 @@ import type { BackendFeature } from '../types.js';
 import { registerUsersRoutes } from './routes.js';
 import { registerUsersAuthRoutes } from './authRoutes.js';
 import { getUser, getUserByPrincipal, liveRevokedFamilies, resolveCanonicalUserReadOnly, sessionEpochOf } from './usersService.js';
-import { setUserDisplayResolver } from '../../host/subjectDisplay.js';
+import { setOperatorDisplayResolver, setUserDisplayResolver } from '../../host/subjectDisplay.js';
+import { listedSuperadminTenants } from '../../host/superadmin.js';
+import { isPersonalTenantId } from '../../host/requestSubject.js';
 import { registerSubjectToUserIdResolver } from '../../host/approverResolution.js';
 import { registerPersonalTenantSessionAuthority, registerSessionAuthority, type PersonalTenantSessionAuthority, type SessionAuthority } from '../../host/sessionAuthority.js';
 import { buildUsersSurface } from './surface.js';
@@ -44,6 +46,7 @@ export const usersSessionAuthority: SessionAuthority = async (userId) => {
     sessionEpoch: sessionEpochOf(user),
     // ADR 0833 D3 — signed-out families ride the read the request already pays for.
     revokedFamilies: liveRevokedFamilies(user),
+    homeTenantId: user.tenantId,
   };
 };
 
@@ -81,6 +84,15 @@ export const usersFeature: BackendFeature = {
     // Core declares the seam; the users feature owns the identity store, so it
     // registers the mapping here (feature→core; core never imports the feature).
     registerSubjectToUserIdResolver(async (tenantId, subject) => {
+      // A bound session/member already names the global canonical userId.
+      // Its home tenant may differ from this workspace; role expansion above
+      // this seam owns workspace/org membership. Return only the same id,
+      // never role authority or profile data, and keep principal resolution
+      // scoped to the requesting tenant below.
+      if (subject.startsWith('user:')) {
+        const canonical = await getUser(subject);
+        if (canonical) return canonical.userId;
+      }
       const user = await getUserByPrincipal(tenantId, subject);
       return user?.userId ?? null;
     });
@@ -93,6 +105,21 @@ export const usersFeature: BackendFeature = {
       await Promise.all(userIds.map(async (id) => {
         const user = await getUser(id);
         if (user && user.tenantId === tenantId && user.displayName) out.set(id, user.displayName);
+      }));
+      return out;
+    });
+    // The system site's public byline (David's ruling, 2026-10-26): a post
+    // there names its author only when that author is the host operator, i.e.
+    // a user whose PERSONAL tenant is on the allowlist (the same "follows the
+    // person" arm as `isSuperadmin`, without the wildcard key or dev-open).
+    // Anyone else stays unnamed, so no other user's profile is exposed.
+    setOperatorDisplayResolver(async (userIds) => {
+      const allow = listedSuperadminTenants();
+      const out = new Map<string, string>();
+      if (!allow.length) return out;
+      await Promise.all(userIds.map(async (id) => {
+        const user = await getUser(id);
+        if (user && isPersonalTenantId(user.tenantId) && allow.includes(user.tenantId) && user.displayName) out.set(id, user.displayName);
       }));
       return out;
     });

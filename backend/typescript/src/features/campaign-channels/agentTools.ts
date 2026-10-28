@@ -29,6 +29,7 @@
  */
 
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
+import { CAMPAIGN_RUN_TAG_KEY, campaignRunTagForBrief } from '../../host/campaignRefs.js';
 import { resolveOne } from '../../host/featureToggles/service.js';
 import { resolveEffectiveAccess, type Scope } from '../../host/accessControlService.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
@@ -150,6 +151,10 @@ export async function runChannelGenerateTool(deps: StartRunDeps, input: Record<s
   }
 
   const workflowId = workflowIdFor(channel);
+  // ADR 0941 P2 (CO941WF-2) — a channel run about a brief that has a campaign is
+  // a campaign run: it carries the run tag (role 'stage'), composed by the
+  // campaign owner, so the campaign's policy, caps and run index cover it.
+  const campaignTag = await campaignRunTagForBrief(scope.tenantId, briefId, { role: 'stage', agentId: scope.agentProfileId ?? GENERATOR_AGENT_ID }).catch(() => null);
   const runId = await startWorkflowRun(deps, {
     tenantId: scope.tenantId,
     workflowId,
@@ -158,6 +163,7 @@ export async function runChannelGenerateTool(deps: StartRunDeps, input: Record<s
       actingUserId: scope.actingUserId,
       ...(scope.conversationId ? { chatSessionId: scope.conversationId } : {}),
       campaignChannel: { channel, briefId, agentId: scope.agentProfileId ?? GENERATOR_AGENT_ID },
+      ...(campaignTag ? { [CAMPAIGN_RUN_TAG_KEY]: campaignTag } : {}),
     },
   }).catch((err) => {
     // DATA-4 — a startWorkflowRun THROW must also release the claim; coerce to

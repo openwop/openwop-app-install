@@ -1,8 +1,8 @@
 {
   "name": "feature.creative-video.nodes",
-  "version": "1.1.1",
+  "version": "1.3.0",
   "kind": "node",
-  "description": "AI video node pack (ADR 0404) — `generate` (avatar script→MP4 via the HeyGen-class provider), `text-to-video` (frontier text→video, ADR 0404 §P4, behind the creative-video.t2v sub-toggle), and `status`. All ride the Connections broker (async submit→poll→download→media asset; ADR 0106 cost-metered; replay-safe — the asset id is the recorded output, never a regenerate). Over ctx.features['creative-video']; adapterOnly consumer of the heygen + runway providers.",
+  "description": "AI video node pack (ADR 0404) — `generate` (avatar script→MP4 via the HeyGen-class provider), `text-to-video` (frontier text→video, ADR 0404 §P4, behind the creative-video.t2v sub-toggle), and `status`. All ride the Connections broker (async submit→poll→download→media asset; ADR 0106 cost-metered; replay-safe — the asset id is the recorded output, never a regenerate). Over ctx.features['creative-video']; adapterOnly consumer of the heygen + runway providers. v1.2.0 (ADR 0945 D8): generate and text-to-video are role:side-effect + side-effectful, so a :fork serves the recorded asset instead of submitting a second paid job. v1.3.0 (ADR 0945 D7) adds image-to-video: animate a checked product shot or one of the product's own photos on the same job pipeline; every product video is needs_review until frames can be sampled.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": ["feature", "creative-video", "heygen", "runway", "ai", "media"],
@@ -12,19 +12,28 @@
       "typeId": "feature.creative-video.nodes.generate",
       "version": "1.0.0",
       "label": "AI Video: Generate",
-      "description": "Generates an avatar video from a script over ctx.features['creative-video'].generateVideo (async: submit → bounded-poll → download → media asset). Inputs: { orgId, script, avatarId, voiceId? }. Output: { success, status: 'completed'|'pending'|'failed', jobId, assetId? } — on completion the output is the MEDIA ASSET ID (replay returns it, never regenerates). Cost-metered (ADR 0106 video); the governed spend rides the adapterOnly heygen provider.",
+      "description": "Generates an avatar video from a script over ctx.features['creative-video'].generateVideo (async: submit → bounded-poll → download → media asset). Inputs: { orgId, script, avatarId, voiceId? }. Output: { success, status: 'completed'|'pending'|'failed', jobId, assetId? } — on completion the output is the MEDIA ASSET ID (replay returns it, never regenerates). Cost-metered (ADR 0106 video); the governed spend rides the adapterOnly heygen provider. role:side-effect (ADR 0945 D8): a :fork serves the recorded output instead of generating (and paying) again.",
       "category": "integration",
-      "role": "action",
-      "capabilities": []
+      "role": "side-effect",
+      "capabilities": ["side-effectful"]
     },
     {
       "typeId": "feature.creative-video.nodes.text-to-video",
       "version": "1.0.0",
       "label": "AI Video: Text-to-Video",
-      "description": "Generates a video directly from a text prompt with a frontier text-to-video model (Runway/Veo/Sora-class) over ctx.features['creative-video'].textToVideo (async: submit → bounded-poll → download → media asset). Inputs: { orgId, prompt, model?, durationSec? }. Output: { success, status: 'completed'|'pending'|'failed', jobId, assetId? } — the asset id is the recorded output (replay returns it). Gated by the creative-video.t2v sub-toggle (AND the parent); metered at a heavier weight against the ADR 0106 daily video budget; governed spend rides the adapterOnly runway provider.",
+      "description": "Generates a video directly from a text prompt with a frontier text-to-video model (Runway/Veo/Sora-class) over ctx.features['creative-video'].textToVideo (async: submit → bounded-poll → download → media asset). Inputs: { orgId, prompt, model?, durationSec? }. Output: { success, status: 'completed'|'pending'|'failed', jobId, assetId? } — the asset id is the recorded output (replay returns it). Gated by the creative-video.t2v sub-toggle (AND the parent); metered at a heavier weight against the ADR 0106 daily video budget; governed spend rides the adapterOnly runway provider. role:side-effect (ADR 0945 D8): a :fork serves the recorded output instead of generating (and paying) again.",
       "category": "integration",
-      "role": "action",
-      "capabilities": []
+      "role": "side-effect",
+      "capabilities": ["side-effectful"]
+    },
+    {
+      "typeId": "feature.creative-video.nodes.image-to-video",
+      "version": "1.0.0",
+      "label": "Video: Image to Video",
+      "description": "ADR 0945 D7 — animates a still into a short video on the SAME async job pipeline as text-to-video (one job store, one spend meter, the operator's frontier-video connection). The still must be a checked product shot (a composite or edit whose stored verdict is pass) or one of the product's own photos (pass productId); any other image is refused product_depiction_ungrounded, and a still over 3.5 MB is refused before any spend. Every product video is needs_review: frames cannot be sampled on this host yet, so the publish gate holds it for a person. Inputs: { orgId, sourceAssetId, prompt, productId?, model?, durationSec? }. Output: { status: 'completed'|'pending'|'failed', jobId, assetId?, outcome? ('needs_review') } — pending is resolved by the status node. Behind creative-video.t2v. role:side-effect: a :fork serves the recorded asset instead of submitting a second paid job.",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": ["side-effectful"]
     },
     {
       "typeId": "feature.creative-video.nodes.status",

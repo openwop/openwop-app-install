@@ -124,6 +124,7 @@ describe('CMNT-1 — a notification actionUrl opens the thread it names, for eve
     { rt: 'priority_idea', id: 'lst_3#card_8' },
     { rt: 'creative_brief', id: 'brief_5' },
     { rt: 'canvas_slides', id: 'cnv_9#slide-3' }, // ADR 0886 D5
+    { rt: 'media_asset', id: 'ast_6' }, // ADR 0947 D2
   ];
 
   it('covers every type the backend registers (no type is silently untested)', () => {

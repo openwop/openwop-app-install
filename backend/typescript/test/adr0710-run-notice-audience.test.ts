@@ -14,20 +14,23 @@
  * These legs pin the AUDIENCE DECISION, which is the thing that drifted — not
  * the copy, which was always fine.
  *
- * Sabotage record (disjoint):
- *   - drop `recipientRole` from the failure emit        → leg 2 only
- *   - make `runNoticeAudience` role-address personal    → leg 1 only
- *   - drop the participant-facing registry lookup       → leg 4 only
- *   - drop the `alreadyNoticedToday` guard              → leg 5 only
- *   - restore the open-gate broadcast                   → leg 6 only
- *   - restore the conditional spread in approvalSla     → leg 7 only
+ * Sabotage record (/grade-tests wave 58, re-probed; tracker TST-BGF-14):
+ *   - `runNoticeAudience` role-addresses a personal tenant   → leg 1
+ *   - drop `recipientRole: 'admin'` for a shared tenant      → legs 2, 3
+ *   - drop `recipientRole` from the failure EMIT (notify.ts) → leg 3 (behavioural), leg 6
+ *   - drop the role from the open-gate emit                  → leg 6
+ *   - drop the participant-facing registry lookup            → legs 4, 9
+ *   - drop the `alreadyNoticedToday` aggregation guard       → leg 9
+ *
+ * CEILINGS: legs 5, 7 and 8 are source checks (a registry that names written
+ * purposes; the two conditional sites; a recorded decision comment). Behavioural
+ * legs for approvalSla / actionExecution would be new coverage.
  */
 import { describe, expect, it } from 'vitest';
 import { runNoticeAudience, isParticipantFacingRun, PARTICIPANT_FACING_PURPOSES } from '../src/notifications/runNoticeAudience.js';
 import { setNotificationBackend } from '../src/notifications/emitter.js';
 import { openStorage } from '../src/storage/index.js';
 import { emitRunFailureNotification } from '../src/notifications/notify.js';
-import type { Storage } from '../src/storage/storage.js';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -53,9 +56,27 @@ describe('ADR 0710 — run-notice audience', () => {
     expect(a.reason).toBe('operator-role');
   });
 
-  it('leg 3: operator = the EXISTING admin role — no new notification role was invented', () => {
-    const a = runNoticeAudience({ tenantId: 'ws:0d2f9c' });
-    expect(a.recipientRole, 'ADR 0710 §Decision 1: reuse ADR 0050 Phase 3 recipientRole with the admin role').toBe('admin');
+  it('leg 3: operator = the EXISTING admin role — no new notification role was invented', async () => {
+    // BEHAVIOURAL: the role reaches the STORED record through the real failure emit,
+    // and a personal tenant's record stays a broadcast.
+    const storage = await openStorage('memory://');
+    setNotificationBackend(storage);
+    const now = new Date().toISOString();
+    const cases = [['run:leg3-shared', 'ws:leg3-shared'], ['run:leg3-solo', 'user:leg3solo']] as const;
+    for (const [runId, tenantId] of cases) {
+      await storage.insertRun({
+        runId, tenantId, workflowId: `wf:${runId}`, status: 'failed',
+        createdAt: now, updatedAt: now, inputs: {}, configurable: {}, metadata: {},
+      });
+      await emitRunFailureNotification(storage, runId, { code: 'x', userMessage: 'boom' });
+    }
+    const failed = async (tenantId: string) =>
+      (await storage.listNotifications({ tenantId, limit: 50, includeArchived: true })).filter((r) => r.type === 'workflow.failed');
+    const shared = await failed('ws:leg3-shared');
+    expect(shared.map((r) => r.recipientRole), 'ADR 0710 §Decision 1: reuse ADR 0050 Phase 3 recipientRole with the admin role').toEqual(['admin']);
+    const solo = await failed('user:leg3solo');
+    expect(solo).toHaveLength(1);
+    expect(solo[0]!.recipientRole ?? null, 'a personal workspace keeps the broadcast').toBeNull();
   });
 
   it('leg 4: a participant-facing purpose is recognised and marks the notice for aggregation', () => {
@@ -90,7 +111,7 @@ describe('ADR 0710 — run-notice audience', () => {
     const notify = src('notifications/notify.ts');
     expect(notify, 'the failure emit must set recipientRole from the audience').toContain('...(audience.recipientRole ? { recipientRole: audience.recipientRole } : {})');
     expect(notify, 'the open gate must no longer be an unaddressed broadcast').not.toContain('await getNotificationEmitter().emit(base); // broadcast');
-    expect(notify, 'the open gate consults the same predicate').toContain('gateAudience');
+    expect(notify, 'the open gate emits the role from the same predicate').toContain('...(gateAudience.recipientRole ? { recipientRole: gateAudience.recipientRole } : {})');
     // NOTE: this file previously asserted `toContain('alreadyNoticedToday')` here.
     // That was a GATE THAT COULD NOT FAIL — the function DEFINITION keeps the
     // string in the file, so deleting the CALL left the leg green (measured).
@@ -116,8 +137,8 @@ describe('ADR 0710 — run-notice audience', () => {
     expect(c, 'and must state what would reverse it').toContain('What WOULD change this');
   });
   it('leg 9: BEHAVIOURAL — a participant-facing job emits ONE operator notice per day, an ordinary workflow emits every time', async () => {
-    const storage = await openStorage('memory://') as unknown as Storage;
-    setNotificationBackend(storage as never);
+    const storage = await openStorage('memory://');
+    setNotificationBackend(storage);
     const TENANT = 'ws:agg-test';
 
     const seed = async (runId: string, workflowId: string, purpose?: string): Promise<void> => {

@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.crm.nodes/1.15.0/lead-evidence.input.json",
+  "title": "CrmLeadEvidenceInput",
+  "description": "`orgId`, `contactId`, `modelId` and `modelVersion` are required by the surface (a typed refusal).",
+  "type": "object",
+  "properties": {
+    "orgId": {
+      "type": "string"
+    },
+    "contactId": {
+      "type": "string"
+    },
+    "modelId": {
+      "type": "string"
+    },
+    "modelVersion": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": true
+}

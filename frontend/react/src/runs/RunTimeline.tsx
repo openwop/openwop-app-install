@@ -24,6 +24,35 @@ import i18n from '../i18n/index.js';
 import { formatNumber } from '../i18n/format.js';
 import { CompactionNotice, findCompactionMarkers } from './CompactionNotice.js';
 
+/**
+ * ADR 0942 P5 — the autonomy-policy badge for a lane. Narrow on purpose: it reads
+ * only the campaign autonomy gate's own result shape, so an unrelated node whose
+ * outputs happen to carry a `decision` field never gets a badge.
+ *  - `node.completed` outputs `{ decision: 'auto' | 'notify-after' | 'approved', ruleId }`
+ *    where `ruleId` is a policy rule (`ads.budget#esc0`, `plan.approve:client#default#preset`)
+ *    or a resolver layer (`floor:fork-posture`, `ceiling:governance`, `agent:hitl`, `live:halt`);
+ *  - `node.failed` error codes `autonomy_blocked` / `autonomy_rejected`.
+ */
+export type AutonomyBadge = { kind: 'auto' | 'notify-after' | 'approved'; ruleId: string } | { kind: 'blocked' | 'rejected' };
+const AUTONOMY_RULE_ID = /^(?:[a-z][a-z.-]*(?::[a-z]+)?#[a-z0-9#]+|(?:floor|ceiling|agent|live):[a-z-]+)$/;
+export function autonomyBadgeOf(ev: RunEventDoc | undefined): AutonomyBadge | null {
+  if (!ev) return null;
+  const payload = ev.payload as { outputs?: unknown; error?: unknown } | undefined;
+  if (ev.type === 'node.completed') {
+    const out = payload?.outputs as { decision?: unknown; ruleId?: unknown } | undefined;
+    if (!out || typeof out !== 'object' || typeof out.ruleId !== 'string' || !AUTONOMY_RULE_ID.test(out.ruleId)) return null;
+    return out.decision === 'auto' || out.decision === 'notify-after' || out.decision === 'approved' ? { kind: out.decision, ruleId: out.ruleId } : null;
+  }
+  if (ev.type === 'node.failed') {
+    const code = (payload?.error as { code?: unknown } | undefined)?.code;
+    return code === 'autonomy_blocked' ? { kind: 'blocked' } : code === 'autonomy_rejected' ? { kind: 'rejected' } : null;
+  }
+  return null;
+}
+const AUTONOMY_BADGE_CHIP: Record<AutonomyBadge['kind'], string> = {
+  auto: 'chip--success', 'notify-after': 'chip--accent', approved: 'chip--warning', blocked: 'chip--danger', rejected: 'chip--danger',
+};
+
 /** Maps a timeline segment status to its display key. */
 const SEG_STATUS_KEYS: Record<SegStatus, string> = {
   running: 'segStatusRunning',
@@ -231,6 +260,17 @@ export function RunTimeline({ events, onForkFrom, onSelectSeq, readState, onRetr
               {lane.segments.length > 1 && lane.nodeId !== '(run)' && (
                 <span className="muted run-timeline-attempts"> ×{formatNumber(lane.segments.length)}</span>
               )}
+              {(() => {
+                const last = lane.segments[lane.segments.length - 1];
+                const badge = autonomyBadgeOf([...(last?.events ?? [])].reverse().find((e) => e.type === 'node.completed' || e.type === 'node.failed'));
+                if (!badge) return null;
+                const label = t(`timelineAutonomy_${badge.kind.replace('-', '_')}`);
+                return (
+                  <span className={`chip ${AUTONOMY_BADGE_CHIP[badge.kind]} run-timeline-autonomy`} title={'ruleId' in badge ? t('timelineAutonomyRule', { ruleId: badge.ruleId }) : undefined}>
+                    {'ruleId' in badge ? t('timelineAutonomyWithRule', { label, ruleId: badge.ruleId }) : label}
+                  </span>
+                );
+              })()}
               {(() => {
                 const mw = memWrites.get(lane.nodeId);
                 if (!mw) return null;

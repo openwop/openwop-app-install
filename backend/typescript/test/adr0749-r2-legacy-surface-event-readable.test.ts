@@ -13,6 +13,11 @@
  * `ui.*` carve-out covers envelope KINDS, not event TYPES (events.md §Types).
  * The fix translates the type's SPELLING onto this host's registered vendor org
  * (`openwop-app.a2ui-surface`) — the payload is never touched.
+ *
+ * Tracker TST-BAB-10. Red when (sabotage-witnessed, wave 60): the
+ * `ui.a2ui-surface` → `openwop-app.a2ui-surface` row is removed from the vendor
+ * spelling map (poll, fork and bijection all red); an era-3 log stops forwarding
+ * a pre-fix verbatim row.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';

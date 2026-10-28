@@ -30,6 +30,10 @@
  * guard in `applySubscriptionEvent` removed.
  * (`billingService.ts`): the bundle-grant loop
  * removed; the `isTerminalStatus` skip removed; the missing-key throw removed.
+ *
+ * Tracker TST-BG1-23. Wave 58 witnessed each of the above, plus: the local
+ * subscription rows not ended after a Stripe cancel, the post-failure
+ * re-enable removed, and the re-enable's epoch check removed.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -59,6 +63,7 @@ import { registerSubjectErasedHandler } from '../src/host/delegatedSubject.js';
 import { registerTenantPurgeHook } from '../src/host/hostExtPersistence.js';
 import {
   __resetBilling, __seedBundleGrant, getBundleEntitlements, getSubscription, importBillingState, processStripeEvent,
+  type SubscriptionStatus,
 } from '../src/features/billing/billingService.js';
 
 const STRIPE_KEY = 'sk_test_r2_self_delete';
@@ -133,10 +138,10 @@ async function deleteAccount(cookie: string): Promise<{ status: number; body: Re
   return { status: res.status, body: (await res.json()) as Record<string, unknown> };
 }
 
-async function seedPlan(tenantId: string, subId: string, status = 'active'): Promise<void> {
+async function seedPlan(tenantId: string, subId: string, status: SubscriptionStatus = 'active'): Promise<void> {
   subs.set(subId, { id: subId, status });
   await importBillingState({ subscriptions: [{
-    tenantId, planTier: 'pro', status: status as 'active', stripeCustomerId: `cus_${subId}`, stripeSubscriptionId: subId, updatedAt: new Date().toISOString(),
+    tenantId, planTier: 'pro', status, stripeCustomerId: `cus_${subId}`, stripeSubscriptionId: subId, updatedAt: new Date().toISOString(),
   }] });
 }
 

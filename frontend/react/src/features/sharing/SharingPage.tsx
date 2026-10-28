@@ -70,12 +70,12 @@ const ADOPT_REFUSAL_KEY: Record<AdoptRefusal, string> = {
   unknown: 'adoptFailed',
 };
 
-const TYPE_LABEL_KEY: Record<ResourceType, string> = { cms_page: 'typeCmsPage', kb_collection: 'typeKbCollection', document: 'typeDocument', conversation: 'typeConversation', prompt: 'typePrompt', commerce_quote: 'typeCommerceQuote', commerce_order: 'typeCommerceOrder', app_builder_canvas: 'typeAppBuilderCanvas', slides_canvas: 'typeSlidesCanvas', creative_brief: 'typeCreativeBrief', booking_manage: 'typeBookingManage', sign_request: 'typeSignRequest' };
+const TYPE_LABEL_KEY: Record<ResourceType, string> = { cms_page: 'typeCmsPage', kb_collection: 'typeKbCollection', document: 'typeDocument', conversation: 'typeConversation', prompt: 'typePrompt', commerce_quote: 'typeCommerceQuote', commerce_order: 'typeCommerceOrder', app_builder_canvas: 'typeAppBuilderCanvas', slides_canvas: 'typeSlidesCanvas', creative_brief: 'typeCreativeBrief', booking_manage: 'typeBookingManage', sign_request: 'typeSignRequest', campaign_approval: 'typeCampaignApproval', collab_invite: 'typeCollabInvite' };
 
 /** R2 SR-5 — links the APP mints in feature flows (booking confirmations, sign
  *  invites, order-status emails), as opposed to links a person minted here.
  *  They land in the same org list; unlabeled they read as mystery rows. */
-const SYSTEM_TYPES: ReadonlySet<ResourceType> = new Set(['booking_manage', 'sign_request', 'commerce_order']);
+const SYSTEM_TYPES: ReadonlySet<ResourceType> = new Set(['booking_manage', 'sign_request', 'commerce_order', 'campaign_approval', 'collab_invite']);
 
 /** R2 SR-5 — simple paging cap so a big org doesn't render hundreds of cards. */
 const PAGE_SIZE = 30;

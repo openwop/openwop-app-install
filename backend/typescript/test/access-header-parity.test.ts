@@ -20,6 +20,10 @@
  *
  * Five copies of one authorization-relevant string is the generator. The shared
  * constant is the cure; this keeps it the only spelling.
+ *
+ * Tracker TST-BG1-19. Red when (probe-witnessed, wave 58): the SPA sends a
+ * different spelling; a backend file writes the header as its own literal (or the
+ * stale `-member` spelling); `ACT_AS_HEADER` is renamed.
  */
 import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';

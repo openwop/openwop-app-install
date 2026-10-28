@@ -8,9 +8,11 @@
  * refusal or a thrown fault is logged and the event still applies with the grant
  * durable. A lapse leaves the override; the plan gate then reads the feature locked.
  *
- * Sabotage witness (run by hand, 2026-10-14): deleting the
- * `activatePurchasedBundle` call reds "a bundle subscription turns the bundle on";
- * removing its try/catch reds "a helper that throws does not fail the webhook".
+ * (TST-BPC) Red when (each sabotage-witnessed, wave 65): the `activatePurchasedBundle`
+ * call is skipped ⇒ "a bundle subscription turns the bundle on" (and the redelivery and
+ * throw cases, which count its calls); its try/catch rethrows ⇒ "a helper that throws
+ * does not fail the webhook"; it runs on every grant write, not only `grant-started` ⇒
+ * "a redelivered event…"; the grant is audited under another actor ⇒ "…audited as billing".
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/index.js';

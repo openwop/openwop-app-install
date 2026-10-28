@@ -112,6 +112,7 @@ export function evalErrorMessage(t: TFunction, f: Formatter, err: unknown, ctx: 
 /** Terminal run error codes with their own sentence (BE-1). */
 const RUN_CODES = new Set([
   'eval_cost_ceiling_exceeded', 'eval_cost_unpriced', 'eval_feature_disabled', 'eval_suite_unavailable', 'eval_run_failed', 'run_timeout', 'eval_mock_unscripted',
+  'eval_recorded_fixtures_gone',
 ]);
 
 /** The localized sentence for a terminal run error code. Unknown codes read as a generic failure. */

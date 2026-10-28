@@ -68,7 +68,7 @@ import type {
   RelayDeviceRecord,
 } from '../../messaging/types.js';
 import { egressExtraJson, applyEgressExtra } from '../../messaging/types.js';
-import { IdempotentCommitRejectedError, PAYLOAD_KEY_RE, RUN_FINAL_STATUSES, type Storage } from '../storage.js';
+import { ADMISSION_HOLDING_STATUSES, AdmissionRefusedError, IdempotentCommitRejectedError, PAYLOAD_KEY_RE, RUN_FINAL_STATUSES, type Storage } from '../storage.js';
 import { applyMigrations } from './schema.js';
 import { createLogger } from '../../observability/logger.js';
 import { isForwardExecutionEvent, RunLogClosedError, TERMINAL_RUN_EVENT_TYPES } from '../runLogClosure.js';
@@ -96,7 +96,19 @@ type Row = Record<string, unknown>;
  * `webhook_deliveries.payload`, typed `string`) — that would double-encode.
  */
 function jsonbParam(value: unknown): string | null {
-  return value === undefined || value === null ? null : JSON.stringify(value);
+  return value === undefined || value === null ? null : JSON.stringify(value, nulSafe);
+}
+
+/**
+ * ADR 0975 D10 — Postgres `jsonb` (and `text`) cannot hold U+0000; the insert
+ * fails with `unsupported Unicode escape sequence` and takes the whole write with
+ * it. MEASURED on kicktodo.com (2026-10-27): one NUL in a fetched web page failed
+ * the Challenge Factory's `node.completed` append, twice. Strings are stored with
+ * U+FFFD in its place: lossless for every other character, and visible. Exported
+ * for its test.
+ */
+export function nulSafe(_key: string, v: unknown): unknown {
+  return typeof v === 'string' && v.includes('\u0000') ? v.replaceAll('\u0000', '\uFFFD') : v;
 }
 
 function rowToRun(r: Row): RunRecord {
@@ -505,7 +517,7 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
 
   const impl: Storage = {
     async insertRun(run, opts) {
-      if (!opts?.dispatchOutbox && !opts?.idempotencyCommit) {
+      if (!opts?.dispatchOutbox && !opts?.idempotencyCommit && !opts?.admission) {
         await pool.query(INSERT_RUN_SQL, insertRunParams(run));
         return;
       }
@@ -522,7 +534,25 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
       const client = await pool.connect();
       try {
         await client.query('BEGIN');
+        // ADR 0987 D2 — admission is counted from run state inside this
+        // transaction. Partition 3 of the advisory-lock space (1: event sequence,
+        // 2: chat sessions) serializes admissions for one scope across every
+        // instance; two creators on one key cannot both read "4 of 5" and both
+        // insert. The lock is released by COMMIT or ROLLBACK.
+        if (opts.admission) {
+          const a = opts.admission;
+          await client.query('SELECT pg_advisory_xact_lock(hashtext($1), 3)', [a.key]);
+          const held = await client.query<{ n: string }>(
+            'SELECT count(*)::text AS n FROM runs WHERE admission_key = $1 AND status = ANY($2::text[])',
+            [a.key, [...ADMISSION_HOLDING_STATUSES]],
+          );
+          const holding = Number(held.rows[0]?.n ?? 0);
+          if (holding >= a.cap) throw new AdmissionRefusedError(a.cap, holding);
+        }
         await client.query(INSERT_RUN_SQL, insertRunParams(run));
+        if (opts.admission) {
+          await client.query('UPDATE runs SET admission_key = $1 WHERE run_id = $2', [opts.admission.key, run.runId]);
+        }
         if (opts.dispatchOutbox) {
           await client.query(INSERT_DISPATCH_OUTBOX_SQL, [
             run.runId, run.tenantId, run.workflowId,
@@ -867,14 +897,15 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
       return rows.map(rowToEvent);
     },
 
-    async findFirstEventByPayload(runId, type, payloadKey, payloadValue) {
+    async findFirstEventByPayload(runId, type, payloadKey, payloadValue, opts) {
       if (!PAYLOAD_KEY_RE.test(payloadKey)) throw new Error(`findFirstEventByPayload: invalid payload key ${payloadKey}`);
       const { rows } = await pool.query<Row>(
         `SELECT * FROM events
          WHERE run_id = $1 AND type = $2 AND payload->>$3 = $4
-         ORDER BY sequence ASC
+           AND ($5::text IS NULL OR node_id = $5)
+         ORDER BY sequence ${opts?.newestFirst ? 'DESC' : 'ASC'}
          LIMIT 1`,
-        [runId, type, payloadKey, payloadValue],
+        [runId, type, payloadKey, payloadValue, opts?.nodeId ?? null],
       );
       return rows[0] ? rowToEvent(rows[0]) : null;
     },
@@ -2570,6 +2601,32 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
       const r = await pool.query<{ n: string }>('SELECT COUNT(*) AS n FROM chat_messages WHERE session_id = $1', [sessionId]);
       return Number(r.rows[0]?.n ?? 0);
     },
+    async searchChatMessages(sessionIds, needles, opts) {
+      if (sessionIds.length === 0 || needles.length === 0 || opts.limit <= 0) return [];
+      type Row = { message_id: string; session_id: string; role: string; content: string; meta: string | null; author_subject: string | null; created_at: Date };
+      // ADR 0997 D1 — `ILIKE ALL` is the AND of the needles; each is LIKE-escaped
+      // (backslash is Postgres's default LIKE escape). Uses idx_chat_messages_session.
+      const patterns = needles.map((n) => `%${n.replace(/[\\%_]/g, (c) => `\\${c}`)}%`);
+      const r = await pool.query<Row>(
+        `SELECT message_id, session_id, role, content, meta, author_subject, created_at
+         FROM chat_messages
+         WHERE session_id = ANY($1::text[])
+           AND content <> '{"deleted":true}'
+           AND content ILIKE ALL($2::text[])
+         ORDER BY created_at DESC, message_id DESC
+         LIMIT $3`,
+        [[...sessionIds], patterns, opts.limit],
+      );
+      return r.rows.map((row): ChatMessageRecord => ({
+        messageId: row.message_id,
+        sessionId: row.session_id,
+        role: row.role as ChatMessageRecord['role'],
+        content: row.content,
+        meta: row.meta,
+        authorSubject: row.author_subject,
+        createdAt: row.created_at.toISOString(),
+      }));
+    },
     async listChatSessionMessages(sessionId, opts) {
       type Row = { message_id: string; session_id: string; role: string; content: string; meta: string | null; author_subject: string | null; created_at: Date };
       let rows: Row[];
@@ -3420,6 +3477,10 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
     },
     async kvDelete(key) {
       const { rowCount } = await pool.query(`DELETE FROM host_ext_kv WHERE k = $1`, [key]);
+      return (rowCount ?? 0) > 0;
+    },
+    async kvCompareAndDelete(key, expected) {
+      const { rowCount } = await pool.query('DELETE FROM host_ext_kv WHERE k = $1 AND v = $2', [key, expected]);
       return (rowCount ?? 0) > 0;
     },
     async kvCompareAndSwap(key, expected, next) {

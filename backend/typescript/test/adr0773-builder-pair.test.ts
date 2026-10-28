@@ -12,6 +12,13 @@
  *     invalid ops with per-op reasons, refuses a viewer, and refuses inside a
  *     replay fork (Architect review A1);
  *   - `persist` requires the revision it read to overwrite (D8, `WBWF-17`).
+ *
+ * Red when (wave 60 probes, tracker TST-BRB-10): the context route skips the toggle;
+ * the selection is not filtered to the head's ids; the run binding or the replay belt
+ * is dropped (CR-4); a viewer may suggest; a moved head is accepted; a first draft
+ * needs no `plannedOps`; the acting-user check is dropped; a template is drawn onto a
+ * non-empty canvas; blank follow-ups are kept; the Pair scope widens an existing one;
+ * `persist` accepts an overwrite with no or a stale `baseRevision`.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -24,9 +31,15 @@ import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { builtinAgentTool } from '../src/host/agentToolProvider.js';
 import { runWithEffectContext } from '../src/host/runEffectContext.js';
 import { readRegisteredWorkflowFresh, registerWorkflowDurable } from '../src/host/workflowsRegistry.js';
+import { getEffectiveConfig } from '../src/host/featureToggles/service.js';
+import { openStorage } from '../src/storage/index.js';
+import type { Storage } from '../src/storage/storage.js';
+import type { WorkflowDefinition } from '../src/executor/types.js';
+import { listChains } from '../src/host/workflowChainPackLoader.js';
+import { buildWorkflowAuthorSurface } from '../src/features/workflow-author/surface.js';
 import { recordOwnership } from '../src/host/workflowOwnership.js';
 import { revisionHashOf } from '../src/host/definitionHash.js';
-import { writePairContext } from '../src/features/builder-pair/pairService.js';
+import { patchSuggestion, readSuggestionFor, suggestFromChain, writePairContext } from '../src/features/builder-pair/pairService.js';
 import { BUILDER_PAIR_READ_CANVAS_TOOL_ID, BUILDER_PAIR_SUGGEST_EDITS_TOOL_ID } from '../src/features/builder-pair/agentTools.js';
 import { WORKFLOW_AUTHOR_GET_TOOL_ID, WORKFLOW_AUTHOR_PERSIST_TOOL_ID } from '../src/features/workflow-author/agentTools.js';
 import type { BundleScope } from '../src/host/inMemorySurfaces.js';
@@ -43,15 +56,28 @@ let VIEWER = '';
 const saved: Record<string, string | undefined> = {};
 let BASE = '';
 let server: http.Server;
-/** Only `getRun` is read (for `lastRunId`), and these tests pass none. */
-const storage = { getRun: async () => null } as unknown as Parameters<typeof writePairContext>[0];
+/** Only `getRun` is read (for `lastRunId`), and these tests pass none: a real, empty store. */
+let storage: Storage;
+/** The toggle's status before this file turned it on, restored in `afterAll`. */
+let priorToggle: Awaited<ReturnType<typeof getEffectiveConfig>> = null;
 
-async function call(method: string, path: string, opts: { key?: string; body?: unknown } = {}) {
+/** The route bodies these cases read. */
+interface RouteBody {
+  error?: string;
+  feature?: string;
+  details?: { feature?: string };
+  selection?: { nodeIds: string[]; edgeIds: string[] };
+  droppedIds?: string[];
+  suggestions?: Array<{ id: string; opState?: string[]; conversationId?: string; requestedBy?: string }>;
+}
+
+async function call(method: string, path: string, opts: { key?: string; body?: unknown } = {}): Promise<{ status: number; json: RouteBody }> {
   const headers: Record<string, string> = { authorization: `Bearer ${opts.key ?? TENANT_ENV_KEY}` };
   if (opts.body !== undefined) headers['content-type'] = 'application/json';
   const res = await fetch(`${BASE}${path}`, { method, headers, ...(opts.body !== undefined ? { body: JSON.stringify(opts.body) } : {}) });
   const text = await res.text();
-  let json: any; try { json = JSON.parse(text); } catch { json = text; }
+  let json: RouteBody = {};
+  try { json = JSON.parse(text) as RouteBody; } catch { /* non-JSON body */ }
   return { status: res.status, json };
 }
 const host = (p: string) => `/host/openwop-app${p}`;
@@ -72,13 +98,28 @@ const def = () => ({
 });
 
 const scopeFor = (actingUserId: string | undefined, conversationId = 'sess-0773', runId = 'run-conv-0773'): BundleScope =>
-  ({ tenantId: TENANT, runId, ...(actingUserId ? { actingUserId } : {}), conversationId } as BundleScope);
+  ({ tenantId: TENANT, runId, ...(actingUserId ? { actingUserId } : {}), conversationId });
 
-async function tool(id: string, input: Record<string, unknown>, scope: BundleScope): Promise<{ json: any; isError: boolean }> {
+interface ToolNode { nodeId: string; name?: string }
+/** The Pair / workflow-author tool results these cases read. */
+interface ToolBody {
+  error?: string;
+  reason?: string;
+  details?: { reason?: string };
+  errors?: Array<{ index: number; message?: string }>;
+  revision?: string;
+  selection?: { nodeIds: string[] };
+  definition?: { workflowId?: string; nodes: ToolNode[]; [k: string]: unknown };
+  suggestionId?: string;
+  mode?: string;
+  ops?: Array<{ index: number; dependsOn: number[]; gateSensitive: boolean; nodeId?: string }>;
+}
+
+async function tool(id: string, input: Record<string, unknown>, scope: BundleScope): Promise<{ json: ToolBody; isError: boolean }> {
   const t = builtinAgentTool(id);
   if (!t) throw new Error(`tool ${id} is not registered`);
   const out = await t.run(input, scope) as { content: string; isError?: boolean };
-  return { json: JSON.parse(out.content), isError: out.isError === true };
+  return { json: JSON.parse(out.content) as ToolBody, isError: out.isError === true };
 }
 
 async function setToggle(on: boolean) {
@@ -95,6 +136,8 @@ beforeAll(async () => {
   process.env.OPENWOP_AUTH_ENFORCE_BEARER = 'true';
   process.env.OPENWOP_DEPLOY_POSTURE = 'bearer-shared';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+  storage = await openStorage('memory://');
+  priorToggle = await getEffectiveConfig('builder-pair');
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   await createOrg({ tenantId: TENANT, orgId: TENANT, name: 'Root', createdBy: 'test' });
   await createMember({ tenantId: TENANT, orgId: TENANT, subject: EDITOR_SUBJECT, displayName: 'Editor', roles: ['editor'] });
@@ -106,6 +149,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  if (priorToggle) await saveConfig(priorToggle, 'test');
   for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
   await new Promise<void>((res) => server.close(() => res()));
 });
@@ -140,14 +184,14 @@ describe('ADR 0773 — routes are toggle-gated, and the witness can tell disable
     });
     expect(r.status).toBe(200);
     expect(r.json.selection).toEqual({ nodeIds: ['score'], edgeIds: ['e1'] });
-    expect(r.json.droppedIds.sort()).toEqual(['ghost-node', 'nope']);
+    expect([...(r.json.droppedIds ?? [])].sort()).toEqual(['ghost-node', 'nope']);
   });
 
   it('a viewer may pair (read-only), and a workflow outside the tenant is a 404', async () => {
     expect((await call('PUT', host('/builder-pair/context'), { key: VIEWER, body: { conversationId: 'sess-v', workflowId: WF } })).status).toBe(200);
     // A workflow ANOTHER tenant owns is a miss — never an empty draft to pair with.
-    const foreign = { workflowId: 'wf.adr0773.foreign', nodes: [{ nodeId: 'x', typeId: 'core.noop' }], edges: [] };
-    await registerWorkflowDurable(foreign as never);
+    const foreign: WorkflowDefinition = { workflowId: 'wf.adr0773.foreign', nodes: [{ nodeId: 'x', typeId: 'core.noop' }], edges: [] };
+    await registerWorkflowDurable(foreign);
     await recordOwnership('tenant-someone-else', foreign.workflowId, { nodeCount: 1 });
     expect((await call('PUT', host('/builder-pair/context'), { key: EDITOR, body: { conversationId: 'sess-x', workflowId: foreign.workflowId } })).status).toBe(404);
     // An id nobody registered is a new, never-saved draft (review CR-1).
@@ -168,8 +212,8 @@ describe('ADR 0773 D2 — read-canvas', () => {
     expect(r.isError).toBe(false);
     const fresh = await readRegisteredWorkflowFresh(WF);
     expect(r.json.revision).toBe(revisionHashOf(fresh.def!));
-    expect(r.json.selection.nodeIds).toEqual(['score']);
-    expect(r.json.definition.nodes.map((n: { nodeId: string }) => n.nodeId)).toEqual(['score', 'crm', 'gate']);
+    expect(r.json.selection?.nodeIds).toEqual(['score']);
+    expect(r.json.definition?.nodes.map((n) => n.nodeId)).toEqual(['score', 'crm', 'gate']);
   });
 
   it('is empty-and-typed without an acting user, and never reads another user\'s pairing', async () => {
@@ -195,9 +239,9 @@ describe('ADR 0773 D4 — suggest-edits never writes the workflow', () => {
     }, scopeFor(EDITOR_SUBJECT));
     expect(r.isError, JSON.stringify(r.json)).toBe(false);
     expect(r.json.ops).toHaveLength(4);
-    expect(r.json.ops[1].dependsOn).toEqual([0]);
-    expect(r.json.ops[3].gateSensitive, 'an edge into an approval gate is gate-sensitive').toBe(true);
-    expect(r.json.ops[2].gateSensitive).toBe(false);
+    expect(r.json.ops?.[1]?.dependsOn).toEqual([0]);
+    expect(r.json.ops?.[3]?.gateSensitive, 'an edge into an approval gate is gate-sensitive').toBe(true);
+    expect(r.json.ops?.[2]?.gateSensitive).toBe(false);
 
     const after = await readRegisteredWorkflowFresh(WF);
     expect(after.raw, 'suggest-edits must not write the workflow').toBe(before.raw);
@@ -224,7 +268,7 @@ describe('ADR 0773 D4 — suggest-edits never writes the workflow', () => {
       ],
     }, scopeFor(EDITOR_SUBJECT));
     expect(bad.json.error).toBe('invalid_ops');
-    expect(bad.json.errors.map((e: { index: number }) => e.index)).toEqual([0, 1]);
+    expect(bad.json.errors?.map((e) => e.index)).toEqual([0, 1]);
 
     const cycle = await tool(BUILDER_PAIR_SUGGEST_EDITS_TOOL_ID, {
       baseRevision: rev, ops: [{ kind: 'addEdge', source: 'gate', target: 'score' }],
@@ -252,7 +296,6 @@ describe('ADR 0773 D4 — suggest-edits never writes the workflow', () => {
     expect(forkRead.json.error).toBe('replay_refused');
     const forkWrite = await tool(BUILDER_PAIR_SUGGEST_EDITS_TOOL_ID, { baseRevision: rev, ops: [{ kind: 'renameNode', nodeId: 'crm', name: 'CRM' }] }, scopeFor(EDITOR_SUBJECT, 'sess-fork', 'run-fork'));
     expect(forkWrite.json.error).toBe('replay_refused');
-    const { readSuggestionFor } = await import('../src/features/builder-pair/pairService.js');
     expect(await readSuggestionFor({ tenantId: TENANT, actingUserId: EDITOR_SUBJECT, granted: new Set(['workspace:read']) }, 'sess-fork')).toBeNull();
     // Belt: an executor replay context refuses too.
     const r = await runWithEffectContext({ runId: 'run-live', replaying: true }, () =>
@@ -265,7 +308,7 @@ describe('ADR 0773 D4 — suggest-edits never writes the workflow', () => {
     expect('refused' in out).toBe(false);
     const read = await tool(BUILDER_PAIR_READ_CANVAS_TOOL_ID, {}, scopeFor(EDITOR_SUBJECT, 'sess-new'));
     expect(read.json.revision).toBe('absent');
-    expect(read.json.definition.nodes).toEqual([]);
+    expect(read.json.definition?.nodes).toEqual([]);
     const s = await tool(BUILDER_PAIR_SUGGEST_EDITS_TOOL_ID, {
       // B.6: a first draft on an empty canvas states its plan (the refusal without it is pinned below).
       baseRevision: 'absent', plannedOps: 3,
@@ -288,7 +331,6 @@ describe('ADR 0773 D4 — suggest-edits never writes the workflow', () => {
     await createMember({ tenantId: TENANT, orgId: TENANT, subject: OTHER, displayName: 'Other', roles: ['editor'] });
     await pair(OTHER, 'sess-shared-id');
     await tool(BUILDER_PAIR_SUGGEST_EDITS_TOOL_ID, { baseRevision: rev, ops: [{ kind: 'renameNode', nodeId: 'crm', name: 'Theirs' }] }, scopeFor(OTHER, 'sess-shared-id'));
-    const { readSuggestionFor } = await import('../src/features/builder-pair/pairService.js');
     const got = await readSuggestionFor({ tenantId: TENANT, actingUserId: EDITOR_SUBJECT, granted: new Set(['workspace:read']) }, 'sess-shared-id');
     expect(got?.id).toBe(mine.json.suggestionId);
   });
@@ -300,11 +342,10 @@ describe('ADR 0773 D4 — keep/drop and sharing are the requester\'s, over the r
     const rev = revisionHashOf((await readRegisteredWorkflowFresh(WF)).def!);
     const s = await tool(BUILDER_PAIR_SUGGEST_EDITS_TOOL_ID, { baseRevision: rev, ops: [{ kind: 'renameNode', nodeId: 'crm', name: 'CRM' }] }, scopeFor(EDITOR_SUBJECT, 'sess-patch'));
     expect(s.isError).toBe(false);
-    const { patchSuggestion, readSuggestionFor } = await import('../src/features/builder-pair/pairService.js');
     const who = { tenantId: TENANT, actingUserId: EDITOR_SUBJECT };
     const stale = await patchSuggestion(who, 'sess-patch', { suggestionId: 'nope', opState: [{ index: 0, state: 'kept' }] });
     expect('refused' in stale && stale.code).toBe('workflow_head_moved');
-    const kept = await patchSuggestion(who, 'sess-patch', { suggestionId: s.json.suggestionId, opState: [{ index: 0, state: 'kept' }], visibility: 'room' });
+    const kept = await patchSuggestion(who, 'sess-patch', { suggestionId: s.json.suggestionId ?? '', opState: [{ index: 0, state: 'kept' }], visibility: 'room' });
     expect('refused' in kept).toBe(false);
     // A peer never reaches it by conversation id, and cannot resolve it…
     const peer = { tenantId: TENANT, actingUserId: VIEWER_SUBJECT };
@@ -315,7 +356,7 @@ describe('ADR 0773 D4 — keep/drop and sharing are the requester\'s, over the r
     // no requester or conversation id to target (review CR-3).
     const room = await call('GET', host(`/builder-pair/suggestions?workflowId=${encodeURIComponent(WF)}`), { key: VIEWER });
     expect(room.status).toBe(200);
-    const shared = room.json.suggestions.find((x: { id: string }) => x.id === s.json.suggestionId);
+    const shared = room.json.suggestions?.find((x) => x.id === s.json.suggestionId);
     expect(shared?.opState).toEqual(['kept']);
     expect(shared).not.toHaveProperty('conversationId');
     expect(shared).not.toHaveProperty('requestedBy');
@@ -327,12 +368,14 @@ describe('ADR 0773 D8 — persist requires the revision it read to overwrite (WB
     const scope = scopeFor(EDITOR_SUBJECT);
     const got = await tool(WORKFLOW_AUTHOR_GET_TOOL_ID, { workflowId: WF }, scope);
     expect(typeof got.json.revision).toBe('string');
-    const next = { ...got.json.definition, nodes: got.json.definition.nodes.map((n: { nodeId: string }) => (n.nodeId === 'crm' ? { ...n, name: 'CRM upsert' } : n)) };
+    const base = got.json.definition!;
+    const next = { ...base, nodes: base.nodes.map((n) => (n.nodeId === 'crm' ? { ...n, name: 'CRM upsert' } : n)) };
     const missing = await tool(WORKFLOW_AUTHOR_PERSIST_TOOL_ID, { definition: next }, scope);
     expect(missing.isError).toBe(true);
-    expect(JSON.stringify(missing.json)).toMatch(/base_revision_required|baseRevision/);
+    expect(missing.json.details?.reason ?? missing.json.reason, JSON.stringify(missing.json)).toBe('base_revision_required');
     const stale = await tool(WORKFLOW_AUTHOR_PERSIST_TOOL_ID, { definition: next, baseRevision: 'stale' }, scope);
-    expect(JSON.stringify(stale.json)).toMatch(/workflow_head_moved|changed since you read it/);
+    expect(stale.isError).toBe(true);
+    expect(stale.json.details?.reason ?? stale.json.reason, JSON.stringify(stale.json)).toBe('workflow_head_moved');
     const ok = await tool(WORKFLOW_AUTHOR_PERSIST_TOOL_ID, { definition: next, baseRevision: got.json.revision }, scope);
     expect(ok.isError, JSON.stringify(ok.json)).toBe(false);
     const after = await readRegisteredWorkflowFresh(WF);
@@ -349,7 +392,7 @@ describe('ADR 0773 P7/P9 — why, follow-ups, append batches, chain as ghost, cr
       ops: [{ kind: 'addNode', ref: 'n', typeId: 'core.noop', name: 'Nurture', why: 'Low scores get a slower path.' }],
     }, scopeFor(EDITOR_SUBJECT, 'sess-append'));
     expect(b1.isError, JSON.stringify(b1.json)).toBe(false);
-    const minted = b1.json.ops[0].nodeId as string;
+    const minted = b1.json.ops?.[0]?.nodeId ?? '';
     expect(minted).toMatch(/^sg_/);
     const b2 = await tool(BUILDER_PAIR_SUGGEST_EDITS_TOOL_ID, {
       baseRevision: rev, mode: 'append',
@@ -360,10 +403,9 @@ describe('ADR 0773 P7/P9 — why, follow-ups, append batches, chain as ghost, cr
     }, scopeFor(EDITOR_SUBJECT, 'sess-append'));
     expect(b2.isError, JSON.stringify(b2.json)).toBe(false);
     expect(b2.json.mode).toBe('append');
-    expect(b2.json.ops.map((o: { index: number }) => o.index)).toEqual([1, 2]);
-    expect(b2.json.ops[0].dependsOn).toEqual([0]);
-    expect(b2.json.ops[1].dependsOn).toEqual([0]);
-    const { readSuggestionFor } = await import('../src/features/builder-pair/pairService.js');
+    expect(b2.json.ops?.map((o) => o.index)).toEqual([1, 2]);
+    expect(b2.json.ops?.[0]?.dependsOn).toEqual([0]);
+    expect(b2.json.ops?.[1]?.dependsOn).toEqual([0]);
     const s = await readSuggestionFor({ tenantId: TENANT, actingUserId: EDITOR_SUBJECT, granted: new Set(['workspace:read']) }, 'sess-append');
     expect(s?.ops).toHaveLength(3);
     expect(s?.plannedOps).toBe(3);
@@ -373,33 +415,29 @@ describe('ADR 0773 P7/P9 — why, follow-ups, append batches, chain as ghost, cr
   });
 
   it('draws a template onto an EMPTY draft as a ghost suggestion — never registered — and refuses one that needs inputs', async () => {
-    const { listChains } = await import('../src/host/workflowChainPackLoader.js');
     const chains = listChains();
     const simple = chains.find((c) => !c.chain.subChains?.length && !((c.chain.parameters as { required?: unknown[] }).required?.length) && c.chain.dag.nodes.length > 0);
     expect(simple, 'the test pack set has at least one input-free, single-level chain').toBeDefined();
-    const { suggestFromChain } = await import('../src/features/builder-pair/pairService.js');
     const who = { tenantId: TENANT, actingUserId: EDITOR_SUBJECT, granted: new Set(['workspace:read', 'workspace:write'] as const) };
     const out = await suggestFromChain(who, { conversationId: 'sess-chain', workflowId: 'wf.adr0773.chain-draft', chainId: simple!.chain.chainId });
     expect('refused' in out, JSON.stringify(out)).toBe(false);
     expect((await readRegisteredWorkflowFresh('wf.adr0773.chain-draft')).def, 'drawn, not registered').toBeNull();
     const needsInputs = chains.find((c) => !c.chain.subChains?.length && ((c.chain.parameters as { required?: unknown[] }).required?.length ?? 0) > 0);
-    if (needsInputs) {
-      const refused = await suggestFromChain(who, { conversationId: 'sess-chain2', workflowId: 'wf.adr0773.chain-draft2', chainId: needsInputs.chain.chainId });
-      expect('refused' in refused && refused.code).toBe('validation_error');
-    }
+    expect(needsInputs, 'fixture: the test pack set has a single-level chain with required params').toBeDefined();
+    const refused = await suggestFromChain(who, { conversationId: 'sess-chain2', workflowId: 'wf.adr0773.chain-draft2', chainId: needsInputs!.chain.chainId });
+    expect('refused' in refused && refused.code).toBe('validation_error');
     // A non-empty workflow is refused (a template never overwrites a canvas).
     const onFull = await suggestFromChain(who, { conversationId: 'sess-chain3', workflowId: WF, chainId: simple!.chain.chainId });
     expect('refused' in onFull && onFull.code).toBe('validation_error');
   });
 
   it('the meta-workflow NODE lane is create-only: an overwrite without the read revision is refused (G-10c, WBWF-17)', async () => {
-    const { buildWorkflowAuthorSurface } = await import('../src/features/workflow-author/surface.js');
-    const surface = buildWorkflowAuthorSurface({ tenantId: TENANT, actingUserId: EDITOR_SUBJECT } as never);
+    const surface = buildWorkflowAuthorSurface({ tenantId: TENANT, actingUserId: EDITOR_SUBJECT });
     const id = 'wf.adr0773.node-lane';
     const def = { workflowId: id, nodes: [{ nodeId: 'a', typeId: 'core.noop' }], edges: [] };
     await surface.persistDraft?.({ definition: def });
     await expect(surface.persistDraft?.({ definition: def })).rejects.toMatchObject({ details: { reason: 'base_revision_required' } });
-    const ok = await surface.persistDraft?.({ definition: def, baseRevision: revisionHashOf((await readRegisteredWorkflowFresh(id)).def!) } as never);
+    const ok = await surface.persistDraft?.({ definition: def, baseRevision: revisionHashOf((await readRegisteredWorkflowFresh(id)).def!) });
     expect((ok as { workflowId: string }).workflowId).toBe(id);
   });
 });

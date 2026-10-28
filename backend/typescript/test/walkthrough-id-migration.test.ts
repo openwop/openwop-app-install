@@ -4,8 +4,15 @@
  *  - the app-migration COPIES (not moves) the toggle canary row + progress rows
  *    to the new ids, renaming the tourId field and rewriting the builtin id;
  *  - it is idempotent + preserves the tenant override (the canary);
- *  - the legacy node type ids + builtin workflow id stay REGISTERED as aliases so
- *    pre-rename defs/runs still resolve on replay.
+ *  - the legacy node type ids stay REGISTERED as aliases so pre-rename defs
+ *    still resolve on replay.
+ *
+ * NOT asserted here (corrected grade-tests w63 — this header used to claim it):
+ * the legacy BUILTIN WORKFLOW id resolving. `walkthroughs-progress.test.ts`
+ * runs `tour.campaign-studio.first-brief` and counts it in the funnel.
+ * Witnessed: first-write-wins dropped → the no-clobber case red; the config id
+ * or the builtin-id rewrite dropped → case 1 red; the legacy step alias
+ * unregistered → the alias case red.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
@@ -50,6 +57,8 @@ describe('ADR 0376 Phase 2 — persisted-id migration', () => {
     await migration.run(store);
     const again = JSON.parse((await store.kvGet('hostext:feature-toggle:walkthroughs'))!) as Record<string, unknown>;
     expect(again.tenantOverrides).toEqual({ 'user:abc': true });
+    expect((await store.kvList('hostext:walkthrough-progress:')).map((r) => r.key))
+      .toEqual(['hostext:walkthrough-progress:t1:walkthrough.campaign-studio.first-brief']);
   });
 
   it('does NOT clobber a diverged new-toggle on re-run (first-write-wins)', async () => {

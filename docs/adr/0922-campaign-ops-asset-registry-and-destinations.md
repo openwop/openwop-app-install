@@ -1,6 +1,6 @@
 # ADR 0922 — Campaign ops: asset registry and destinations
 
-Status: Accepted — P0 implemented (#5015); P0b (email adapter) and later phases pending
+Status: Accepted — P0 implemented (#5015); P0b email adapter implemented (follows #5022); later phases pending
 
 Program: agency campaign operations (ADRs 0921–0928). PRD features **F3**
 (asset registry), **F8** (first CMS destination) and **F11** (email draft
@@ -267,3 +267,30 @@ silently depend on an unmerged PR.
 | Phase | Commit / PR | Tests |
 |---|---|---|
 | P0 | #5015 (`feat(campaign-ops): client accounts, asset registry, CMS page adapter`) | `backend/typescript/test/campaign-ops-clients-assets.test.ts` |
+| P0b | email-template adapter (`adapters/emailTemplate.ts`, PR after #5022) | `backend/typescript/test/campaign-ops-email-adapter.test.ts` |
+
+> **P0b as built (2026-10-19).**
+> - The sent check is best-effort until ADR 0905's `refuseIfSent` lands (#5020):
+>   the adapter reads the locator's campaigns and every campaign referencing the
+>   template, then writes, so a send starting in between is not caught here. A send
+>   in that window still delivers its own pinned bytes (0905 D1). When #5020 merges,
+>   the write passes `refuseIfSent: true`, and its typed `template_sent` already maps
+>   to `email_already_sent`.
+> - Editable fields are `subject` and `body`. The template name is not delivered
+>   content (0905's content hash excludes it) and is not editable here.
+> - The email toggle is checked per call (preview and write refuse
+>   `destination_unavailable` while it is off), so the adapter is registered
+>   unconditionally.
+
+
+**Correction (2026-10-21, recovery composition):** P0b now passes
+`refuseIfSent: true` to ADR 0905's update and uses `campaignsUsingTemplate()` for
+its precheck. A send winning after that precheck causes the template edit CAS to
+lose and the retry to refuse `email_already_sent`; no new template version lands.
+The new adapter storage-barrier witness runs an actual campaign send through a
+fake provider in that window and checks the preserved version/hash and delivered
+subject. It is authored, not executed yet; the serialized recovery gate is active.
+The template hold is deliberately conservative and sticky once a send attempt
+starts. It is not a delivery receipt and may survive an aborted admission; the
+refusal copy says sending started rather than claiming an email was delivered.
+Do not clear such a hold without proving no other instance owns a send.

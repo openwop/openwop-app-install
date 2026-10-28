@@ -15,6 +15,15 @@
  *     later run does not erase that
  *   - a spent one-shot is not re-fired for the SAME slot, while a later fire time
  *     re-arms it (`SCTWF-11` + the /architect Blocker on the draft)
+ *
+ * Tracker: TST-BSC-1 (docs/steward/TEST-ASSESSMENT.md). Red when: a day/hour
+ * jump is taken without verifying where it landed (the DST month case); the
+ * day-of-week restriction is ignored; the search horizon shrinks to 30 days; a
+ * bad zone reaches `Intl` unchecked; `registerJob` or `updateJob` skips
+ * `validateCadence` (both halves of the store claim are probed separately); the
+ * advance stops recording `no-next-fire` or `recordJobRun` clears it; the spent
+ * one-shot comparison is off by one in either direction; `reviveStalledJob`
+ * stops checking `isStalled` or `isStalled` ignores `enabled`.
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -127,19 +136,22 @@ describe('ADR 0787 D6 — the store', () => {
 
   it('refuses an ENABLED job whose cadence cannot fire; a DISABLED one stays permissive until enabled', async () => {
     const bad = await registerJob({ jobId: 'j-bad', tenantId: 't', cronExpr: 'every tuesday', workflowId: 'wf' });
-    expect(bad.ok).toBe(false);
-    if (!bad.ok) expect(bad.error.code).toBe('invalid_cron');
+    expect(bad).toMatchObject({ ok: false, error: { code: 'invalid_cron' } });
     const tz = await registerJob({ jobId: 'j-tz', tenantId: 't', cronExpr: '0 9 * * *', timezone: 'Nowhere/Land', workflowId: 'wf' });
-    expect(tz.ok).toBe(false);
+    expect(tz).toMatchObject({ ok: false, error: { code: 'invalid_timezone' } });
     // A portability import arrives disabled and is stored as-is…
     const imported = await registerJob({ jobId: 'j-import', tenantId: 't', cronExpr: '0 0 30 2 *', workflowId: 'wf', enabled: false });
     expect(imported.ok).toBe(true);
     // …and is judged the moment someone arms it.
-    await expect(updateJob('j-import', { enabled: true })).rejects.toBeInstanceOf(ScheduleCadenceError);
+    const arming = updateJob('j-import', { enabled: true });
+    await expect(arming).rejects.toBeInstanceOf(ScheduleCadenceError);
+    await expect(arming).rejects.toMatchObject({ refusal: { code: 'schedule_horizon_exceeded' } });
     expect((await getJob('j-import'))?.enabled).toBe(false);
     // A cadence edit on an enabled job is judged too.
     await registerJob({ jobId: 'j-ok', tenantId: 't', cronExpr: '0 9 * * *', workflowId: 'wf' });
-    await expect(updateJob('j-ok', { timezone: 'Nowhere/Land' })).rejects.toBeInstanceOf(ScheduleCadenceError);
+    const rezone = updateJob('j-ok', { timezone: 'Nowhere/Land' });
+    await expect(rezone).rejects.toBeInstanceOf(ScheduleCadenceError);
+    await expect(rezone).rejects.toMatchObject({ refusal: { code: 'invalid_timezone' } });
     expect((await getJob('j-ok'))?.timezone).toBeUndefined();
   });
 
@@ -189,9 +201,17 @@ describe('ADR 0787 D6 — the store', () => {
     delete row.nextFireAt;
     await __rawPutJobForTest(row);
     expect((await getJob('j-dead-monthly'))?.nextFireAt).toBeUndefined();
-    expect(await reviveStalledJob('j-dead-monthly')).toBe(true);
+    // The expectation is derived by hand, never by `computeNextFire`: the next
+    // 3rd-of-month 09:00Z strictly after `nowMs`. `nowMs` is read BEFORE the
+    // revive (which searches from max(nowMs, Date.now())), so the two can only
+    // disagree if 09:00Z on the 3rd falls between the two reads.
+    const nowMs = Date.now();
+    const at = new Date(nowMs);
+    let want = Date.UTC(at.getUTCFullYear(), at.getUTCMonth(), 3, 9);
+    if (want <= nowMs) want = Date.UTC(at.getUTCFullYear(), at.getUTCMonth() + 1, 3, 9);
+    expect(await reviveStalledJob('j-dead-monthly', nowMs)).toBe(true);
     const revived = await getJob('j-dead-monthly');
-    expect(revived?.nextFireAt).toBe(computeNextFire('0 9 3 * *', Date.now(), 'UTC'));
+    expect(revived?.nextFireAt).toBe(want);
     // Idempotent: a second pass has nothing to do.
     expect(await reviveStalledJob('j-dead-monthly')).toBe(false);
     // A disabled or spent one-shot row is NOT revived.

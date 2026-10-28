@@ -95,8 +95,16 @@ fi
 # 2026-09-06 on a hosted runner against this bundle. The lane is defined by this
 # strip list, so it is stripped here, and `test/steward/steward-lane-ratchet.test.ts`
 # refuses any test outside it that names a stripped path.
+#
+# `hyvemind.json` + `.hyve/` go with `.claude/` and `.agents/`: hyvemind installs the
+# steward's agent skills INTO those two trees and `.hyve/manifest.json` is a checksum
+# list of files this same line strips, so shipped it describes nothing the adopter has.
+# Worse, it COLLIDES: an adopter running hyvemind writes its own pair at the same paths,
+# and every sync then conflicts on them. MEASURED 2026-10-26 on KickTodo's sync of
+# f3a80dd9e (both files `AA`, 13 skills vs the steward's 3).
 zip -q -d "$ZIP" \
   "${PREFIX}.claude/*" "${PREFIX}.agents/*" "${PREFIX}.github/*" \
+  "${PREFIX}hyvemind.json" "${PREFIX}.hyve/*" \
   "${PREFIX}docs/steward/*" "${PREFIX}docs/research/*" \
   "${PREFIX}backend/typescript/test/steward/*" \
   || [[ $? -eq 12 ]]

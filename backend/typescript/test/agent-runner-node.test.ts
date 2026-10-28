@@ -12,6 +12,12 @@
  * @mention path (routes/interrupts.ts) passes them as `inputs` (which still
  * wins). The prior tests missed this because they stubbed the workflow catalog
  * and never ran the real executor.
+ *
+ * TST-BLN-1. Red when: `configurable` is dropped from the precedence chain, config
+ * and configurable swap places, `offerTools` stops filtering non-strings, the
+ * runner ignores `offerTools` (the baseline union reaches the sim), the typed
+ * `result` is dropped, or a roster id is dispatched raw instead of the agent it
+ * wraps (ADR 0277).
  */
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import agentRunnerNode, { resolveParams } from '../src/host/agentRunnerNode.js';
@@ -22,9 +28,19 @@ import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { createRosterEntry } from '../src/host/rosterService.js';
 import type { AiCallRequest, AiCallResult, NodeContext } from '../src/executor/types.js';
 
-// Typed-partial cast (test-only): resolveParams reads only inputs/config/configurable.
-const ctx = (over: Partial<NodeContext>): NodeContext =>
-  ({ inputs: {}, configurable: {}, ...over } as unknown as NodeContext);
+/** A fully-typed NodeContext (every required member), overridable per case. */
+const baseCtx = (): NodeContext => ({
+  runId: 'run-sim-1',
+  nodeId: 'agent-runner',
+  tenantId: 'tenant-sim',
+  inputs: {},
+  config: {},
+  configurable: {},
+  attempt: 1,
+  secrets: {},
+  emit: async () => ({ eventId: 'e-1', sequence: 1 }),
+});
+const ctx = (over: Partial<NodeContext>): NodeContext => ({ ...baseCtx(), ...over });
 
 describe('agent-runner resolveParams — precedence inputs > config > configurable', () => {
   it('resolves the full autonomous-dispatch shape from configurable when inputs are empty', () => {
@@ -91,16 +107,7 @@ describe('agent-runner node — ADR 0458 P2 sim confinement + structured result'
     registry.register(agent);
   }
 
-  const nodeCtx = (over: Record<string, unknown>): NodeContext =>
-    ({
-      tenantId: 'tenant-sim',
-      runId: 'run-sim-1',
-      inputs: {},
-      config: {},
-      configurable: {},
-      emit: async () => {},
-      ...over,
-    } as unknown as NodeContext);
+  const nodeCtx = (over: Partial<NodeContext>): NodeContext => ctx(over);
 
   it('the ADR 0315 baseline is a real hazard for an empty-allowlist sim — the union includes WRITE/EGRESS tools', () => {
     // WHY confinement matters: with no override, a sim's effective allowlist is
@@ -151,7 +158,7 @@ describe('agent-runner node — ADR 0458 P2 sim confinement + structured result'
       packName: 'test',
       packVersion: '0',
       toolAllowlist: [],
-    } as ResolvedAgentManifest);
+    });
     const entry = await createRosterEntry({
       tenantId: 'tenant-roster',
       persona: `Roster Wrapped ${Date.now()}`,

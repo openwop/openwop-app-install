@@ -23,12 +23,25 @@ const log = createLogger('features.crm.suppression');
 export type SuppressionReason = 'unsubscribed' | 'bounced' | 'complaint' | 'manual';
 const REASONS: readonly SuppressionReason[] = ['unsubscribed', 'bounced', 'complaint', 'manual'];
 
+/** ADR 0955 D2 (J2) — the channel a suppression row stops. */
+export type SuppressionChannel = 'email' | 'sms';
+
 export interface SuppressionEntry {
-  /** `${tenantId}::${emailLower}` — the natural key (one row per address). */
+  /** The natural key, one row per (channel, sender scope, address):
+   *  - legacy tenant-wide email: `${tenantId}::${emailLower}` (every row before ADR 0955);
+   *  - everything else: `${tenantId}::#${channel}:${senderOrgId || '*'}:${address}` (`scopedKeyOf`). */
   key: string;
   tenantId: string;
-  /** Lower-cased, trimmed address. */
+  /** Lower-cased, trimmed address on an email row. `''` on an SMS row (the number is `address`). */
   email: string;
+  /** ADR 0955 D2 — absent on rows written before it, which read as `'email'`. */
+  channel?: SuppressionChannel;
+  /** ADR 0955 D2 — the normalized address the row stops (email lower-cased, SMS E.164).
+   *  Absent on legacy rows, which read as `email`. */
+  address?: string;
+  /** ADR 0955 D2 — the client org whose SENDER this row stops. Absent ⇒ tenant-wide (every
+   *  sender in the workspace), which is what every row before ADR 0955 is. */
+  senderOrgId?: string;
   reason: SuppressionReason;
   /** Free-form context (e.g. the campaignId the unsubscribe came from). */
   note?: string;
@@ -95,6 +108,53 @@ export function normalizeEmail(raw: string): string {
 }
 const keyOf = (tenantId: string, email: string): string => `${tenantId}::${normalizeEmail(email)}`;
 
+function assertSuppressionIdentity(
+  row: SuppressionEntry | null | undefined, tenantId: string, address: string,
+  channel: SuppressionChannel = 'email', senderOrgId?: string,
+): void {
+  if (row && (row.key !== rowKeyOf(tenantId, channel, address, senderOrgId)
+      || !rowMatches(row, tenantId, channel, address, senderOrgId) || !REASONS.includes(row.reason))) {
+    throw new OpenwopError('conflict', 'Suppression identity is inconsistent; delivery remains blocked.', 409);
+  }
+}
+
+/** ADR 0955 D2 — an SMS address is E.164: `+`, a non-zero country digit, 8–15 digits in all. */
+const E164 = /^\+[1-9]\d{7,14}$/;
+
+/** ADR 0955 D2 — the normalized address for a channel, or `''` when it is not one
+ *  (an email without `@`, a number that is not E.164 after stripping punctuation). */
+export function normalizeChannelAddress(channel: SuppressionChannel, raw: string): string {
+  if (channel === 'email') {
+    const e = normalizeEmail(raw);
+    return e.includes('@') ? e : '';
+  }
+  const n = raw.trim().replace(/[^\d+]/g, '');
+  return E164.test(n) ? n : '';
+}
+
+/**
+ * ADR 0955 D2 — the key of every row that is NOT a legacy tenant-wide email row. The `#`
+ * marker keeps these out of the legacy `${tenant}::${email}` space in practice; readers
+ * verify the row's own `channel`/`senderOrgId`/`address` after the point get, so even a
+ * contrived collision can only MISS a row, never attribute one row to another scope.
+ * ADDRESS before scope, so every scope of one address is one prefix (`addressPrefixOf`):
+ * the SMS exit guard (P1) needs "any row for this number" when it cannot name the sender.
+ */
+const scopedKeyOf = (tenantId: string, channel: SuppressionChannel, address: string, senderOrgId?: string): string =>
+  `${tenantId}::#${channel}:${address}:${senderOrgId || '*'}`;
+const addressPrefixOf = (tenantId: string, channel: SuppressionChannel, address: string): string => `${tenantId}::#${channel}:${address}:`;
+
+/** The key a (channel, address, sender) row lives under. Tenant-wide email keeps the legacy key. */
+const rowKeyOf = (tenantId: string, channel: SuppressionChannel, address: string, senderOrgId?: string): string =>
+  channel === 'email' && !senderOrgId ? keyOf(tenantId, address) : scopedKeyOf(tenantId, channel, address, senderOrgId);
+
+const channelOfRow = (r: SuppressionEntry): SuppressionChannel => r.channel ?? 'email';
+const addressOfRow = (r: SuppressionEntry): string => r.address ?? r.email;
+
+/** Does a stored row really describe this (channel, address, sender) scope? */
+const rowMatches = (r: SuppressionEntry | null | undefined, tenantId: string, channel: SuppressionChannel, address: string, senderOrgId?: string): r is SuppressionEntry =>
+  !!r && r.tenantId === tenantId && channelOfRow(r) === channel && addressOfRow(r) === address && (r.senderOrgId ?? '') === (senderOrgId ?? '');
+
 /**
  * Is this address suppressed for the tenant? The ONE read every marketing egress
  * path calls. Fail-open only on a malformed address (nothing to key).
@@ -114,7 +174,8 @@ export async function isSuppressed(tenantId: string, email: string): Promise<boo
   const e = normalizeEmail(email);
   if (!e) return false;
   const row = await suppressions.get(keyOf(tenantId, e));
-  return !!row && row.tenantId === tenantId;
+  assertSuppressionIdentity(row, tenantId, e);
+  return !!row;
 }
 
 /**
@@ -152,12 +213,59 @@ export type SuppressionCheck = 'clear' | 'suppressed' | 'unreadable';
  * consent decision, in the store an auditor reads. Returning the third state is
  * what lets a caller refuse the send WITHOUT making a claim about the recipient.
  */
-export async function suppressionBlocksSend(tenantId: string, email: string): Promise<SuppressionCheck> {
+export async function suppressionBlocksSend(tenantId: string, email: string, opts: { purpose?: 'marketing' | 'transactional' } = {}): Promise<SuppressionCheck> {
+  // ADR 0955 D2 — the email, tenant-wide case of `suppressionCheck`. Every caller before
+  // ADR 0955 sends from no particular client sender, so only tenant-wide rows apply.
+  return suppressionCheck(tenantId, { channel: 'email', address: email, ...(opts.purpose ? { purpose: opts.purpose } : {}) });
+}
+
+/**
+ * ADR 0955 D2 (J2) — the ONE suppression read for a send on any channel, optionally from one
+ * client's sender. A row stops the send when it is tenant-wide for this (channel, address), or
+ * scoped to this exact `senderOrgId`. At most two point reads; never a scan.
+ *
+ * `purpose:'transactional'`: an `unsubscribed` row is a marketing opt-out and does not block
+ * (ADR 0905 D7, EMWF-18). Bounces, complaints and manual holds block every purpose.
+ * A read failure is `'unreadable'` (CRM-4 / fold-in B5): refused, never claimed as a choice.
+ */
+export async function suppressionCheck(
+  tenantId: string,
+  input: {
+    channel: SuppressionChannel; address: string; senderOrgId?: string; purpose?: 'marketing' | 'transactional';
+    /** The caller cannot name the sender (an SMS sent from a number bound to no client): every
+     *  row for the address blocks, whatever its scope. One prefix read on the address. */
+    anySender?: boolean;
+  },
+): Promise<SuppressionCheck> {
+  const address = input.channel === 'email' ? normalizeEmail(input.address) : normalizeChannelAddress('sms', input.address);
+  if (!address) return 'clear'; // nothing to key (the eligibility check refuses `no_address` before this)
+  const blocks = (r: SuppressionEntry): boolean => input.purpose !== 'transactional' || r.reason !== 'unsubscribed';
   try {
-    return (await isSuppressed(tenantId, email)) ? 'suppressed' : 'clear';
+    if (input.anySender) {
+      const rows = await suppressions.listByPrefix(addressPrefixOf(tenantId, input.channel, address));
+      for (const row of rows) {
+        assertSuppressionIdentity(row, tenantId, address, input.channel, row.senderOrgId);
+        if (blocks(row)) return 'suppressed';
+      }
+      if (input.channel === 'email') {
+        const legacy = await suppressions.get(keyOf(tenantId, address));
+        assertSuppressionIdentity(legacy, tenantId, address);
+        if (legacy && blocks(legacy)) return 'suppressed';
+      }
+      return 'clear';
+    }
+    const wide = await suppressions.get(rowKeyOf(tenantId, input.channel, address));
+    assertSuppressionIdentity(wide, tenantId, address, input.channel);
+    if (wide && blocks(wide)) return 'suppressed';
+    if (input.senderOrgId) {
+      const scoped = await suppressions.get(scopedKeyOf(tenantId, input.channel, address, input.senderOrgId));
+      assertSuppressionIdentity(scoped, tenantId, address, input.channel, input.senderOrgId);
+      if (scoped && blocks(scoped)) return 'suppressed';
+    }
+    return 'clear';
   } catch (err) {
     log.error('suppression_read_failed_refusing_send', {
-      tenantId, error: err instanceof Error ? err.message : String(err),
+      tenantId, channel: input.channel, error: err instanceof Error ? err.message : String(err),
     });
     return 'unreadable';
   }
@@ -170,11 +278,19 @@ export async function addSuppression(
   reason: SuppressionReason,
   actor: string,
   note?: string,
+  /** ADR 0955 D2 — absent ⇒ a tenant-wide EMAIL row, exactly as every writer before it. */
+  scope: { channel?: SuppressionChannel; senderOrgId?: string } = {},
 ): Promise<SuppressionEntry> {
-  const e = normalizeEmail(email);
-  if (!e || !e.includes('@')) throw new OpenwopError('validation_error', 'A valid email address is required.', 400, { field: 'email' });
+  const channel = scope.channel ?? 'email';
+  const senderOrgId = cleanString(scope.senderOrgId, 160) || undefined;
+  const e = normalizeChannelAddress(channel, email);
+  if (!e) {
+    throw new OpenwopError('validation_error', channel === 'email' ? 'A valid email address is required.' : 'A phone number in E.164 form (+ and country code) is required.', 400, { field: channel === 'email' ? 'email' : 'address' });
+  }
   if (!REASONS.includes(reason)) throw new OpenwopError('validation_error', `reason must be one of ${REASONS.join(' | ')}.`, 400, { field: 'reason' });
-  const existing = await suppressions.get(keyOf(tenantId, e)).catch(() => undefined);
+  const rowKey = rowKeyOf(tenantId, channel, e, senderOrgId);
+  const existing = await suppressions.get(rowKey);
+  assertSuppressionIdentity(existing, tenantId, e, channel, senderOrgId);
   if (!existing) {
     // SUPP-1: fast O(1) counter check; only if it SAYS full do we pay the scan
     // to verify — the counter can drift high and must never falsely refuse a
@@ -184,26 +300,43 @@ export async function addSuppression(
       throw new OpenwopError('validation_error', 'Suppression list is full.', 400, { cap });
     }
   }
+  const legacy = channel === 'email' && !senderOrgId;
   const entry: SuppressionEntry = {
-    key: keyOf(tenantId, e),
+    key: rowKey,
     tenantId,
-    email: e,
+    email: channel === 'email' ? e : '',
+    // A legacy-keyed row stays byte-shaped as before (no new fields); a scoped row says what it is.
+    ...(legacy ? {} : { channel, address: e, ...(senderOrgId ? { senderOrgId } : {}) }),
     reason,
     ...(cleanString(note, 400) ? { note: cleanString(note, 400) } : {}),
     actor,
     at: new Date().toISOString(),
   };
-  await suppressions.put(entry);
-  if (!existing) await bumpCount(tenantId, +1); // maintain the fast-path counter
-  return entry;
+  let current = existing;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    assertSuppressionIdentity(current, tenantId, e, channel, senderOrgId);
+    // An unsubscribe narrows marketing only. It cannot erase a bounce, complaint
+    // or manual hold, which also protects transactional delivery. Re-evaluate on
+    // every lost CAS; unreadable state must never be treated as an absent hold.
+    if (reason === 'unsubscribed' && current && current.reason !== 'unsubscribed') return current;
+    if (await suppressions.compareAndSwap(current, entry)) {
+      if (!current) await bumpCount(tenantId, +1);
+      return entry;
+    }
+    current = await suppressions.get(entry.key);
+  }
+  throw new OpenwopError('conflict', 'Suppression changed concurrently; retry the request.', 409);
 }
 
 /** Remove a suppression — ONLY 'manual' rows are operator-removable; system
  *  reasons (unsubscribed/bounced/complaint) stay unless the subject re-opts-in
  *  through a consent-bearing flow (not an admin click — the honesty rule). */
-export async function removeSuppression(tenantId: string, email: string, opts: { force?: boolean } = {}): Promise<boolean> {
-  const row = await suppressions.get(keyOf(tenantId, email)).catch(() => undefined);
-  if (!row || row.tenantId !== tenantId) return false;
+export async function removeSuppression(tenantId: string, email: string, opts: { force?: boolean; channel?: SuppressionChannel; senderOrgId?: string } = {}): Promise<boolean> {
+  const channel = opts.channel ?? 'email';
+  const address = channel === 'email' ? normalizeEmail(email) : normalizeChannelAddress('sms', email);
+  if (!address) return false;
+  const row = await suppressions.get(rowKeyOf(tenantId, channel, address, opts.senderOrgId)).catch(() => undefined);
+  if (!rowMatches(row, tenantId, channel, address, opts.senderOrgId)) return false;
   if (row.reason !== 'manual' && !opts.force) {
     throw new OpenwopError('validation_error', `A '${row.reason}' suppression can only be lifted by the subject re-opting in.`, 400, { reason: row.reason });
   }
@@ -212,10 +345,39 @@ export async function removeSuppression(tenantId: string, email: string, opts: {
   return deleted;
 }
 
-/** Tenant list, newest-first. */
+/**
+ * ADR 0955 D3 — lift a row only if `may(row)` says so, for a lifting flow that may not
+ * remove every reason (an SMS START lifts only the opt-out a STOP to that sender wrote).
+ */
+export async function removeSuppressionIf(
+  tenantId: string,
+  address: string,
+  scope: { channel: SuppressionChannel; senderOrgId?: string },
+  may: (row: SuppressionEntry) => boolean,
+): Promise<boolean> {
+  const a = scope.channel === 'email' ? normalizeEmail(address) : normalizeChannelAddress('sms', address);
+  if (!a) return false;
+  const row = await suppressions.get(rowKeyOf(tenantId, scope.channel, a, scope.senderOrgId));
+  if (!rowMatches(row, tenantId, scope.channel, a, scope.senderOrgId) || !may(row)) return false;
+  const deleted = await suppressions.compareAndDelete(row);
+  if (deleted) await bumpCount(tenantId, -1);
+  return deleted;
+}
+
+/** Tenant list, newest-first. ADR 0955 D2: every row carries its `channel` and `address`
+ *  (a legacy row reads as a tenant-wide email row), so a consumer never has to infer them. */
 export async function listSuppressions(tenantId: string): Promise<SuppressionEntry[]> {
   const all = await suppressions.listByPrefix(`${tenantId}::`);
-  return all.filter((s) => s.tenantId === tenantId).sort((a, b) => b.at.localeCompare(a.at));
+  return all
+    .filter((s) => s.tenantId === tenantId)
+    .map((s) => ({ ...s, channel: channelOfRow(s), address: addressOfRow(s) }))
+    .sort((a, b) => b.at.localeCompare(a.at));
+}
+
+/** ADR 0955 D2 — the scoped (non-legacy) rows for a tenant: the `#` keyspace only, for the
+ *  DSAR redaction leg (`crm/erasure.ts`), which point-reads the legacy rows itself. */
+export async function listScopedSuppressions(tenantId: string): Promise<SuppressionEntry[]> {
+  return (await suppressions.listByPrefix(`${tenantId}::#`)).filter((s) => s.tenantId === tenantId);
 }
 
 /** ADR 0251: a suppression-CAUSE projection over the same rows `listSuppressions`

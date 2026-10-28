@@ -8,7 +8,11 @@
  * delivered and dead rows stay as history; a major-2 subscription is untouched.
  *
  * The Postgres leg runs against `OPENWOP_PG_TEST_DSN` (a PGlite socket server
- * works) and skips without it.
+ * works) and skips without it, so `npm run ci` runs only the sqlite leg.
+ * Tracker: TST-BVC-6.
+ *
+ * Red when (wave 60 probes w60g4-mig-*, sqlite): a NULL-major row survives;
+ * a major-2 row is deleted; delivered/dead history is deleted.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type Database from 'better-sqlite3';
@@ -63,10 +67,16 @@ describe('ADR 0812 P3d — sqlite mig 50 drops major-1 webhook subscriptions', (
     db.prepare(
       `INSERT INTO webhooks (subscription_id, url, events, secret, created_at, protocol_major) VALUES ('only-v2', 'https://example.test/hook', '["*"]', 's', '2026-10-01T00:00:00Z', 2)`,
     ).run();
+    db.prepare(
+      `INSERT INTO webhook_deliveries (delivery_id, subscription_id, url, secret, event_type, payload, status, attempts, max_attempts, next_attempt_at, created_at, updated_at)
+       VALUES ('only-v2:pending', 'only-v2', 'https://example.test/hook', 's', 'run.completed', '{}', 'pending', 0, 5, 0, 0, 0)`,
+    ).run();
     applySqlite(db);
     db.prepare(`UPDATE __schema_version SET version = 49 WHERE id = 1`).run();
     expect(() => applySqlite(db)).not.toThrow();
-    expect(db.prepare(`SELECT count(*) AS n FROM webhooks`).get()).toEqual({ n: 1 });
+    // The same row and its pending delivery, by id, after both runs.
+    expect(db.prepare(`SELECT subscription_id AS id FROM webhooks`).all()).toEqual([{ id: 'only-v2' }]);
+    expect(db.prepare(`SELECT delivery_id AS id FROM webhook_deliveries`).all()).toEqual([{ id: 'only-v2:pending' }]);
     db.close();
   });
 });

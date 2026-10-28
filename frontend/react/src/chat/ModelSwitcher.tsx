@@ -21,9 +21,15 @@ interface Props {
    *  MODEL switch within the configured provider, never a jump to a provider the
    *  user has no credential for. Omitted ⇒ all advertised models (legacy). */
   provider?: string;
+  /** Accessible name override (default: the chat's "Model"), for a page that
+   *  renders several switchers side by side (the evals arena's contestants). */
+  label?: string;
+  /** The empty option's text (default: the chat's "Default model"). A surface
+   *  where "no pick" is not a choice says so, e.g. "Choose a model". */
+  emptyOptionLabel?: string;
 }
 
-export function ModelSwitcher({ value, onChange, provider }: Props): JSX.Element | null {
+export function ModelSwitcher({ value, onChange, provider, label, emptyOptionLabel }: Props): JSX.Element | null {
   const { t } = useTranslation('chat');
   const [providers, setProviders] = useState<ProviderCapabilities[] | null>(null);
 
@@ -49,11 +55,11 @@ export function ModelSwitcher({ value, onChange, provider }: Props): JSX.Element
       {/* Visually hidden — the segment's provider card already names the model;
           this label is for screen readers only. (`u-sr-only` was a no-op class,
           so the eyebrow used to render visibly and collide with the change btn.) */}
-      <span className="sr-only">{t('modelSwitcherLabel')}</span>
+      <span className="sr-only">{label ?? t('modelSwitcherLabel')}</span>
       <select
         className="model-switcher-select"
         value={selected}
-        aria-label={t('modelSwitcherLabel')}
+        aria-label={label ?? t('modelSwitcherLabel')}
         onChange={(e) => {
           const v = e.target.value;
           if (!v) { onChange(null); return; }
@@ -61,7 +67,7 @@ export function ModelSwitcher({ value, onChange, provider }: Props): JSX.Element
           onChange({ provider: provider ?? '', model: rest.join(':') });
         }}
       >
-        <option value="">{t('modelSwitcherDefault')}</option>
+        <option value="">{emptyOptionLabel ?? t('modelSwitcherDefault')}</option>
         {options.map((o) => <option key={`${o.provider}:${o.model}`} value={`${o.provider}:${o.model}`}>{o.label}</option>)}
       </select>
     </label>

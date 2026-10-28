@@ -18,6 +18,10 @@
  * that lane for a reason it does not hunt. There the leg proves the bomb is
  * ARMED instead — the shifted clock DOES read as stale — and checks the
  * real-clock age separately, so the lane neither reds nor goes vacuous.
+ *
+ * Tracker TST-BFA-2. Red when: either v2 record advertises a literal instead of
+ * its constant; a constant is older than 90 days; a constant is not a real
+ * calendar day.
  */
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -45,7 +49,7 @@ function refreshedAtValidator(family: string): (v: unknown) => boolean {
   const prop = caps.properties[family]?.properties['refreshedAt'];
   if (!prop) throw new Error(`capabilities.schema.json has no ${family}.refreshedAt — the shape check would be vacuous`);
   const ajv = new Ajv2020({ strict: false });
-  (addFormats as unknown as (a: unknown) => void)(ajv);
+  addFormats(ajv);
   const fn = ajv.compile(prop as Record<string, unknown>);
   return (v) => fn(v) as boolean;
 }

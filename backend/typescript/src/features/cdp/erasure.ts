@@ -31,6 +31,12 @@
  * (nothing joins to `eventId`). ADR 0464's taxonomy sends "a subject's OWN data"
  * to DELETE.
  *
+ * ADR 0954 recovery correction: delete the payload and its legacy plaintext
+ * projections, retaining only opaque primary/index/receipt deletion fences.
+ * These prevent an admitted delayed CAS or identical retry from republishing
+ * the subject's event. A failed cleanup retains its durable deleting receipt
+ * (including legacy keys) until acknowledged cleanup strips those keys.
+ *
  * THE RESIDUAL, stated rather than implied. An event whose payload carries the
  * person under a key the ingest did NOT flag and which is not a known identity
  * field is not reached. Neither is one keyed by an identifier the ADR 0381
@@ -41,68 +47,21 @@
  * left to be inferred from an eraser's existence.
  */
 
-import { DurableCollection } from '../../host/hostExtPersistence.js';
-import { registerSubjectEraser } from '../../host/subjectErasure.js';
+import { registerSubjectEraser, currentErasureRequest } from '../../host/subjectErasure.js';
+import { writeErasureTombstone, tombstoneId } from '../consent/consentService.js';
+import { eraseCollectedEventsForIdentity } from './visitorEventIndex.js';
+import { collectedIdentityForms, foldCollectedIdentity } from './collectedEventIdentity.js';
 import { createLogger } from '../../observability/logger.js';
-
 const log = createLogger('features.cdp.erasure');
 
-/** Same namespace + key function as `collectService` — this module reads and
- *  writes the SAME rows (the `crm/erasure.ts` precedent: the erasure seam does
- *  not widen the owning service's public surface). */
-interface CollectedEventRow {
-  eventId: string;
-  tenantId: string;
-  eventType: string;
-  payload: Record<string, unknown>;
-  piiFields: string[];
-  at: string;
-}
-const events = new DurableCollection<CollectedEventRow>(
-  'cdp:collected-event', (e) => e.eventId, undefined, (e) => e.tenantId,
-);
-
-/**
- * Payload keys that ARE an identity regardless of what `looksLikePiiName`
- * thought at ingest. `sessionKey` is the consent `subjectKey` and the ADR 0381
- * closure's own currency; `contactId` is a live DSAR key; the rest are the
- * collection SDKs' conventional anonymous-id spellings. None of them is
- * PII-by-NAME, which is exactly why the ingest tag alone was not enough.
- */
-const IDENTITY_KEYS: readonly string[] = [
-  'contactId', 'sessionKey', 'subjectKey', 'userId', 'visitorKey', 'visitorId',
-  'anonymousId', 'anonymousKey', 'distinctId',
-];
-
-const fold = (v: string): string => v.trim().toLowerCase();
-
-function addressesSubject(row: CollectedEventRow, subject: string): boolean {
-  const candidates = new Set<string>([...IDENTITY_KEYS, ...(row.piiFields ?? [])]);
-  for (const key of candidates) {
-    const v = row.payload?.[key];
-    if (typeof v === 'string' && v && fold(v) === subject) return true;
-  }
-  return false;
-}
-
-/** Invoked once per resolved identity key by the ADR 0381 fan-out. */
+/** The shared barrier precedes both reservation and legacy-primary enumeration.
+ * Group every normalized form with the original DSAR for sanctioned readmission. */
 export async function eraseCdpCollectedEvents(tenantId: string, subjectKey: string): Promise<void> {
-  if (!tenantId || !subjectKey) return;
-  const subject = fold(subjectKey);
-  if (!subject) return;
-  let deleted = 0;
-  for (const row of await events.listForTenantIndexed(tenantId)) {
-    if (row.tenantId !== tenantId) continue; // belt-and-braces on a stale index marker
-    if (!addressesSubject(row, subject)) continue;
-    await events.delete(row.eventId);
-    deleted += 1;
-  }
-  if (deleted > 0) log.info('cdp_collected_events_erased', { tenantId, deleted });
+  if (!tenantId || !subjectKey || !foldCollectedIdentity(subjectKey)) return;
+  const request = currentErasureRequest();
+  const dsarHash = tombstoneId(tenantId, request?.tenantId === tenantId ? request.requestedKey : subjectKey);
+  for (const form of collectedIdentityForms(subjectKey)) await writeErasureTombstone(tenantId, form, dsarHash);
+  const deleted = await eraseCollectedEventsForIdentity(tenantId, subjectKey);
+  if (deleted) log.info('cdp_collected_events_erased', { tenantId, deleted });
 }
-
-/** Register CDP's DSAR eraser. Called from the feature's boot path, which runs
- *  regardless of the `cdp` toggle — an erasure obligation is not a purchased
- *  feature (the CONS-5 reasoning, applied here too). */
-export function registerCdpErasure(): void {
-  registerSubjectEraser(eraseCdpCollectedEvents);
-}
+export function registerCdpErasure(): void { registerSubjectEraser(eraseCdpCollectedEvents); }

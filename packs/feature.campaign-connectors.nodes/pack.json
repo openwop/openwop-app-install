@@ -1,6 +1,6 @@
 {
   "name": "feature.campaign-connectors.nodes",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "kind": "node",
   "description": "Campaign Connectors node pack — `import-csv` (parse a platform CSV export onto the unified metric schema with dedup + computed fields) and `sync` (ADR 0907 D3: a 7-day look-back of daily campaign metrics with conversions and revenue, for the dispatched campaigns or the whole configured ad account, read through the Connections broker via ctx.ads.getAccountMetrics — meta/google live; other platforms stay CSV-first with `connector_not_configured`). `dispatch-conversions` (ADR 0907 D7) delivers the queued server-side conversions on a schedule, re-checking consent per row at send. Over ctx.features['campaign-connectors'] + ctx.ads.",
   "author": "OpenWOP App",
@@ -41,6 +41,17 @@
       "role": "action",
       "label": "Sync Segment → Ad Audience",
       "description": "Uploads a CRM saved segment as a hashed platform custom audience (ADR 0217): consent-checked, suppression-subtracted, SHA-256-hashed members via ctx.ads.syncAudience — behind the ads-audience approval gate (default require-approval; PII-adjacent). Inputs: { segmentId, platform: meta|google, adAccountId, audienceName? }. Output: { platformAudienceId, uploaded, excluded }."
+    },
+    {
+      "typeId": "feature.campaign-connectors.nodes.push-catalog-feed",
+      "version": "1.0.0",
+      "label": "Connectors: Push product feed",
+      "description": "Pushes the org's product feed, generated from the commerce catalog (ADR 0952 D6), to Meta Catalog (items_batch) or Google Merchant Center (Merchant API) through the run owner's connections; they must hold workspace:write in the org. Only items whose content changed since the last push are sent, and items that left the catalog (deleted, inactive, or no image) are removed from the platform. Only real catalog images go in. A replay fork serves the recorded outcome and sends nothing. Unsupported until the push is verified on a test account; disabled until the org turns its feed on. Inputs: { orgId, platform: meta|google }. Output: { outcome, sent, unchanged, removed, failed, excluded, failures }.",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": [
+        "side-effectful"
+      ]
     },
     {
       "typeId": "feature.campaign-connectors.nodes.dispatch-conversions",

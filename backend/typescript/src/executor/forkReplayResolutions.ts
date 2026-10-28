@@ -46,6 +46,9 @@ export interface DerivedResolution {
   /** Someone ELSE decided the fork's gate row (see `DERIVED_MARKER`): the
    *  recorded resolution is NOT applied, and the gate fails closed instead. */
   conflict: boolean;
+  /** ctx.suspend nodes shape a resolution into their own output ports. Reuse
+   * the live re-invoke path instead of inventing `{ output: resolvedValue }`. */
+  reinvoke?: { resumeKey: string };
 }
 
 /**
@@ -152,6 +155,8 @@ export async function deriveRecordedResolutions(input: {
       }
     }
     const alreadyRecorded = !conflict && (await firstResolvedAfter(storage, run.runId, cut, nodeId)) !== null;
+    const sourceData = sourceRow?.data && typeof sourceRow.data === 'object' && !Array.isArray(sourceRow.data)
+      ? sourceRow.data as Record<string, unknown> : null;
     out.push({
       nodeId,
       kind,
@@ -160,6 +165,9 @@ export async function deriveRecordedResolutions(input: {
       resolvedValue: sourceValue,
       alreadyRecorded,
       conflict,
+      ...(sourceData?.__resumeStyle === 'reinvoke' ? {
+        reinvoke: { resumeKey: typeof sourceData.__resumeKey === 'string' ? sourceData.__resumeKey : nodeId },
+      } : {}),
     });
   }
   return out;

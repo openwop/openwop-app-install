@@ -25,9 +25,9 @@ export interface Org { orgId: string; name: string }
  */
 export type ResourceType =
   | 'cms_page' | 'kb_collection' | 'chat_message'
-  | 'canvas_document' | 'priority_idea' | 'creative_brief' | 'canvas_slides';
+  | 'canvas_document' | 'priority_idea' | 'creative_brief' | 'canvas_slides' | 'media_asset';
 export const ALL_RESOURCE_TYPES: readonly ResourceType[] = [
-  'cms_page', 'kb_collection', 'chat_message', 'canvas_document', 'priority_idea', 'creative_brief', 'canvas_slides',
+  'cms_page', 'kb_collection', 'chat_message', 'canvas_document', 'priority_idea', 'creative_brief', 'canvas_slides', 'media_asset',
 ];
 export function isResourceType(v: unknown): v is ResourceType {
   return typeof v === 'string' && (ALL_RESOURCE_TYPES as readonly string[]).includes(v);
@@ -59,8 +59,24 @@ export interface Comment {
   resolvedAt?: string;
   /** ADR 0881 D6 — set when the author changed the body. */
   editedAt?: string;
+  /** ADR 0947 D2 — a proofing pin on the subject at one version (root comments). */
+  anchor?: CommentAnchor;
+  /** ADR 0947 D2 — absent ⇒ a note. */
+  intent?: 'note' | 'change-request';
+  /** ADR 0947 D2 — absent ⇒ internal. */
+  visibility?: 'internal' | 'shared';
   createdAt: string;
   updatedAt: string;
+}
+
+/** ADR 0947 D2 — mirrors the backend `CommentAnchor` (closed schema, validated server-side). */
+export interface CommentAnchor {
+  subjectVersion: string;
+  target:
+    | { kind: 'region'; x: number; y: number; w: number; h: number }
+    | { kind: 'point'; x: number; y: number }
+    | { kind: 'timecode'; startMs: number; endMs?: number; region?: { x: number; y: number; w: number; h: number } }
+    | { kind: 'element'; sectionId: string; field?: string };
 }
 
 /** ADR 0881 D7 — what the caller may do on this thread (server-authoritative). */

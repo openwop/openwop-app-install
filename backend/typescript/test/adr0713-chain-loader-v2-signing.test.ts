@@ -17,6 +17,11 @@
  * in-tree + published-registry population), and the tests below pin what that
  * script cannot: that the v2 route is really the v2 SCHEMA, and that the schema
  * really does subsume the prose check the loader stopped running.
+ *
+ * Tracker TST-BGF-19. Red when `chainManifestSchemaTree` stops routing a v2
+ * signing block to v2, or the loader judges every pack by the v2 schema. Every
+ * refusal asserts `/signing` in its message, because any schema violation shares
+ * the `workflow_chain_pack_manifest_invalid` code.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync } from 'node:fs';
@@ -112,7 +117,9 @@ describe('ADR 0713 Phase 1b — chain-pack loader and the v2 signing block', () 
     const { errors } = loadWorkflowChainPacks({ roots: [root] });
     const byPack = Object.fromEntries(errors.map((e) => [e.pack, e]));
     expect(byPack['v2-bad-scheme']?.code).toBe('workflow_chain_pack_manifest_invalid');
+    expect(byPack['v2-bad-scheme']?.message).toContain('/signing');
     expect(byPack['v2-mixed']?.code).toBe('workflow_chain_pack_manifest_invalid');
+    expect(byPack['v2-mixed']?.message).toContain('/signing');
     expect(getChain('adr0713.bad-scheme')).toBeNull();
   });
 
@@ -120,6 +127,7 @@ describe('ADR 0713 Phase 1b — chain-pack loader and the v2 signing block', () 
     const { errors } = loadWorkflowChainPacks({ roots: [root] });
     const byPack = Object.fromEntries(errors.map((e) => [e.pack, e]));
     expect(byPack['v2-with-v1-block']?.code).toBe('workflow_chain_pack_manifest_invalid');
+    expect(byPack['v2-with-v1-block']?.message).toContain('/signing');
     expect(getChain('adr0713.v2-with-v1-block')).toBeNull();
   });
 

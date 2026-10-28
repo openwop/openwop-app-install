@@ -4,7 +4,7 @@ import { visibleHubRoutes, tabIdOf } from '../hubProjection.js';
 
 /**
  * ADR 0200 Phase 2 — Campaign Studio console. Asserts the manifest wiring that
- * consolidates the campaign chain: the console projects exactly the four campaign
+ * consolidates the campaign chain: the console projects exactly the six campaign
  * tabs (and only its own), each gated by its own toggle, the standalone Marketing
  * nav collapses via `hiddenWhenFeature: 'campaigns'` while the routes stay
  * reachable, and the anchor id is `campaigns` (NOT `campaign-studio`, which is the
@@ -18,13 +18,13 @@ import { visibleHubRoutes, tabIdOf } from '../hubProjection.js';
  */
 const byPath = (p: string) => FEATURES.find((r) => r.path === p);
 const all = (): boolean => true;
-const CAMPAIGN_PATHS = ['/campaign-ops', '/campaign-brief', '/campaigns', '/campaign-performance', '/campaign-intelligence'];
+const CAMPAIGN_PATHS = ['/campaign-ops', '/campaign-brief', '/campaigns', '/campaign-performance', '/campaign-intelligence', '/campaign-playbooks'];
 
 describe('ADR 0200 — Campaign Studio console', () => {
   // ADR 0926 D1 — Operations is the FIRST tab.
-  it('projects exactly Operations → Briefs → Campaigns → Performance → Intelligence, in order', () => {
+  it('projects exactly Operations → Briefs → Campaigns → Performance → Intelligence → Playbooks, in order', () => {
     expect(visibleHubRoutes(FEATURES, all, true, 'campaigns').map(tabIdOf)).toEqual([
-      'campaign-ops', 'campaign-brief', 'campaigns', 'campaign-performance', 'campaign-intelligence',
+      'campaign-ops', 'campaign-brief', 'campaigns', 'campaign-performance', 'campaign-intelligence', 'campaign-playbooks',
     ]);
   });
 
@@ -35,7 +35,7 @@ describe('ADR 0200 — Campaign Studio console', () => {
     expect(hub?.hubTab).toBeUndefined();
   });
 
-  it('collapses the four standalone Marketing nav entries once `campaigns` is enabled', () => {
+  it('collapses the six standalone Marketing nav entries once `campaigns` is enabled', () => {
     for (const p of CAMPAIGN_PATHS) {
       expect(byPath(p)?.nav?.hiddenWhenFeature, p).toBe('campaigns');
     }
@@ -52,5 +52,9 @@ describe('ADR 0200 — Campaign Studio console', () => {
     expect(visibleHubRoutes(FEATURES, only('campaign-brief'), true, 'campaigns').map(tabIdOf)).toEqual(['campaign-brief']);
     expect(visibleHubRoutes(FEATURES, only('campaign-intel'), true, 'campaigns').map(tabIdOf)).toEqual(['campaign-intelligence']);
     expect(visibleHubRoutes(FEATURES, only('campaign-ops'), true, 'campaigns').map(tabIdOf)).toEqual(['campaign-ops']);
+    expect(visibleHubRoutes(FEATURES, only('campaign-playbooks'), true, 'campaigns').map(tabIdOf)).toEqual(['campaign-playbooks']);
+    expect(visibleHubRoutes(FEATURES, (id) => id !== 'campaign-playbooks', true, 'campaigns').map(tabIdOf)).toEqual([
+      'campaign-ops', 'campaign-brief', 'campaigns', 'campaign-performance', 'campaign-intelligence',
+    ]);
   });
 });

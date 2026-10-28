@@ -31,6 +31,7 @@
 import { randomUUID } from 'node:crypto';
 import { insertRunWithStartContext } from '../host/runInsert.js';
 import { stripReservedRunMetadata } from '../host/runDispatch.js';
+import { inheritedRunMetadata } from '../host/inheritedRunMetadata.js';
 import { scoreOnlineEvalsOnTerminal } from '../host/workflowEvalOnline.js';
 import { stampRunCostOnTerminal } from '../observability/costEmitter.js';
 import { foldWorkflowSpendOnTerminal } from '../host/workflowBudgets.js';
@@ -143,6 +144,9 @@ export interface SubWorkflowResult {
   /** Per RFC 0022 §B HVMAP-1b — `true` when outputMapping was
    *  skipped because the child terminated non-completed. */
   outputMappingSkipped: boolean;
+  /** ADR 0964 D1 — exactly the parent-bag writes `outputMapping` applied (undefined
+   *  child values skipped). Absent for a non-terminal child. */
+  parentVariableWrites?: Record<string, unknown>;
   /** When the child is in a `waiting-*` state (not terminal), this
    *  carries the open child-side interrupt the parent's subWorkflow
    *  node SHOULD echo into its own NodeOutcome.suspended payload. */
@@ -220,7 +224,11 @@ export async function dispatchSubWorkflow(
   let parentMetadata: Record<string, unknown> | undefined;
   while (cursorRunId && ancestorWorkflowIds.length < MAX_SUBWORKFLOW_DEPTH) {
     const ancestor = await storage.getRun(cursorRunId);
-    if (!ancestor) break;
+    if (!ancestor) {
+      if (cursorRunId === opts.parentRunId) throw new DispatchCreationError('subWorkflow: parent not found in this tenant', 'subworkflow_parent_not_found');
+      break;
+    }
+    if (ancestor.tenantId !== opts.parentTenantId) throw new DispatchCreationError('subWorkflow: parent not found in this tenant', 'subworkflow_parent_not_found');
     if (cursorRunId === opts.parentRunId) parentMetadata = ancestor.metadata as Record<string, unknown> | undefined;
     ancestorWorkflowIds.push(ancestor.workflowId);
     cursorRunId = ancestor.parentRunId;
@@ -295,7 +303,9 @@ export async function dispatchSubWorkflow(
     scopeId: opts.parentScopeId,
     status: 'pending',
     inputs: childInputs,
-    metadata: { ...stripReservedRunMetadata(opts.childMetadata), ...(parentPerson ? { orgScopeSubject: parentPerson } : {}) },
+    // ADR 0941 D2b — registered host stamps (the campaign run tag + frozen goal)
+    // are projected from the PARENT ROW, after the handoff strip.
+    metadata: { ...stripReservedRunMetadata(opts.childMetadata), ...inheritedRunMetadata(parentMetadata), ...(parentPerson ? { orgScopeSubject: parentPerson } : {}) },
     configurable: {
       ...(opts.parentCredentialRefs && opts.parentCredentialRefs.length > 0 ? { credentialRefs: [...opts.parentCredentialRefs] } : {}),
       ...(opts.parentAi ? { ai: { ...opts.parentAi } } : {}),
@@ -389,11 +399,9 @@ export async function dispatchSubWorkflow(
   // Apply outputMapping per RFC 0022 §A. SKIPPED when child terminates
   // non-completed per HVMAP-1b.
   let outputMappingSkipped = false;
+  let parentVariableWrites: Record<string, unknown> = {};
   if (childStatus === 'completed' && opts.outputMapping) {
-    for (const [parentKey, childKey] of Object.entries(opts.outputMapping)) {
-      if (typeof parentKey !== 'string' || typeof childKey !== 'string') continue;
-      setRunVariable(opts.parentRunId, parentKey, childVariables[childKey]);
-    }
+    parentVariableWrites = foldChildOutputMapping(opts.parentRunId, opts.outputMapping, childVariables);
   } else if (opts.outputMapping) {
     outputMappingSkipped = true;
   }
@@ -403,6 +411,32 @@ export async function dispatchSubWorkflow(
     childStatus,
     childVariables,
     outputMappingSkipped,
+    parentVariableWrites,
     ...(childRuntimeError ? { childRuntimeError } : {}),
   };
+}
+
+/**
+ * ADR 0964 D1 — the ONE fold of a completed child's variables into its parent: RFC
+ * 0022 `outputMapping` (`parentVar ← childVar`). A child value that is `undefined` is
+ * skipped (`node-packs.md` §core.subWorkflow: "MUST NOT overwrite parent variables for
+ * entries whose child source is `undefined`"; before this fold the dispatcher wrote it).
+ * Returns exactly the writes it applied, which the node records in its outputs as
+ * `parentVariableWrites`, so a replay that SERVES the node can re-apply them
+ * without re-running the child.
+ */
+export function foldChildOutputMapping(
+  parentRunId: string,
+  outputMapping: Record<string, unknown>,
+  childVariables: Record<string, unknown>,
+): Record<string, unknown> {
+  const writes: Record<string, unknown> = {};
+  for (const [parentKey, childKey] of Object.entries(outputMapping)) {
+    if (typeof parentKey !== 'string' || typeof childKey !== 'string') continue;
+    const value = childVariables[childKey];
+    if (value === undefined) continue;
+    setRunVariable(parentRunId, parentKey, value);
+    writes[parentKey] = value;
+  }
+  return writes;
 }

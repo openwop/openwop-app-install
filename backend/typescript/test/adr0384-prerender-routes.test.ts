@@ -9,6 +9,15 @@
  *    text (the same page the SPA renders);
  *  - custom-domain documents: `/` + `/p/:slug` on a bound host rewrite to the
  *    org's prerender (bots AND humans), cross-org API paths still 404.
+ *
+ * TST-BQR-6. Red when: the kill-switch is ignored; a draft page is served;
+ * the platform door drops `Vary: User-Agent`, answers bots `public`-cacheable,
+ * or serves the prerender to a human UA; the body carries text the projection
+ * lacks (cloaking); og:site_name stops coming from the org record; the
+ * bound-host `/p/:slug` rewrite is removed; a bound host reaches ANOTHER org's
+ * public page. Honest ceiling: "no site org ⇒ no guessing" can only show a
+ * 404 with no page content — a guess at an org id that has no published `home`
+ * is indistinguishable from not guessing.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -40,16 +49,17 @@ afterEach(() => {
   delete process.env.OPENWOP_SPA_SHELL_FILE;
 });
 
-interface Res<T = any> { status: number; body: T }
+interface Res<T> { status: number; body: T }
+interface OrgBody { orgId: string }
+interface PageBody { pageId: string; slug: string }
 function client() {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-    for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
+    for (const c of getSetCookies(res.headers)) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]!; }
+    return { status: res.status, body: (await res.json().catch(() => ({}))) as T };
   };
-  return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b) };
+  return { post: <T>(p: string, b?: unknown) => call<T>('POST', p, b) };
 }
 
 /** Raw GET with arbitrary Host / User-Agent headers, returning raw text. */
@@ -74,9 +84,9 @@ const SUBTEXT = 'A rich paragraph for crawlers.';
 async function siteOrg(): Promise<{ orgId: string; slug: string; draftSlug: string }> {
   const owner = client();
   await owner.post('/host/openwop-app/test/login', { email: `pre-${Date.now()}-${n++}@acme.test` });
-  const org = await owner.post('/host/openwop-app/orgs', { name: 'Prerender Co' });
-  const orgId = org.body.orgId as string;
-  const page = await owner.post(cms(orgId, '/pages'), {
+  const org = await owner.post<OrgBody>('/host/openwop-app/orgs', { name: 'Prerender Co' });
+  const orgId = org.body.orgId;
+  const page = await owner.post<PageBody>(cms(orgId, '/pages'), {
     title: 'Prerender Page',
     sections: [
       { type: 'hero', data: { heading: HEADING, subheading: 'Sub with **bold**' } },
@@ -84,11 +94,11 @@ async function siteOrg(): Promise<{ orgId: string; slug: string; draftSlug: stri
     ],
   });
   expect(page.status, JSON.stringify(page.body)).toBe(201);
-  const pageId = page.body.pageId as string;
-  const slug = page.body.slug as string;
+  const pageId = page.body.pageId;
+  const slug = page.body.slug;
   expect((await owner.post(cms(orgId, `/pages/${pageId}/publish`))).status).toBe(200);
-  const draft = await owner.post(cms(orgId, '/pages'), { title: 'Draft Page', sections: [{ type: 'hero', data: { heading: 'Draft heading' } }] });
-  return { orgId, slug, draftSlug: draft.body.slug as string };
+  const draft = await owner.post<PageBody>(cms(orgId, '/pages'), { title: 'Draft Page', sections: [{ type: 'hero', data: { heading: 'Draft heading' } }] });
+  return { orgId, slug, draftSlug: draft.body.slug };
 }
 
 const prerenderPath = (orgId: string, slug: string): string =>
@@ -162,8 +172,11 @@ describe('ADR 0384 — platform-origin document paths', () => {
   });
 
   it('bot UA with no site org configured falls to the human path (no guessing)', async () => {
+    await siteOrg(); // a published page exists somewhere; it must not be served
     const res = await rawGet('/', { 'user-agent': 'Slackbot-LinkExpanding 1.0' });
     expect(res.status).toBe(404);
+    expect(res.body).not.toContain(HEADING);
+    expect(String(res.headers.vary)).toContain('User-Agent');
   });
 });
 
@@ -185,7 +198,12 @@ describe('ADR 0384 — custom-domain document rewrite', () => {
 
     // `/` maps to the published `home` slug — this org has none → uniform 404.
     expect((await rawGet('/', { host, 'user-agent': 'GPTBot/1.0' })).status).toBe(404);
-    // The org-pinning invariant is untouched for API paths.
-    expect((await rawGet('/host/openwop-app/public/other-org/pages/x', { host })).status).toBe(404);
+    // The org-pinning invariant is untouched for API paths: a REAL second org's
+    // published page is 404 through this org's bound host…
+    const other = await siteOrg();
+    const otherPage = `/host/openwop-app/public/${encodeURIComponent(other.orgId)}/pages/${encodeURIComponent(other.slug)}`;
+    expect((await rawGet(otherPage, { host })).status).toBe(404);
+    // …while the same path on the platform origin serves it (positive control).
+    expect((await rawGet(otherPage, {})).status).toBe(200);
   });
 });

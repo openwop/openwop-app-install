@@ -14,7 +14,15 @@
  *
  * A NEW entry in either fails here. Route it through the funnel, or classify it in
  * the ADR 0823 launch-site table and add it below with its reason. Shrinking is
- * fine (delete the entry).
+ * fine (delete the entry), and REQUIRED: the check is two-sided, so a pinned file
+ * whose count fell is a stale pin and fails until its entry is removed. (A stale
+ * `features/crm/routes.ts` pin, left when CRM moved to startWorkflowRun in
+ * 18c501897, silently admitted a re-added minting call — w62 probe.)
+ *
+ * Tracker TST-BLO-1. Sabotage-witnessed (w62): red when a launcher reads the
+ * catalog directly, a fixed-id entry takes a caller id, a run-minting or
+ * executeRun call is added (including in a file whose pin went stale), the
+ * funnel stops asking isWorkflowForeignTo, or :fork stops re-authorizing.
  */
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
@@ -75,7 +83,6 @@ const RUN_MINTERS: Record<string, [number, string]> = {
   'host/triggerIngestionService.ts': [1, 'resolveLaunchWorkflow'],
   'routes/triggerBridge.ts': [1, 'resolveLaunchWorkflow'],
   'host/mcpSemantics.ts': [1, 'resolveLaunchWorkflow (via mcpCaller)'],
-  'features/crm/routes.ts': [1, 'resolveLaunchWorkflow'],
   'routes/durabilitySeam.ts': [1, 'resolveLaunchWorkflow (test seam)'],
   'routes/workflowDebug.ts': [2, 'debug-run: owner-gated loadOwnedHead; redrive: resolveRunDefinition'],
   'host/canvasSurface.ts': [1, 'injected getWorkflow = resolveTenantWorkflow (index.ts)'],
@@ -110,7 +117,6 @@ const EXECUTORS: Record<string, [number, string]> = {
   'host/triggerIngestionService.ts': [1, 'resolveLaunchWorkflow'],
   'routes/triggerBridge.ts': [1, 'resolveLaunchWorkflow'],
   'host/mcpSemantics.ts': [1, 'resolveLaunchWorkflow'],
-  'features/crm/routes.ts': [1, 'resolveLaunchWorkflow'],
   'routes/durabilitySeam.ts': [1, 'resolveLaunchWorkflow (test seam)'],
   'routes/workflowDebug.ts': [1, 'owner-gated loadOwnedHead / resolveRunDefinition'],
   'host/canvasSurface.ts': [2, 'resolveTenantWorkflow (injected)'],
@@ -133,6 +139,11 @@ function expectPinned(found: Record<string, number>, pinned: Record<string, [num
     .filter(([rel, n]) => pinned[rel]?.[0] !== n)
     .map(([rel, n]) => `${rel}: ${n} call(s), pinned ${pinned[rel]?.[0] ?? 'none'}`);
   expect(drift, hint).toEqual([]);
+  // Two-sided: a pin whose file no longer has that many calls is stale — delete it.
+  const stale = Object.entries(pinned)
+    .filter(([rel, [n]]) => found[rel] !== n)
+    .map(([rel, [n]]) => `${rel}: pinned ${n}, found ${found[rel] ?? 0} (stale pin — shrink the entry)`);
+  expect(stale).toEqual([]);
 }
 
 describe('ADR 0823 D7 — launch-ownership ratchet', () => {

@@ -3,6 +3,17 @@
  * validation, the run→verdict loop (positive, negative-status, pinned-mock,
  * judge-unavailable, timeout), and the evals-green promote gate
  * (failing → 409, green → promote, head-move → stale 409).
+ *
+ * Every refusal is asserted by its exact message (four validators share
+ * `400 validation_error`), and the judge leg runs with the managed-provider key
+ * (`MINIMAX_API_KEY`) cleared INSIDE this file, so it never depends on — or
+ * reaches — a live provider.
+ *
+ * Sabotage-witnessed (grade-tests wave 64): the stale-hash and all-passed gate
+ * terms, the fail-closed unknown kind, the judge's unavailable verdict, the
+ * stale-row repair, the per-key settle chain (an unforced Promise.all race that
+ * nevertheless reds without the chain — 8fw5g5-we-race), both erasure scrubs, the
+ * timed_out status and the duplicate-caseId check (8fw5g5-we-*).
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -19,7 +30,11 @@ describe('workflow evaluations (ADR 0477, sqlite memory app)', () => {
   const WF_GATE = 'eval-wf-gate';   // transient draft for the promote gate
   const WF_WAIT = 'eval-wf-wait';   // approvalGate — suspends (timeout case)
 
+  let savedManagedKey: string | undefined;
   beforeAll(async () => {
+    // No live provider: the judge leg asserts the NO-provider verdict.
+    savedManagedKey = process.env.MINIMAX_API_KEY;
+    delete process.env.MINIMAX_API_KEY;
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
     process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
     process.env.OPENWOP_EVAL_CASE_TIMEOUT_MS = '600';
@@ -38,6 +53,8 @@ describe('workflow evaluations (ADR 0477, sqlite memory app)', () => {
   });
   afterAll(async () => {
     delete process.env.OPENWOP_EVAL_CASE_TIMEOUT_MS;
+    if (savedManagedKey === undefined) delete process.env.MINIMAX_API_KEY;
+    else process.env.MINIMAX_API_KEY = savedManagedKey;
     await new Promise<void>((res) => server.close(() => res()));
   });
 
@@ -66,24 +83,37 @@ describe('workflow evaluations (ADR 0477, sqlite memory app)', () => {
 
   describe('set validation (closed world)', () => {
     it('rejects unknown assertion kinds, duplicate caseIds, and empty cases', async () => {
-      const put = (body: unknown) => call('PUT', `${API}/${WF}/eval-sets/v1`, body);
-      expect((await put({ name: 'x', cases: [] })).status).toBe(400);
-      expect((await put({ name: 'x', cases: [{ caseId: 'c1', assertions: [{ kind: 'nope' }] }] })).status).toBe(400);
-      expect((await put({
+      const put = (body: unknown) => call<{ error?: string; message?: string }>('PUT', `${API}/${WF}/eval-sets/v1`, body);
+      // Each body is valid except for the ONE property under test, and each is
+      // refused by its own validator — asserted by message, since all share 400.
+      const refusal = async (body: unknown) => {
+        const r = await put(body);
+        return { status: r.status, error: r.body.error, message: r.body.message };
+      };
+      expect(await refusal({ name: 'x', cases: [] }))
+        .toEqual({ status: 400, error: 'validation_error', message: 'cases must be a non-empty array.' });
+      expect(await refusal({ name: 'x', cases: [{ caseId: 'c1', assertions: [{ kind: 'nope' }] }] }))
+        .toEqual({ status: 400, error: 'validation_error', message: "cases[0].assertions[0]: unknown assertion kind 'nope' (closed world — see ADR 0477 §1)" });
+      expect(await refusal({
         name: 'x',
         cases: [
           { caseId: 'c1', assertions: [{ kind: 'status', value: 'completed' }] },
           { caseId: 'c1', assertions: [{ kind: 'status', value: 'completed' }] },
         ],
-      })).status).toBe(400);
-      expect((await put({ name: 'x', cases: [{ caseId: 'c1', assertions: [] }] })).status).toBe(400);
+      })).toEqual({ status: 400, error: 'validation_error', message: "duplicate caseId 'c1'." });
+      expect(await refusal({ name: 'x', cases: [{ caseId: 'c1', assertions: [] }] }))
+        .toEqual({ status: 400, error: 'validation_error', message: 'cases[0] needs at least one assertion.' });
+      // Positive control: the same body with the defect removed is accepted.
+      expect((await put({ name: 'x', cases: [{ caseId: 'c1', assertions: [{ kind: 'status', value: 'completed' }] }] })).status).toBe(201);
     });
 
     it('unknown workflow is a 404 on every verb (owner posture)', async () => {
-      expect((await call('GET', `${API}/does-not-exist/eval-sets`)).status).toBe(404);
-      expect((await call('PUT', `${API}/does-not-exist/eval-sets/x`, { name: 'x', cases: [{ caseId: 'c', assertions: [{ kind: 'status', value: 'completed' }] }] })).status).toBe(404);
-      expect((await call('POST', `${API}/does-not-exist/eval-sets/x/run`)).status).toBe(404);
-      expect((await call('GET', `${API}/does-not-exist/eval-results`)).status).toBe(404);
+      // The owner gate's own refusal (not the later "Eval set not found."), as a literal.
+      const NOT_OWNED = { status: 404, body: { error: 'workflow_not_found', message: 'Workflow not found in this catalog.', details: { workflowId: 'does-not-exist' } } };
+      expect(await call('GET', `${API}/does-not-exist/eval-sets`)).toEqual(NOT_OWNED);
+      expect(await call('PUT', `${API}/does-not-exist/eval-sets/x`, { name: 'x', cases: [{ caseId: 'c', assertions: [{ kind: 'status', value: 'completed' }] }] })).toEqual(NOT_OWNED);
+      expect(await call('POST', `${API}/does-not-exist/eval-sets/x/run`)).toEqual(NOT_OWNED);
+      expect(await call('GET', `${API}/does-not-exist/eval-results`)).toEqual(NOT_OWNED);
     });
   });
 
@@ -159,7 +189,13 @@ describe('workflow evaluations (ADR 0477, sqlite memory app)', () => {
       expect(result.cases[0]!.status).toBe('failed');
       const a = result.cases[0]!.assertions[0]!;
       expect(a.pass).toBe(false);
-      expect(a.detail).toMatch(/judge_(unavailable|error)/);
+      // The host wires a real judge (`tenantEvalJudge`). The managed FREE tier
+      // still RESOLVES with no seeded key, so the verdict is the dispatch failure,
+      // refused before any network call (managedProvider.ts: no apiKey ⇒ throw).
+      // Measured; the "no provider ⇒ judge_unavailable" wording in
+      // workflowEvalJudge.ts's header is not what this host answers (grade-code
+      // row EVAL-JUDGE-UNAVAIL-1, reported by grade-tests wave 64).
+      expect(a.detail).toBe('judge_error: dispatch failed (Free tier is temporarily unavailable. Try again later or bring your own key.)');
     });
 
     it('a run that suspends on a gate is TIMED OUT with an honest verdict', async () => {
@@ -197,7 +233,9 @@ describe('workflow evaluations (ADR 0477, sqlite memory app)', () => {
   describe('grade-trio regressions', () => {
     it('an UNKNOWN persisted assertion kind fails closed, never silently passes (grade-data M5)', async () => {
       const { evaluateAssertions } = await import('../src/host/workflowEvalRunner.js');
-      const rogue = [{ kind: 'assert-vibes', value: 'x' }] as unknown as Parameters<typeof evaluateAssertions>[0];
+      // A PERSISTED row this host version does not know: parsed, as storage would
+      // hand it back, rather than cast into the assertion union.
+      const rogue: Parameters<typeof evaluateAssertions>[0] = JSON.parse('[{"kind":"assert-vibes","value":"x"}]');
       const verdicts = await evaluateAssertions(rogue, {
         status: 'completed', output: {}, completedNodes: new Set<string>(), touchedNodes: new Set<string>(),
       });

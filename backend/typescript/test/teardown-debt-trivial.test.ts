@@ -1,5 +1,6 @@
 /**
- * Teardown-reachability RECORDED_DEBT shrink (baseline 9→7): two orphan-hygiene
+ * Teardown-reachability RECORDED_DEBT shrink (baseline 9→7; ADR 0590's teardown
+ * debt program, PROPC-ERASURE-RATCHET-BLINDSPOT #3530, fixed in #3531): two orphan-hygiene
  * stores flagged by `teardown-reachability-coverage.test.ts` now carry a `tenantOf`
  * so tenant teardown (`purgeTenantHostExt`) reaches them instead of orphaning:
  *

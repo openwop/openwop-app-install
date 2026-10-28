@@ -34,21 +34,31 @@
  *    `extraHeaders`, which the broker strips of any `authorization` override.
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { campaignForRun } from './campaignRefs.js';
+import { canonicalJSON } from './jcs.js';
 import { createLogger } from '../observability/logger.js';
 import { stampConnectionUse } from './connectionInjection.js';
 import { brokeredPost, brokeredFetch, type BrokeredEgressDeps } from './brokeredEgress.js';
-import { connectionExists, circuitStatus, reportConnectionFailure, reportConnectionSuccess } from '../features/connections/connectionsService.js';
+import { connectionExists, circuitStatus, listConnections, reportConnectionFailure, reportConnectionSuccess } from '../features/connections/connectionsService.js';
 import { resolveMediaAsset } from './inMemorySurfaces.js';
 import { getAssetByIdForTenant } from '../features/media/mediaService.js';
+import { assertCreativePublishable } from './creativePublishGate.js';
 import { DurableCollection } from './hostExtPersistence.js';
 import { getGovernancePolicy } from './governanceService.js';
+import { compileApproverSpec } from './autonomyPolicy/compile.js';
+import { enforceCampaignAction, noticeAfterEffect, type EnforceVerdict } from './autonomyPolicy/enforce.js';
+import { recordApprovalWaiter } from './autonomyPolicy/waiters.js';
 import { createCampaignSpendApproval, getApproval } from './approvalService.js';
 import { emitHostEvent } from './hostEventDispatcher.js';
 import {
   ADS_API_VERSIONS, LINKEDIN_VERSION, metaApiBase, googleApiBase, tiktokApiBase, linkedinApiBase,
   buildMetaConversionBody, buildTiktokConversionBody, adsReaderEnabled, buildTiktokReportUrl, buildLinkedinAnalyticsUrl,
   buildGoogleClickConversionBody, adsSenderEnabled, GOOGLE_CONVERSION_ACTION_RE,
+  minorToGoogleMicros, minorToMetaBudget, metaCurrencyOffset, minorToMajorString, minorToMajorNumber, isoExponent,
+  adsStatusWriterEnabled, buildMetaStatusBody, buildGoogleStatusBody, metaStatusLiteral, googleStatusLiteral, type DeliveryStatus,
+  adsAigcFlagEnabled, TIKTOK_AIGC_FIELD, TIKTOK_AIGC_SELF_DISCLOSURE, adsCeilingWriterEnabled, buildMetaSpendCapBody,
+  adsBudgetWriterEnabled, tiktokStatusLiteral, linkedinStatusLiteral, buildTiktokStatusBody, buildTiktokBudgetBody, buildLinkedinStatusPatch, buildLinkedinBudgetPatch, metaBudgetToMinor, googleMicrosToMinor,
   type AdPlatform, type AdsApiVersionPin, type ConversionBodyArgs, type GoogleConsent,
 } from './adsWire.js';
 
@@ -65,7 +75,7 @@ type Provenance = Parameters<typeof stampConnectionUse>[2];
 /** The ONE platform → connection-pack provider-id mapping. Every strategy and the
  *  dry-run readiness check source the provider from here, so the id can't drift
  *  between the dispatch call and the preview's connection check. */
-const PLATFORM_PROVIDER: Record<AdPlatform, string> = { meta: 'meta-ads', google: 'google-ads', tiktok: 'tiktok-ads', linkedin: 'linkedin-ads' };
+export const PLATFORM_PROVIDER: Readonly<Record<AdPlatform, string>> = { meta: 'meta-ads', google: 'google-ads', tiktok: 'tiktok-ads', linkedin: 'linkedin-ads' };
 
 /** Google Ads developer-token — an APP/manager-account-level credential (one per
  *  integration, NOT per-user BYOK), so it lives host-side as operator config, mirroring
@@ -93,11 +103,28 @@ export interface PublishAdArgs {
   campaignName: string;
   objective?: string;
   copy: AdCopyVariant;
+  /** ISO-4217 MINOR units of the ad ACCOUNT's currency (ADR 0952 defect P9):
+   *  converted to each platform's unit through the currency the platform reports. */
   dailyBudgetMinor?: number;
+  /** ADR 0945 D6 — the creative carries AI-generated media that the destination
+   *  must label. TikTok sets its AIGC self-disclosure flag (once verified; until
+   *  then the dispatch is refused `aigc_flag_not_verified`, never published
+   *  unlabelled). The other platforms' AI rules are political-only and decided by
+   *  the publish gate. Creative-affecting → part of the idempotency key. */
+  aiGeneratedMedia?: boolean;
+  /** The currency the caller believes the account uses. A dry run converts with it;
+   *  a live dispatch refuses (`currency_mismatch`) when the platform reports another. */
+  accountCurrency?: string;
   /** REQUIRED by Google (`finalUrls` on the responsive search ad — dispatch fails
    *  closed `missing_landing_url` without it); Meta/TikTok/LinkedIn thread it into the
    *  creative's link/landing-page field when present. */
   landingUrl?: string;
+  /** ADR 0956 D6 — our ad reference (the ADR 0946 variant member), recorded on
+   *  the dispatch ledger for AdMap. NOT part of the idempotency key, and neither
+   *  is `landingUrl` (see `idemKeyFor`): a re-run whose only change is the ad
+   *  reference or the tracked link reuses the earlier dispatch, and the ledger
+   *  keeps the FIRST dispatch's values. */
+  adRef?: string;
   /** Meta ONLY (ADR 0223): the Facebook Page that publishes the ad creative's story
    *  (`object_story_spec.page_id`). REQUIRED for a Meta dispatch — fails closed
    *  `missing_page_id` without it. Creative-affecting → part of the idempotency key. */
@@ -191,6 +218,8 @@ export type PublishAdResult =
       // proceeds (same fork-stable key). Nothing was created on the platform.
       outcome: 'requires_approval';
       approvalId: string;
+      /** ADR 0942 — set when the campaign's autonomy policy asked: the node waits on the row. */
+      autonomy?: true;
     }
   | {
       outcome: 'published';
@@ -234,6 +263,15 @@ interface AdDispatchRecord {
   campaignName?: string;
   dailyBudgetMinor?: number;
   adAccountId?: string;
+  /** ADR 0941 P2 — the MarketingCampaign and its client org, derived from the
+   *  publishing run's host-written tag (else from the brief through the campaign
+   *  owner), never from a node argument. Rows written before read back without
+   *  them and are matched by `briefId`. */
+  campaignId?: string;
+  orgId?: string;
+  /** ADR 0956 D6 — first-dispatch link and ad reference. */
+  landingUrl?: string;
+  adRef?: string;
 }
 const dispatched = new DurableCollection<AdDispatchRecord>('ads:dispatch', (r) => r.idemKey);
 
@@ -260,9 +298,31 @@ async function trimDispatchLedger(tenantId: string): Promise<void> {
       platformCampaignId: stale.platformCampaignId, platformAdSetId: stale.platformAdSetId,
       platformAdId: stale.platformAdId, createdAt: stale.createdAt,
       ...(stale.briefId !== undefined ? { briefId: stale.briefId } : {}),
+      ...(stale.campaignId !== undefined ? { campaignId: stale.campaignId } : {}),
+      ...(stale.orgId !== undefined ? { orgId: stale.orgId } : {}),
     };
     await dispatched.put(tombstone);
   }
+}
+
+/**
+ * ADR 0961 D7 — which ad platforms a CLIENT org has an ad account connected for.
+ * Org-scoped connections only (ADR 0921 D4: a client's spend never falls back to
+ * a workspace or a person's account), keyed by the ONE platform→provider map
+ * above. `active` = usable now; `inactive` = a row exists but needs reconsent,
+ * expired or was revoked. Metadata only: no secret is read or refreshed.
+ */
+export async function adAccountsForOrg(tenantId: string, orgId: string): Promise<{ active: AdPlatform[]; inactive: AdPlatform[] }> {
+  const byProvider = new Map(Object.entries(PLATFORM_PROVIDER).map(([platform, provider]) => [provider, platform as AdPlatform] as const));
+  const active = new Set<AdPlatform>();
+  const inactive = new Set<AdPlatform>();
+  for (const c of await listConnections(tenantId)) {
+    const platform = byProvider.get(c.provider);
+    if (!platform || c.userId || c.orgId !== orgId) continue;
+    (c.status === 'active' ? active : inactive).add(platform);
+  }
+  for (const p of active) inactive.delete(p);
+  return { active: [...active].sort(), inactive: [...inactive].sort() };
 }
 
 /** What the campaign hub's launch checklist reads (§5B B5): the dispatch ledger
@@ -272,10 +332,26 @@ async function trimDispatchLedger(tenantId: string): Promise<void> {
 export interface DispatchLedgerRow {
   platform: AdPlatform; platformCampaignId: string; platformAdSetId: string; platformAdId: string;
   briefId?: string; campaignName?: string; dailyBudgetMinor?: number; adAccountId?: string; createdAt: string;
+  campaignId?: string; orgId?: string; landingUrl?: string; adRef?: string;
 }
 
 export async function listDispatchRecords(tenantId: string, briefId: string): Promise<DispatchLedgerRow[]> {
   return (await listTenantDispatchRecords(tenantId)).filter((r) => r.briefId === briefId);
+}
+
+/** ADR 0941 P2 — the dispatch rows of one MarketingCampaign in its client org.
+ *  A row written before the back-link (no `campaignId`) is matched by the
+ *  campaign's brief, and only when it names no other org. */
+export async function listCampaignDispatchRecords(tenantId: string, orgId: string, campaignId: string, briefId?: string): Promise<DispatchLedgerRow[]> {
+  return (await listTenantDispatchRecords(tenantId)).filter((r) => r.campaignId !== undefined
+    ? r.campaignId === campaignId && r.orgId === orgId
+    : briefId !== undefined && r.briefId === briefId && (r.orgId === undefined || r.orgId === orgId));
+}
+
+/** Test-only: seed a ledger row a real dispatch would write (the AdMap and
+ *  sync readers' fixtures need one without a platform round trip). Never routed. */
+export async function __putDispatchRecordForTests(r: Omit<AdDispatchRecord, 'idemKey'> & { idemKey?: string }): Promise<void> {
+  await dispatched.put({ ...r, idemKey: r.idemKey ?? `ads:test-${r.tenantId}-${r.platformAdId}` });
 }
 
 /** Every dispatch row for a tenant (C2 sync iterates these). Bounded scan. */
@@ -284,13 +360,18 @@ export async function listTenantDispatchRecords(tenantId: string): Promise<Dispa
   return all
     .filter((r) => r.tenantId === tenantId)
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-    .map(({ platform, platformCampaignId, platformAdSetId, platformAdId, briefId, campaignName, dailyBudgetMinor, adAccountId, createdAt }) => ({
+    .map(({ platform, platformCampaignId, platformAdSetId, platformAdId, briefId, campaignName, dailyBudgetMinor, adAccountId, createdAt, campaignId, orgId, landingUrl, adRef }) => ({
       platform, platformCampaignId, platformAdSetId, platformAdId,
       ...(briefId !== undefined ? { briefId } : {}),
+      ...(campaignId !== undefined ? { campaignId } : {}),
+      ...(orgId !== undefined ? { orgId } : {}),
       ...(campaignName !== undefined ? { campaignName } : {}),
       ...(dailyBudgetMinor !== undefined ? { dailyBudgetMinor } : {}),
       ...(adAccountId !== undefined ? { adAccountId } : {}),
       createdAt,
+      // ADR 0956 D6 — the first-dispatch link and ad reference ride the allowlist.
+      ...(landingUrl !== undefined ? { landingUrl } : {}),
+      ...(adRef !== undefined ? { adRef } : {}),
     }));
 }
 
@@ -308,14 +389,24 @@ export async function listTenantDispatchRecords(tenantId: string): Promise<Dispa
 //     can't re-ask. Below it (or unset): allow — created-PAUSED stays the
 //     backstop and a human still activates on-platform.
 
-interface SpendApprovalMapRow { spendKey: string; tenantId: string; approvalId: string; }
+interface SpendApprovalMapRow {
+  spendKey: string; tenantId: string; approvalId: string;
+  launchClaim?: { claimId: string; claimedAt: string; state: 'claimed' | 'completed' };
+}
 const spendApprovals = new DurableCollection<SpendApprovalMapRow>('ads:spend-approval', (r) => r.spendKey);
 
 type SpendGateVerdict =
-  | { verdict: 'allow' }
+  | { verdict: 'allow'; launchApproval?: SpendApprovalMapRow; notice?: EnforceVerdict }
+  /** The governance policy could not be READ. Fail closed: a live write must
+   *  never proceed on "we could not check" (a tenant whose policy says
+   *  `disabled`, or approval above a threshold, would otherwise be bypassed by a
+   *  transient storage error). Dry-runs and pause stay available. */
+  | { verdict: 'unreadable'; error?: 'launch_outcome_unknown' }
   | { verdict: 'draft-only' }
   | { verdict: 'disabled' }
-  | { verdict: 'requires-approval'; approvalId: string; approvalStatus: 'pending' | 'rejected' };
+  | { verdict: 'requires-approval'; approvalId: string; approvalStatus: 'pending' | 'rejected'; autonomy?: true }
+  /** ADR 0942 — the campaign's autonomy policy (or a floor it applies) blocks this spend. */
+  | { verdict: 'autonomy-blocked'; reason: string };
 
 // ── ADR 0354 P1 — the brand-compliance checker seam ─────────────────────────
 // The HOST must not import features; the brand feature registers this checker
@@ -328,6 +419,25 @@ export type AdsComplianceChecker = (tenantId: string, args: { briefId?: string; 
 let complianceChecker: AdsComplianceChecker | null = null;
 export function setAdsComplianceChecker(fn: AdsComplianceChecker | null): void { complianceChecker = fn; }
 
+// ── ADR 0952 D2 — the spend-cap checker seam ───────────────────────────────
+// Caps live in campaign-intel (the host must not import features); that feature
+// registers this checker at boot. A LAUNCH (`setDeliveryStatus` active) asks it
+// before the spend gate, so no approval is opened for a launch a cap refuses.
+// `cap_exceeded`: a covering cap is breached or stale this period.
+// `cap_unenforceable`: a covering cap exists but nothing can enforce it (its
+// watchdog is off, or the platform's spend reader is not verified) — a cap is
+// never decorative. A checker that THROWS refuses the launch (fail closed).
+// Absent checker = no caps feature on this host.
+/** `ceiling` (ADR 0952 P2): set only for a LIFETIME, campaign-scoped cap that
+ *  covers exactly this ONE platform campaign, so the platform's own lifetime
+ *  ceiling can equal the cap. A reason otherwise says why no native ceiling. */
+export type AdsCapVerdict =
+  | { verdict: 'ok'; ceiling?: { limitMinor: number; currency: string; capId: string }; noCeiling?: 'period_not_lifetime' | 'multi_target' | 'client_scope' }
+  | { verdict: 'cap_exceeded' | 'cap_unenforceable'; capId: string };
+export type AdsCapChecker = (tenantId: string, target: { platform: AdPlatform; adAccountId: string; campaignId: string; orgId?: string }) => Promise<AdsCapVerdict>;
+let capChecker: AdsCapChecker | null = null;
+export function setAdsCapChecker(fn: AdsCapChecker | null): void { capChecker = fn; }
+
 /** ADR 0357 P6 — is a strategy failure a TRANSPORT failure the circuit breaker
  *  should count? Matches the adapter's own error vocabulary: `request_failed`,
  *  `timeout`, and the `http_5xx` shape every strategy emits (`http_${status}` —
@@ -339,52 +449,182 @@ export function isBreakerReportableFailure(error: unknown): boolean {
 
 async function evaluateSpendGate(
   deps: BrokeredEgressDeps,
-  kind: 'ads.publish' | 'ads.budget',
+  kind: 'ads.publish' | 'ads.budget' | 'ads.launch',
   spendKey: string,
   dailyBudgetMinor: number | undefined,
-  describe: { platform: AdPlatform; summary: string; briefId?: string; adAccountId: string; platformCampaignId?: string },
+  describe: {
+    platform: AdPlatform; summary: string; briefId?: string; adAccountId: string; platformCampaignId?: string;
+    /** ADR 0952 residual (a) — the ad account's currency, read lazily and only
+     *  when a threshold must be compared. `null` = unreadable. */
+    accountCurrency?: () => Promise<string | null>;
+  },
 ): Promise<SpendGateVerdict> {
   let policy: Awaited<ReturnType<typeof getGovernancePolicy>> = null;
   try { policy = await getGovernancePolicy(deps.tenantId); }
-  catch (e) { log.warn('ads spend policy read failed — treating as unset', { error: e instanceof Error ? e.message : String(e) }); }
+  catch (e) {
+    // Fail CLOSED. This used to say "treating as unset", which made an unset
+    // threshold read as `allow` and let the LIVE write through on a read error.
+    log.warn('ads spend policy read failed — refusing the live write', { kind, error: e instanceof Error ? e.name : 'unknown' });
+    return { verdict: 'unreadable' };
+  }
+  let currencyNote = '';
   const kindPolicy = policy?.actionPolicy?.[kind];
   if (kindPolicy === 'disabled') return { verdict: 'disabled' };
   if (kindPolicy === 'draft-only') return { verdict: 'draft-only' };
+  // ADR 0952's single-use human launch approval remains a host ceiling.
   const threshold = policy?.adSpend?.approvalThresholdMinor;
-  if (threshold === undefined || (dailyBudgetMinor ?? 0) < threshold) return { verdict: 'allow' };
-
-  const mapped = await spendApprovals.get(spendKey).catch(() => undefined);
-  if (mapped && mapped.tenantId === deps.tenantId) {
-    const approval = await getApproval(mapped.approvalId);
-    if (approval && approval.tenantId === deps.tenantId) {
-      if (approval.status === 'approved') return { verdict: 'allow' };
-      return { verdict: 'requires-approval', approvalId: approval.approvalId, approvalStatus: approval.status === 'rejected' ? 'rejected' : 'pending' };
+  let thresholdMet = threshold !== undefined && (dailyBudgetMinor ?? 0) >= threshold;
+  if (threshold !== undefined && kind !== 'ads.launch') {
+    // ADR 0952 residual (a) — the threshold is in ITS currency (absent = USD, the
+    // only meaning the field ever had), and the budget is in the AD ACCOUNT's.
+    // There is no FX here, so a budget is compared only in the SAME currency; a
+    // different account currency meets the threshold (a person decides) instead
+    // of letting ¥5,000 pass as 5,000 cents. An UNREADABLE currency compares as
+    // before (the threshold still bites on the number); the write itself then
+    // converts through the same memoized read and fails closed on it.
+    const thresholdCurrency = policy?.adSpend?.approvalThresholdCurrency ?? 'USD';
+    const account = describe.accountCurrency ? await describe.accountCurrency() : thresholdCurrency;
+    if (account !== null && account !== thresholdCurrency) {
+      thresholdMet = true;
+      currencyNote = ` The ad account is in ${account} and the approval threshold is in ${thresholdCurrency}; there is no conversion, so a person decides.`;
     }
   }
+  // ADR 0942 D5 — a CAMPAIGN run's spend is decided by its frozen autonomy policy,
+  // with the governance threshold folded in as the tenant ceiling (D3 layer 2): one
+  // decision, one approval row. A non-campaign run keeps exactly today's gate.
+  // The old budget is not known here, so `spendDeltaPct` is absent and every
+  // preset's spend-increase escalation asks (fail toward review).
+  const autonomy = await enforceCampaignAction(deps, { actionClass: kind, facts: { spendMinor: dailyBudgetMinor ?? 0 }, ceiling: kind === 'ads.launch' || thresholdMet ? 'approve' : 'none' });
+  if (autonomy.kind === 'blocked') return { verdict: 'autonomy-blocked', reason: autonomy.reason };
+  if (autonomy.kind === 'proceed' && kind !== 'ads.launch') return { verdict: 'allow', notice: autonomy };
+  if (autonomy.kind === 'unbound' && kind !== 'ads.launch' && !thresholdMet) return { verdict: 'allow' };
+  const policyAsk = autonomy.kind === 'approve' ? autonomy : null;
+  // A grant under a different frozen policy/client/approver requirement cannot
+  // discharge this request merely because the provider payload stayed equal.
+  // Keep the existing spend-map owner and fork-stable content key.
+  if (policyAsk) {
+    const policyKey = createHash('sha256').update(canonicalJSON({ orgId: policyAsk.orgId ?? null, policyHash: policyAsk.policyHash, ruleId: policyAsk.ruleId, approver: policyAsk.approver })).digest('hex');
+    spendKey = `aut:${policyKey}:${spendKey}`;
+  }
+  // D10.4 — an attended (branch) fork never reuses its source's spend approval: the
+  // fork-stable key is namespaced by the fork's own run, so humans decide again.
+  if (policyAsk?.attended) spendKey = `att:${policyAsk.runId}:${spendKey}`;
+
+  let mapped: SpendApprovalMapRow | null;
+  try { mapped = await spendApprovals.get(spendKey); }
+  catch { return { verdict: 'unreadable' }; }
+  if (mapped && mapped.tenantId !== deps.tenantId) return { verdict: 'unreadable' };
+  if (kind === 'ads.launch' && mapped?.launchClaim) {
+    if (mapped.launchClaim.state !== 'completed') return { verdict: 'unreadable', error: 'launch_outcome_unknown' };
+    if (!mapped.launchClaim.claimId || !mapped.launchClaim.claimedAt) return { verdict: 'unreadable' };
+  }
+  if (mapped && !(kind === 'ads.launch' && mapped.launchClaim?.state === 'completed')) {
+    let approval: Awaited<ReturnType<typeof getApproval>>;
+    try { approval = await getApproval(mapped.approvalId); }
+    catch { return { verdict: 'unreadable' }; }
+    if (kind === 'ads.launch' && (!approval || approval.tenantId !== deps.tenantId || approval.kind !== 'campaign-spend'
+      || approval.spendKind !== 'launch' || approval.spendIdemKey !== spendKey || approval.platform !== describe.platform
+      || approval.adAccountId !== describe.adAccountId || approval.platformCampaignId !== describe.platformCampaignId)) return { verdict: 'unreadable' };
+    if (approval && approval.tenantId === deps.tenantId) {
+      if (approval.status === 'approved') return { verdict: 'allow', ...(kind === 'ads.launch' ? { launchApproval: mapped } : {}) };
+      if (policyAsk && approval.status !== 'rejected') await recordApprovalWaiter(deps.tenantId, approval.approvalId, policyAsk.runId);
+      return { verdict: 'requires-approval', approvalId: approval.approvalId, approvalStatus: approval.status === 'rejected' ? 'rejected' : 'pending', ...(policyAsk ? { autonomy: true as const } : {}) };
+    }
+  }
+  const compiled = policyAsk ? compileApproverSpec(policyAsk.approver, { actionClass: kind, lane: 'approval' }) : null;
   const approval = await createCampaignSpendApproval({
+    ...(compiled ? { policy: compiled.approvalPolicy } : {}),
+    ...(policyAsk?.orgId ? { orgId: policyAsk.orgId } : {}),
+    ...(policyAsk?.requesters.length ? { submitters: policyAsk.requesters } : {}),
+    ...(policyAsk?.requesterCauses.length ? { submitterCauses: policyAsk.requesterCauses } : {}),
+    ...(policyAsk ? { autonomySourceRunId: policyAsk.runId } : {}),
     tenantId: deps.tenantId,
-    spendKind: kind === 'ads.publish' ? 'publish' : 'budget',
+    spendKind: kind === 'ads.publish' ? 'publish' : kind === 'ads.launch' ? 'launch' : 'budget',
     platform: describe.platform,
     adAccountId: describe.adAccountId,
     ...(describe.briefId ? { briefId: describe.briefId } : {}),
     ...(describe.platformCampaignId ? { platformCampaignId: describe.platformCampaignId } : {}),
     dailyBudgetMinor: dailyBudgetMinor ?? 0,
     spendIdemKey: spendKey,
-    proposal: describe.summary,
+    proposal: describe.summary + currencyNote,
   });
-  await spendApprovals.put({ spendKey, tenantId: deps.tenantId, approvalId: approval.approvalId }).catch((e) =>
-    log.warn('ads spend-approval map write failed', { spendKey, error: e instanceof Error ? e.message : String(e) }));
+  const nextMap = { spendKey, tenantId: deps.tenantId, approvalId: approval.approvalId };
+  if (kind === 'ads.launch') {
+    try {
+      if (!(await spendApprovals.compareAndSwap(mapped, nextMap))) return { verdict: 'unreadable' };
+    } catch { return { verdict: 'unreadable' }; }
+  } else {
+    await spendApprovals.put(nextMap).catch((e) =>
+      log.warn('ads spend-approval map write failed', { spendKey, error: e instanceof Error ? e.message : String(e) }));
+  }
   recordAdsAction(deps, 'approval-required', {
     platform: describe.platform, kind, approvalId: approval.approvalId,
     ...(describe.briefId ? { briefId: describe.briefId } : {}),
     dailyBudgetMinor: dailyBudgetMinor ?? 0,
   });
-  return { verdict: 'requires-approval', approvalId: approval.approvalId, approvalStatus: 'pending' };
+  // ADR 0942 D5 — the campaign run waits on this row; its finalizer resumes it.
+  if (policyAsk) await recordApprovalWaiter(deps.tenantId, approval.approvalId, policyAsk.runId);
+  // ADR 0942 D7 — a per-row SLA ladder (remind / escalate / expire = reject) is swept
+  // even in a tenant with no tenant-wide ladder. Lazy import: approvalSla reaches the
+  // decision core, which must not load at this module's top level.
+  if (compiled?.approvalPolicy.sla) await (await import('./approvalSla.js')).trackApprovalSla(approval);
+  return { verdict: 'requires-approval', approvalId: approval.approvalId, approvalStatus: 'pending', ...(policyAsk ? { autonomy: true as const } : {}) };
+}
+
+/** ADR 0952 D6 (P7) × ADR 0942 — a catalog push publishes the client's product
+ *  listings (public Shopping listings, live shopping ads), so it passes the SAME
+ *  gate as an ad publish: kind `ads.publish`, on the PendingApproval lane (that is
+ *  `ads.publish`'s lane; an in-run gate node cannot open it). It starts no spend
+ *  (`dailyBudgetMinor` 0). The fork-stable key hashes exactly what is sent, so an
+ *  approval covers that content and nothing else, and approve-then-rerun proceeds
+ *  under the same key. `catalogPushAdapter` is the only caller. */
+export type CatalogPublishGate =
+  | { verdict: 'allow'; notice?: EnforceVerdict }
+  | { verdict: 'refused'; error: 'policy_unreadable' | 'policy_disabled' | 'policy_draft_only' | 'autonomy_blocked' | 'spend_approval_rejected' }
+  | { verdict: 'requires_approval'; approvalId: string; autonomy?: true };
+export async function gateCatalogPublish(
+  deps: BrokeredEgressDeps,
+  args: { platform: 'meta' | 'google'; target: string; contentHash: string; summary: string },
+): Promise<CatalogPublishGate> {
+  const spendKey = `adscatalog:${createHash('sha256').update(JSON.stringify([deps.tenantId, args.platform, args.target, args.contentHash])).digest('hex')}`;
+  const gate = await evaluateSpendGate(deps, 'ads.publish', spendKey, 0, { platform: args.platform, adAccountId: args.target, summary: args.summary });
+  if (gate.verdict === 'allow') return { verdict: 'allow', ...(gate.notice ? { notice: gate.notice } : {}) };
+  if (gate.verdict === 'unreadable') return { verdict: 'refused', error: 'policy_unreadable' };
+  if (gate.verdict === 'disabled') return { verdict: 'refused', error: 'policy_disabled' };
+  // A push has no preview to fall back to: draft-only means not now.
+  if (gate.verdict === 'draft-only') return { verdict: 'refused', error: 'policy_draft_only' };
+  if (gate.verdict === 'autonomy-blocked') return { verdict: 'refused', error: 'autonomy_blocked' };
+  if (gate.approvalStatus === 'rejected') return { verdict: 'refused', error: 'spend_approval_rejected' };
+  return { verdict: 'requires_approval', approvalId: gate.approvalId, ...(gate.autonomy ? { autonomy: true as const } : {}) };
 }
 
 /** Fork-stable spend key for a budget mutation (mirrors `idemKeyFor`). */
-function budgetSpendKey(deps: BrokeredEgressDeps, a: UpdateBudgetArgs): string {
+function budgetSpendKey(deps: Pick<BrokeredEgressDeps, 'tenantId'>, a: Pick<UpdateBudgetArgs, 'platform' | 'adAccountId' | 'campaignId' | 'dailyBudgetMinor'>): string {
   return `adsbudget:${createHash('sha256').update(JSON.stringify([deps.tenantId, a.platform, a.adAccountId, a.campaignId, a.dailyBudgetMinor])).digest('hex')}`;
+}
+
+/** ADR 0952 D3 — one approved reallocation plan authorizes its own budget ops.
+ *  Each op's spend key (the SAME hash `updateBudget` computes) is mapped to the
+ *  plan's approval, so `updateBudget`'s gate finds an approved row and proceeds,
+ *  while its other checks (disabled / draft-only / unreadable) still apply. The
+ *  caller MUST have verified the approval is approved; an existing APPROVED
+ *  mapping is kept. Like any per-amount budget approval, the mapping also covers
+ *  a later set of that campaign to that exact amount. */
+export async function authorizeBudgetOps(
+  tenantId: string, approvalId: string,
+  ops: ReadonlyArray<Pick<UpdateBudgetArgs, 'platform' | 'adAccountId' | 'campaignId' | 'dailyBudgetMinor'>>,
+): Promise<void> {
+  const approval = await getApproval(approvalId);
+  if (!approval || approval.tenantId !== tenantId || approval.status !== 'approved') throw new Error('plan approval is not approved');
+  for (const op of ops) {
+    const spendKey = budgetSpendKey({ tenantId }, op);
+    const mapped = await spendApprovals.get(spendKey).catch(() => undefined);
+    if (mapped && mapped.tenantId === tenantId) {
+      const prior = await getApproval(mapped.approvalId);
+      if (prior?.status === 'approved') continue;
+    }
+    await spendApprovals.put({ spendKey, tenantId, approvalId });
+  }
 }
 
 /** Audit row + lifecycle webhook for an ads action (campaign gap plan §5B B1/B2
@@ -394,6 +634,8 @@ function budgetSpendKey(deps: BrokeredEgressDeps, a: UpdateBudgetArgs): string {
  *  signed webhooks + event→workflow trigger bindings. */
 const ADS_EVENT_FOR_ACTION: Record<string, string> = {
   dispatched: 'host.campaign.ads.dispatched',
+  'delivery-paused': 'host.campaign.ads.paused',
+  'delivery-activated': 'host.campaign.ads.activated',
   'budget-updated': 'host.campaign.ads.budget-updated',
   'audience-synced': 'host.campaign.ads.audience-synced',
 };
@@ -445,7 +687,8 @@ function idemKeyFor(deps: BrokeredEgressDeps, a: PublishAdArgs): string {
       n: a.campaignName, o: a.objective ?? '', c: a.copy, b: a.dailyBudgetMinor ?? 0, acct: a.adAccountId,
       ...(a.pageId ? { pg: a.pageId } : {}),
       ...(a.mediaAssetId ? { m: a.mediaAssetId } : {}),
-      ...(a.mediaKind ? { mk: a.mediaKind } : {}), // P3c: image vs video is creative-affecting; additive so pre-P3c keys are unchanged
+      ...(a.mediaKind ? { mk: a.mediaKind } : {}),
+      ...(a.aiGeneratedMedia ? { aigc: true } : {}), // ADR 0945 D6: the AI label is creative-affecting; additive // P3c: image vs video is creative-affecting; additive so pre-P3c keys are unchanged
       ...(a.identityId ? { idn: a.identityId } : {}),
       // ADS-0245: targeting is spend-shaping, so a change mints a NEW PAUSED
       // dispatch — additively (a record with no targeting keeps matching) and
@@ -465,7 +708,102 @@ type StrategyResult =
   | { kind: 'no_connection' }
   | { kind: 'failed'; error: string }
   | { kind: 'preview'; plan: AdPlanStep[] };
-type PlatformStrategy = (deps: BrokeredEgressDeps, args: PublishAdArgs) => Promise<StrategyResult>;
+/** ADR 0952 defect P9 — resolves the ad ACCOUNT's ISO currency. A strategy calls it
+ *  AFTER its own argument checks and BEFORE its first write, and only when it sends
+ *  a budget, so a refused dispatch still makes zero platform calls. On a dry run it
+ *  makes no call and returns the caller's hint (absent ⇒ the plan shows the budget
+ *  as minor units to be converted at send). */
+type CurrencyResolver = () => Promise<{ currency?: string } | { error: string }>;
+type PlatformStrategy = (deps: BrokeredEgressDeps, args: PublishAdArgs, money: CurrencyResolver) => Promise<StrategyResult>;
+
+/** ADR 0952 defect P9 — `dailyBudgetMinor` (minor units of the account currency)
+ *  in the platform's own unit. Never assumes a currency: an unknown or
+ *  unsupported one is a typed failure. */
+type BudgetValue = { ok: true; value: number | string; currency?: string } | { ok: false; error: string };
+function platformBudget(platform: AdPlatform, minor: number, currency: string | undefined): BudgetValue {
+  if (!Number.isSafeInteger(minor) || minor < 0) return { ok: false, error: 'invalid_budget' };
+  if (currency === undefined) return { ok: true, value: `<${minor} minor units of the account currency; converted at send>` };
+  if (isoExponent(currency) === null || (platform === 'meta' && metaCurrencyOffset(currency) === null)) return { ok: false, error: `currency_unsupported:${currency}` };
+  const v = platform === 'google' ? minorToGoogleMicros(minor, currency)
+    : platform === 'meta' ? minorToMetaBudget(minor, currency)
+    : platform === 'tiktok' ? minorToMajorNumber(minor, currency)
+    : minorToMajorString(minor, currency);
+  return v === null ? { ok: false, error: 'budget_not_representable' } : { ok: true, value: platform === 'google' ? String(v) : v, currency };
+}
+
+/** Resolve and validate once, before the first upload/create in a strategy. */
+function prepareBudget(platform: AdPlatform, minor: number | undefined, money: CurrencyResolver): () => Promise<BudgetValue | null> {
+  let pending: Promise<BudgetValue | null> | undefined;
+  return () => pending ??= (async (): Promise<BudgetValue | null> => {
+    if (minor === undefined) return null;
+    const reported = await money();
+    return 'error' in reported ? { ok: false, error: reported.error } : platformBudget(platform, minor, reported.currency);
+  })();
+}
+
+type AccountCurrency = { outcome: 'ok'; currency: string } | { outcome: 'no_connection' } | { outcome: 'failed'; error: string };
+
+/** One account-currency read per operation, however many callers ask. */
+function memoAccountCurrency(deps: BrokeredEgressDeps, platform: AdPlatform, adAccountId: string): () => Promise<AccountCurrency> {
+  let p: Promise<AccountCurrency> | null = null;
+  return () => (p ??= readAccountCurrency(deps, platform, adAccountId));
+}
+
+/** ADR 0952 defect P9 — the ad account's currency, as the platform reports it.
+ *  Every budget write converts through it; a currency the platform does not
+ *  report is a failure, never a default. */
+async function readAccountCurrency(deps: BrokeredEgressDeps, platform: AdPlatform, adAccountId: string): Promise<AccountCurrency> {
+  if (platform === 'meta' && !/^(?:act_)?[0-9]+$/.test(adAccountId)) return { outcome: 'failed', error: 'invalid_ad_account_id' };
+  const digits = adAccountId.replace(/[^0-9]/g, '');
+  const sent = (r: Awaited<ReturnType<typeof brokeredFetch>>): AccountCurrency | null =>
+    r.outcome === 'no_connection' ? { outcome: 'no_connection' } : r.outcome !== 'sent' ? { outcome: 'failed', error: r.outcome === 'request_failed' ? (r.timedOut ? 'timeout' : 'request_failed') : r.outcome } : null;
+  let code: unknown;
+  if (platform === 'meta') {
+    const r = await brokeredFetch(deps, { provider: PLATFORM_PROVIDER.meta, url: `${metaApiBase()}/act_${digits}?fields=currency`, method: 'GET' });
+    const bad = sent(r); if (bad) return bad;
+    if (r.outcome !== 'sent') return { outcome: 'failed', error: 'request_failed' };
+    try {
+      const body = await r.res.json() as { currency?: unknown; error?: unknown; serviceErrorCode?: unknown };
+      if (!body || body.error || body.serviceErrorCode) return { outcome: 'failed', error: 'account_currency_rejected' };
+      code = body.currency;
+    } catch { return { outcome: 'failed', error: 'bad_response' }; }
+    if (!r.res.ok) return { outcome: 'failed', error: `http_${r.res.status}` };
+  } else if (platform === 'google') {
+    const devToken = resolveDeveloperToken(deps.tenantId);
+    if (!devToken) return { outcome: 'failed', error: 'no_developer_token' };
+    const r = await brokeredPost(deps, { provider: PLATFORM_PROVIDER.google, url: `${googleApiBase()}/customers/${digits}/googleAds:search`, body: JSON.stringify({ query: 'SELECT customer.currency_code FROM customer' }), extraHeaders: { 'developer-token': devToken } });
+    const bad = sent(r); if (bad) return bad;
+    if (r.outcome !== 'sent') return { outcome: 'failed', error: 'request_failed' };
+    try {
+      const body = await r.res.json() as { error?: unknown; results?: Array<{ customer?: { currencyCode?: unknown } }> };
+      if (!body || body.error) return { outcome: 'failed', error: 'account_currency_rejected' };
+      code = body.results?.[0]?.customer?.currencyCode;
+    } catch { return { outcome: 'failed', error: 'bad_response' }; }
+    if (!r.res.ok) return { outcome: 'failed', error: `http_${r.res.status}` };
+  } else if (platform === 'tiktok') {
+    const url = `${tiktokApiBase()}/advertiser/info/?advertiser_ids=${encodeURIComponent(JSON.stringify([digits]))}&fields=${encodeURIComponent(JSON.stringify(['currency']))}`;
+    const r = await brokeredFetch(deps, { provider: PLATFORM_PROVIDER.tiktok, url, method: 'GET', authScheme: 'raw', authHeaderName: 'access-token' });
+    const bad = sent(r); if (bad) return bad;
+    if (r.outcome !== 'sent') return { outcome: 'failed', error: 'request_failed' };
+    try {
+      const body = await r.res.json() as { code?: unknown; data?: { list?: Array<{ currency?: unknown }> } };
+      if (!body || body.code !== 0) return { outcome: 'failed', error: 'account_currency_rejected' };
+      code = body.data?.list?.[0]?.currency;
+    } catch { return { outcome: 'failed', error: 'bad_response' }; }
+    if (!r.res.ok) return { outcome: 'failed', error: `http_${r.res.status}` };
+  } else {
+    const r = await brokeredFetch(deps, { provider: PLATFORM_PROVIDER.linkedin, url: `${linkedinApiBase()}/rest/adAccounts/${digits}`, method: 'GET', extraHeaders: { 'LinkedIn-Version': LINKEDIN_VERSION, 'X-Restli-Protocol-Version': '2.0.0' } });
+    const bad = sent(r); if (bad) return bad;
+    if (r.outcome !== 'sent') return { outcome: 'failed', error: 'request_failed' };
+    try {
+      const body = await r.res.json() as { currency?: unknown; error?: unknown; serviceErrorCode?: unknown };
+      if (!body || body.error || body.serviceErrorCode) return { outcome: 'failed', error: 'account_currency_rejected' };
+      code = body.currency;
+    } catch { return { outcome: 'failed', error: 'bad_response' }; }
+    if (!r.res.ok) return { outcome: 'failed', error: `http_${r.res.status}` };
+  }
+  return typeof code === 'string' && isoExponent(code) !== null ? { outcome: 'ok', currency: code } : { outcome: 'failed', error: 'account_currency_unknown' };
+}
 
 // ── Meta (Phase 1; ADR 0223 production payloads) — [image →] campaign → adset →
 //    creative → ad, all PAUSED. The creative is a real page-published story
@@ -473,7 +811,7 @@ type PlatformStrategy = (deps: BrokeredEgressDeps, args: PublishAdArgs) => Promi
 //    preview, which would otherwise render an un-postable plan) fails closed without
 //    one. The optional media leg uploads the host-resolved asset bytes to `adimages`
 //    and threads the returned `image_hash` into the creative's `link_data`. ─────────
-const metaStrategy: PlatformStrategy = async (deps, args) => {
+const metaStrategy: PlatformStrategy = async (deps, args, money) => {
   if (!args.pageId) return { kind: 'failed', error: 'missing_page_id' }; // an ARG, not host config — a plan without it is not a valid Meta payload
   const acct = `act_${args.adAccountId.replace(/^act_/, '')}`;
   const base = metaApiBase();
@@ -512,6 +850,9 @@ const metaStrategy: PlatformStrategy = async (deps, args) => {
   // (ADR 0411 §P3c): a live video request never reaches here (the outer guard
   // fails it closed video_dispatch_live_pending); a video DRY-RUN previews the
   // documented `advideos` upload → `video_data` creative.
+  // ADR 0952 defect P9 — the account currency is resolved once, after every local
+  // check and before the FIRST write (adimages, else the campaign).
+  const budget = prepareBudget('meta', args.dailyBudgetMinor, money);
   let imageHash: string | undefined;
   let videoPlan = false;
   if (args.mediaAssetId && args.mediaKind === 'video') {
@@ -528,15 +869,19 @@ const metaStrategy: PlatformStrategy = async (deps, args) => {
       if (media.contentType.startsWith('video/')) return { kind: 'failed', error: 'media_asset_wrong_kind' }; // never POST video bytes to the image endpoint — use mediaKind:'video'
       bytes = media.base64;
     }
+    const prepared = await budget();
+    if (prepared && !prepared.ok) return fail(prepared.error);
     const img = await post('adimages', { bytes }, 'image_hash');
     if ('error' in img) return fail(img.error);
     imageHash = img.id;
   }
 
+  const metaBudget = await budget();
+  if (metaBudget && !metaBudget.ok) return fail(metaBudget.error);
   const campaign = await post('campaigns', { name: args.campaignName, objective: args.objective ?? 'OUTCOME_TRAFFIC', status: 'PAUSED', special_ad_categories: [] });
   if ('error' in campaign) return fail(campaign.error);
   created.push({ kind: 'campaign', id: campaign.id });
-  const adset = await post('adsets', { name: `${args.campaignName} — Ad Set`, campaign_id: campaign.id, status: 'PAUSED', billing_event: 'IMPRESSIONS', optimization_goal: 'LINK_CLICKS', ...(args.dailyBudgetMinor ? { daily_budget: args.dailyBudgetMinor } : {}), ...(args.targeting ? { targeting: args.targeting } : {}) });
+  const adset = await post('adsets', { name: `${args.campaignName} — Ad Set`, campaign_id: campaign.id, status: 'PAUSED', billing_event: 'IMPRESSIONS', optimization_goal: 'LINK_CLICKS', ...(metaBudget?.ok ? { daily_budget: metaBudget.value } : {}), ...(args.targeting ? { targeting: args.targeting } : {}) });
   if ('error' in adset) return fail(adset.error);
   created.push({ kind: 'adsets', id: adset.id });
   // The real creative object (v21 `adcreatives`): a link ad published as the Page's
@@ -579,7 +924,7 @@ const metaStrategy: PlatformStrategy = async (deps, args) => {
 //    adGroup → ad, all PAUSED. `finalUrls` is MANDATORY on a responsive search ad, so
 //    dispatch (and the preview) fails closed `missing_landing_url` without a landing
 //    URL; the campaign carries the SEARCH network settings. ─────────────────────
-const googleStrategy: PlatformStrategy = async (deps, args) => {
+const googleStrategy: PlatformStrategy = async (deps, args, money) => {
   if (!args.landingUrl) return { kind: 'failed', error: 'missing_landing_url' }; // an ARG, not host config — finalUrls is mandatory (RSA)
   if (!args.dryRun && !args.euPoliticalAdvertising) return { kind: 'failed', error: 'missing_eu_political_declaration' }; // an attestation — never defaulted
   const devToken = resolveDeveloperToken(deps.tenantId);
@@ -619,7 +964,11 @@ const googleStrategy: PlatformStrategy = async (deps, args) => {
   };
 
   // 1) Budget.
-  const budget = await mutate('campaignBudgets', { name: `${args.campaignName} — Budget`, amountMicros: String((args.dailyBudgetMinor ?? 5000) * 10000), deliveryMethod: 'STANDARD' });
+  const m = await money();
+  if ('error' in m) return fail(m.error);
+  const micros = platformBudget('google', args.dailyBudgetMinor ?? 5000, m.currency);
+  if (!micros.ok) return fail(micros.error);
+  const budget = await mutate('campaignBudgets', { name: `${args.campaignName} — Budget`, amountMicros: micros.value, deliveryMethod: 'STANDARD' });
   if ('error' in budget) return fail(budget.error);
   created.push(budget.rn);
   // 2) Campaign — PAUSED; SEARCH channel + explicit network settings (Google
@@ -661,8 +1010,11 @@ const googleStrategy: PlatformStrategy = async (deps, args) => {
 // identity, so `identityId` is REQUIRED (fail closed `missing_identity_id`); the
 // optional media leg uploads host-resolved bytes to `/file/image/ad/upload/` and
 // threads the returned `image_id` into the ad creative's `image_ids`.
-const tiktokStrategy: PlatformStrategy = async (deps, args) => {
+const tiktokStrategy: PlatformStrategy = async (deps, args, money) => {
   if (!args.identityId) return { kind: 'failed', error: 'missing_identity_id' }; // an ARG, not host config — a v1.3 ad create requires the identity
+  // ADR 0945 D6 — an AI ad is never published to TikTok unlabelled: refused until
+  // the AIGC flag's value is sandbox-verified (a dry run still previews it).
+  if (args.aiGeneratedMedia && !args.dryRun && !adsAigcFlagEnabled('tiktok')) return { kind: 'failed', error: 'aigc_flag_not_verified' };
   const advertiserId = args.adAccountId.replace(/[^0-9]/g, '');
   const base = tiktokApiBase();
   const plan: AdPlanStep[] = [];
@@ -689,6 +1041,8 @@ const tiktokStrategy: PlatformStrategy = async (deps, args) => {
   // VIDEO (ADR 0411 §P3c): a live video request never reaches here (the outer guard
   // fails it closed video_dispatch_live_pending); a video DRY-RUN previews the
   // documented `/file/video/ad/upload/` → `SINGLE_VIDEO` creative.
+  // ADR 0952 defect P9 — resolved once, after the local checks, before the FIRST write.
+  const budget = prepareBudget('tiktok', args.dailyBudgetMinor ?? 5000, money);
   let imageId: string | undefined;
   let videoPlan = false;
   if (args.mediaAssetId && args.mediaKind === 'video') {
@@ -705,13 +1059,19 @@ const tiktokStrategy: PlatformStrategy = async (deps, args) => {
       if (media.contentType.startsWith('video/')) return { kind: 'failed', error: 'media_asset_wrong_kind' }; // never POST video bytes to the image endpoint — use mediaKind:'video'
       imageFile = media.base64;
     }
+    const prepared = await budget();
+    if (!prepared) return fail('invalid_budget');
+    if (!prepared.ok) return fail(prepared.error);
     const img = await create('file/image/ad/upload/', 'image_id', { image_file: imageFile });
     if ('error' in img) return fail(img.error);
     imageId = img.id;
   }
 
   // Campaign — DISABLE (paused), consistent with the cross-strategy created-PAUSED invariant.
-  const campaign = await create('campaign/create/', 'campaign_id', { campaign_name: args.campaignName, objective_type: args.objective ?? 'TRAFFIC', budget_mode: 'BUDGET_MODE_DAY', budget: ((args.dailyBudgetMinor ?? 5000) / 100), operation_status: 'DISABLE' });
+  const ttBudget = await budget();
+  if (!ttBudget) return fail('invalid_budget');
+  if (!ttBudget.ok) return fail(ttBudget.error);
+  const campaign = await create('campaign/create/', 'campaign_id', { campaign_name: args.campaignName, objective_type: args.objective ?? 'TRAFFIC', budget_mode: 'BUDGET_MODE_DAY', budget: ttBudget.value, operation_status: 'DISABLE' });
   if ('error' in campaign) return fail(campaign.error);
   // Ad group — DISABLE (paused); the v1.3 required delivery fields (placement,
   // schedule, optimization, billing) + the day budget when the caller set one.
@@ -719,7 +1079,7 @@ const tiktokStrategy: PlatformStrategy = async (deps, args) => {
     campaign_id: campaign.id, adgroup_name: `${args.campaignName} — Ad Group`,
     placements: ['PLACEMENT_TIKTOK'], schedule_type: 'SCHEDULE_FROM_NOW',
     optimization_goal: 'CLICK', billing_event: 'CPC',
-    ...(args.dailyBudgetMinor ? { budget_mode: 'BUDGET_MODE_DAY', budget: args.dailyBudgetMinor / 100 } : {}),
+    ...(args.dailyBudgetMinor !== undefined ? { budget_mode: 'BUDGET_MODE_DAY', budget: ttBudget.value } : {}),
     operation_status: 'DISABLE',
   });
   if ('error' in adgroup) return fail(adgroup.error);
@@ -730,6 +1090,7 @@ const tiktokStrategy: PlatformStrategy = async (deps, args) => {
     creatives: [{
       ad_name: `${args.campaignName} — Ad`,
       identity_id: args.identityId, identity_type: 'CUSTOMIZED_USER',
+      ...(args.aiGeneratedMedia ? { [TIKTOK_AIGC_FIELD]: TIKTOK_AIGC_SELF_DISCLOSURE } : {}),
       ad_text: args.copy.bodyText ?? args.copy.description ?? args.copy.headline,
       call_to_action: args.copy.ctaText ?? 'LEARN_MORE',
       // VIDEO (P3c, dry-run only): a SINGLE_VIDEO creative referencing the uploaded
@@ -754,7 +1115,7 @@ const tiktokStrategy: PlatformStrategy = async (deps, args) => {
 // (legacy: `x-linkedin-id`) response HEADER, not the body. No rollback (the TikTok
 // posture): a half-built hierarchy is DRAFT/PAUSED = no spend. The caller-supplied
 // piece is the public sponsored-account id (urn path only — never the host).
-const linkedinStrategy: PlatformStrategy = async (deps, args) => {
+const linkedinStrategy: PlatformStrategy = async (deps, args, money) => {
   const accountId = args.adAccountId.replace(/[^0-9]/g, '');
   const accountUrn = `urn:li:sponsoredAccount:${accountId}`;
   const base = linkedinApiBase();
@@ -783,12 +1144,14 @@ const linkedinStrategy: PlatformStrategy = async (deps, args) => {
   // A header id may be the bare numeric id or a full urn; a dry-run placeholder passes through.
   const urn = (entity: string, id: string): string => (id.startsWith('urn:') || id.startsWith('<') ? id : `urn:li:${entity}:${id}`);
 
+  const liBudget = await prepareBudget('linkedin', args.dailyBudgetMinor, money)();
+  if (liBudget && !liBudget.ok) return fail(liBudget.error);
   // 1) Campaign group — DRAFT (LinkedIn's non-spending created state at this level).
   const group = await post('adCampaignGroups', { account: accountUrn, name: `${args.campaignName} — Group`, status: 'DRAFT' });
   if ('error' in group) return fail(group.error);
   // 2) Campaign — PAUSED literal; text-ad type, CPC, the day budget when set (amount
-  //    is a decimal STRING in major units per the docs; account currency is assumed
-  //    USD — see ADR 0223's honesty note).
+  //    is a decimal STRING in major units of the ACCOUNT currency, read from the
+  //    account — ADR 0952 defect P9 retired ADR 0223's assumed-USD note).
   const campaign = await post('adCampaigns', {
     account: accountUrn,
     campaignGroup: urn('sponsoredCampaignGroup', group.id),
@@ -797,7 +1160,7 @@ const linkedinStrategy: PlatformStrategy = async (deps, args) => {
     type: 'SPONSORED_UPDATES',
     costType: 'CPC',
     locale: { country: 'US', language: 'en' },
-    ...(args.dailyBudgetMinor ? { dailyBudget: { amount: (args.dailyBudgetMinor / 100).toFixed(2), currencyCode: 'USD' } } : {}),
+    ...(liBudget?.ok ? { dailyBudget: { amount: liBudget.value, currencyCode: liBudget.currency ?? '<account currency>' } } : {}),
     // ADR 0245 — operator-authored targeting, verbatim into LinkedIn's slot.
     ...(args.targeting ? { targetingCriteria: args.targeting } : {}),
   });
@@ -1150,20 +1513,77 @@ async function linkedinAccountMetrics(deps: BrokeredEgressDeps, args: GetAccount
 // harmless no-op, so NO dispatch record is needed), and it does NOT unpause a campaign
 // (no spend-from-nothing). Wrong-value risk is bounded upstream by the chain's guardrail
 // + approval gate. `unsupported` for a platform without a writer (tiktok today).
+/** `dailyBudgetMinor` is ISO-4217 minor units of the ad ACCOUNT's currency (ADR 0952 defect P9). */
 export interface UpdateBudgetArgs { platform: AdPlatform; adAccountId: string; campaignId: string; dailyBudgetMinor: number; dryRun?: boolean; }
 export type UpdateBudgetResult =
   | { outcome: 'no_connection' }
   | { outcome: 'unsupported'; platform: AdPlatform }
   | { outcome: 'failed'; error: string }
-  | { outcome: 'requires_approval'; approvalId: string }
+  | { outcome: 'requires_approval'; approvalId: string; autonomy?: true }
   | { outcome: 'preview'; platform: AdPlatform; dailyBudgetMinor: number; target: string }
   | { outcome: 'updated'; platform: AdPlatform; dailyBudgetMinor: number; target: string };
 
+type MetaCampaignOwner = { outcome: 'ok'; accountId: string; status?: unknown } | { outcome: 'no_connection' } | { outcome: 'failed'; error: string };
+
+/** Meta campaign IDs are global. Bind the target to the account used for money,
+ * approvals and caps before any mutation; another accessible account is not enough. */
+async function readMetaCampaignOwner(deps: BrokeredEgressDeps, adAccountId: string, campaignId: string, includeStatus = false): Promise<MetaCampaignOwner> {
+  const account = /^(?:act_)?([0-9]+)$/.exec(adAccountId)?.[1];
+  if (!account || !/^[0-9]+$/.test(campaignId)) return { outcome: 'failed', error: 'invalid_campaign_account_target' };
+  const r = await brokeredFetch(deps, { provider: PLATFORM_PROVIDER.meta, url: `${metaApiBase()}/${campaignId}?fields=account_id${includeStatus ? ',status' : ''}`, method: 'GET' });
+  if (r.outcome === 'no_connection') return { outcome: 'no_connection' };
+  if (r.outcome !== 'sent') return { outcome: 'failed', error: r.outcome === 'request_failed' ? (r.timedOut ? 'timeout' : 'request_failed') : r.outcome };
+  let body: { account_id?: unknown; status?: unknown; error?: unknown };
+  try { body = await r.res.json() as typeof body; } catch { return { outcome: 'failed', error: 'campaign_account_unreadable' }; }
+  if (!r.res.ok || !body || body.error || typeof body.account_id !== 'string' || !/^[0-9]+$/.test(body.account_id)) return { outcome: 'failed', error: 'campaign_account_unreadable' };
+  if (body.account_id !== account) return { outcome: 'failed', error: 'campaign_account_mismatch' };
+  return { outcome: 'ok', accountId: `act_${body.account_id}`, ...(includeStatus ? { status: body.status } : {}) };
+}
+
+/** ADR 0952 (P3 residual b) — WHERE a Meta campaign's daily budget lives. A
+ *  campaign-budget (CBO) campaign carries `daily_budget` itself; an ad-set-budget
+ *  (ABO) campaign carries it on its ad set. Our own dispatch creates ONE ad set
+ *  with the budget (ABO), so before this a campaign budget write was rejected for
+ *  every campaign this app dispatched, and a reallocation left them all out. An
+ *  ABO campaign with several budgeted ad sets has no single daily budget to move:
+ *  that is a typed failure, never a guess at which ad set to change. */
+type MetaBudgetTarget = { outcome: 'ok'; level: 'campaign' | 'adset'; id: string; value: number } | { outcome: 'no_connection' } | { outcome: 'failed'; error: string };
+async function metaBudgetTarget(deps: BrokeredEgressDeps, campaignId: string): Promise<MetaBudgetTarget> {
+  const fail = (o: { outcome: string; timedOut?: boolean }): MetaBudgetTarget => (o.outcome === 'no_connection' ? { outcome: 'no_connection' } : { outcome: 'failed', error: o.outcome === 'request_failed' ? (o.timedOut ? 'timeout' : 'request_failed') : o.outcome });
+  const c = await brokeredFetch(deps, { provider: PLATFORM_PROVIDER.meta, url: `${metaApiBase()}/${encodeURIComponent(campaignId)}?fields=daily_budget`, method: 'GET' });
+  if (c.outcome !== 'sent') return fail(c);
+  let cj: { daily_budget?: string | number; error?: { message?: string } };
+  try { cj = (await c.res.json()) as typeof cj; } catch { return { outcome: 'failed', error: 'bad_response' }; }
+  if (!c.res.ok || cj.error) return { outcome: 'failed', error: cj.error?.message ?? `http_${c.res.status}` };
+  const cv = Number(cj.daily_budget);
+  if (cj.daily_budget !== undefined && Number.isFinite(cv) && cv > 0) return { outcome: 'ok', level: 'campaign', id: campaignId, value: cv };
+  const a = await brokeredFetch(deps, { provider: PLATFORM_PROVIDER.meta, url: `${metaApiBase()}/${encodeURIComponent(campaignId)}/adsets?fields=id,daily_budget&limit=25`, method: 'GET' });
+  if (a.outcome !== 'sent') return fail(a);
+  let aj: { data?: Array<{ id?: string; daily_budget?: string | number }>; error?: { message?: string } };
+  try { aj = (await a.res.json()) as typeof aj; } catch { return { outcome: 'failed', error: 'bad_response' }; }
+  if (!a.res.ok || aj.error) return { outcome: 'failed', error: aj.error?.message ?? `http_${a.res.status}` };
+  const budgeted = (aj.data ?? []).filter((x) => typeof x.id === 'string' && Number.isFinite(Number(x.daily_budget)) && Number(x.daily_budget) > 0);
+  if (budgeted.length === 0) return { outcome: 'failed', error: 'no_daily_budget' };
+  if (budgeted.length > 1) return { outcome: 'failed', error: 'budget_split_across_ad_sets' };
+  return { outcome: 'ok', level: 'adset', id: budgeted[0]!.id as string, value: Number(budgeted[0]!.daily_budget) };
+}
+
 async function metaBudget(deps: BrokeredEgressDeps, args: UpdateBudgetArgs): Promise<UpdateBudgetResult> {
-  // Meta: update the campaign object's daily_budget (CBO). Target is the campaign id.
-  const target = args.campaignId;
-  if (args.dryRun) return { outcome: 'preview', platform: 'meta', dailyBudgetMinor: args.dailyBudgetMinor, target };
-  const r = await brokeredPost(deps, { provider: PLATFORM_PROVIDER.meta, url: `${metaApiBase()}/${encodeURIComponent(target)}`, body: JSON.stringify({ daily_budget: args.dailyBudgetMinor }) });
+  // Meta: update the daily budget where it lives — the campaign (CBO) or its one
+  // budgeted ad set (ABO, what our own dispatch creates). Target is that object.
+  if (args.dryRun) return { outcome: 'preview', platform: 'meta', dailyBudgetMinor: args.dailyBudgetMinor, target: args.campaignId };
+  // ADR 0952 defect P9 — Meta's unit is the account currency's Meta offset.
+  const owner = await readMetaCampaignOwner(deps, args.adAccountId, args.campaignId);
+  if (owner.outcome !== 'ok') return owner;
+  const c = await readAccountCurrency(deps, 'meta', owner.accountId);
+  if (c.outcome === 'no_connection') return { outcome: 'no_connection' };
+  if (c.outcome === 'failed') return { outcome: 'failed', error: c.error === 'account_currency_unknown' ? c.error : `account_currency_unreadable:${c.error}` };
+  const value = platformBudget('meta', args.dailyBudgetMinor, c.currency);
+  if (!value.ok) return { outcome: 'failed', error: value.error };
+  const t = await metaBudgetTarget(deps, args.campaignId);
+  if (t.outcome !== 'ok') return t.outcome === 'no_connection' ? t : { outcome: 'failed', error: t.error };
+  const target = t.id;
+  const r = await brokeredPost(deps, { provider: PLATFORM_PROVIDER.meta, url: `${metaApiBase()}/${encodeURIComponent(target)}`, body: JSON.stringify({ daily_budget: value.value }) });
   if (r.outcome === 'no_connection') return { outcome: 'no_connection' };
   if (r.outcome !== 'sent') return { outcome: 'failed', error: r.outcome === 'request_failed' ? (r.timedOut ? 'timeout' : 'request_failed') : r.outcome };
   let json: { success?: boolean; id?: string; error?: { message?: string } };
@@ -1176,9 +1596,16 @@ async function metaBudget(deps: BrokeredEgressDeps, args: UpdateBudgetArgs): Pro
 async function googleBudget(deps: BrokeredEgressDeps, args: UpdateBudgetArgs): Promise<UpdateBudgetResult> {
   const devToken = resolveDeveloperToken(deps.tenantId);
   const customerId = args.adAccountId.replace(/[^0-9]/g, '');
-  const amountMicros = String(Math.round(args.dailyBudgetMinor) * 10000); // minor units → micros (×10^4)
   if (args.dryRun) return { outcome: 'preview', platform: 'google', dailyBudgetMinor: args.dailyBudgetMinor, target: `customers/${customerId} campaign ${args.campaignId}` };
   if (!devToken) return { outcome: 'failed', error: 'no_developer_token' };
+  // ADR 0952 defect P9 — micros = minor × 10^(6 − the account currency's exponent).
+  // This used to be minor × 10⁴, which is right only for 2-decimal currencies.
+  const c = await readAccountCurrency(deps, 'google', args.adAccountId);
+  if (c.outcome === 'no_connection') return { outcome: 'no_connection' };
+  if (c.outcome === 'failed') return { outcome: 'failed', error: c.error === 'account_currency_unknown' ? c.error : `account_currency_unreadable:${c.error}` };
+  const micros = platformBudget('google', args.dailyBudgetMinor, c.currency);
+  if (!micros.ok) return { outcome: 'failed', error: micros.error };
+  const amountMicros = String(micros.value);
   const extraHeaders = { 'developer-token': devToken };
   const base = googleApiBase();
   // 1) Resolve the campaign's budget resourceName.
@@ -1205,6 +1632,52 @@ async function googleBudget(deps: BrokeredEgressDeps, args: UpdateBudgetArgs): P
   if (!m.res.ok || mjson.error || !mjson.results?.[0]?.resourceName) return { outcome: 'failed', error: mjson.error?.message ?? `http_${m.res.status}` };
   await stampConnectionUse(deps.storage, deps.runId, m.provenance).catch((e) => log.warn('ads budget connectionUse stamp failed', { error: e instanceof Error ? e.message : String(e) }));
   return { outcome: 'updated', platform: 'google', dailyBudgetMinor: args.dailyBudgetMinor, target: budgetRn };
+}
+
+/** ADR 0952 D3 — a campaign's current daily budget (the "from" of a reallocation op). */
+export interface GetCampaignBudgetArgs { platform: AdPlatform; adAccountId: string; campaignId: string }
+export type GetCampaignBudgetResult =
+  | { outcome: 'ok'; platform: AdPlatform; dailyBudgetMinor: number }
+  | { outcome: 'no_connection' }
+  | { outcome: 'unsupported'; platform: AdPlatform; reason?: 'not_sandbox_verified' }
+  | { outcome: 'failed'; error: string };
+
+async function metaCampaignBudget(deps: BrokeredEgressDeps, a: GetCampaignBudgetArgs): Promise<GetCampaignBudgetResult> {
+  // The same budget location `updateBudget` writes (campaign, or its one budgeted
+  // ad set), so a read-then-write targets one object. Meta reports the value in its
+  // OWN unit for the account currency (the Meta offset, ADR 0952 defect P9).
+  // Campaign ids are global: bind it to this account first, as the writer does.
+  const owner = await readMetaCampaignOwner(deps, a.adAccountId, a.campaignId);
+  if (owner.outcome !== 'ok') return owner;
+  const t = await metaBudgetTarget(deps, a.campaignId);
+  if (t.outcome !== 'ok') return t.outcome === 'no_connection' ? t : { outcome: 'failed', error: t.error };
+  const n = t.value;
+  const c = await readAccountCurrency(deps, 'meta', owner.accountId);
+  if (c.outcome !== 'ok') return c.outcome === 'no_connection' ? c : { outcome: 'failed', error: c.error };
+  const minor = metaBudgetToMinor(n, c.currency);
+  return minor === null ? { outcome: 'failed', error: `currency_unsupported:${c.currency}` } : { outcome: 'ok', platform: 'meta', dailyBudgetMinor: minor };
+}
+
+async function googleCampaignBudget(deps: BrokeredEgressDeps, a: GetCampaignBudgetArgs): Promise<GetCampaignBudgetResult> {
+  const devToken = resolveDeveloperToken(deps.tenantId);
+  if (!devToken) return { outcome: 'failed', error: 'no_developer_token' };
+  if (!/^[0-9]+$/.test(a.campaignId)) return { outcome: 'failed', error: 'invalid_ids' };
+  const cid = a.adAccountId.replace(/[^0-9]/g, '');
+  const query = `SELECT campaign_budget.amount_micros FROM campaign WHERE campaign.id = ${a.campaignId}`;
+  const r = await brokeredPost(deps, { provider: PLATFORM_PROVIDER.google, url: `${googleApiBase()}/customers/${cid}/googleAds:search`, body: JSON.stringify({ query }), extraHeaders: { 'developer-token': devToken } });
+  if (r.outcome === 'no_connection') return { outcome: 'no_connection' };
+  if (r.outcome !== 'sent') return legFail(r);
+  let json: { results?: Array<{ campaignBudget?: { amountMicros?: string | number } }>; error?: { message?: string } };
+  try { json = (await r.res.json()) as typeof json; } catch { return { outcome: 'failed', error: 'bad_response' }; }
+  if (!r.res.ok || json.error) return { outcome: 'failed', error: json.error?.message ?? `http_${r.res.status}` };
+  const micros = Number(json.results?.[0]?.campaignBudget?.amountMicros);
+  if (!Number.isFinite(micros) || micros <= 0) return { outcome: 'failed', error: 'budget_not_found' };
+  // ADR 0952 defect P9 — micros → minor units of the ACCOUNT currency, the inverse
+  // of googleBudget's conversion, so a read-then-write round-trips.
+  const c = await readAccountCurrency(deps, 'google', a.adAccountId);
+  if (c.outcome !== 'ok') return c.outcome === 'no_connection' ? c : { outcome: 'failed', error: c.error };
+  const minor = googleMicrosToMinor(micros, c.currency);
+  return minor === null ? { outcome: 'failed', error: `currency_unsupported:${c.currency}` } : { outcome: 'ok', platform: 'google', dailyBudgetMinor: minor };
 }
 
 export interface SyncAudienceArgs {
@@ -1239,6 +1712,26 @@ export type SendConversionResult =
   | { outcome: 'unsupported'; platform: string; reason?: 'not_sandbox_verified' }
   | { outcome: 'failed'; error: string };
 
+/** ADR 0952 D1 — why a campaign's delivery status changes (audited). */
+export interface DeliveryStatusReason { kind: 'launch' | 'cap' | 'pacing' | 'operator' | 'promotion'; ref?: string }
+export interface SetDeliveryStatusArgs {
+  platform: AdPlatform;
+  adAccountId: string;
+  campaignId: string;
+  status: DeliveryStatus;
+  reason: DeliveryStatusReason;
+  dryRun?: boolean;
+}
+export type SetDeliveryStatusResult =
+  | { outcome: 'updated' | 'unchanged'; platform: AdPlatform; status: DeliveryStatus; ceiling?: string }
+  | { outcome: 'preview'; platform: AdPlatform; status: DeliveryStatus; plan: AdPlanStep[] }
+  | { outcome: 'requires_approval'; approvalId: string }
+  | { outcome: 'refused'; error: 'policy_unreadable' | 'policy_disabled' | 'autonomy_blocked' | 'circuit_open' | 'cap_exceeded' | 'cap_unenforceable'
+      | 'launch_outcome_unknown' | 'launch_approval_missing' | 'launch_approval_changed' | 'launch_claim_unreadable'; capId?: string }
+  | { outcome: 'no_connection' }
+  | { outcome: 'unsupported'; platform: AdPlatform; reason?: 'not_sandbox_verified' }
+  | { outcome: 'failed'; error: string };
+
 export interface AdsAdapter {
   publishAd(args: PublishAdArgs): Promise<PublishAdResult>;
   /** Upload a hashed member list as a platform custom audience (ADR 0217 —
@@ -1267,6 +1760,17 @@ export interface AdsAdapter {
    *  circuit breaker; a platform 429 is `rate_limited`, never a failure that
    *  looks like missing data. `unsupported` without a reader. Never throws. */
   getAccountMetrics(args: GetAccountMetricsArgs): Promise<GetAccountMetricsResult>;
+  /** ADR 0952 D1 — pause or activate a campaign's delivery. `paused` is never
+   *  governance-gated (stopping spend is the safe direction) and is idempotent;
+   *  `active` is a LAUNCH and passes the spend gate as `ads.launch`. Live writes
+   *  are `unsupported` until sandbox-verified; `dryRun` returns the plan with no
+   *  platform call. Never throws. */
+  setDeliveryStatus(args: SetDeliveryStatusArgs): Promise<SetDeliveryStatusResult>;
+  /** ADR 0952 D3 — read a campaign's current daily budget (meta: the campaign's
+   *  CBO `daily_budget`; google: its campaign budget). Behind the platform's
+   *  verified READER; a campaign that budgets per ad set is a typed failure, never
+   *  a guess. Never throws. */
+  getCampaignBudget(args: GetCampaignBudgetArgs): Promise<GetCampaignBudgetResult>;
   /** Set a campaign's daily budget (ADR 0186 slice 4b) — the one live-spend mutation.
    *  `dryRun` returns a preview WITHOUT calling the platform. Idempotent + never
    *  unpauses; graceful `no_connection`; `unsupported` (tiktok/linkedin today). Never throws. */
@@ -1296,6 +1800,255 @@ async function sendGoogleConversion(deps: BrokeredEgressDeps, args: SendConversi
   if (!row || Object.keys(row).length === 0) return { outcome: 'failed', error: 'conversion_not_accepted' };
   await stampConnectionUse(deps.storage, deps.runId, r.provenance).catch((e) => log.warn('ads conversion connectionUse stamp failed', { error: e instanceof Error ? e.message : String(e) }));
   return { outcome: 'sent' };
+}
+
+/** ADR 0952 D1 — fork-stable key for one campaign's LAUNCH approval. Claimed
+ *  before a live write; confirmed completion permits a fresh approval on a
+ *  later launch. Ambiguous claims require operator reconciliation. */
+function launchSpendKey(deps: BrokeredEgressDeps, a: SetDeliveryStatusArgs): string {
+  return `adslaunch:${createHash('sha256').update(JSON.stringify([deps.tenantId, a.platform, a.adAccountId, a.campaignId])).digest('hex')}`;
+}
+
+/** A launch refused BEFORE its status write made no launch attempt, so its claim
+ *  returns to the approved mapping it was taken from. CAS on our own claim only:
+ *  a mapping someone else changed since is left alone (it stays fenced). */
+async function releaseUnattemptedLaunch(claim: SpendApprovalMapRow, approved: SpendApprovalMapRow): Promise<void> {
+  try {
+    if (!(await spendApprovals.compareAndSwap(claim, approved))) log.warn('ads launch claim not released; mapping changed, claim remains fenced');
+  } catch { log.warn('ads launch claim release unreadable; claim remains fenced'); }
+}
+
+type LaunchCeiling = { outcome: 'ok'; note: string } | { outcome: 'refused'; result: SetDeliveryStatusResult };
+
+/** ADR 0952 D2 layer 1 (P2) — set the platform's own lifetime ceiling at launch.
+ *  Meta only; behind `adsCeilingWriterEnabled` (unverified until sandbox). */
+async function setLaunchCeiling(
+  deps: BrokeredEgressDeps, args: SetDeliveryStatusArgs,
+  ceiling: { limitMinor: number; currency: string; capId: string }, breakerKey: string,
+): Promise<LaunchCeiling> {
+  const refuse = (result: SetDeliveryStatusResult): LaunchCeiling => ({ outcome: 'refused', result });
+  if (args.platform !== 'meta') return { outcome: 'ok', note: 'not_set:platform_unsupported' };
+  if (!adsCeilingWriterEnabled('meta')) return { outcome: 'ok', note: 'not_set:not_sandbox_verified' };
+  const c = await readAccountCurrency(deps, 'meta', args.adAccountId);
+  if (c.outcome === 'no_connection') return refuse({ outcome: 'no_connection' });
+  if (c.outcome === 'failed') return refuse({ outcome: 'failed', error: `account_currency_unreadable:${c.error}` });
+  if (c.currency !== ceiling.currency) return refuse({ outcome: 'refused', error: 'cap_unenforceable', capId: ceiling.capId });
+  const body = buildMetaSpendCapBody(ceiling.limitMinor, c.currency);
+  if (!body) return refuse({ outcome: 'refused', error: 'cap_unenforceable', capId: ceiling.capId });
+  const cw = await brokeredPost(deps, { provider: PLATFORM_PROVIDER.meta, url: `${metaApiBase()}/${encodeURIComponent(args.campaignId)}`, body: JSON.stringify(body) });
+  if (cw.outcome === 'no_connection') return refuse({ outcome: 'no_connection' });
+  if (cw.outcome !== 'sent') {
+    const err = cw.outcome === 'request_failed' ? (cw.timedOut ? 'timeout' : 'request_failed') : cw.outcome;
+    if (isBreakerReportableFailure(err)) reportConnectionFailure(deps.tenantId, breakerKey);
+    return refuse({ outcome: 'failed', error: `ceiling_rejected:${err}` });
+  }
+  let cj: { success?: boolean; error?: { message?: string } };
+  try { cj = (await cw.res.json()) as typeof cj; } catch { return refuse({ outcome: 'failed', error: 'ceiling_rejected:bad_response' }); }
+  // Meta refuses a spend_cap under its minimum (about $100): the launch is
+  // refused with the platform's own words, never silently uncapped.
+  if (!cw.res.ok || cj.error || cj.success !== true) return refuse({ outcome: 'failed', error: `ceiling_rejected:${cj.error?.message ?? `http_${cw.res.status}`}` });
+  await stampConnectionUse(deps.storage, deps.runId, cw.provenance).catch((e) => log.warn('ads ceiling connectionUse stamp failed', { error: e instanceof Error ? e.message : String(e) }));
+  recordAdsAction(deps, 'ceiling-set', { platform: 'meta', adAccountId: args.adAccountId, platformCampaignId: args.campaignId, spendCap: body.spend_cap, capId: ceiling.capId });
+  return { outcome: 'ok', note: 'set' };
+}
+
+type StatusRead = { outcome: 'ok'; status: DeliveryStatus | 'removed' } | { outcome: 'no_connection' } | { outcome: 'failed'; error: string };
+type StatusWrite = { outcome: 'ok'; provenance: Provenance } | { outcome: 'no_connection' } | { outcome: 'failed'; error: string };
+const legFail = (o: { outcome: string; timedOut?: boolean }): { outcome: 'failed'; error: string } =>
+  ({ outcome: 'failed', error: o.outcome === 'request_failed' ? (o.timedOut ? 'timeout' : 'request_failed') : o.outcome });
+
+async function readMetaStatus(deps: BrokeredEgressDeps, a: SetDeliveryStatusArgs): Promise<StatusRead> {
+  const owner = await readMetaCampaignOwner(deps, a.adAccountId, a.campaignId, true);
+  if (owner.outcome !== 'ok') return owner;
+  if (owner.status === 'PAUSED') return { outcome: 'ok', status: 'paused' };
+  if (owner.status === 'ACTIVE') return { outcome: 'ok', status: 'active' };
+  if (owner.status === 'DELETED' || owner.status === 'ARCHIVED') return { outcome: 'ok', status: 'removed' };
+  return { outcome: 'failed', error: 'unknown_status' };
+}
+async function writeMetaStatus(deps: BrokeredEgressDeps, a: SetDeliveryStatusArgs): Promise<StatusWrite> {
+  const r = await brokeredPost(deps, { provider: PLATFORM_PROVIDER.meta, url: `${metaApiBase()}/${encodeURIComponent(a.campaignId)}`, body: JSON.stringify(buildMetaStatusBody(a.status)) });
+  if (r.outcome === 'no_connection') return { outcome: 'no_connection' };
+  if (r.outcome !== 'sent') return legFail(r);
+  let json: { success?: boolean; error?: { message?: string } };
+  try { json = (await r.res.json()) as typeof json; } catch { return { outcome: 'failed', error: 'bad_response' }; }
+  if (!r.res.ok || json.error || json.success !== true) return { outcome: 'failed', error: json.error?.message ?? `http_${r.res.status}` };
+  return { outcome: 'ok', provenance: r.provenance };
+}
+async function readGoogleStatus(deps: BrokeredEgressDeps, a: SetDeliveryStatusArgs, devToken: string): Promise<StatusRead> {
+  const cid = a.adAccountId.replace(/[^0-9]/g, '');
+  const query = `SELECT campaign.status FROM campaign WHERE campaign.id = ${a.campaignId}`;
+  const r = await brokeredPost(deps, { provider: PLATFORM_PROVIDER.google, url: `${googleApiBase()}/customers/${cid}/googleAds:search`, body: JSON.stringify({ query }), extraHeaders: { 'developer-token': devToken } });
+  if (r.outcome === 'no_connection') return { outcome: 'no_connection' };
+  if (r.outcome !== 'sent') return legFail(r);
+  let json: { results?: Array<{ campaign?: { status?: string } }>; error?: { message?: string } };
+  try { json = (await r.res.json()) as typeof json; } catch { return { outcome: 'failed', error: 'bad_response' }; }
+  if (!r.res.ok || json.error) return { outcome: 'failed', error: json.error?.message ?? `http_${r.res.status}` };
+  const st = json.results?.[0]?.campaign?.status;
+  if (st === undefined) return { outcome: 'failed', error: 'campaign_not_found' };
+  if (st === 'PAUSED') return { outcome: 'ok', status: 'paused' };
+  if (st === 'ENABLED') return { outcome: 'ok', status: 'active' };
+  if (st === 'REMOVED') return { outcome: 'ok', status: 'removed' };
+  return { outcome: 'failed', error: 'unknown_status' };
+}
+async function writeGoogleStatus(deps: BrokeredEgressDeps, a: SetDeliveryStatusArgs, devToken: string): Promise<StatusWrite> {
+  const cid = a.adAccountId.replace(/[^0-9]/g, '');
+  const r = await brokeredPost(deps, { provider: PLATFORM_PROVIDER.google, url: `${googleApiBase()}/customers/${cid}/campaigns:mutate`, body: JSON.stringify(buildGoogleStatusBody(cid, a.campaignId, a.status)), extraHeaders: { 'developer-token': devToken } });
+  if (r.outcome === 'no_connection') return { outcome: 'no_connection' };
+  if (r.outcome !== 'sent') return legFail(r);
+  let json: { results?: Array<{ resourceName?: string }>; error?: { message?: string } };
+  try { json = (await r.res.json()) as typeof json; } catch { return { outcome: 'failed', error: 'bad_response' }; }
+  if (!r.res.ok || json.error || !json.results?.[0]?.resourceName) return { outcome: 'failed', error: json.error?.message ?? `http_${r.res.status}` };
+  return { outcome: 'ok', provenance: r.provenance };
+}
+
+// ── ADR 0952 P5 — TikTok (campaign level) and LinkedIn (campaign GROUP level:
+// our dispatch maps the group into the `campaignId` slot) status + budget I/O.
+// All behind the status/budget writer gates and the reader gate; fixture-only
+// until each platform's sandbox row passes. ──────────────────────────────────
+
+type TiktokCampaignRow = { operation_status?: string; budget?: number | string; budget_mode?: string };
+async function tiktokCampaignRow(deps: BrokeredEgressDeps, advertiserId: string, campaignId: string): Promise<{ outcome: 'ok'; row: TiktokCampaignRow } | { outcome: 'no_connection' } | { outcome: 'failed'; error: string }> {
+  const q = new URLSearchParams({
+    advertiser_id: advertiserId.replace(/[^0-9]/g, ''),
+    filtering: JSON.stringify({ campaign_ids: [campaignId] }),
+    fields: JSON.stringify(['campaign_id', 'operation_status', 'budget', 'budget_mode']),
+  });
+  const r = await brokeredFetch(deps, { provider: PLATFORM_PROVIDER.tiktok, url: `${tiktokApiBase()}/campaign/get/?${q.toString()}`, method: 'GET', authScheme: 'raw', authHeaderName: 'access-token' });
+  if (r.outcome === 'no_connection') return { outcome: 'no_connection' };
+  if (r.outcome !== 'sent') return legFail(r);
+  let json: { code?: number; message?: string; data?: { list?: TiktokCampaignRow[] } };
+  try { json = (await r.res.json()) as typeof json; } catch { return { outcome: 'failed', error: 'bad_response' }; }
+  if (!r.res.ok || json.code !== 0) return { outcome: 'failed', error: json.message ?? `code_${json.code ?? r.res.status}` };
+  const row = json.data?.list?.[0];
+  return row ? { outcome: 'ok', row } : { outcome: 'failed', error: 'campaign_not_found' };
+}
+async function tiktokPost(deps: BrokeredEgressDeps, path: string, body: Record<string, unknown>): Promise<StatusWrite> {
+  const r = await brokeredPost(deps, { provider: PLATFORM_PROVIDER.tiktok, url: `${tiktokApiBase()}/${path}`, body: JSON.stringify(body), authScheme: 'raw', authHeaderName: 'access-token' });
+  if (r.outcome === 'no_connection') return { outcome: 'no_connection' };
+  if (r.outcome !== 'sent') return legFail(r);
+  let json: { code?: number; message?: string };
+  try { json = (await r.res.json()) as typeof json; } catch { return { outcome: 'failed', error: 'bad_response' }; }
+  if (!r.res.ok || json.code !== 0) return { outcome: 'failed', error: json.message ?? `code_${json.code ?? r.res.status}` };
+  return { outcome: 'ok', provenance: r.provenance };
+}
+async function readTiktokStatus(deps: BrokeredEgressDeps, a: SetDeliveryStatusArgs): Promise<StatusRead> {
+  const c = await tiktokCampaignRow(deps, a.adAccountId, a.campaignId);
+  if (c.outcome !== 'ok') return c;
+  const st = c.row.operation_status;
+  if (st === 'DISABLE') return { outcome: 'ok', status: 'paused' };
+  if (st === 'ENABLE') return { outcome: 'ok', status: 'active' };
+  if (st === 'DELETE') return { outcome: 'ok', status: 'removed' };
+  return { outcome: 'failed', error: 'unknown_status' };
+}
+const writeTiktokStatus = (deps: BrokeredEgressDeps, a: SetDeliveryStatusArgs): Promise<StatusWrite> =>
+  tiktokPost(deps, 'campaign/status/update/', buildTiktokStatusBody(a.adAccountId, a.campaignId, a.status));
+
+const LI_HEADERS = { 'LinkedIn-Version': LINKEDIN_VERSION, 'X-Restli-Protocol-Version': '2.0.0' };
+const liAcct = (adAccountId: string): string => adAccountId.replace(/[^0-9]/g, '');
+async function linkedinGet<T>(deps: BrokeredEgressDeps, url: string): Promise<{ outcome: 'ok'; json: T } | { outcome: 'no_connection' } | { outcome: 'failed'; error: string }> {
+  const r = await brokeredFetch(deps, { provider: PLATFORM_PROVIDER.linkedin, url, method: 'GET', extraHeaders: LI_HEADERS });
+  if (r.outcome === 'no_connection') return { outcome: 'no_connection' };
+  if (r.outcome !== 'sent') return legFail(r);
+  let json: T & { message?: string };
+  try { json = (await r.res.json()) as T & { message?: string }; } catch { return { outcome: 'failed', error: 'bad_response' }; }
+  if (!r.res.ok) return { outcome: 'failed', error: json.message ?? `http_${r.res.status}` };
+  return { outcome: 'ok', json };
+}
+async function linkedinPatch(deps: BrokeredEgressDeps, url: string, body: Record<string, unknown>): Promise<StatusWrite> {
+  const r = await brokeredPost(deps, { provider: PLATFORM_PROVIDER.linkedin, url, body: JSON.stringify(body), extraHeaders: { ...LI_HEADERS, 'X-RestLi-Method': 'PARTIAL_UPDATE' } });
+  if (r.outcome === 'no_connection') return { outcome: 'no_connection' };
+  if (r.outcome !== 'sent') return legFail(r);
+  if (!r.res.ok) {
+    let msg: string | undefined;
+    try { msg = ((await r.res.json()) as { message?: string }).message; } catch { /* empty 2xx/4xx body */ }
+    return { outcome: 'failed', error: msg ?? `http_${r.res.status}` };
+  }
+  return { outcome: 'ok', provenance: r.provenance };
+}
+type LinkedinCampaign = { id?: number | string; status?: string; dailyBudget?: { amount?: string; currencyCode?: string } };
+async function linkedinGroupCampaigns(deps: BrokeredEgressDeps, adAccountId: string, groupId: string): Promise<{ outcome: 'ok'; campaigns: LinkedinCampaign[] } | { outcome: 'no_connection' } | { outcome: 'failed'; error: string }> {
+  const urn = encodeURIComponent(`urn:li:sponsoredCampaignGroup:${groupId}`);
+  const r = await linkedinGet<{ elements?: LinkedinCampaign[] }>(deps, `${linkedinApiBase()}/rest/adAccounts/${liAcct(adAccountId)}/adCampaigns?q=search&search=(campaignGroup:(values:List(${urn})))`);
+  return r.outcome === 'ok' ? { outcome: 'ok', campaigns: r.json.elements ?? [] } : r;
+}
+async function readLinkedinStatus(deps: BrokeredEgressDeps, a: SetDeliveryStatusArgs): Promise<StatusRead> {
+  const r = await linkedinGet<{ status?: string }>(deps, `${linkedinApiBase()}/rest/adAccounts/${liAcct(a.adAccountId)}/adCampaignGroups/${a.campaignId}`);
+  if (r.outcome !== 'ok') return r;
+  const st = r.json.status;
+  if (st === 'ACTIVE') return { outcome: 'ok', status: 'active' };
+  if (st === 'PAUSED' || st === 'DRAFT') return { outcome: 'ok', status: 'paused' };
+  if (st === 'ARCHIVED' || st === 'CANCELED' || st === 'PENDING_DELETION' || st === 'REMOVED') return { outcome: 'ok', status: 'removed' };
+  return { outcome: 'failed', error: 'unknown_status' };
+}
+/** Pause: the GROUP (pauses everything under it). Activate: the group AND each of
+ *  its campaigns (our dispatch created the campaign PAUSED, so an active group
+ *  alone would still deliver nothing). */
+async function writeLinkedinStatus(deps: BrokeredEgressDeps, a: SetDeliveryStatusArgs): Promise<StatusWrite> {
+  const acct = liAcct(a.adAccountId);
+  const g = await linkedinPatch(deps, `${linkedinApiBase()}/rest/adAccounts/${acct}/adCampaignGroups/${a.campaignId}`, buildLinkedinStatusPatch(a.status));
+  if (g.outcome !== 'ok' || a.status === 'paused') return g;
+  const cs = await linkedinGroupCampaigns(deps, a.adAccountId, a.campaignId);
+  if (cs.outcome !== 'ok') return cs;
+  let last: StatusWrite = g;
+  for (const c of cs.campaigns) {
+    if (c.status === 'ACTIVE' || c.id === undefined) continue;
+    last = await linkedinPatch(deps, `${linkedinApiBase()}/rest/adAccounts/${acct}/adCampaigns/${c.id}`, buildLinkedinStatusPatch('active'));
+    if (last.outcome !== 'ok') return last;
+  }
+  return last;
+}
+
+async function tiktokCampaignBudget(deps: BrokeredEgressDeps, a: GetCampaignBudgetArgs): Promise<GetCampaignBudgetResult> {
+  const c = await tiktokCampaignRow(deps, a.adAccountId, a.campaignId);
+  if (c.outcome !== 'ok') return c;
+  const major = Number(c.row.budget);
+  if (c.row.budget_mode !== 'BUDGET_MODE_DAY' || !Number.isFinite(major) || major <= 0) return { outcome: 'failed', error: 'no_daily_budget' };
+  const cur = await readAccountCurrency(deps, 'tiktok', a.adAccountId);
+  if (cur.outcome !== 'ok') return cur.outcome === 'no_connection' ? cur : { outcome: 'failed', error: cur.error };
+  const exp = isoExponent(cur.currency);
+  return exp === null ? { outcome: 'failed', error: 'account_currency_unknown' } : { outcome: 'ok', platform: 'tiktok', dailyBudgetMinor: Math.round(major * 10 ** exp) };
+}
+async function linkedinCampaignBudget(deps: BrokeredEgressDeps, a: GetCampaignBudgetArgs): Promise<GetCampaignBudgetResult> {
+  const cs = await linkedinGroupCampaigns(deps, a.adAccountId, a.campaignId);
+  if (cs.outcome !== 'ok') return cs;
+  const budgeted = cs.campaigns.filter((c) => c.dailyBudget?.amount !== undefined);
+  if (budgeted.length === 0) return { outcome: 'failed', error: 'no_daily_budget' };
+  if (budgeted.length > 1) return { outcome: 'failed', error: 'budget_split_across_campaigns' };
+  const b = budgeted[0]?.dailyBudget;
+  const exp = isoExponent(b?.currencyCode);
+  const major = Number(b?.amount);
+  if (exp === null || !Number.isFinite(major)) return { outcome: 'failed', error: 'bad_response' };
+  return { outcome: 'ok', platform: 'linkedin', dailyBudgetMinor: Math.round(major * 10 ** exp) };
+}
+
+async function tiktokBudget(deps: BrokeredEgressDeps, args: UpdateBudgetArgs): Promise<UpdateBudgetResult> {
+  if (args.dryRun) return { outcome: 'preview', platform: 'tiktok', dailyBudgetMinor: args.dailyBudgetMinor, target: args.campaignId };
+  const c = await readAccountCurrency(deps, 'tiktok', args.adAccountId);
+  if (c.outcome === 'no_connection') return { outcome: 'no_connection' };
+  if (c.outcome === 'failed') return { outcome: 'failed', error: c.error === 'account_currency_unknown' ? c.error : `account_currency_unreadable:${c.error}` };
+  const v = platformBudget('tiktok', args.dailyBudgetMinor, c.currency);
+  if (!v.ok || typeof v.value !== 'number') return { outcome: 'failed', error: v.ok ? 'bad_budget' : v.error };
+  const w = await tiktokPost(deps, 'campaign/update/', buildTiktokBudgetBody(args.adAccountId, args.campaignId, v.value));
+  if (w.outcome !== 'ok') return w;
+  await stampConnectionUse(deps.storage, deps.runId, w.provenance).catch((e) => log.warn('ads budget connectionUse stamp failed', { error: e instanceof Error ? e.message : String(e) }));
+  return { outcome: 'updated', platform: 'tiktok', dailyBudgetMinor: args.dailyBudgetMinor, target: args.campaignId };
+}
+async function linkedinBudget(deps: BrokeredEgressDeps, args: UpdateBudgetArgs): Promise<UpdateBudgetResult> {
+  if (args.dryRun) return { outcome: 'preview', platform: 'linkedin', dailyBudgetMinor: args.dailyBudgetMinor, target: args.campaignId };
+  const cs = await linkedinGroupCampaigns(deps, args.adAccountId, args.campaignId);
+  if (cs.outcome !== 'ok') return cs;
+  // The daily budget lives on the group's campaign; several campaigns have no single budget to set.
+  if (cs.campaigns.length !== 1 || cs.campaigns[0]?.id === undefined) return { outcome: 'failed', error: cs.campaigns.length === 0 ? 'no_daily_budget' : 'budget_split_across_campaigns' };
+  const c = await readAccountCurrency(deps, 'linkedin', args.adAccountId);
+  if (c.outcome === 'no_connection') return { outcome: 'no_connection' };
+  if (c.outcome === 'failed') return { outcome: 'failed', error: c.error === 'account_currency_unknown' ? c.error : `account_currency_unreadable:${c.error}` };
+  const v = platformBudget('linkedin', args.dailyBudgetMinor, c.currency);
+  if (!v.ok || typeof v.value !== 'string') return { outcome: 'failed', error: v.ok ? 'bad_budget' : v.error };
+  const target = String(cs.campaigns[0].id);
+  const w = await linkedinPatch(deps, `${linkedinApiBase()}/rest/adAccounts/${liAcct(args.adAccountId)}/adCampaigns/${target}`, buildLinkedinBudgetPatch(v.value, c.currency));
+  if (w.outcome !== 'ok') return w;
+  await stampConnectionUse(deps.storage, deps.runId, w.provenance).catch((e) => log.warn('ads budget connectionUse stamp failed', { error: e instanceof Error ? e.message : String(e) }));
+  return { outcome: 'updated', platform: 'linkedin', dailyBudgetMinor: args.dailyBudgetMinor, target };
 }
 
 export function makeAdsAdapter(deps: BrokeredEgressDeps): AdsAdapter {
@@ -1344,7 +2097,12 @@ export function makeAdsAdapter(deps: BrokeredEgressDeps): AdsAdapter {
       const spendKey = `adsaud:${createHash('sha256').update(JSON.stringify([deps.tenantId, args.platform, args.adAccountId, args.audienceName, args.membersKey])).digest('hex')}`;
       let policy: Awaited<ReturnType<typeof getGovernancePolicy>> = null;
       try { policy = await getGovernancePolicy(deps.tenantId); }
-      catch (e) { log.warn('ads audience policy read failed — treating as unset', { error: e instanceof Error ? e.message : String(e) }); }
+      catch (e) {
+        // Fail CLOSED, like the spend gate: "unset" would fall through to a
+        // stored approval and upload even if the unread policy says `disabled`.
+        log.warn('ads audience policy read failed — refusing the upload', { error: e instanceof Error ? e.name : 'unknown' });
+        return { outcome: 'failed', error: 'policy_unreadable' };
+      }
       const kindPolicy = policy?.actionPolicy?.['ads.audience'];
       if (kindPolicy === 'disabled') return { outcome: 'failed', error: 'policy_disabled' };
       const mapped = await spendApprovals.get(spendKey).catch(() => undefined);
@@ -1439,29 +2197,169 @@ export function makeAdsAdapter(deps: BrokeredEgressDeps): AdsAdapter {
       return { outcome: 'synced', platform: 'google', platformAudienceId: rn, uploaded: args.memberHashes.length };
     },
     async updateBudget(args) {
+      if (!Number.isSafeInteger(args.dailyBudgetMinor) || args.dailyBudgetMinor < 0) return { outcome: 'failed', error: 'invalid_budget' };
       let effective = args;
+      let notice: EnforceVerdict | undefined;
       if (!effective.dryRun) {
+        const accountCurrency = memoAccountCurrency(deps, effective.platform, effective.adAccountId);
         const gate = await evaluateSpendGate(deps, 'ads.budget', budgetSpendKey(deps, effective), effective.dailyBudgetMinor, {
           platform: effective.platform, adAccountId: effective.adAccountId, platformCampaignId: effective.campaignId,
-          summary: `Set ${effective.platform} campaign ${effective.campaignId} daily budget to ${effective.dailyBudgetMinor} (minor units)`,
+          summary: `Set ${effective.platform} campaign ${effective.campaignId} daily budget to ${effective.dailyBudgetMinor} (minor units of the ad account's currency)`,
+          accountCurrency: async () => { const c = await accountCurrency(); return c.outcome === 'ok' ? c.currency : null; },
         });
         if (gate.verdict === 'disabled') return { outcome: 'failed', error: 'policy_disabled' };
+        if (gate.verdict === 'unreadable') return { outcome: 'failed', error: 'policy_unreadable' };
+        if (gate.verdict === 'autonomy-blocked') return { outcome: 'failed', error: 'autonomy_blocked' };
+        if (gate.verdict === 'allow') notice = gate.notice;
         if (gate.verdict === 'draft-only') effective = { ...effective, dryRun: true };
         else if (gate.verdict === 'requires-approval') {
           if (gate.approvalStatus === 'rejected') return { outcome: 'failed', error: 'spend_approval_rejected' };
-          return { outcome: 'requires_approval', approvalId: gate.approvalId };
+          return { outcome: 'requires_approval', approvalId: gate.approvalId, ...(gate.autonomy ? { autonomy: true as const } : {}) };
         }
       }
+      // ADR 0952 P5 — TikTok/LinkedIn writers exist but are `unsupported` until sandbox-verified.
       const result = effective.platform === 'meta' ? await metaBudget(deps, effective)
         : effective.platform === 'google' ? await googleBudget(deps, effective)
-        : ({ outcome: 'unsupported', platform: effective.platform } as UpdateBudgetResult);
+        : !adsBudgetWriterEnabled(effective.platform) && !effective.dryRun ? ({ outcome: 'unsupported', platform: effective.platform } as UpdateBudgetResult)
+        : effective.platform === 'tiktok' ? await tiktokBudget(deps, effective)
+        : await linkedinBudget(deps, effective);
       if (result.outcome === 'updated') {
         recordAdsAction(deps, 'budget-updated', {
           platform: effective.platform, platformCampaignId: effective.campaignId,
           adAccountId: effective.adAccountId, dailyBudgetMinor: effective.dailyBudgetMinor,
         });
+        // ADR 0942 D7 — a notify-after decision tells its people AFTER the change landed.
+        if (notice) await noticeAfterEffect(deps.tenantId, notice, 'ads.budget', `Daily budget set to ${effective.dailyBudgetMinor} (minor units) on ${effective.platform} campaign ${effective.campaignId}.`);
       }
       return result;
+    },
+    async setDeliveryStatus(args) {
+      if (args.status !== 'paused' && args.status !== 'active') return { outcome: 'failed', error: 'invalid_status' };
+      if (!/[0-9]/.test(args.campaignId) || !/[0-9]/.test(args.adAccountId)) return { outcome: 'failed', error: 'invalid_ids' };
+      // Google, TikTok and LinkedIn ids are numeric and go into queries / paths:
+      // a non-numeric id is refused, never stripped into a different campaign.
+      if (args.platform !== 'meta' && !/^[0-9]+$/.test(args.campaignId)) return { outcome: 'failed', error: 'invalid_ids' };
+      // Dry run: the exact write, no call, no gate (a preview starts no spend).
+      if (args.dryRun) {
+        const acct = args.adAccountId.replace(/[^0-9]/g, '');
+        const plan: AdPlanStep[] = args.platform === 'meta'
+          ? [{ step: `POST /${args.campaignId}`, body: buildMetaStatusBody(args.status) }]
+          : args.platform === 'google'
+            ? [{ step: `POST customers/${acct}/campaigns:mutate`, body: buildGoogleStatusBody(acct, args.campaignId, args.status) }]
+            : args.platform === 'tiktok'
+              ? [{ step: 'POST campaign/status/update/', body: buildTiktokStatusBody(acct, args.campaignId, args.status) }]
+              : [{ step: `POST (PARTIAL_UPDATE) rest/adAccounts/${acct}/adCampaignGroups/${args.campaignId}${args.status === 'active' ? ' + each campaign in the group' : ''}`, body: buildLinkedinStatusPatch(args.status) }];
+        return { outcome: 'preview', platform: args.platform, status: args.status, plan };
+      }
+      // ADR 0952 D1 / 0907 D2 — never presented as working before a sandbox run.
+      if (!adsStatusWriterEnabled(args.platform)) return { outcome: 'unsupported', platform: args.platform, reason: 'not_sandbox_verified' };
+      let devToken = '';
+      if (args.platform === 'google') {
+        devToken = resolveDeveloperToken(deps.tenantId) ?? '';
+        if (!devToken) return { outcome: 'failed', error: 'no_developer_token' };
+      }
+      const breakerKey = `ads:${args.platform}`;
+      // Stopping spend is the safe direction: an open circuit refuses a LAUNCH,
+      // but a pause is still attempted.
+      if (args.status === 'active' && circuitStatus(deps.tenantId, breakerKey) === 'open') return { outcome: 'refused', error: 'circuit_open' };
+
+      // Read first: a no-op (already in the target state) needs no gate and no write.
+      const current = args.platform === 'meta' ? await readMetaStatus(deps, args)
+        : args.platform === 'google' ? await readGoogleStatus(deps, args, devToken)
+        : args.platform === 'tiktok' ? await readTiktokStatus(deps, args)
+        : await readLinkedinStatus(deps, args);
+      if (current.outcome === 'no_connection') return { outcome: 'no_connection' };
+      if (current.outcome === 'failed') {
+        if (isBreakerReportableFailure(current.error)) reportConnectionFailure(deps.tenantId, breakerKey);
+        return { outcome: 'failed', error: current.error };
+      }
+      if (current.status === 'removed') return { outcome: 'failed', error: 'campaign_removed' };
+      if (current.status === args.status) return { outcome: 'unchanged', platform: args.platform, status: args.status };
+
+      // `active` is a LAUNCH: the spend gate as `ads.launch` (approval by default;
+      // unreadable / disabled refuse; draft-only previews). `paused` is never gated.
+      const spendKey = launchSpendKey(deps, args);
+      let launchClaim: SpendApprovalMapRow | undefined;
+      let gateApproval: SpendApprovalMapRow | undefined;
+      let launchCeiling: { limitMinor: number; currency: string; capId: string } | undefined;
+      let ceilingNote: string | undefined;
+      if (args.status === 'active') {
+        // ADR 0952 D2 — caps first: a breached/stale or unenforceable cap refuses
+        // the launch before any approval is opened for it.
+        if (capChecker) {
+          let cap: AdsCapVerdict;
+          try { cap = await capChecker(deps.tenantId, { platform: args.platform, adAccountId: args.adAccountId, campaignId: args.campaignId, ...(deps.orgId ? { orgId: deps.orgId } : {}) }); } catch { return { outcome: 'refused', error: 'policy_unreadable' }; }
+          if (cap.verdict !== 'ok') return { outcome: 'refused', error: cap.verdict, capId: cap.capId };
+          launchCeiling = cap.ceiling;
+          ceilingNote = cap.ceiling ? 'pending' : cap.noCeiling ? `not_set:${cap.noCeiling}` : undefined;
+        }
+        const gate = await evaluateSpendGate(deps, 'ads.launch', spendKey, undefined, {
+          platform: args.platform, adAccountId: args.adAccountId, platformCampaignId: args.campaignId,
+          summary: `LAUNCH ${args.platform} campaign ${args.campaignId} (account ${args.adAccountId}): this STARTS SPEND at the campaign's current budget. Reason: ${args.reason.kind}${args.reason.ref ? ` (${args.reason.ref})` : ''}.`,
+        });
+        if (gate.verdict === 'unreadable') return { outcome: 'refused', error: gate.error ?? 'policy_unreadable' };
+        if (gate.verdict === 'disabled') return { outcome: 'refused', error: 'policy_disabled' };
+        if (gate.verdict === 'autonomy-blocked') return { outcome: 'refused', error: 'autonomy_blocked' };
+        if (gate.verdict === 'draft-only') return adapter.setDeliveryStatus({ ...args, dryRun: true });
+        if (gate.verdict === 'requires-approval') {
+          if (gate.approvalStatus === 'rejected') return { outcome: 'failed', error: 'launch_approval_rejected' };
+          return { outcome: 'requires_approval', approvalId: gate.approvalId };
+        }
+        if (!gate.launchApproval) return { outcome: 'refused', error: 'launch_approval_missing' };
+        gateApproval = gate.launchApproval;
+        launchClaim = { ...gate.launchApproval, launchClaim: { claimId: randomUUID(), claimedAt: new Date().toISOString(), state: 'claimed' } };
+        try {
+          if (!(await spendApprovals.compareAndSwap(gate.launchApproval, launchClaim))) return { outcome: 'refused', error: 'launch_approval_changed' };
+        } catch { return { outcome: 'refused', error: 'launch_claim_unreadable' }; }
+      }
+
+      // ADR 0952 D2 layer 1 (P2) — the platform's own lifetime ceiling goes on
+      // BEFORE the campaign starts spending, and AFTER the launch claim above, so
+      // no vendor call precedes the claim. A verified writer that fails refuses
+      // the launch (the campaign stays paused); an unverified one leaves the P1
+      // watchdog as the guard, and the result says which. A refusal here is
+      // before the status write, so no launch was attempted: the claim goes back
+      // to the approved mapping it came from (own claim only, by CAS), and a
+      // retry can launch once the ceiling is fixed. A ceiling write never starts
+      // spend, so an ambiguous one is not an ambiguous launch.
+      if (args.status === 'active' && launchCeiling) {
+        const ceiling = await setLaunchCeiling(deps, args, launchCeiling, breakerKey);
+        if (ceiling.outcome !== 'ok') {
+          if (launchClaim && gateApproval) await releaseUnattemptedLaunch(launchClaim, gateApproval);
+          return ceiling.result;
+        }
+        ceilingNote = ceiling.note;
+      }
+
+      const w = args.platform === 'meta' ? await writeMetaStatus(deps, args)
+        : args.platform === 'google' ? await writeGoogleStatus(deps, args, devToken)
+        : args.platform === 'tiktok' ? await writeTiktokStatus(deps, args)
+        : await writeLinkedinStatus(deps, args);
+      if (w.outcome === 'no_connection') return { outcome: 'no_connection' };
+      if (w.outcome === 'failed') {
+        if (isBreakerReportableFailure(w.error)) reportConnectionFailure(deps.tenantId, breakerKey);
+        return { outcome: 'failed', error: w.error };
+      }
+      reportConnectionSuccess(deps.tenantId, breakerKey);
+      // The pre-write claim survives every ambiguous outcome. Only this exact
+      // confirmed attempt can mark completion; never delete a newer mapping.
+      if (launchClaim?.launchClaim) {
+        try {
+          const completed: SpendApprovalMapRow = { ...launchClaim, launchClaim: { ...launchClaim.launchClaim, state: 'completed' } };
+          if (!(await spendApprovals.compareAndSwap(launchClaim, completed))) log.warn('ads launch completion not recorded; claim remains fenced');
+        } catch { log.warn('ads launch completion unreadable; claim remains fenced'); }
+      }
+      await stampConnectionUse(deps.storage, deps.runId, w.provenance).catch((e) => log.warn('ads delivery-status connectionUse stamp failed', { error: e instanceof Error ? e.message : String(e) }));
+      recordAdsAction(deps, args.status === 'paused' ? 'delivery-paused' : 'delivery-activated', {
+        platform: args.platform, adAccountId: args.adAccountId, platformCampaignId: args.campaignId,
+        status: { meta: metaStatusLiteral, google: googleStatusLiteral, tiktok: tiktokStatusLiteral, linkedin: linkedinStatusLiteral }[args.platform](args.status),
+        reason: args.reason.kind, ...(args.reason.ref ? { reasonRef: args.reason.ref } : {}),
+      });
+      return { outcome: 'updated', platform: args.platform, status: args.status, ...(ceilingNote ? { ceiling: ceilingNote } : {}) };
+    },
+    async getCampaignBudget(args) {
+      if (!adsReaderEnabled(args.platform)) return { outcome: 'unsupported', platform: args.platform, reason: 'not_sandbox_verified' };
+      return { meta: metaCampaignBudget, google: googleCampaignBudget, tiktok: tiktokCampaignBudget, linkedin: linkedinCampaignBudget }[args.platform](deps, args);
     },
     async getAccountMetrics(args) {
       const reader = { meta: metaAccountMetrics, google: googleAccountMetrics, tiktok: tiktokAccountMetrics, linkedin: linkedinAccountMetrics }[args.platform];
@@ -1486,6 +2384,7 @@ export function makeAdsAdapter(deps: BrokeredEgressDeps): AdsAdapter {
       return { outcome: 'unsupported', platform: args.platform };
     },
     async publishAd(args) {
+      if (args.dailyBudgetMinor !== undefined && (!Number.isSafeInteger(args.dailyBudgetMinor) || args.dailyBudgetMinor < 0)) return { outcome: 'failed', error: 'invalid_budget' };
       const strategy = STRATEGIES[args.platform];
       if (!strategy) return { outcome: 'failed', error: 'unsupported_platform' };
 
@@ -1516,8 +2415,19 @@ export function makeAdsAdapter(deps: BrokeredEgressDeps): AdsAdapter {
       // platform calls and persists NOTHING — pure preview. We surface whether a real
       // dispatch already exists for this key (so a UI can warn "this would be a no-op")
       // but never short-circuit to 'published' — a preview must stay side-effect-free.
+      // ADR 0945 D5 — the creative publish gate, before any preview, approval or
+      // spend. Skipped when this exact ad was already dispatched: a live ad is
+      // not "un-published" by a later verdict, and a replay returns `reused`.
+      if (args.mediaAssetId && !priorIsOurs) {
+        const gate = await assertCreativePublishable({
+          tenantId: deps.tenantId, mediaRef: args.mediaAssetId, destination: `ads:${args.platform}`,
+          context: { political: args.euPoliticalAdvertising === 'contains' },
+        });
+        if (!gate.ok) return { outcome: 'failed', error: gate.code };
+      }
+
       if (args.dryRun) {
-        const pr = await strategy(deps, args);
+        const pr = await strategy(deps, args, async () => (args.accountCurrency ? { currency: args.accountCurrency } : {}));
         if (pr.kind === 'no_connection') return { outcome: 'no_connection' };
         if (pr.kind === 'failed') return { outcome: 'failed', error: pr.error };
         if (pr.kind !== 'preview') return { outcome: 'failed', error: 'preview_unavailable' };
@@ -1545,14 +2455,19 @@ export function makeAdsAdapter(deps: BrokeredEgressDeps): AdsAdapter {
       // Spend governance (§5B B3): policy gate on the LIVE dispatch path only —
       // dry-runs are side-effect-free previews and a reused prior creates no new
       // spend surface, so both bypass the gate.
+      // One account-currency read per dispatch, shared by the spend gate and the strategy.
+      const accountCurrency = memoAccountCurrency(deps, args.platform, args.adAccountId);
       const gate = await evaluateSpendGate(deps, 'ads.publish', idemKey, args.dailyBudgetMinor, {
         platform: args.platform, adAccountId: args.adAccountId, briefId: args.briefId,
-        summary: `Publish ${args.platform} campaign "${args.campaignName}" (PAUSED) with daily budget ${args.dailyBudgetMinor ?? 0} (minor units)`,
+        summary: `Publish ${args.platform} campaign "${args.campaignName}" (PAUSED) with daily budget ${args.dailyBudgetMinor ?? 0} (minor units of the ad account's currency)`,
+        accountCurrency: async () => { const c = await accountCurrency(); return c.outcome === 'ok' ? c.currency : null; },
       });
       if (gate.verdict === 'disabled') return { outcome: 'failed', error: 'policy_disabled' };
+      if (gate.verdict === 'unreadable') return { outcome: 'failed', error: 'policy_unreadable' };
+      if (gate.verdict === 'autonomy-blocked') return { outcome: 'failed', error: 'autonomy_blocked' };
       if (gate.verdict === 'requires-approval') {
         if (gate.approvalStatus === 'rejected') return { outcome: 'failed', error: 'spend_approval_rejected' };
-        return { outcome: 'requires_approval', approvalId: gate.approvalId };
+        return { outcome: 'requires_approval', approvalId: gate.approvalId, ...(gate.autonomy ? { autonomy: true as const } : {}) };
       }
       if (gate.verdict === 'draft-only') {
         // 'draft-only' policy: behave exactly like an explicit dryRun preview.
@@ -1616,7 +2531,15 @@ export function makeAdsAdapter(deps: BrokeredEgressDeps): AdsAdapter {
       // refusal (no platform call); half-open lets this ONE call probe.
       const circuit = circuitStatus(deps.tenantId, `ads:${args.platform}`);
       if (circuit === 'open') return { outcome: 'failed', error: 'circuit_open' };
-      const r = await strategy(deps, args);
+      // ADR 0952 defect P9 — a budget goes out in the account's own currency unit:
+      // the strategy reads the currency before its first write. Fail closed.
+      const r = await strategy(deps, args, async () => {
+        const c = await accountCurrency();
+        if (c.outcome === 'no_connection') return { error: 'no_connection' };
+        if (c.outcome === 'failed') return { error: c.error === 'account_currency_unknown' ? c.error : `account_currency_unreadable:${c.error}` };
+        if (args.accountCurrency && args.accountCurrency !== c.currency) return { error: `currency_mismatch:${c.currency}` };
+        return { currency: c.currency };
+      });
       if (r.kind === 'no_connection') return { outcome: 'no_connection' };
       if (r.kind === 'failed') {
         if (isBreakerReportableFailure(r.error)) reportConnectionFailure(deps.tenantId, `ads:${args.platform}`);
@@ -1631,11 +2554,16 @@ export function makeAdsAdapter(deps: BrokeredEgressDeps): AdsAdapter {
       // side (no spend — the bounded residual); but only ONE ledger row wins, and
       // the loser returns the winner's ids with reused:true so its OUTPUT is
       // consistent. A storage hiccup must not throw (the types.ts contract) — log.
+      // ADR 0941 P2 — the campaign back-link comes from the run, never from `args`.
+      const owner = await campaignForRun((id) => deps.storage.getRun(id), deps.tenantId, deps.runId, args.briefId).catch(() => null);
       const record: AdDispatchRecord = {
         idemKey, tenantId: deps.tenantId, platform: args.platform,
         platformCampaignId: r.ids.campaignId, platformAdSetId: r.ids.adSetId, platformAdId: r.ids.adId, createdAt: new Date().toISOString(),
         briefId: args.briefId, campaignName: args.campaignName, adAccountId: args.adAccountId,
         ...(args.dailyBudgetMinor !== undefined ? { dailyBudgetMinor: args.dailyBudgetMinor } : {}),
+        ...(owner ? { campaignId: owner.campaignId, orgId: owner.orgId } : {}),
+        ...(args.landingUrl ? { landingUrl: args.landingUrl } : {}),
+        ...(args.adRef ? { adRef: args.adRef } : {}),
       };
       let ledgered = record;
       try {
@@ -1665,6 +2593,8 @@ export function makeAdsAdapter(deps: BrokeredEgressDeps): AdsAdapter {
         ...(args.dailyBudgetMinor !== undefined ? { dailyBudgetMinor: args.dailyBudgetMinor } : {}),
         paused: true,
       });
+      // ADR 0942 D7 — notify-after: told once the PAUSED entities exist.
+      if (gate.verdict === 'allow' && gate.notice) await noticeAfterEffect(deps.tenantId, gate.notice, 'ads.publish', `Published "${args.campaignName}" to ${args.platform} (paused).`);
 
       return {
         outcome: 'published', platform: args.platform, reused: false, paused: true, reviewStatus: 'pending_review',

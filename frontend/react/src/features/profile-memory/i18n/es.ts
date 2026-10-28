@@ -21,7 +21,11 @@ export const messages = {
 
   // Consentimiento de extracción automática (ADR 0120)
   consentLabel: 'Aprender automáticamente datos duraderos de mis chats',
-  consentHint: 'Cuando está activado, su asistente puede guardar datos duraderos que aprende durante los chats. Los datos aprendidos aparecen abajo, marcados como «Aprendida automáticamente», y puede eliminarlos. Desactivarlo detiene el aprendizaje futuro, pero no elimina lo ya aprendido. Desactivado por defecto.',
+  consentHint: 'Cuando está activado, cada vez que inicia un chat nuevo su asistente revisa el chat que acaba de dejar y guarda datos duraderos que usted dijo sobre sí mismo. Solo lee sus propios mensajes, y solo los chats de su espacio de trabajo personal. Los datos aprendidos aparecen abajo, marcados como «Aprendida automáticamente», y los asistentes los tratan como no verificados. Eliminar uno también impide que se vuelva a aprender con las mismas palabras. Desactivarlo detiene el aprendizaje futuro, pero no elimina lo ya aprendido. Desactivado por defecto.',
+  consentUnavailable: 'Aprender de los chats requiere un espacio de trabajo personal, y esta cuenta no tiene uno.',
+  consentSignIn: 'Inicie sesión para que su asistente aprenda datos duraderos de sus chats.',
+  consentTurnOff: 'Desactivar',
+  removeLearnedConfirmBody: '¿Eliminar este dato aprendido? Ya no se recordará, y no se volverá a aprender con las mismas palabras.',
   erasureScopeNote: 'Eliminar los datos de su cuenta borra su memoria personal. No alcanza lo que un agente compartido del espacio de trabajo recuerda de sus conversaciones con él: esa memoria pertenece al espacio de trabajo. Pida a un administrador que borre la memoria del agente desde su pestaña Memoria.',
   consentError: 'No se pudo actualizar la opción de aprendizaje de memoria.',
   consentLoadFailed: 'No se pudo leer si el aprendizaje de memoria está activado. Puede estar ACTIVADO: esto no confirma que esté desactivado.',

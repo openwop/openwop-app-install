@@ -8,6 +8,15 @@
  * tenant-bound the way a v2 client binds it) for the same principal. A codec that minted its own task id would pass every unit test and
  * hand a peer an id that resolves to nothing.
  *
+ * Tracker TST-BG1-1. Red when (probe-witnessed, wave 58): `submitMessageTask`
+ * mints a task id that is not the run id; the messageId claim is not re-read
+ * (a retry mints a second run); the messageId requirement, the into-a-task
+ * refusal, the 0.3-name refusal, the streaming / push / extended-card refusals
+ * or the GetTask not-found reason are removed or re-coded; CancelTask stops
+ * cancelling the run or stops refusing a terminal one; ListTasks stops reading
+ * the tenant's tasks; `error.data` stops being the §9.5 ErrorInfo `Any[]`; or the
+ * 1.0 Task grows a `kind`.
+ *
  * @see spec/v1/a2a-integration.md §"A2A 1.0 versioned composition" §D.1, §D.4
  */
 

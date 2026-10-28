@@ -47,16 +47,17 @@ describe('RFC 0106 §C — streaming synthesis arm (ADR 0109 P3)', () => {
     expect(res.status).toBe(200);
     const body = await res.json() as { audio?: { url?: string }; events?: Chunk[] };
     // Promise still resolves with the finished asset.
-    expect(typeof body.audio?.url).toBe('string');
-    // ... and the streaming chunks were emitted on the durable log.
-    const chunks = (body.events ?? []).filter((e) => e.type === 'voice.synthesis_chunk');
-    expect(chunks.length).toBeGreaterThanOrEqual(1);
-    for (const c of chunks) {
-      expect(typeof c.payload.seq).toBe('number');
-      expect(typeof c.payload.mimeType).toBe('string');
-      expect(typeof c.payload.url).toBe('string');     // metadata references the asset url
-      expect(c.payload.base64).toBeUndefined();         // METADATA-ONLY — no inline bytes on the log
-    }
+    const url = body.audio?.url;
+    expect(url).toMatch(/^\S+$/);
+    // ... and EXACTLY one streaming chunk was emitted on the durable log: seq 0,
+    // final, whose url IS the whole-file asset's url. toEqual refuses an extra
+    // key, so an inline `base64` (bytes on the log, the C2/G8 budget rule) or a
+    // second/duplicate chunk fails here.
+    expect(body.events).toEqual([
+      { type: 'voice.synthesis_chunk', payload: { seq: 0, mimeType: 'audio/mpeg', url, final: true } },
+    ]);
+    const chunk = (body.events ?? [])[0];
+    expect(chunk?.payload.base64).toBeUndefined(); // METADATA-ONLY — no inline bytes on the log
   });
 
   it('no stream → unchanged RFC 0105 whole-file result (no events attached)', async () => {

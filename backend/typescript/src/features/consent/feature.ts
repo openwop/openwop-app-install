@@ -9,6 +9,8 @@
 import type { BackendFeature } from '../types.js';
 import { registerConsentRoutes } from './routes.js';
 import { registerConsentErasure } from './erasure.js';
+import { registerTopicOptOutLifecycle } from './topicOptOuts.js';
+import { registerClientChannelConsentLifecycle } from './clientChannelConsent.js';
 import { buildConsentSurface } from './surface.js';
 
 export const consentFeature: BackendFeature = {
@@ -19,6 +21,8 @@ export const consentFeature: BackendFeature = {
     // ADR 0655 D1 precedent): every ADR 0381-resolved key gets the record deleted AND
     // the tombstone written, from BOTH erase doors.
     registerConsentErasure();
+    registerTopicOptOutLifecycle(); // ADR 0905 D7 — topic opt-outs: eraser + merge union
+    registerClientChannelConsentLifecycle(); // ADR 0955 Q7 — per-client SMS grants: eraser + merge (false wins)
   },
   // Face 2 (ADR 0014): `ctx.features.consent` — the same isAllowed/record helper,
   // exposed to workflow nodes (single enforcement path).

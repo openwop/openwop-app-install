@@ -373,7 +373,7 @@ describe('crm org surface — custom fields + import (Phase 3)', () => {
     await enableCrm('on');
     const { owner, orgId } = await ownerWithMember('viewer');
     expect((await owner.post(c(orgId, '/fields'), { entityType: 'company', key: 'note', label: 'Note', type: 'string' })).status).toBe(201);
-    // The seam uses the SAME host cleanString (cap 120 + secret-shape scrub) CRM already used.
+    // The seam caps values at 120 (the content lane: no rewrite, see below).
     // BOUNDED: a long value of SHORT words — not a 40+-char run, which the scrub
     // would redact first and so hide whether the cap applies at all (the old
     // `'x'.repeat(200)` fixture was exactly that: it came back as the 24-char
@@ -382,10 +382,17 @@ describe('crm org surface — custom fields + import (Phase 3)', () => {
     const co = await owner.post(c(orgId, '/companies'), { name: 'Bounded', customFields: { note: long } });
     expect(co.status, JSON.stringify(co.body)).toBe(201);
     expect(co.body.customFields.note, 'capped at exactly 120 chars').toBe(long.slice(0, 120));
-    // SCRUBBED: a pasted credential shape is redacted, never stored.
+    // Content lane (custom field VALUES are served on the public storefront): a
+    // pasted credential is a typed refusal and nothing is stored, never a silent
+    // rewrite; a long opaque run (a hash) is kept byte for byte.
     const secret = await owner.post(c(orgId, '/companies'), { name: 'Scrubbed', customFields: { note: 'key sk-live1234567890abcd here' } });
-    expect(secret.status, JSON.stringify(secret.body)).toBe(201);
-    expect(secret.body.customFields.note).toBe('key [REDACTED:secret-shaped] here');
+    expect(secret.status, JSON.stringify(secret.body)).toBe(400);
+    expect(JSON.stringify(secret.body)).toContain('secret_shaped');
+    expect(JSON.stringify(secret.body)).not.toContain('sk-live1234567890abcd');
+    const hash = 'sha 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08';
+    const kept = await owner.post(c(orgId, '/companies'), { name: 'Hash', customFields: { note: hash } });
+    expect(kept.status, JSON.stringify(kept.body)).toBe(201);
+    expect(kept.body.customFields.note).toBe(hash);
   });
 
   it('import: dedup by key, column mapping, per-row errors', async () => {

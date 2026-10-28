@@ -8,22 +8,31 @@
  * Entitlement is the real billing seam (`createApp` registers it), narrowed with
  * `OPENWOP_BILLING_PLAN_FEATURES`.
  *
- * Sabotage witnesses (run by hand, 2026-10-14): dropping the `unentitled` check
- * from `enableBundleForTenant` reds "refuses a bundle the plan does not cover";
- * dropping the `!leaving.has(...)` exclusion in `tenantDisableBlockers` reds
- * "turns the crm bundle off".
+ * (TST-BPC) Red when (each sabotage-witnessed, wave 65): the `unentitled` check is
+ * dropped ⇒ both "…plan does not cover" cases; the audit row names someone other than
+ * the actor ⇒ "turns the closure on…"; the disable-lock refusal is dropped ⇒ "refuses
+ * while a feature OUTSIDE…"; the closure lists a feature before its dependency ⇒
+ * "enabling commerce…"; the activation state skips its per-feature check ⇒
+ * "available → enabled…"; disable turns off the closure, not just the bundle's own
+ * features ⇒ "disabling commerce…"; `tenantDisableBlockers` drops its tenant filter ⇒
+ * "the lock is per tenant" (an orphan another tenant already has must not block this
+ * one) or its `!leaving.has(...)` exclusion ⇒ "turns the crm bundle off".
+ *
+ * DOUBLE GUARD (recorded): a killed feature is refused twice, by the precheck in
+ * `host/featureBundleActivation.ts` and by `enableTenantOverride`'s kill outcome in
+ * `host/featureToggles/service.ts`, which the in-loop branch maps to the same
+ * `{reason:'feature_killed', ids:[id]}`. Dropping either one alone stays green.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import {
-  __clearToggleStore, enableTenantOverride, getStoredConfig, resolveToggle, saveConfig,
+  __clearToggleStore, disableTenantOverride, enableTenantOverride, getStoredConfig, resolveToggle, saveConfig,
 } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { listToggleChanges } from '../src/host/featureToggles/audit.js';
 import {
   bundleActivationState, bundleClosure, disableBundleForTenant, enableBundleForTenant,
 } from '../src/host/featureBundleActivation.js';
-import { bundleFeatureIds } from '../src/host/featureBundles.js';
 
 const T = 't-bundle-act';
 const OTHER = 't-bundle-other';
@@ -59,24 +68,30 @@ describe('closure (D4)', () => {
 
 describe('enableBundleForTenant', () => {
   it('turns the closure on for THIS tenant only, with one audit row per id', async () => {
-    const r = await enableBundleForTenant('commerce', T, 'user:alice');
+    // The audit log is not reset between cases, so this case's rows are its actor's.
+    const actor = 'user:alice-closure';
+    const r = await enableBundleForTenant('commerce', T, actor);
     expect(r.refused).toBeUndefined();
     expect(r.enabled).toEqual(expect.arrayContaining(['commerce', 'crm']));
     expect(await onFor('commerce')).toBe(true);
     expect(await onFor('crm')).toBe(true);
     expect(await onFor('commerce', OTHER)).toBe(false); // never the global default
-    const rows = await listToggleChanges('crm');
+    const rows = (await listToggleChanges('crm')).filter((x) => x.principalId === actor);
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ action: 'feature-toggle.tenant-enabled', principalId: 'user:alice' });
+    expect(rows[0]).toMatchObject({ action: 'feature-toggle.tenant-enabled', principalId: actor });
     expect((rows[0]!.payload as { reason?: string }).reason).toBe('bundle:commerce');
+    expect((await listToggleChanges('commerce')).filter((x) => x.principalId === actor)).toHaveLength(1);
   });
 
   it('is idempotent: a second enable writes nothing and audits nothing', async () => {
-    await enableBundleForTenant('crm', T, 'user:alice');
-    const r = await enableBundleForTenant('crm', T, 'user:alice');
+    const actor = 'user:alice-idempotent';
+    const first = await enableBundleForTenant('crm', T, actor);
+    expect(first.enabled).toEqual(expect.arrayContaining(['crm', 'csm']));
+    const r = await enableBundleForTenant('crm', T, actor);
     expect(r.enabled).toEqual([]);
-    expect(r.alreadyOn).toEqual(expect.arrayContaining(bundleFeatureIds('crm').filter((id) => getToggleDefault(id))));
-    expect(await listToggleChanges('csm')).toHaveLength(1);
+    // Everything the first call turned on is now reported already on — nothing else.
+    expect([...r.alreadyOn].sort()).toEqual([...first.enabled].sort());
+    expect((await listToggleChanges('csm')).filter((x) => x.principalId === actor)).toHaveLength(1);
   });
 
   it('refuses a bundle the plan does not cover (402 shape), writing nothing', async () => {
@@ -121,13 +136,17 @@ describe('enableBundleForTenant', () => {
 
 describe('disableBundleForTenant (D5)', () => {
   it('turns the crm bundle off here — its own members (csm needs crm) do not block it', async () => {
-    await enableBundleForTenant('crm', T, 'user:alice');
-    const r = await disableBundleForTenant('crm', T, 'user:alice');
+    // Enable and disable land in the same millisecond, so "newest row first" is not an
+    // order this case can rely on; the disabler is its own actor and its row is found by that.
+    await enableBundleForTenant('crm', T, 'user:alice-enabler');
+    const r = await disableBundleForTenant('crm', T, 'user:alice-disabler');
     expect(r.refused).toBeUndefined();
     expect(r.disabled).toEqual(expect.arrayContaining(['crm', 'csm']));
     expect(await onFor('crm')).toBe(false);
-    const rows = await listToggleChanges('crm');
-    expect(rows[0]).toMatchObject({ action: 'feature-toggle.tenant-disabled', principalId: 'user:alice' });
+    const rows = (await listToggleChanges('crm')).filter((x) => x.principalId === 'user:alice-disabler');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ action: 'feature-toggle.tenant-disabled', principalId: 'user:alice-disabler' });
+    expect((rows[0]!.payload as { reason?: string }).reason).toBe('bundle:crm');
   });
 
   it('refuses while a feature OUTSIDE the bundle still needs it in this tenant', async () => {
@@ -143,6 +162,14 @@ describe('disableBundleForTenant (D5)', () => {
     await enableBundleForTenant('crm', T, 'user:alice');
     expect((await disableBundleForTenant('crm', T, 'user:alice')).refused).toBeUndefined();
     expect(await onFor('crm', OTHER)).toBe(true);
+    // Even an orphan OTHER already has (commerce on, crm off there) is OTHER's scope,
+    // so it does not block this tenant: only the tenant filter keeps it out.
+    expect(await disableTenantOverride('crm', OTHER, 'test')).toBe('disabled');
+    expect(await onFor('commerce', OTHER)).toBe(true);
+    await enableBundleForTenant('crm', T, 'user:alice');
+    const again = await disableBundleForTenant('crm', T, 'user:alice');
+    expect(again.refused).toBeUndefined();
+    expect(again.disabled).toEqual(expect.arrayContaining(['crm']));
   });
 
   it('disabling commerce leaves its dependency crm on', async () => {

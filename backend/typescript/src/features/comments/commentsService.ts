@@ -20,6 +20,7 @@ import { declarePiiFields } from '../../host/dataClassification.js';
 import { registerRetentionPurger, purgeRowsByAge } from '../../host/retentionPurger.js';
 import { registerSubjectEraser } from '../../host/subjectErasure.js';
 import { getPage } from '../cms/cmsService.js';
+import { getAsset, type MediaAsset } from '../media/mediaService.js';
 import { getBrief as getCreativeBrief } from '../creative-briefs/creativeBriefsService.js';
 import { getList as getPriorityList, listRankedIdeas } from '../priority-matrix/priorityMatrixService.js';
 import { getCollection } from '../kb/kbService.js';
@@ -45,10 +46,32 @@ declarePiiFields('comments.comment', ['body']);
 // messageId is the opaque UI anchor. v1 is INTRA-TENANT (a chat session is
 // tenant-private, unlike the org-shared cms/kb resources); cross-tenant comments on
 // a SHARED session (RFC 0122 share grant) are a follow-up (see ADR).
-export type ResourceType = 'cms_page' | 'kb_collection' | 'chat_message' | 'priority_idea' | 'canvas_document' | 'creative_brief' | 'canvas_slides';
-export const RESOURCE_TYPES: readonly ResourceType[] = ['cms_page', 'kb_collection', 'chat_message', 'priority_idea', 'canvas_document', 'creative_brief', 'canvas_slides'];
+export type ResourceType = 'cms_page' | 'kb_collection' | 'chat_message' | 'priority_idea' | 'canvas_document' | 'creative_brief' | 'canvas_slides' | 'media_asset';
+export const RESOURCE_TYPES: readonly ResourceType[] = ['cms_page', 'kb_collection', 'chat_message', 'priority_idea', 'canvas_document', 'creative_brief', 'canvas_slides', 'media_asset'];
 
 export type CommentStatus = 'open' | 'resolved';
+
+/** ADR 0947 D2 — THE scope every comment-write lane checks (HTTP, chat tool,
+ *  workflow surface): a reviewer role can annotate without workspace edit rights,
+ *  and `workspace:write` implies it (accessControlService `unionScopes`). */
+export const COMMENT_WRITE_SCOPE = 'host:comments:write' as const;
+
+/** ADR 0947 D2 — where on the subject a comment points, and which version of it. */
+export type AnchorRect = { x: number; y: number; w: number; h: number };
+export type AnchorTarget =
+  | { kind: 'region'; x: number; y: number; w: number; h: number }
+  | { kind: 'point'; x: number; y: number }
+  | { kind: 'timecode'; startMs: number; endMs?: number; region?: AnchorRect }
+  | { kind: 'element'; sectionId: string; field?: string };
+export interface CommentAnchor {
+  /** The subject version annotated (a media content hash, a CMS page version). */
+  subjectVersion: string;
+  target: AnchorTarget;
+}
+/** ADR 0947 D2 — a `change-request` blocks its review stage until resolved (ADR 0947 D3). */
+export type CommentIntent = 'note' | 'change-request';
+/** ADR 0947 D2 — a client sees `shared` only (ADR 0947 D6). Default `internal`. */
+export type CommentVisibility = 'internal' | 'shared';
 
 export interface Comment {
   commentId: string;
@@ -73,11 +96,90 @@ export interface Comment {
   resolvedAt?: string;
   /** ADR 0881 D6 — set when the author changed the body. */
   editedAt?: string;
+  /** ADR 0947 D2 — a pin on the subject at one version. Root comments only;
+   *  immutable after create (a pin never moves onto another version). */
+  anchor?: CommentAnchor;
+  /** ADR 0947 D2 — absent ⇒ `note`. */
+  intent?: CommentIntent;
+  /** ADR 0947 D2 — absent ⇒ `internal`. */
+  visibility?: CommentVisibility;
   createdAt: string;
   updatedAt: string;
 }
 
 const MAX = { body: 4000, mentions: 20, participants: 50 } as const;
+
+/** ADR 0947 D2 — the version a media annotation is made on (see the `media_asset` target). */
+export function mediaSubjectVersion(a: Pick<MediaAsset, 'assetId' | 'contentHash'>): string {
+  return a.contentHash ?? `legacy:${a.assetId}`;
+}
+
+/** No asset carries a duration yet (ADR 0947 Q5: accept and bound). 24 h. */
+const MAX_TIMECODE_MS = 24 * 60 * 60 * 1000;
+
+function anchorError(message: string, reason: string): OpenwopError {
+  return new OpenwopError('validation_error', message, 400, { field: 'anchor', reason });
+}
+
+const unit = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1;
+function closedKeys(o: Record<string, unknown>, allowed: readonly string[], where: string): void {
+  const extra = Object.keys(o).filter((k) => !allowed.includes(k));
+  if (extra.length > 0) throw anchorError(`\`${where}\` has unknown properties: ${extra.join(', ')}.`, 'unknown_property');
+}
+function parseRect(raw: unknown, where: string): AnchorRect {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw anchorError(`\`${where}\` must be an object.`, 'bad_shape');
+  const r = raw as Record<string, unknown>;
+  closedKeys(r, ['kind', 'x', 'y', 'w', 'h'], where);
+  const { x, y, w, h } = r;
+  if (!unit(x) || !unit(y) || !unit(w) || !unit(h) || w === 0 || h === 0 || x + w > 1 || y + h > 1) {
+    throw anchorError(`\`${where}\` must be a normalised box inside the subject (x, y, w, h in 0–1, w and h above 0).`, 'out_of_range');
+  }
+  return { x, y, w, h };
+}
+
+/** ADR 0947 D2 — closed-world parse of an anchor's SHAPE; the target checks it against the subject. */
+export function parseAnchor(raw: unknown): CommentAnchor {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw anchorError('`anchor` must be an object.', 'bad_shape');
+  const a = raw as Record<string, unknown>;
+  closedKeys(a, ['subjectVersion', 'target'], 'anchor');
+  const subjectVersion = typeof a.subjectVersion === 'string' ? a.subjectVersion.trim() : '';
+  if (!subjectVersion || subjectVersion.length > 200) throw anchorError('`anchor.subjectVersion` is required.', 'missing_version');
+  const t = a.target;
+  if (!t || typeof t !== 'object' || Array.isArray(t)) throw anchorError('`anchor.target` must be an object.', 'bad_shape');
+  const tr = t as Record<string, unknown>;
+  switch (tr.kind) {
+    case 'region': {
+      const rect = parseRect(tr, 'anchor.target');
+      return { subjectVersion, target: { kind: 'region', ...rect } };
+    }
+    case 'point': {
+      closedKeys(tr, ['kind', 'x', 'y'], 'anchor.target');
+      if (!unit(tr.x) || !unit(tr.y)) throw anchorError('A point needs x and y in 0–1.', 'out_of_range');
+      return { subjectVersion, target: { kind: 'point', x: tr.x, y: tr.y } };
+    }
+    case 'timecode': {
+      closedKeys(tr, ['kind', 'startMs', 'endMs', 'region'], 'anchor.target');
+      const { startMs, endMs } = tr;
+      if (typeof startMs !== 'number' || !Number.isInteger(startMs) || startMs < 0 || startMs > MAX_TIMECODE_MS) {
+        throw anchorError('`startMs` must be a whole number of milliseconds from 0.', 'out_of_range');
+      }
+      if (endMs !== undefined && (typeof endMs !== 'number' || !Number.isInteger(endMs) || endMs <= startMs || endMs > MAX_TIMECODE_MS)) {
+        throw anchorError('`endMs` must be after `startMs`.', 'out_of_range');
+      }
+      const region = tr.region === undefined ? undefined : parseRect(tr.region, 'anchor.target.region');
+      return { subjectVersion, target: { kind: 'timecode', startMs, ...(endMs !== undefined ? { endMs: endMs as number } : {}), ...(region ? { region } : {}) } };
+    }
+    case 'element': {
+      closedKeys(tr, ['kind', 'sectionId', 'field'], 'anchor.target');
+      const sectionId = typeof tr.sectionId === 'string' ? tr.sectionId.trim() : '';
+      if (!sectionId || sectionId.length > 200) throw anchorError('An element anchor needs `sectionId`.', 'missing_section');
+      if (tr.field !== undefined && (typeof tr.field !== 'string' || !tr.field.trim() || tr.field.length > 200)) throw anchorError('`field` must be a non-empty string.', 'bad_shape');
+      return { subjectVersion, target: { kind: 'element', sectionId, ...(typeof tr.field === 'string' ? { field: tr.field.trim() } : {}) } };
+    }
+    default:
+      throw anchorError('`anchor.target.kind` must be region, point, timecode or element.', 'unknown_kind');
+  }
+}
 
 /**
  * ADR 0881 D1/D2 — the caller as the comments lanes know it. Feature-local on purpose:
@@ -106,7 +208,12 @@ function recipientCaller(userId: string): CommentCaller {
  *  narrower than the org (a private conversation, a subject-bound corpus, a
  *  project-owned canvas or list): no host event is emitted for it. `archived` (D1) = a
  *  read-only target that refuses new comments. */
-export interface ResolvedTarget { title: string; ownerId: string; restricted: boolean; archived?: boolean }
+export interface ResolvedTarget {
+  title: string; ownerId: string; restricted: boolean; archived?: boolean;
+  /** ADR 0947 D2 — present only on targets that accept an anchor: checks one
+   *  against the subject at its CURRENT version, throwing a 400 when it does not fit. */
+  checkAnchor?: (anchor: CommentAnchor) => void;
+}
 
 /** A commentable resource: validate it is in (tenant, org) and visible to the caller,
  *  and yield the title + owner used for the notification emit. Returns null when not
@@ -133,7 +240,37 @@ const TARGETS: Record<ResourceType, CommentTarget> = {
     featureId: null,
     async validate(tenantId, orgId, resourceId) {
       const p = await getPage(tenantId, orgId, resourceId);
-      return p ? { title: p.title, ownerId: p.createdBy, restricted: false } : null;
+      if (!p) return null;
+      // ADR 0947 D2 — a page takes `element` pins on a section of its CURRENT version.
+      const sectionIds = new Set(p.sections.map((sec) => sec.sectionId));
+      return {
+        title: p.title, ownerId: p.createdBy, restricted: false,
+        checkAnchor: (anchor) => {
+          if (anchor.subjectVersion !== String(p.version)) throw anchorError('`anchor.subjectVersion` is not this page\'s current version.', 'stale_subject_version');
+          if (anchor.target.kind !== 'element') throw anchorError('A page takes only `element` anchors.', 'kind_not_allowed');
+          if (!sectionIds.has(anchor.target.sectionId)) throw anchorError('`anchor.target.sectionId` is not a section of this page version.', 'unknown_section');
+        },
+      };
+    },
+  },
+  // ADR 0947 D2 — a media asset (image, video, audio, document). Media is ALWAYS-ON
+  // (ADR 0027), so no owning toggle; the org check is `getAsset`'s. Asset bytes are
+  // immutable (an AI edit mints a new asset, ADR 0229), so the version is the
+  // content hash, or `legacy:<assetId>` for rows uploaded before the hash existed.
+  media_asset: {
+    featureId: null,
+    async validate(tenantId, orgId, resourceId) {
+      const a = await getAsset(tenantId, orgId, resourceId);
+      if (!a) return null;
+      const timed = /^(video|audio)\//.test(a.contentType);
+      return {
+        title: a.name, ownerId: a.uploadedBy, restricted: false,
+        checkAnchor: (anchor) => {
+          if (anchor.subjectVersion !== mediaSubjectVersion(a)) throw anchorError('`anchor.subjectVersion` is not this asset\'s version.', 'stale_subject_version');
+          if (anchor.target.kind === 'element') throw anchorError('A media asset takes region, point or timecode anchors.', 'kind_not_allowed');
+          if (anchor.target.kind === 'timecode' && !timed) throw anchorError('Only a video or audio asset takes a timecode anchor.', 'kind_not_allowed');
+        },
+      };
     },
   },
   kb_collection: {
@@ -455,6 +592,14 @@ export async function createComment(input: {
   mentions?: unknown;
   /** ADR 0617 D1a — the emitting run, from the workflow surface. */
   origin?: HostEventOrigin;
+  /** ADR 0947 D2 — a pin on the subject (root comments only). */
+  anchor?: unknown;
+  intent?: unknown;
+  visibility?: unknown;
+  /** ADR 0947 Q2 — only a person on the HTTP lane may share a comment with the
+   *  client. The agent tool and the workflow surface pass false: they may pin and
+   *  raise a change request, never publish a note to a client. */
+  mayShare?: boolean;
 }): Promise<{ comment: Comment; notify: CommentNotifyPlan; unnotifiedMentions: string[] }> {
   if (!isResourceType(input.resourceType)) {
     throw new OpenwopError('validation_error', `\`resourceType\` MUST be one of: ${RESOURCE_TYPES.join(', ')}.`, 400, { field: 'resourceType' });
@@ -485,6 +630,28 @@ export async function createComment(input: {
     parent = p.parentId ? ((await comments.get(p.parentId)) ?? p) : p; // flatten reply-to-reply to the root
   }
 
+  // ADR 0947 D2 — anchor, intent and visibility describe a THREAD, so they sit on
+  // its root; a reply inherits them. Everything is checked before anything is stored.
+  const hasProofing = input.anchor !== undefined || input.intent !== undefined || input.visibility !== undefined;
+  if (parent && hasProofing) {
+    throw new OpenwopError('validation_error', 'A reply takes the anchor, intent and visibility of its thread.', 400, { field: 'anchor', reason: 'reply_not_anchorable' });
+  }
+  let anchor: CommentAnchor | undefined;
+  if (input.anchor !== undefined) {
+    anchor = parseAnchor(input.anchor);
+    if (!target.checkAnchor) throw anchorError(`A ${resourceType} comment cannot carry an anchor.`, 'not_anchorable');
+    target.checkAnchor(anchor);
+  }
+  if (input.intent !== undefined && input.intent !== 'note' && input.intent !== 'change-request') {
+    throw new OpenwopError('validation_error', "`intent` MUST be 'note' or 'change-request'.", 400, { field: 'intent' });
+  }
+  if (input.visibility !== undefined && input.visibility !== 'internal' && input.visibility !== 'shared') {
+    throw new OpenwopError('validation_error', "`visibility` MUST be 'internal' or 'shared'.", 400, { field: 'visibility' });
+  }
+  if (input.visibility === 'shared' && !input.mayShare) {
+    throw new OpenwopError('validation_error', 'Only a person can share a comment with the client.', 400, { field: 'visibility', reason: 'share_not_allowed' });
+  }
+
   const actors = new Set([input.authorId, ...(input.onBehalfOf ? [input.onBehalfOf] : [])]);
   // `CM2CD-1` — the member list is read only when someone could be told: a mention, a
   // reply (there is always a thread author), or a root on a resource with an owner.
@@ -501,6 +668,9 @@ export async function createComment(input: {
     body, authorId: input.authorId,
     ...(input.onBehalfOf ? { onBehalfOf: input.onBehalfOf } : {}),
     ...(mentioned.notified.length ? { mentions: mentioned.notified } : {}),
+    ...(anchor ? { anchor } : {}),
+    ...(input.intent === 'change-request' ? { intent: 'change-request' as const } : {}),
+    ...(input.visibility === 'shared' ? { visibility: 'shared' as const } : {}),
     status: 'open', createdAt: now, updatedAt: now,
   };
   await comments.put(comment);
@@ -719,6 +889,10 @@ export async function deleteSubjectComments(tenantId: string, subjectKey: string
 
 const commentsEraser = async (tenantId: string, subjectKey: string): Promise<void> => { await deleteSubjectComments(tenantId, subjectKey); };
 registerSubjectEraser(commentsEraser);
+
+/** Test-only: every comment row of one tenant (a cascade check cannot go through a
+ *  thread read, which resolves the deleted target to null). */
+export async function __commentsForTenant(tenantId: string): Promise<Comment[]> { return rowsForTenant(tenantId); }
 
 /** Test-only: clear the comment store. */
 export async function __resetCommentsStore(): Promise<void> { await comments.__clear(); }

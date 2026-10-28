@@ -26,14 +26,7 @@ import { OpenwopError } from '../../types.js';
 import { assertRunScopeOrg, type Scope } from '../../host/accessControlService.js';
 import { allowedUploadMimeList, storableContentType } from '../../host/allowedUploadMime.js';
 import * as mediaStorage from './mediaStorage.js';
-import { withOrgCapacity, createAsset, findAssetByContentHash, selectAssets, viewAsset, type MediaAssetView } from './mediaService.js';
-
-/** Extract the capability token from a host serve URL, or accept a bare token. */
-function parseServeToken(raw: string): string | null {
-  const m = raw.match(/\/assets\/([A-Za-z0-9_-]{1,512})\/?$/);
-  if (m) return m[1];
-  return /^[A-Za-z0-9_-]{1,512}$/.test(raw) ? raw : null;
-}
+import { withOrgCapacity, createAsset, findAssetByContentHash, selectAssets, viewAsset, parseServeToken, groundingForGenerated, stampGroundingIfAbsent, cleanLineage, type MediaAssetView } from './mediaService.js';
 
 export function buildMediaSurface(scope: BundleScope): FeatureSurface {
   const tenantId = scope.tenantId;
@@ -154,8 +147,12 @@ export function buildMediaSurface(scope: BundleScope): FeatureSurface {
       // bytes in the same collection context return the EXISTING asset instead
       // of a hash-less duplicate row.
       const contentHash = createHash('sha256').update(Buffer.from(entry.contentBase64, 'base64')).digest('hex');
+      // ADR 0945 D4 — provenance from the HOST's record of who minted these
+      // bytes (never from a `lineage.grounding` the node passed: cleanLineage
+      // drops it). A dedup hit still gets its FIRST grounding write.
+      const grounding = await groundingForGenerated(tenantId, orgId, entry.aiOrigin, { claimedLineage: args.lineage, ...(scope.runId ? { runId: scope.runId } : {}), ...(optStr(args.productId) ? { productHint: optStr(args.productId) } : {}) });
       const existing = await findAssetByContentHash(tenantId, orgId, contentHash, optStr(args.collectionId));
-      if (existing) return project(viewAsset(existing), true);
+      if (existing) return project(viewAsset(grounding ? await stampGroundingIfAbsent(existing, grounding) : existing), true);
       // Re-store on the durable library path (the source token may be a
       // short-TTL scratch asset); the library owns its own storageRef.
       const asset = await withOrgCapacity(tenantId, orgId, entry.bytes, async () => {
@@ -171,7 +168,8 @@ export function buildMediaSurface(scope: BundleScope): FeatureSurface {
           serveToken: stored.serveToken,
           tags: args.tags,
           uploadedBy: scope.actingUserId ?? scope.runId ?? 'workflow',
-          ...(args.lineage !== undefined ? { lineage: args.lineage } : {}),
+          ...(entry.aiOrigin ? { lineage: { ...cleanLineage(args.lineage), generatedBy: 'ai' } } : args.lineage !== undefined ? { lineage: args.lineage } : {}),
+          ...(grounding ? { grounding } : {}),
           contentHash,
         });
       });

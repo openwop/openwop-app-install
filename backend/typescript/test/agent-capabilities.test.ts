@@ -1,6 +1,10 @@
 /**
  * A11 — agent capability negotiation (RFC 0092). Unmet `requiresCapabilities`
  * are surfaced via the merged `degraded[]` projection.
+ *
+ * Tracker TST-BKY-2. Red when unmet capabilities are not computed, the merged
+ * list is unsorted, or "nothing degraded" stops being `undefined` — each
+ * sabotage-witnessed (w65).
  */
 
 import { describe, expect, it } from 'vitest';

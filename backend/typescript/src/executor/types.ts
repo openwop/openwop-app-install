@@ -748,6 +748,10 @@ export interface NodeContext {
        *  (Meta adimages image_hash / TikTok image upload image_ids). Bytes are resolved
        *  host-side and never appear in outputs or dry-run plans. */
       mediaAssetId?: string;
+      /** Google ONLY (ADR 0907 P0): the operator's EU political-advertising
+       *  declaration. Never defaulted; a live Google dispatch without it fails
+       *  closed `missing_eu_political_declaration`. */
+      euPoliticalAdvertising?: 'contains' | 'does_not_contain';
       /** Preview mode: build the exact PAUSED create payloads and return them as a
        *  plan WITHOUT calling the platform — zero platform calls, nothing persisted. */
       dryRun?: boolean;
@@ -763,7 +767,8 @@ export interface NodeContext {
       // Spend governance (campaign gap plan §5B B3): the tenant's ad-spend policy
       // requires a human sign-off (kind 'campaign-spend' in the ONE approvals
       // inbox). Nothing was created; approve + re-run proceeds (same fork-stable key).
-      | { outcome: 'requires_approval'; approvalId: string }
+      // ADR 0942 — `autonomy` set: a campaign run's policy asked, so the node waits on the row.
+      | { outcome: 'requires_approval'; approvalId: string; autonomy?: true }
       | { outcome: 'published'; platform: 'meta' | 'google' | 'tiktok' | 'linkedin'; platformCampaignId: string; platformAdSetId: string; platformAdId: string; reviewStatus: 'pending_review'; paused: true; reused: boolean }
     >;
     /** Read a campaign's performance metrics from the connected platform (ADR 0186
@@ -796,7 +801,7 @@ export interface NodeContext {
       | { outcome: 'no_connection' }
       | { outcome: 'unsupported'; platform: 'meta' | 'google' | 'tiktok' | 'linkedin' }
       | { outcome: 'failed'; error: string }
-      | { outcome: 'requires_approval'; approvalId: string }
+      | { outcome: 'requires_approval'; approvalId: string; autonomy?: true }
       | { outcome: 'preview'; platform: 'meta' | 'google' | 'tiktok' | 'linkedin'; dailyBudgetMinor: number; target: string }
       | { outcome: 'updated'; platform: 'meta' | 'google' | 'tiktok' | 'linkedin'; dailyBudgetMinor: number; target: string }
     >;
@@ -963,6 +968,11 @@ export interface NodeModule {
    *  pack-author-owned (never workflow-author config); the executor's
    *  pattern list covers the core families when this flag is absent. */
   sideEffecting?: boolean;
+  /** ADR 0964 D1 — when a replay fork SERVES this node's recorded success (it is
+   *  side-effecting, so it never re-executes), reproduce any run state the live
+   *  execution wrote OUTSIDE its outputs. `core.subWorkflow` uses it to re-apply its
+   *  `outputMapping` writes to the parent bag. A throw fails the served node closed. */
+  applyServed?(served: { runId: string; config?: Record<string, unknown>; outputs: Record<string, unknown> }): Promise<void>;
   /** RFC 0031 §B. Model capabilities this NodeModule requires the active
    *  model to advertise. Distinct from `requires`, which gates on HOST
    *  capabilities — this field gates on MODEL capabilities. Spec-reserved
@@ -986,7 +996,33 @@ export interface NodeModule {
    *  the host's own code and never a candidate for the isolated-worker
    *  contract. */
   packOrigin?: PackNodeOrigin;
+  /** ADR 0936 (Book AI P18) — the node's DATA fields, from its pack manifest
+   *  entry's `x-dataFields`: top-level output ports (`outputs`) and resume-value
+   *  keys (`resume`) a later node or feature reads back. They get the Tier 1
+   *  known-secret scrub only; the credential-shape pass still runs on every
+   *  other field. Absent = everything is scrubbed in full. */
+  dataFields?: NodeDataFields;
   execute(ctx: NodeContext): Promise<NodeOutcome>;
+}
+
+/** ADR 0936 — see {@link NodeModule.dataFields}. */
+export interface NodeDataFields {
+  outputs?: readonly string[];
+  resume?: readonly string[];
+}
+
+/** ADR 0936 — read a manifest node entry's `x-dataFields`, keeping only
+ *  well-formed field names. Returns undefined when nothing usable is declared. */
+export function readNodeDataFields(entry: unknown): NodeDataFields | undefined {
+  const raw = (entry as { 'x-dataFields'?: unknown } | null | undefined)?.['x-dataFields'];
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const names = (v: unknown): string[] => Array.isArray(v)
+    ? [...new Set(v.filter((x): x is string => typeof x === 'string' && /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/.test(x)))]
+    : [];
+  const outputs = names((raw as { outputs?: unknown }).outputs);
+  const resume = names((raw as { resume?: unknown }).resume);
+  if (outputs.length === 0 && resume.length === 0) return undefined;
+  return { ...(outputs.length ? { outputs } : {}), ...(resume.length ? { resume } : {}) };
 }
 
 /** DAG edge between two nodes. Mirrors `WorkflowEdge` in

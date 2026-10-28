@@ -1,6 +1,6 @@
 # ADR 0961 — Brief-to-launch autopilot
 
-Status: Proposed
+Status: Accepted (P0 and P1 implemented 2026-10-20; P2+ wait on 0945–0952 and on a host child→parent resume cascade)
 
 Date: 2026-10-19. Program: Campaign Studio (ADRs 0941–0962), Tier 5 capstone.
 Source: the program brief (session 66) and David's original ask: "all as
@@ -127,6 +127,19 @@ FragmentNode" move RFC 0013 already made for `condition` and RFC 0125 for
 NOT put agent ids in `config` (node modules would see an undeclared key, and it
 would be a second, host-only spelling of the same fact). Author via `/prd`.
 
+> **Correction (2026-10-20, P0/P1 architect review) — no host binder.** ADR
+> 0943's P0 build settled how a chain pins an agent before this ADR's D2 was
+> built: `expandChain` emits no node `agent` field, so a chain pack pins its
+> default through `config.agentId`, and 0943's run-start contributor freezes the
+> client's replacement into `run.metadata['openwop-app.agentBindings']`, reading
+> `node.agent?.agentId ?? config.agentId` (#5054, ADR 0943 D2 correction). A
+> second, host-side binder writing `nodes[].agent` from a feature-owned map would
+> be the "second spelling" this section rejects. So D2 is: the **default** is the
+> pack's `config.agentId`; the **client** layer is 0943's frozen map; the
+> **playbook** layer arrives with ADR 0959 `agentBindings` and must feed the same
+> frozen map, not a new field. The v0.1 spine has no agent-runner node of its own
+> (its stages are feature nodes), so P1 adds no binding code.
+
 ### D3 — Autonomy: one dial, frozen at launch, enforced per action
 
 The campaign's autonomy is ADR 0942's policy (presets *Review everything*,
@@ -191,6 +204,41 @@ present (0951/0955), product linked to the catalog with images (0945), agent
 team bound (0943), and **eval status** (D8). Missing items surface as one
 checklist card; the run suspends on it (D6) instead of failing late.
 
+> **Correction (2026-10-20, P0 build).** The checklist is a closed id set that
+> grows only when an item's owner ships; nothing is invented ahead of it. P0's
+> items: `brief` (linked, same client — blocking), `brief-complete` (the brief
+> validator, `validateBrief` — blocking), `brief-setup` (the readiness check the
+> Strategist's status tool already uses, `setupOf`, now exported — advisory),
+> `goal` (advisory). The node's role is `read`, honestly: a replay fork re-reads
+> the checklist live (declaring it `side-effect` to get a recorded replay would
+> misreport a read to the ADR 0572 floor). P0 stops the run with a typed
+> `preflight_blocked` failure; P1 replaces that with the suspension below.
+> **P1 suspension, decided:** no new interrupt kind. The node suspends with the
+> existing `clarification` kind (A2UI surface with a "Check again" action, the
+> `feature.assistant.nodes` / `feature.kicktodo.nodes` precedent). P3's card
+> interrupt (D6) generalises this.
+>
+> > **Correction (2026-10-20, P1 build).** Two parts of the decision above did not
+> > survive the code. (1) The checklist rides the clarification's `question` and
+> > A2UI `surface`, not an ADR 0829 handoff record: `ctx.suspend` (the pack-facing
+> > primitive) carries no `handoff`, only a host node's `NodeOutcome` does. (2)
+> > "the next round key" is not expressible: the executor seeds only the LATEST
+> > resolution (`suspendSignal.ts` `makeSuspendFn`), so a node cannot tell round
+> > 3 from round 1. The key instead names WHAT is blocked
+> > (`autopilot-preflight:<item=missing,…>`): a changed checklist always asks
+> > afresh, and an unchanged one alternates `k` / `k:again` (the key just
+> > answered short-circuits, the other suspends). No cap is needed: every round
+> > is a person's click, and the run can be cancelled. The card sits on the
+> > SPINE's own node (see the D4 correction: a suspended sub-chain child would
+> > never be resumed into its parent).
+> >
+> > **Why `ad-account` blocks drafting** when v0.1 only drafts: it is this
+> > phase's exit criterion, and the autopilot's job is to reach launch. Drafting
+> > paid ads for a client whose own ad account is missing ends at a launch stage
+> > that must refuse (ADR 0921 D4 forbids a workspace or personal fallback), so
+> > the card asks at the start, when it is cheapest to fix. The item is asked
+> > only when the brief enables `ad_variants`.
+
 ### D8 — Evals are the release gate for autonomy
 
 An autonomy level above *Guarded* can be selected for a client only when the
@@ -249,6 +297,63 @@ shown in 0960), and never mid-run.
 | P5 | Eval release gate (D8) + autonomy above *Guarded* | Failing suite downgrades effective level at next run start (test) |
 | P6 | Report + learn stages (0957, 0944, 0853, 0889 promote) | Close-out run writes per-client memory only (isolation test from 0944) |
 
+> **Correction (2026-10-20, P0 build) — dependencies measured.** ADR 0959 is
+> Proposed with no code, so P0's "launch from an installation stamps … playbook"
+> cannot be met yet. P0 launches from the **campaign** (`POST
+> /v1/host/openwop-app/campaign-autopilot/campaigns/:campaignId/launch`) and
+> carries no playbook stamp; the stamp (`openwop-app.playbook`, reserved by 0959)
+> and revision pinning arrive with 0959 P0. Until then the spine is registered
+> **chain-backed same-id** (the campaign spine's precedent), so a run resolves
+> its definition at head (`resolveRunDefinition`: no revision for chain-backed
+> definitions) — a pack bump between a run and its fork changes the definition,
+> exactly as for the campaign spine today. Installations close that.
+>
+> **Correction (2026-10-20, P0 build) — a gated stage is its own run, not a
+> nested sub-chain.** D1 composes every stage with `config.subChainRef`. MEASURED
+> on this host: when a `core.subWorkflow` child suspends (an approval gate, a
+> clarification), the parent's node suspends with it
+> (`bootstrap/nodes.ts` core.subWorkflow, "Non-terminal child status → parent
+> suspends"), and **nothing resumes the parent when the child later completes**:
+> no consumer reads the parent interrupt's `childRunId`, and no run-terminal
+> hook resolves it. A first build composed the campaign spine (which waits on a
+> kernel approval) as the drafting sub-chain; the witness test showed the child
+> complete and the parent stay `waiting-input` with no further events. So v0.1
+> runs a gated stage as **its own campaign run** (D4's model already: role
+> `stage` in the ADR 0941 run tag): the `start-stage` node (role `side-effect`)
+> starts `campaign-studio.campaign-orchestration` tagged with the same campaign,
+> under an id derived from (tenant, autopilot run, stage), and completes with
+> that id. The spine is therefore `preflight → start-stage(drafts)`, with no
+> sub-chain and no `briefId` input (the brief comes from the campaign the run is
+> tagged with). Composing two kernel-drafting stages would also have drafted the
+> kernel twice, so v0.1 has exactly these two steps.
+>
+> The sub-chain composition D1 describes needs a host **child-terminal →
+> parent-resume cascade** for suspended `core.subWorkflow` children. That is a
+> cross-cutting executor change (every nested chain, replay of the parent's
+> resolution, the `interrupt-profiles.md` parent-child profile), so it is NOT
+> built here: it is recorded as a dependency for P2+, where stages nest.
+
+> **Correction (2026-10-20, P0 build) — `dependsOn`.** The matrix row says
+> `dependsOn: ['campaign-orchestration','projects']`. ADR 0194's lock graph is
+> backed by real imports (`feature-dependency-parity.test.ts` refuses a phantom
+> edge), and P0 imports `campaign-brief` (the preflight reads the brief's
+> validator and setup check) but nothing from `projects`. P0 declares
+> `['campaign-orchestration','campaign-brief']`; `projects` joins in P3, when
+> the card stage writes to the campaign board.
+>
+> **Correction (2026-10-20, P0 build) — the autonomy sub-toggle.** The toggle
+> row says the feature also needs `campaign-orchestration.autonomy`. v0.1 has no
+> external effect (drafts only), so that AND-gate starts in P2, the first phase
+> with an effect stage. P0 gates on `campaign-autopilot` AND
+> `campaign-orchestration`.
+
+### Implementation record
+
+| Phase | Commit | What landed | Tests |
+|---|---|---|---|
+| P0 | (this PR) | `features/campaign-autopilot/` (toggle OFF/tenant, dependsOn `campaign-orchestration`+`campaign-brief`; preflight + launch routes; preflight surface bound to the run's tag and a person); node pack `feature.campaign-autopilot.nodes` 1.0.0 (`preflight`, role `read`; `start-stage`, role `side-effect`); chain pack `core.openwop.workflows.campaign-autopilot` 0.1.0 (internal; `campaign-studio.autopilot` = `preflight` → `start-stage(drafts)`, the drafting stage as its own campaign run); node `start-stage` (role `side-effect`, derived stage-run id); one live autopilot per campaign, spine or stage (a later launch joins it); FE `AutopilotSection` lazy on the campaign detail, 4 locales; A-G6 doc fixes | `test/adr0961-p0-autopilot-launch.test.ts` (11, nine sabotage witnesses), `campaign-autopilot/__tests__/autopilotSection.test.tsx` (5, three witnesses) |
+| P1 | (this PR) | Preflight suspends on a `clarification` checklist card instead of failing ("Check again" re-reads; alternating key); `ad-account` item: a brief that runs ads needs the CLIENT's own active, org-scoped ad account (`adAccountsForOrg`, `host/adsAdapter.ts`, ADR 0921 D4), a stale one is named `reconnect:<platform>`; node pack 1.1.0, chain pack 0.2.0; FE item + reconnect copy, 4 locales. D2 binding: no code (0943's frozen map) | `test/adr0961-p1-preflight-card.test.ts` (4, three witnesses incl. a re-run of the readiness gate with a regenerated steward manifest), P0 test updated |
+
 ## Alternatives weighed
 
 - **One giant run per campaign.** Simplest mental model; rejected for event-log
@@ -280,9 +385,11 @@ a run-produced variable bag are not yet expressible; RFC 0133 expresses both.
 
 1. **(David)** Default autonomy preset for a new client: *Review everything*
    (proposed) or *Guarded*?
+   **Decided (2026-10-19, David): Guarded (matches ADR 0942 Q1).**
 2. **(David)** May *Full autopilot* ever launch paid spend for a client without
    a client-side approval, if the client's 0924 policy is `agency`? Proposed:
    only under a 0952 hard cap, and with a notify-after digest.
+   **Decided (2026-10-19, David): No by default. Launch and budget increases need the client's approval unless the client opts in per campaign; pausing, cutting spend and moves inside an approved cap stay automatic.**
 3. **(David)** Should we author the RFC 0013 `FragmentNode.agent` revision now
    (portable agent intent) or wait until a second host needs it?
 4. Default cadence (daily optimize, weekly report) — per playbook or per client?
@@ -296,3 +403,52 @@ a run-produced variable bag are not yet expressible; RFC 0133 expresses both.
 
 - **ROADMAP:** `| 0961 | Brief-to-launch autopilot | campaign-autopilot (feature.campaign-autopilot.*, chain pack core.openwop.workflows.campaign-autopilot) | top-level campaign chain of block sub-chains (RFC 0133), named agent per node, 0942 autonomy dial, goals + budget, cadence optimize/report runs, kanban fallback, eval release gate | deps 0941–0959, 0960, 0889, 0927, 0311, 0852; recommended RFC 0013 rev (FragmentNode.agent) | Tier 5 | 🔵 Proposed |`
 - **FEATURES (Future features):** `| campaign-autopilot | Campaign autopilot | Turn a brief into a running campaign: research, plan, creative, funnel, channels, experiments and optimization as one visible workflow, each step run by a named agent, with as much or as little human review as you choose, inside a budget and toward a goal. | OFF | tenant | ADR 0961 |`
+
+
+### Recovery composition review — 2026-10-25 (validation pending)
+
+Track A: host application work on existing run, chain, graph and scope seams.
+No wire field/capability, executor, scheduler, second chat or second graph
+renderer is introduced. Both original histories remain ancestors. The canonical
+CampaignDetailPage owns the lazy cockpit/autopilot sections; recovery preserves
+the current campaign list, policy editor, veto panel and client-report work.
+
+An independent autopilot stage must retain the initiating run's frozen goal,
+autonomy policy and attended branch-fork posture. The internal run starter now
+accepts a source-run ID, reads it in the same tenant and uses only the existing
+registered inherited-metadata projectors before normal contributors run. It
+does not set executor parentRunId (the gated stage remains independent), trust
+caller-supplied decision blobs, or delegate change-set approval authority.
+Absent/foreign parents refuse before reservation or insertion. Normal starters
+retain their reserved-key strip. New regression cases cover this inheritance
+and a forged retargeting argument.
+
+The graph buffers stream events until its initial log read finishes, then
+folds the merged sequence in order through the builder's existing reducer.
+A late older poll cannot rewind a completed node. Snapshot and definition
+requests ignore superseded replies; failed refreshes retain the last good
+view with an announced failure. Replay state belongs to the selected run,
+and an obsolete fork response cannot start a background poll for it. Both
+diff handles use the existing binding helper. The branch-fork action remains
+unavailable; this source recovery adds no external-effect permission.
+
+These fixes and their regression cases are prepared but not executed while
+PR #5207 owns the single guarded heavy-work slot. Generated censuses will be
+regenerated and reviewed afterward, followed by focused and canonical gates.
+Later autopilot stages and the cockpit's unintegrated projections remain open.
+
+
+### Recovery qualification — 2026-10-25
+
+Native backend typecheck and 20 focused runtime files (238 cases) pass,
+including the real MCP request replay, immutable stage decision inheritance,
+client binding and privacy refusals, and existing spend/veto/fork fences.
+Pack-surface parity passes all six cases. The regenerated floor adds only
+start-stage and mcp-request-change to the served side-effect set; there are
+377 floor entries, 334 served, 43 undischarged and zero unresolved. No waiver
+is added. Frontend lint, canonical build, test types and 16 focused files
+(97 cases) pass, including public navigation and client-switch state. The
+public shell now loads only on public routes, retaining 1,095 bytes of entry
+budget headroom. Whole-slot peaks were 4.56 GiB backend and 3.27 GiB frontend,
+with no swap growth or resource stop. Full composed canonical CI remains
+required before merge; this qualification makes no production change.

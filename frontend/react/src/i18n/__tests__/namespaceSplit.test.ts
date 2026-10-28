@@ -38,7 +38,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
-import { join, sep } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 
 const SRC = join(process.cwd(), 'src');
 const FEATURES = join(SRC, 'features');
@@ -215,6 +215,47 @@ describe('ADR 0490 — the eager/lazy namespace split stays safe', () => {
     }
     for (const f of ['notifications/ApprovalsInbox.tsx', 'notifications/NeedsYouInbox.tsx', 'chat/reviews/ReviewCard.tsx', 'agents/AgentDrawer.tsx']) {
       expect(readFileSync(join(SRC, f), 'utf8'), f).toMatch(/lazy\(\(\) => import\('\.\.\/(\.\.\/)?assistantAction\/AssistantActionFields\.js'\)/);
+    }
+  });
+
+  it('the lazy route-only AREA catalogs `workforces` and `settings` are read only inside their lazy pages', () => {
+    // Deferred out of the eager chunk for shared-chunk headroom (2026-10-26). Safe only
+    // while (a) nothing outside the area reads the namespace and (b) the area is reached
+    // only through route pages `chrome/features.tsx` lazy-imports — the route <Suspense>
+    // then waits for the catalog exactly as it waits for the code. A shell or cross-area
+    // reader would paint raw keys.
+    for (const area of ['workforces', 'settings']) {
+      const readers: string[] = [];
+      const importers: string[] = [];
+      const walk = (dir: string): void => {
+        for (const entry of readdirSync(dir)) {
+          const p = join(dir, entry);
+          if (statSync(p).isDirectory()) { if (entry !== '__tests__' && entry !== 'i18n') walk(p); continue; }
+          if (!/\.tsx?$/.test(entry)) continue;
+          const rel = p.slice(SRC.length + 1).split(sep).join('/');
+          if (rel.startsWith(`${area}/`)) continue;
+          const src = readFileSync(p, 'utf8');
+          if (new RegExp(`useTranslation\\((\\[[^\\]]*)?['"]${area}['"]|['"\`]${area}:[a-zA-Z]|ns:\\s*\\[?\\s*['"]${area}['"]`).test(src)) readers.push(rel);
+          for (const line of src.split('\n')) {
+            for (const m of line.matchAll(/['"](\.\.?\/[^'"]+)['"]/g)) {
+              if (resolve(dirname(p), m[1]!).startsWith(join(SRC, area) + sep)) importers.push(`${rel}: ${line.trim()}`);
+            }
+          }
+        }
+      };
+      walk(SRC);
+      expect(readers, `${area} namespace read outside src/${area}/`).toEqual([]);
+      const nonLazy = importers.filter((i) => !(i.startsWith('chrome/features.tsx: ') && /lazy\(\(\) => import\(/.test(i)));
+      expect(nonLazy, `src/${area}/ imported other than by a lazy route`).toEqual([]);
+      expect(importers.length, `no lazy route for src/${area}/ found`).toBeGreaterThan(0);
+    }
+    // And all three lists defer the same areas.
+    const res = readFileSync(join(SRC, 'i18n', 'resources.ts'), 'utf8');
+    const vite = readFileSync(join(process.cwd(), 'vite.config.ts'), 'utf8');
+    for (const area of ['featureToggles', 'assistantAction', 'workforces', 'settings']) {
+      expect(res, `${area} lazy loader`).toContain(`'/src/${area}/i18n/en.ts'`);
+      expect(res, `${area} excluded from the eager glob`).toContain(`'!/src/${area}/i18n/en.ts'`);
+      expect(vite.match(/\\\/src\\\/\(([a-zA-Z|]+)\)\\\/i18n\\\/en\\\.ts\$/)?.[1]?.split('|'), 'vite lazy-area regex').toContain(area);
     }
   });
 

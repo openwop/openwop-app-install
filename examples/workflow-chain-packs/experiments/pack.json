@@ -1,0 +1,419 @@
+{
+  "name": "core.openwop.workflows.experiments",
+  "version": "1.1.0",
+  "kind": "workflow-chain",
+  "description": "ADR 0949 P4 — the Optimize loop. One node reallocates a running Optimize experiment by Thompson sampling, every arm kept at or above its floor. Schedule it with the existing scheduler at the experiment's epoch cadence: a run that comes too early returns `too_soon` and changes nothing, and a replay or a :fork finds its epoch already appended (the epoch number comes from the run's frozen start instant), so it never re-allocates. It only reallocates an experiment a human launched; it never launches, stops or promotes. Resolves on hosts that ship the experiments feature + node pack (the OpenWOP reference app). ADR 0950 adds `experiments.promote` (internal): the governed, staged promotion of a Decide winner, started from the experiment.",
+  "author": "openwop",
+  "license": "Apache-2.0",
+  "engines": {
+    "openwop": ">=1.0.0 <3.0.0"
+  },
+  "keywords": [
+    "Marketing",
+    "Experiments"
+  ],
+  "chains": [
+    {
+      "chainId": "experiments.optimize-loop",
+      "version": "1.0.0",
+      "label": "Optimize Experiment Loop",
+      "description": "Reallocate one running Optimize experiment for its next epoch. Schedule it at (or more often than) the experiment's epochMinutes; early runs are no-ops.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "orgId",
+          "experimentId"
+        ],
+        "properties": {
+          "orgId": {
+            "type": "string",
+            "description": "The client organization the experiment belongs to."
+          },
+          "experimentId": {
+            "type": "string",
+            "description": "The running Optimize experiment to reallocate (an `exp:` id from the Experiments page)."
+          }
+        }
+      },
+      "capabilities": [
+        "side-effectful"
+      ],
+      "dag": {
+        "nodes": [
+          {
+            "id": "reallocate",
+            "typeId": "feature.experiments.nodes.optimize-epoch@1.0.0",
+            "name": "Reallocate the next epoch",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "orgId": "{{params.orgId}}",
+              "experimentId": "{{params.experimentId}}"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "experiments.promote",
+      "version": "1.0.0",
+      "internal": true,
+      "label": "Promote an Experiment Winner",
+      "description": "ADR 0950 — governed promotion of a Decide experiment's winner. All eight gates must pass; the autonomy policy (ADR 0942, experiment.promote) decides whether a person approves; then the winner ramps 50% → 90% → everything but a long-term holdout (1–5%), each stage rechecked on its own units after at least 24 hours (sample-ratio mismatch and guardrails). After the last stage, a monitoring window compares the winner with the holdout, then the winner ships as the page or step's own content. Any breach rolls back to the recorded baseline, which policy never blocks. Started only from the experiment (one live promotion per experiment); every step refuses any other run.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "orgId",
+          "experimentId"
+        ],
+        "properties": {
+          "orgId": {
+            "type": "string",
+            "description": "The client organization the experiment belongs to."
+          },
+          "experimentId": {
+            "type": "string",
+            "description": "The running Decide experiment to promote."
+          },
+          "holdoutPct": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 5,
+            "default": 2,
+            "description": "Units kept on the control after promotion, to measure decay."
+          },
+          "stageWaitSeconds": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 86400,
+            "default": 86400,
+            "description": "How long each stage runs before it is rechecked. A recheck refuses a stage younger than 24 hours."
+          },
+          "monitorWindowSeconds": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 86400,
+            "default": 86400,
+            "description": "How long the final stage runs before the monitor compares the winner with the holdout."
+          }
+        }
+      },
+      "capabilities": [
+        "side-effectful"
+      ],
+      "dag": {
+        "nodes": [
+          {
+            "id": "gates",
+            "typeId": "feature.experiments.nodes.require-gates@1.0.0",
+            "name": "All eight gates pass",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "orgId": "{{params.orgId}}",
+              "experimentId": "{{params.experimentId}}"
+            }
+          },
+          {
+            "id": "approve",
+            "typeId": "feature.experiments.nodes.policy-gate@1.0.0",
+            "name": "Policy: approve the promotion",
+            "position": {
+              "x": 220,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "orgId": "{{params.orgId}}"
+            }
+          },
+          {
+            "id": "ramp1",
+            "typeId": "feature.experiments.nodes.apply-ramp@1.0.0",
+            "name": "Stage 1: winner at 50%",
+            "position": {
+              "x": 440,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "orgId": "{{params.orgId}}",
+              "experimentId": "{{params.experimentId}}",
+              "stage": 1,
+              "holdoutPct": "{{params.holdoutPct}}"
+            }
+          },
+          {
+            "id": "wait1",
+            "typeId": "core.flow.wait@1.0.0",
+            "name": "Wait (stage 1)",
+            "position": {
+              "x": 660,
+              "y": 0
+            },
+            "config": {
+              "mode": "duration",
+              "seconds": "{{params.stageWaitSeconds}}"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "recheck1",
+            "typeId": "feature.experiments.nodes.recheck@1.0.0",
+            "name": "Recheck stage 1",
+            "position": {
+              "x": 880,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "orgId": "{{params.orgId}}",
+              "experimentId": "{{params.experimentId}}"
+            }
+          },
+          {
+            "id": "ramp2",
+            "typeId": "feature.experiments.nodes.apply-ramp@1.0.0",
+            "name": "Stage 2: winner at 90%",
+            "position": {
+              "x": 1100,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "orgId": "{{params.orgId}}",
+              "experimentId": "{{params.experimentId}}",
+              "stage": 2,
+              "holdoutPct": "{{params.holdoutPct}}"
+            }
+          },
+          {
+            "id": "wait2",
+            "typeId": "core.flow.wait@1.0.0",
+            "name": "Wait (stage 2)",
+            "position": {
+              "x": 1320,
+              "y": 0
+            },
+            "config": {
+              "mode": "duration",
+              "seconds": "{{params.stageWaitSeconds}}"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "recheck2",
+            "typeId": "feature.experiments.nodes.recheck@1.0.0",
+            "name": "Recheck stage 2",
+            "position": {
+              "x": 1540,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "orgId": "{{params.orgId}}",
+              "experimentId": "{{params.experimentId}}"
+            }
+          },
+          {
+            "id": "ramp3",
+            "typeId": "feature.experiments.nodes.apply-ramp@1.0.0",
+            "name": "Stage 3: all but the holdout",
+            "position": {
+              "x": 1760,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "orgId": "{{params.orgId}}",
+              "experimentId": "{{params.experimentId}}",
+              "stage": 3,
+              "holdoutPct": "{{params.holdoutPct}}"
+            }
+          },
+          {
+            "id": "wait3",
+            "typeId": "core.flow.wait@1.0.0",
+            "name": "Monitoring window",
+            "position": {
+              "x": 1980,
+              "y": 0
+            },
+            "config": {
+              "mode": "duration",
+              "seconds": "{{params.monitorWindowSeconds}}"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "monitor",
+            "typeId": "feature.experiments.nodes.monitor@1.0.0",
+            "name": "Monitor against the holdout",
+            "position": {
+              "x": 2200,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "orgId": "{{params.orgId}}",
+              "experimentId": "{{params.experimentId}}"
+            }
+          },
+          {
+            "id": "finalize",
+            "typeId": "feature.experiments.nodes.finalize@1.0.0",
+            "name": "Ship the winner",
+            "position": {
+              "x": 2420,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "orgId": "{{params.orgId}}",
+              "experimentId": "{{params.experimentId}}"
+            }
+          },
+          {
+            "id": "rollback1",
+            "typeId": "feature.experiments.nodes.rollback@1.0.0",
+            "name": "Roll back (stage 1 breach)",
+            "position": {
+              "x": 1100,
+              "y": 200
+            },
+            "config": {},
+            "inputs": {
+              "orgId": "{{params.orgId}}",
+              "experimentId": "{{params.experimentId}}",
+              "reason": "recheck_breach"
+            }
+          },
+          {
+            "id": "rollback2",
+            "typeId": "feature.experiments.nodes.rollback@1.0.0",
+            "name": "Roll back (stage 2 breach)",
+            "position": {
+              "x": 1760,
+              "y": 200
+            },
+            "config": {},
+            "inputs": {
+              "orgId": "{{params.orgId}}",
+              "experimentId": "{{params.experimentId}}",
+              "reason": "recheck_breach"
+            }
+          },
+          {
+            "id": "rollback3",
+            "typeId": "feature.experiments.nodes.rollback@1.0.0",
+            "name": "Roll back (monitor breach)",
+            "position": {
+              "x": 2420,
+              "y": 200
+            },
+            "config": {},
+            "inputs": {
+              "orgId": "{{params.orgId}}",
+              "experimentId": "{{params.experimentId}}",
+              "reason": "monitor_breach"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "gates",
+            "to": "approve"
+          },
+          {
+            "from": "gates.winner",
+            "to": "ramp1.winner"
+          },
+          {
+            "from": "approve",
+            "to": "ramp1"
+          },
+          {
+            "from": "ramp1",
+            "to": "wait1"
+          },
+          {
+            "from": "wait1",
+            "to": "recheck1"
+          },
+          {
+            "from": "recheck1",
+            "to": "ramp2",
+            "condition": {
+              "type": "falsy",
+              "left": "breach"
+            }
+          },
+          {
+            "from": "recheck1",
+            "to": "rollback1",
+            "condition": {
+              "type": "truthy",
+              "left": "breach"
+            }
+          },
+          {
+            "from": "ramp2",
+            "to": "wait2"
+          },
+          {
+            "from": "wait2",
+            "to": "recheck2"
+          },
+          {
+            "from": "recheck2",
+            "to": "ramp3",
+            "condition": {
+              "type": "falsy",
+              "left": "breach"
+            }
+          },
+          {
+            "from": "recheck2",
+            "to": "rollback2",
+            "condition": {
+              "type": "truthy",
+              "left": "breach"
+            }
+          },
+          {
+            "from": "ramp3",
+            "to": "wait3"
+          },
+          {
+            "from": "wait3",
+            "to": "monitor"
+          },
+          {
+            "from": "monitor",
+            "to": "finalize",
+            "condition": {
+              "type": "falsy",
+              "left": "breach"
+            }
+          },
+          {
+            "from": "monitor",
+            "to": "rollback3",
+            "condition": {
+              "type": "truthy",
+              "left": "breach"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}
