@@ -29,6 +29,7 @@ import { SCHEDULED_AGENT_CHATS_TOGGLE, cadenceRefusal } from './scheduledChatSer
 import { resolveOne } from '../../host/featureToggles/service.js';
 import { hasWorkflowScope } from '../../host/workflowWriteAuthority.js';
 import { isAnonTenantId } from '../../host/requestSubject.js';
+import { untrustedToolError } from '../../host/agentToolKit.js';
 
 /**
  * ADR 0985 D6 — who may arm standing autonomous work from chat. A scheduled job is
@@ -76,8 +77,8 @@ const MIN_LEAD_MS = 60_000;
 // fires against server-local (UTC) wall-clock, so a bad/absent zone would fire the
 // user's "9am" at the wrong moment silently — the recurring analogue of GC-R3.
 
-function toolError(error: string, message: string): { content: string; isError: true } {
-  return { content: JSON.stringify({ error, message }), isError: true };
+function toolError(error: string, message: string): { content: string; isError: true; hostMessage: true } {
+  return { content: JSON.stringify({ error, message }), isError: true, hostMessage: true };
 }
 
 export function registerScheduledFollowupTool(): void {
@@ -172,7 +173,7 @@ export function registerScheduledFollowupTool(): void {
         },
       }, now);
       if (!result.ok) {
-        return toolError(result.error.code, result.error.message);
+        return untrustedToolError(result.error.code, 'The schedule was refused; the reason is below.', result.error.message);
       }
       return {
         content: JSON.stringify({
@@ -308,7 +309,7 @@ export function registerScheduledRecurringTool(): void {
         },
       }, now);
       if (!result.ok) {
-        return toolError(result.error.code, result.error.message);
+        return untrustedToolError(result.error.code, 'The schedule was refused; the reason is below.', result.error.message);
       }
       return {
         content: JSON.stringify({

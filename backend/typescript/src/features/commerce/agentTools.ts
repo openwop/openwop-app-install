@@ -30,6 +30,7 @@ import { OpenwopError } from '../../types.js';
 import { listProducts, getProduct, listOrders, getOrder, listCoupons } from './commerceService.js';
 import { resolvePrice } from './pricing.js';
 import { createQuote, getQuote, listQuotes, type QuoteLineInput } from './quotes.js';
+import { untrustedToolError } from '../../host/agentToolKit.js';
 
 const COMMERCE_TOGGLE = 'commerce';
 const NS = 'openwop:feature.commerce.nodes.';
@@ -57,10 +58,10 @@ export const COMMERCE_STORE_TOOL_IDS: readonly string[] = [
   COMMERCE_CREATE_QUOTE_TOOL_ID,
 ];
 
-type ToolResult = { content: string; isError?: boolean };
+type ToolResult = { content: string; isError?: boolean; hostMessage?: true };
 const ok = (payload: unknown): ToolResult => ({ content: JSON.stringify(payload) });
 const empty = (note: string): ToolResult => ({ content: JSON.stringify({ note }) });
-const toolError = (error: string, message: string): ToolResult => ({ content: JSON.stringify({ error, message }), isError: true });
+const toolError = (error: string, message: string): ToolResult => ({ content: JSON.stringify({ error, message }), isError: true, hostMessage: true });
 const isResult = (v: unknown): v is ToolResult => typeof (v as { content?: unknown }).content === 'string';
 
 /** CFPT-5 — the default row cap for the unbounded list reads. Bounds the array a
@@ -129,7 +130,7 @@ function readTool(
       try {
         return await run(input, org.orgId, scope);
       } catch (err) {
-        if (err instanceof OpenwopError) return toolError(err.code, err.message);
+        if (err instanceof OpenwopError) return untrustedToolError(err.code, 'The tool refused this call; the reason it gave is below.', err.message);
         throw err;
       }
     },
@@ -364,7 +365,7 @@ export function registerCommerceAgentTools(): void {
           note: 'Quote drafted (status: draft). Tell the user the total and that they can send it from the Quotes page — you cannot send it.',
         });
       } catch (err) {
-        if (err instanceof OpenwopError) return toolError(err.code, err.message);
+        if (err instanceof OpenwopError) return untrustedToolError(err.code, 'The tool refused this call; the reason it gave is below.', err.message);
         throw err;
       }
     },

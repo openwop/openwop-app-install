@@ -95,7 +95,9 @@ const log = createLogger('run-dispatch');
 // `campaignAutonomy` / `campaignForkPosture` (ADR 0942 D4, D10.4) are the campaign's
 // autonomy policy frozen at run start and the attended posture of a branch fork or
 // redrive. A caller who could supply either would choose its own HITL level.
-const RESERVED_RUN_METADATA_KEYS = ['definitionRevision', 'definitionResolvedFrom', 'launchResolved', 'costUsd', 'costTokens', 'costByNode', 'debug', 'eval', 'redriveOf', 'onlineEvalScored', 'compaction', 'personalTenant', 'owner', 'traceContext', 'nodePinMismatches', 'teamLedger', 'orgScopeSubject', 'intentLedger', 'intentLedgerApprovals', 'campaignGoal', 'campaignAutonomy', 'campaignForkPosture', 'openwop-app.experiments', 'openwop-app.agentBindings', 'clientContext', 'openwop-app.playbook'] as const;
+// ADR 0957: a report's calendar period is resolved by the host at insertion;
+// callers cannot supply that decision, while forks retain the stored value.
+const RESERVED_RUN_METADATA_KEYS = ['definitionRevision', 'definitionResolvedFrom', 'launchResolved', 'costUsd', 'costTokens', 'costByNode', 'debug', 'eval', 'redriveOf', 'onlineEvalScored', 'compaction', 'personalTenant', 'owner', 'traceContext', 'nodePinMismatches', 'teamLedger', 'orgScopeSubject', 'intentLedger', 'intentLedgerApprovals', 'campaignGoal', 'campaignAutonomy', 'campaignForkPosture', 'openwop-app.experiments', 'openwop-app.agentBindings', 'clientContext', 'openwop-app.playbook', 'openwop-app.clientReportPeriod'] as const;
 /**
  * The run-attribution blocks (`heartbeat`/`schedule`/`kanban`/`approval`) are
  * host-written: the scheduler, the kanban trigger, the heartbeat and approval

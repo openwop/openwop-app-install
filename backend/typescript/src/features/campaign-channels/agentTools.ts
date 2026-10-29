@@ -39,6 +39,7 @@ import { surfaceDispatchedRun } from '../../host/turnRunDispatch.js';
 import { createLogger } from '../../observability/logger.js';
 import { getBrief } from '../campaign-brief/briefService.js';
 import { CAMPAIGN_CHANNELS, type CampaignChannel } from '../campaign-brief/types.js';
+import { untrustedToolError } from '../../host/agentToolKit.js';
 
 const log = createLogger('campaign-channels.generator-tools');
 
@@ -59,11 +60,11 @@ const CHANNEL_LABELS: Record<CampaignChannel, string> = {
 };
 const workflowIdFor = (channel: CampaignChannel): string => `campaign-studio.channel.${channel.replace(/_/g, '-')}`;
 
-type ToolResult = { content: string; isError?: boolean };
+type ToolResult = { content: string; isError?: boolean; hostMessage?: true };
 
 const str = (v: unknown): string => (typeof v === 'string' ? v.trim() : '');
 function toolError(error: string, message: string, extra?: Record<string, unknown>): ToolResult {
-  return { content: JSON.stringify({ error, message, ...(extra ?? {}) }), isError: true };
+  return { content: JSON.stringify({ ...(extra ?? {}), error, message }), isError: true, hostMessage: true };
 }
 
 async function channelsEnabled(tenantId: string, actingUserId: string | undefined): Promise<boolean> {
@@ -137,7 +138,7 @@ export async function runChannelGenerateTool(deps: StartRunDeps, input: Record<s
   const briefId = str(input.briefId);
   if (!briefId) return toolError('validation_error', 'Pass the `briefId` to generate this channel from.');
   const brief = await getBrief(scope.tenantId, briefId);
-  if (!brief) return toolError('not_found', `Brief not found: ${briefId}`);
+  if (!brief) return untrustedToolError('not_found', 'That brief (id below) was not found.', briefId);
   if (!(await hasOrgScope(scope.tenantId, scope.actingUserId, brief.orgId, 'workspace:write'))) {
     return toolError('forbidden', 'You need write access to this brief\'s workspace to generate a channel.');
   }
@@ -175,7 +176,7 @@ export async function runChannelGenerateTool(deps: StartRunDeps, input: Record<s
     // CFPT-2 / DATA-4 — the run never started (null OR a throw); release the claim
     // so an honest retry isn't blocked for the dedup window by a latch over a failure.
     await releaseIgnition(scope.tenantId, key);
-    return toolError('dispatch_failed', `The ${channel} channel workflow could not start.`);
+    return untrustedToolError('dispatch_failed', 'The channel workflow (channel below) could not start.', channel);
   }
   await recordIgnitionRun(scope.tenantId, key, runId);
   await surfaceDispatchedRun(scope, deps.storage, { runId, agentId: scope.agentProfileId ?? GENERATOR_AGENT_ID, workflowId: workflowIdFor(channel), workflowName: `${CHANNEL_LABELS[channel]} generation` }, 'campaign-channel-run');

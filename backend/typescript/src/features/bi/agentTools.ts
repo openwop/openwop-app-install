@@ -33,7 +33,9 @@ export function registerBiAgentTools(): void {
     // `slides.catalog`, both exempt since the list existed. Probed under
     // `lossy`: `['metric-0','metric-1','metric-2',{_elided:8},'metric-11']` —
     // the model then invents an id and the run fails in a way it cannot
-    // diagnose, because what it was SHOWN was wrong.
+    // diagnose, because what it was SHOWN was wrong. (ADR 0999 D5.2: that
+    // probe was a scalar id list, which `lossy` no longer elides at all; a
+    // catalog of metric OBJECTS still would be, so the exemption stands.)
     schemaCarrying: true,
     def: {
       name: BI_LIST_METRICS_TOOL_ID,

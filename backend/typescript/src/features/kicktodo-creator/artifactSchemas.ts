@@ -9,6 +9,7 @@
 
 import { registerArtifactType } from '../../host/artifactTypes.js';
 import { LESSON_JSON_SCHEMA } from './lessonAssembly.js';
+import { CHALLENGE_PLAN_JSON_SCHEMA } from './planService.js';
 
 export const CHALLENGE_PLAN_TYPE = 'kicktodo.challenge-plan';
 
@@ -95,6 +96,12 @@ export function registerKicktodoCreatorArtifactTypes(): void {
               isRecovery: { type: 'boolean' },
               // ADR 0458 §2.2 (correction) — dossier claim ids the day relies on.
               claimRefs: { type: 'array', items: { type: 'string' } },
+              // ADR 0429 P4 substitutions. Taken from the producer's schema rather
+              // than restated: a copy here once lacked this field, so every plan
+              // with alternatives failed typed persistence and was stored as an
+              // untyped JSON blob titled `{` (P9, 2026-10-28). Only this field is
+              // shared; the looser historical optionals above are kept as they were.
+              alternatives: CHALLENGE_PLAN_JSON_SCHEMA.properties.days.items.properties.alternatives,
             } },
         },
       },

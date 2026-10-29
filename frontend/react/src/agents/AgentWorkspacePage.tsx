@@ -23,6 +23,7 @@ import { AgentWorkflowPortfolioPanel } from './AgentWorkflowPortfolioPanel.js';
 import { AgentSchedulesPanel } from './AgentSchedulesPanel.js';
 import { AgentInstructionsPanel } from './AgentInstructionsPanel.js';
 import { AgentVoicePanel } from './AgentVoicePanel.js';
+import { AgentCompactionPanel } from './AgentCompactionPanel.js';
 import { AgentTwinPanel } from '../features/twin/AgentTwinPanel.js';
 import { AgentKnowledgePanel } from '../features/agent-knowledge/AgentKnowledgePanel.js';
 import { AgentMemoryTab } from '../features/agent-knowledge/AgentMemoryTab.js';
@@ -432,6 +433,7 @@ export function AgentWorkspacePage(): JSX.Element {
         <div className="u-flex u-flex-col u-gap-4">
           <AgentInstructionsPanel entry={entry} onChanged={() => void refresh()} />
           <AgentVoicePanel rosterId={entry.rosterId} />
+          <AgentCompactionPanel rosterId={entry.rosterId} />
         </div>
       ) : null}
       {tab === 'knowledge' ? <AgentKnowledgePanel rosterId={entry.rosterId} persona={entry.persona} /> : null}

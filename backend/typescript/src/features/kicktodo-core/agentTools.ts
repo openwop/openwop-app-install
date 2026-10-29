@@ -26,6 +26,7 @@ import { todayFor, journalFor, planFor, submitCheckIn, CheckInDeniedError, Evide
 import { getCard } from '../../host/kanbanService.js';
 import { progressFor } from './progressService.js';
 import { listEnrollmentsFor } from './enrollmentService.js';
+import { toolError } from '../../host/agentToolKit.js';
 
 const log = createLogger('kicktodo.agent-tools');
 
@@ -185,7 +186,7 @@ export async function conveneSpecialist(
     const mine = await listJobsForSubject(scope.tenantId, { kind: 'user', id: scope.actingUserId });
     const pending = mine.filter((j) => j.metadata?.['tool'] === KICKTODO_CONVENE_TOOL_ID && typeof j.nextFireAt === 'number');
     if (pending.length >= MAX_PENDING_CONVENES) {
-      return { content: JSON.stringify({ error: 'too_many_convenes', message: `${pending.length} specialists are already working — wait for them to reply before convening more.` }), isError: true };
+      return toolError('too_many_convenes', `${pending.length} specialists are already working — wait for them to reply before convening more.`);
     }
   } catch { /* best-effort cap — never block on the count */ }
 
@@ -294,10 +295,10 @@ export async function runReplanTool(deps: StartRunDeps, input: Record<string, un
   const enrollmentId = typeof input.enrollmentId === 'string' ? input.enrollmentId.trim() : '';
   const intent = typeof input.intent === 'string' ? input.intent.trim() : '';
   if (!enrollmentId) {
-    return { content: JSON.stringify({ error: 'validation_error', message: 'Pass the `enrollmentId` to replan.' }), isError: true };
+    return toolError('validation_error', 'Pass the `enrollmentId` to replan.');
   }
   if (!intent) {
-    return { content: JSON.stringify({ error: 'validation_error', message: 'Pass your `intent` — what you want to change about the plan.' }), isError: true };
+    return toolError('validation_error', 'Pass your `intent` — what you want to change about the plan.');
   }
   // Participant authority — a foreign/absent enrollment is a uniform not_found (the
   // route posture). A scheduled/system turn (no acting user) already failed above.
@@ -353,13 +354,13 @@ export async function runReplanTool(deps: StartRunDeps, input: Record<string, un
  * (there is no un-check). Echoes the card's human title back so the confirmation
  * is legible. Fails typed without an acting human principal.
  */
-export async function runLogCheckinTool(input: Record<string, unknown>, scope: ReplanToolScope): Promise<{ content: string; isError?: boolean }> {
+export async function runLogCheckinTool(input: Record<string, unknown>, scope: ReplanToolScope): Promise<{ content: string; isError?: boolean; fromThrow?: true }> {
   if (!scope.actingUserId) {
     return { content: JSON.stringify({ error: 'acting_user_required' }), isError: true };
   }
   const cardId = typeof input.cardId === 'string' ? input.cardId.trim() : '';
   if (!cardId) {
-    return { content: JSON.stringify({ error: 'validation_error', message: 'Pass the EXACT `cardId` from the Today view — read `today` first and pick the action; never guess.' }), isError: true };
+    return toolError('validation_error', 'Pass the EXACT `cardId` from the Today view — read `today` first and pick the action; never guess.');
   }
   const note = typeof input.note === 'string' && input.note.trim() ? input.note.trim() : undefined;
   const measuredValue = typeof input.measuredValue === 'number' && Number.isFinite(input.measuredValue) ? input.measuredValue : undefined;
@@ -383,11 +384,11 @@ export async function runLogCheckinTool(input: Record<string, unknown>, scope: R
   } catch (err) {
     // Map the domain errors to the SAME typed shapes the /check-ins route uses.
     if (err instanceof EvidenceRequiredError) {
-      return { content: JSON.stringify({ error: 'validation_error', message: err.message }), isError: true };
+      return { content: JSON.stringify({ error: 'validation_error', message: err.message }), isError: true, fromThrow: true };
     }
     if (err instanceof CheckInDeniedError) {
       if (err.reason === 'superseded') {
-        return { content: JSON.stringify({ error: 'conflict', message: 'That action was superseded by a plan change — read `today` again for the current card.' }), isError: true };
+        return toolError('conflict', 'That action was superseded by a plan change — read `today` again for the current card.');
       }
       // not-owner / occurrence-not-found → uniform not_found (the route posture; no existence leak).
       return { content: JSON.stringify({ error: 'not_found', message: 'That action was not found on your Today view.' }), isError: true };

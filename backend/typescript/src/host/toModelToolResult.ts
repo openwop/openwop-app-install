@@ -56,7 +56,7 @@
  */
 
 import { builtinAgentTool } from './agentToolProvider.js';
-import { fenceUntrustedBlock } from './untrustedContent.js';
+import { fenceUntrustedBlock, fenceThrownToolError, TOOL_FAILED_PREFIX, ERROR_CODE_TOKEN } from './untrustedContent.js';
 import { createLogger } from '../observability/logger.js';
 
 const log = createLogger('host.toModelToolResult');
@@ -83,7 +83,7 @@ export function fenceTally(): Record<string, { fenced: number; passed: number }>
 /** Test seam — the tally is process-global, so a suite must be able to reset it. */
 export function __resetFenceTally(): void { tally.clear(); }
 
-function record(toolName: string, fenced: boolean, decision: 'trusted' | 'untrusted' | 'unknown'): void {
+function record(toolName: string, fenced: boolean, decision: 'trusted' | 'untrusted' | 'unknown' | 'thrown' | 'returned-error'): void {
   const row = tally.get(toolName) ?? { fenced: 0, passed: 0 };
   if (fenced) row.fenced += 1; else row.passed += 1;
   tally.set(toolName, row);
@@ -97,18 +97,58 @@ function record(toolName: string, fenced: boolean, decision: 'trusted' | 'untrus
   log.debug('tool_result_fence_decision', { toolName, decision, fenced });
 }
 
+export { TOOL_FAILED_PREFIX } from './untrustedContent.js';
+
+/** The error CODE of a tool's error content, when it carries one as a safe token. */
+function errorToken(content: string): string | undefined {
+  try {
+    const v = JSON.parse(content) as unknown;
+    if (!v || typeof v !== 'object' || Array.isArray(v)) return undefined;
+    const r = v as Record<string, unknown>;
+    const code = typeof r.error === 'string' ? r.error : typeof r.code === 'string' ? r.code : undefined;
+    return code && ERROR_CODE_TOKEN.test(code) ? code : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
- * Fence `content` iff the named builtin declared `contentTrust: 'untrusted'`.
+ * Build the model-facing text of a tool result. A SUCCESS is fenced iff the tool's
+ * declared `contentTrust` is not `trusted` (fail closed). An ERROR:
+ *
+ *  - from a caught THROW (`fromThrow`) is ALWAYS fenced (TOC2CD-14, the import-free
+ *    leaf `fenceThrownToolError`), whatever the tool's trust.
+ *  - returned by the tool itself (`{ content, isError: true }`) — see
+ *    `returnedErrorText`: fenced unless the tool is trusted, or its `toolError`
+ *    helper vouched for an exact `{ error, message }` host sentence.
+ *
+ * Every fenced error is preceded by `TOOL_FAILED_PREFIX` OUTSIDE the fence, so the
+ * model still knows the call failed (the `isError` flag is unchanged too).
  *
  * @param toolName the builtin's registered id
  * @param content  the text about to become a model message — pass the FINAL
  *                 text (i.e. after any compaction transform), so the fence wraps
  *                 what the model actually reads
- * @param isError  a host-authored error string is never fenced; burying a
- *                 diagnostic in a data-only wrapper helps nobody
+ * @param isError  the result is an error
+ * @param opts.fromThrow the error content is a CAUGHT THROW's message (TOC2CD-14):
+ *                 arbitrary text no tool author wrote (an upstream body, a URL),
+ *                 so it is ALWAYS fenced. The model still reads it as a failure:
+ *                 `Tool failed (<code>):` (or `Tool failed:` with no usable code)
+ *                 sits OUTSIDE the fence as host text, and the caller keeps
+ *                 `isError` (14's condition, 2026-10-28).
+ * @param opts.code the error's code, when the host knows one (`errorCode`). Printed
+ *                 only when it is a safe token, so it can never carry the payload.
+ * @param opts.hostVouched the result carried `hostMessage` — a `toolError` helper vouched for its `message`
  */
-export function toModelToolResult(toolName: string, content: string, isError?: boolean): string {
-  if (isError) return content;
+export function toModelToolResult(toolName: string, content: string, isError?: boolean, opts?: { fromThrow?: boolean; code?: string; hostVouched?: boolean }): string {
+  const declared = builtinAgentTool(toolName)?.contentTrust;
+  if (isError) {
+    if (opts?.fromThrow) {
+      record(toolName, true, 'thrown');
+      return fenceThrownToolError(toolName, content, opts.code);
+    }
+    return returnedErrorText(toolName, content, declared, opts?.hostVouched === true);
+  }
   // FAIL CLOSED. Only an EXPLICIT `trusted` skips the fence; `untrusted` and
   // "not a registered builtin" both fence.
   //
@@ -119,7 +159,6 @@ export function toModelToolResult(toolName: string, content: string, isError?: b
   // blanket fence was removed; `agent-dispatch-tool-loop.test.ts` ("WSRCH-1")
   // caught it by calling a synthetic tool with an injection payload. Inverting
   // the test makes the registry's silence mean "fence it", not "trust it".
-  const declared = builtinAgentTool(toolName)?.contentTrust;
   const decision = declared ?? 'unknown';
   if (declared === 'trusted') {
     record(toolName, false, decision);
@@ -127,4 +166,87 @@ export function toModelToolResult(toolName: string, content: string, isError?: b
   }
   record(toolName, true, decision);
   return fenceUntrustedBlock(content, `the \`${toolName}\` tool`);
+}
+
+/**
+ * ADR 0999 D2 (TOC2CD-2) — the fence for the WORKFLOW-AS-TOOL lane: a chat node
+ * with workflow tool bindings (`bootstrap/nodes.ts` `onToolUse`) returns a child
+ * RUN's output to the provider dispatcher, which puts it in the model's context
+ * verbatim. That output is whatever the child's nodes produced — an `http.fetch`
+ * body, a web search, a form submission — so it is never host-authored
+ * vocabulary, and there is no per-tool `contentTrust` to consult: a binding name
+ * is author-chosen (`^[a-zA-Z0-9_-]{1,64}$`, so it can never name a builtin).
+ * It therefore ALWAYS fences.
+ *
+ * Unlike `toModelToolResult`, a FAILED child is fenced too: a builtin's error is
+ * host-authored text, but a child run's `error` is whatever its failing node said,
+ * which can echo fetched content. Callers leave a `pending` result (a run id and a
+ * fixed host sentence) unfenced, so its instruction is not wrapped in a distrust
+ * warning.
+ *
+ * Kept in THIS module so the fence decision has one owner; recorded in the tally
+ * under `workflow:<name>` so it is observable beside the builtin decisions.
+ */
+export function toModelWorkflowToolResult(bindingName: string, content: string): string {
+  record(`workflow:${bindingName}`, true, 'untrusted');
+  return fenceUntrustedBlock(content, `the \`${bindingName}\` workflow tool`);
+}
+
+/**
+ * A RETURNED error — fenced by PROVENANCE, not by tool trust (TOC2CD-11, ADR 1000).
+ *
+ *  - A `trusted` tool's error is unchanged: its whole result is host vocabulary.
+ *  - A result a `toolError` / `untrustedToolError` helper vouched for (`hostMessage`;
+ *    the AST ratchet proves every such `message` is a host sentence):
+ *      - exactly `{ error, message }` → unchanged. These are the recovery
+ *        instructions agents act on ("pass `orgId` (ask the user which)");
+ *      - `{ error, message, …anything else }` (a `detail`, or a validator's extra
+ *        keys such as `errors` / `defects`) → `Tool failed (<code>): <message>` as
+ *        host text, then the rest INSIDE the fence. The instruction stays
+ *        followable; only what came with it is fenced.
+ *  - Anything else — no flag (a raw upstream body that merely looks like
+ *    `{error, message}`, an inline error) — is fenced whole after `Tool failed:`. The code is printed outside the fence ONLY for a vouched
+ *    result (review M1): an un-vouched payload's `error` field is not host text.
+ */
+function returnedErrorText(toolName: string, content: string, declared: 'trusted' | 'untrusted' | undefined, hostVouched: boolean): string {
+  if (declared === 'trusted') {
+    record(toolName, false, 'returned-error');
+    return content;
+  }
+  const shape = hostVouched ? vouchedShape(content) : undefined;
+  if (shape && shape.rest === undefined) {
+    record(toolName, false, 'returned-error');
+    return content;
+  }
+  record(toolName, true, 'returned-error');
+  if (shape) {
+    // The host sentence stays host text; only what came with it is fenced — a string
+    // `detail` as itself, anything else (extra keys, a non-string detail) as JSON.
+    return `${TOOL_FAILED_PREFIX} (${shape.error}): ${shape.message}\n${fenceUntrustedBlock(shape.rest!, `the ${toolName} tool's error detail`)}`;
+  }
+  const code = hostVouched ? errorToken(content) : undefined;
+  return `${TOOL_FAILED_PREFIX}${code ? ` (${code})` : ''}: ${fenceUntrustedBlock(content, `the ${toolName} tool's error`)}`;
+}
+
+/**
+ * A vouched error's parts: `{ error: <safe token>, message: <string>, …rest }`.
+ * `rest` is undefined when there is nothing but `error` + `message`; the string
+ * itself when it is only a string `detail`; else the remaining keys as JSON (14's
+ * decision, 2026-10-28: a `toolError(code, message, { extra })` keeps its host
+ * sentence OUTSIDE the fence and fences only the extras — fencing it whole buried
+ * the repair instruction of every validator that also returns its error list).
+ */
+function vouchedShape(content: string): { error: string; message: string; rest?: string } | undefined {
+  try {
+    const v = JSON.parse(content) as unknown;
+    if (!v || typeof v !== 'object' || Array.isArray(v)) return undefined;
+    const { error, message, ...rest } = v as Record<string, unknown>;
+    if (typeof error !== 'string' || !ERROR_CODE_TOKEN.test(error) || typeof message !== 'string') return undefined;
+    const keys = Object.keys(rest);
+    if (keys.length === 0) return { error, message };
+    if (keys.length === 1 && keys[0] === 'detail' && typeof rest.detail === 'string') return { error, message, rest: rest.detail };
+    return { error, message, rest: JSON.stringify(rest) };
+  } catch {
+    return undefined;
+  }
 }

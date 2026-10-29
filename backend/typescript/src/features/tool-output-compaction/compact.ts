@@ -91,16 +91,16 @@
  */
 
 import type { CompactionDecision } from '../../executor/types.js';
+import { ELIDED_MARKER } from '../../executor/compaction.js';
 
 export type { CompactionDecision };
+export { ELIDED_MARKER };
 
 const DEFAULT_HEAD = 3;
 const DEFAULT_TAIL = 1;
 
 /** The disclosure marker `dropEmpty` leaves behind, naming what it removed. */
 export const EMPTIED_MARKER = '_emptied';
-/** The disclosure marker `elideArrays` leaves in place of the removed rows. */
-export const ELIDED_MARKER = '_elided';
 
 /**
  * LOSSLESS. Delete insignificant whitespace from well-formed JSON TEXT.
@@ -141,6 +141,17 @@ export function minifyJsonText(text: string): string {
   return out;
 }
 
+/**
+ * ADR 0999 D5.1 (TOCC-9) — a NULL-PROTOTYPE output object. On a plain `{}`,
+ * `out['__proto__'] = value` sets the object's PROTOTYPE instead of an own key,
+ * so a tool payload carrying a `__proto__` field lost it (and, through the
+ * prototype, could take the whole value with it) with no `_emptied` disclosure.
+ * `JSON.parse` creates `__proto__` as an ordinary own key; this keeps it one.
+ */
+function record(): Record<string, unknown> {
+  return Object.create(null) as Record<string, unknown>;
+}
+
 function isStructurallyEmpty(v: unknown): boolean {
   if (v === null || v === '') return true;
   if (Array.isArray(v)) return v.length === 0;
@@ -164,11 +175,11 @@ function dropEmpty(v: unknown): unknown {
   if (v && typeof v === 'object') {
     const src = v as Record<string, unknown>;
     if (Object.prototype.hasOwnProperty.call(src, EMPTIED_MARKER)) {
-      const passthrough: Record<string, unknown> = {};
+      const passthrough = record();
       for (const [k, val] of Object.entries(src)) passthrough[k] = dropEmpty(val);
       return passthrough;
     }
-    const out: Record<string, unknown> = {};
+    const out = record();
     const emptied: string[] = [];
     for (const [k, val] of Object.entries(src)) {
       const cleaned = dropEmpty(val);
@@ -181,11 +192,27 @@ function dropEmpty(v: unknown): unknown {
   return v;
 }
 
-/** Collapse homogeneous arrays longer than head+tail+1 to head + marker + tail. */
+/**
+ * ADR 0999 D5.2 (TOCC-8) — is this array a ROW LIST, the only shape elision may
+ * shorten? Every element must be a plain object. An array of scalars (an enum, an
+ * id list, tags) is never elided: inserting `{"_elided":N}` into it puts an
+ * object into a string vocabulary, and the ids a model must cite back are exactly
+ * the elements it loses. Also refused (D5.3, TOC2CD-7): an array that already
+ * holds an element with its own `_elided` key, so the payload's data can never be
+ * mistaken for our disclosure — the mirror of the `_emptied` passthrough guard.
+ */
+function isElidableRowList(v: readonly unknown[]): boolean {
+  return v.every(
+    (x) => x !== null && typeof x === 'object' && !Array.isArray(x)
+      && !Object.prototype.hasOwnProperty.call(x, ELIDED_MARKER),
+  );
+}
+
+/** Collapse ROW LISTS (arrays of plain objects) longer than head+tail+1 to head + marker + tail. */
 function elideArrays(v: unknown, head: number, tail: number): unknown {
   if (Array.isArray(v)) {
     const mapped = v.map((x) => elideArrays(x, head, tail));
-    if (mapped.length > head + tail + 1) {
+    if (mapped.length > head + tail + 1 && isElidableRowList(v)) {
       return [
         ...mapped.slice(0, head),
         { [ELIDED_MARKER]: mapped.length - head - tail },
@@ -195,7 +222,7 @@ function elideArrays(v: unknown, head: number, tail: number): unknown {
     return mapped;
   }
   if (v && typeof v === 'object') {
-    const out: Record<string, unknown> = {};
+    const out = record();
     for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
       // ADR 0604 — NEVER elide the `_emptied` disclosure. Caught by the witness
       // that was written to prove the disclosure works: with eight dropped keys
@@ -239,11 +266,21 @@ export function compactToolOutput(content: string, decision: CompactionDecision)
 
   const head = Number.isInteger(decision.head) && decision.head! >= 0 ? decision.head! : DEFAULT_HEAD;
   const tail = Number.isInteger(decision.tail) && decision.tail! >= 0 ? decision.tail! : DEFAULT_TAIL;
-  const out = elideArrays(dropEmpty(parsed), head, tail);
-
+  // ADR 0999 D5.4 (TOCC-7) — both transforms recurse, and so does
+  // `JSON.stringify`: a deeply nested payload (MEASURED: 20,000 `[`) throws
+  // `RangeError` from any of the three. `JSON.parse` accepts that depth, so the
+  // validator above does not stop it. The tool-result boundary already fails open,
+  // but the explicit `compact` surface surfaced an uncoded `RangeError`. Returning
+  // the input unchanged is the kernel's documented contract for anything it cannot
+  // transform, and it makes "never throws" true.
+  let compacted: string;
+  try {
+    compacted = JSON.stringify(elideArrays(dropEmpty(parsed), head, tail));
+  } catch {
+    return content;
+  }
   // Minified re-serialization. If the original was already smaller (e.g. an
   // array of scalars where dropEmpty adds nothing), keep whichever is shorter so
   // compaction is never a regression.
-  const compacted = JSON.stringify(out);
   return compacted.length < content.length ? compacted : content;
 }

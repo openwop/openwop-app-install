@@ -47,12 +47,12 @@ export const PODCASTS_PRODUCE_TOOL_ID = 'openwop:podcasts.produce';
 
 const PRODUCER_AGENT_ID = 'vendor.openwop-app.podcasts.agents.producer';
 
-type ToolResult = { content: string; isError?: boolean };
+type ToolResult = { content: string; isError?: boolean; hostMessage?: true };
 
 const str = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
 
 function toolError(error: string, message: string, extra?: Record<string, unknown>): ToolResult {
-  return { content: JSON.stringify({ error, message, ...(extra ?? {}) }), isError: true };
+  return { content: JSON.stringify({ ...(extra ?? {}), error, message }), isError: true, hostMessage: true };
 }
 
 /** Per-call toggle honesty (ADR 0308 D2): per-tenant, dynamic, fail-closed. */

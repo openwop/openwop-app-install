@@ -98,6 +98,10 @@ const CLASSIFIED: Record<string, { kind: Kind; why: string; decisionSource?: Reg
     kind: 'EXEMPT',
     why: 'ADR 0889 D9 — wraps a lane executor to record the tool boundary and returns the inner result unchanged; the calling loop (run / chat lane, both classified) applies the compaction.',
   },
+  'host/replayToolResults.ts': {
+    kind: 'EXEMPT',
+    why: 'ADR 1002 D4 — wraps the run-lane executor to record each result and, on a replay fork, serve the recorded one; it returns the result unchanged to the calling loop (run lane, classified), which applies the compaction.',
+  },
   'features/destination-sync/agentTools.ts': {
     kind: 'EXEMPT',
     why: 'Prose only — the comment references the executor seam; there is no tool-loop dispatch in this file.',

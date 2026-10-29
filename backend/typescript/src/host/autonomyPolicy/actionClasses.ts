@@ -38,11 +38,13 @@ export const NODE_ACTION_CLASSES: Readonly<Record<string, ActionClassEntry>> = O
   'feature.campaign-ops.nodes.execute': { class: 'campaign.change-set.apply', why: 'Applies an approved change set to the client\'s live destinations.' },
   'feature.campaign-connectors.nodes.push-catalog-feed': { class: 'ads.publish', why: 'ADR 0952 D6: publishes the client\'s product listings to Meta Catalog / Merchant Center, which can show publicly (Shopping free listings) and feed live shopping ads. catalogPushAdapter.pushCatalogItems passes the ads spend gate on ads.publish\'s PendingApproval lane (gateCatalogPublish, budget 0, content-hash keyed); the node waits on the approval. Its verified-writer gate (OPENWOP_ADS_VERIFIED_CATALOG_PUSH) still applies first.' },
   'feature.campaign-intel.nodes.apply-reallocation': { class: 'ads.budget', why: 'ADR 0952 D3: applies an approved reallocation plan; every op is adsAdapter.updateBudget, whose spend gate resolves the campaign policy itself (decreases first, caps re-checked on a current snapshot).' },
+  'feature.campaign-ops.nodes.publish-report': { class: 'report.publish', why: 'Publishes a frozen report under its client policy and a snapshot-bound covering approval (ADR 0957).' },
   // ── internal: no campaign action class ──
   'feature.campaign-autopilot.nodes.start-stage': { class: 'none', why: 'ADR 0961 starts an internal drafting stage with projected, frozen campaign decisions. Each child effect retains its own approval and spend chokepoint; this node grants no external authority.' },
   'feature.campaign-brief.nodes.validate': { class: 'none', why: 'Validates the brief; writes nothing outside it.' },
   'feature.campaign-orchestration.nodes.consistency-check': { class: 'none', why: 'Scores drafts against the kernel; a report.' },
   'feature.campaign-orchestration.nodes.finalize': { class: 'none', why: 'Writes the campaign row from the brief; nothing leaves the host.' },
+  'feature.campaign-ops.nodes.compute-snapshot': { class: 'none', why: 'Freezes client figures for review; no external delivery.' },
   'feature.campaign-ops.nodes.interpret': { class: 'none', why: 'Interprets a change request into a proposal; nothing is applied.' },
   'feature.campaign-ops.nodes.propose': { class: 'none', why: 'Stores a proposed change set and asks for approval; nothing is applied.' },
   'feature.campaign-ops.nodes.mcp-campaign-list': { class: 'none', why: 'ADR 0962 read tool for an outside agent; reads one client\'s data, writes only the run\'s client stamp.' },

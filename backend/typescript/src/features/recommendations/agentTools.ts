@@ -16,7 +16,7 @@
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
 import { claimIgnition, recordIgnitionRun, ignitionKey } from '../../host/ignitionGuard.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
-import { resolveFeatureToggle, toolFailLog } from '../../host/agentToolKit.js';
+import { resolveFeatureToggle, toolFailLog, untrustedToolError } from '../../host/agentToolKit.js';
 import { createLogger } from '../../observability/logger.js';
 import { listOrgs, resolveEffectiveAccess, type Scope } from '../../host/accessControlService.js';
 import { OpenwopError } from '../../types.js';
@@ -29,9 +29,9 @@ export const RECOMMENDATIONS_LIST_PLACEMENTS_TOOL_ID = 'openwop:recommendations.
 export const RECOMMENDATIONS_CREATE_PLACEMENT_TOOL_ID = 'openwop:recommendations.create-placement';
 
 const FEATURE = 'recommendations';
-type ToolResult = { content: string; isError?: boolean };
+type ToolResult = { content: string; isError?: boolean; hostMessage?: true };
 const ok = (v: unknown): ToolResult => ({ content: JSON.stringify(v) });
-const toolError = (error: string, message: string): { content: string; isError: true } => ({ content: JSON.stringify({ error, message }), isError: true });
+const toolError = (error: string, message: string): { content: string; isError: true; hostMessage: true } => ({ content: JSON.stringify({ error, message }), isError: true, hostMessage: true });
 const str = (v: unknown): string => (typeof v === 'string' ? v.trim() : '');
 const optStr = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
 
@@ -69,7 +69,7 @@ async function resolveToolOrg(
 
 const log = createLogger('recommendations.agent-tools');
 function fromServiceError(e: unknown): { content: string; isError: true } {
-  if (e instanceof OpenwopError) return toolError(e.code, e.message);
+  if (e instanceof OpenwopError) return untrustedToolError(e.code, 'The tool refused this call; the reason it gave is below.', e.message) as { content: string; isError: true };
   return toolFailLog(log, 'openwop:recommendations', e) as { content: string; isError: true }; // CFPT-6
 }
 

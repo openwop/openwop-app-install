@@ -23,6 +23,7 @@
 import { meterPlatformUnits } from './managedCredits.js';
 import { fetch as undiciFetch } from 'undici';
 import { createLogger } from '../observability/logger.js';
+import { ReplayEffectError } from './runEffectContext.js';
 import { resolveSecret } from '../byok/secretResolver.js';
 
 /** The BYOK credential ref for the web-search key (ADR 0101 P3). Settable per
@@ -338,6 +339,8 @@ export function createWebResearchSurface(scope: BundleScope): WebResearchSurface
       if (readable) page.extractedText = extractReadableText(body).slice(0, maxBody);
       return page;
     } catch (err) {
+      // ADR 0531 — a replay refusal is not a failed page: it propagates, typed.
+      if (err instanceof ReplayEffectError) throw err;
       return { url, status: 0, fetchedAt, error: err instanceof Error ? err.message : String(err) };
     }
   }
@@ -364,6 +367,10 @@ export function createWebResearchSurface(scope: BundleScope): WebResearchSurface
           if (resolved.platformPaid) await meterPlatformUnits({ tenantId: scope.tenantId, unit: 'webSearch', quantity: 1, featureId: 'web-research', ...(scope.runId ? { runId: scope.runId } : {}) });
           return live;
         } catch (err) {
+          // ADR 0531 — a replay fork's refused egress is a TYPED refusal, never
+          // example data: a demo marker would hand the replay a different result
+          // than the source saw (the replay-serving work in #5362).
+          if (err instanceof ReplayEffectError) throw err;
           // An operator who configured a host key did so deliberately — often for
           // egress control, allow-listing, or caching. A transient failure must
           // NOT silently reroute the request through a different egress path
@@ -404,6 +411,7 @@ export function createWebResearchSurface(scope: BundleScope): WebResearchSurface
           // empty list it might read as "nothing exists on this topic".
           log.warn('native web search returned no citations', { query, engine: native.engine });
         } catch (err) {
+          if (err instanceof ReplayEffectError) throw err; // ADR 0531 — typed, never demo
           log.warn('native web search failed', { query, error: err instanceof Error ? err.message : String(err) });
         }
       }

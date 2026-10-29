@@ -48,6 +48,18 @@ upgrade is neither: list it in `breakingConfig`.
 
 ## Version log
 
+### v0.9.0 — 2026-10-29
+- **Required stop:** no. **Rolling-safe:** yes.
+- **Schema:** sqlite 51 / postgres 49 (unchanged) · **App migrations:** 24 (unchanged).
+- No configuration changes are required. Tool-output compaction stays off by default.
+- Model calls replay from the invocation log (managed tier and tool rounds),
+  thrown and untrusted tool errors are fenced before they reach a model, and
+  replay forks refuse compose/propose drafts, web research and native search.
+- Client reports go through review, and admins can create whole-workspace
+  Connections. KickTodo reviews show readable fields instead of raw JSON, and
+  the creative-fidelity judge no longer sends unbranded products to review.
+- [CHANGELOG §0.9.0](./CHANGELOG.md#090--2026-10-29)
+
 ### v0.8.0 — 2026-10-28
 - **Required stop:** no. **Rolling-safe:** yes.
 - **Schema:** sqlite 51 / postgres 49 · **App migrations:** 24 (unchanged).

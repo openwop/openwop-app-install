@@ -222,6 +222,26 @@ describe('CALL-SITE RATCHET — every handler of fenced text is classified', () 
       kind: 'PRODUCES',
       why: 'The single builder of a model-facing tool result: it fences (and, since ADR 0604, compacts before fencing). It never shortens.',
     },
+    'bootstrap/nodes.ts': {
+      kind: 'PRODUCES',
+      why:
+        'ADR 0999 D2 — the workflow-as-tool lane (`chatResponderNode` `onToolUse`) fences a child run\'s '
+        + 'output via `toModelWorkflowToolResult` AFTER compaction and hands it to the provider dispatcher, '
+        + 'which relays it verbatim (`dispatchAnthropicTools` / `dispatchMiniMaxTools` slice only error '
+        + 'bodies). Its `.slice` calls touch prompts, ids and mock text, never a fenced result.',
+    },
+    'host/untrustedContent.ts': {
+      kind: 'PRODUCES',
+      why: 'The fence\'s own module: fenceUntrustedBlock / fenceThrownToolError produce fences, and its one shortener is `truncateFencedContent`, which re-closes the fence. It joined this population when TOC2CD-14 named toModelToolResult in a comment.',
+    },
+    'providers/dispatchAnthropicTools.ts': {
+      kind: 'PRODUCES',
+      why: 'TOC2CD-14 — fences a THROWN `onToolUse` error via `fenceThrownToolError` (untrustedContent.ts, the import-free leaf) before it becomes the model\'s tool_result. It relays every other result verbatim and slices only provider error bodies, never a fenced string.',
+    },
+    'providers/dispatchMiniMaxTools.ts': {
+      kind: 'PRODUCES',
+      why: 'TOC2CD-14 — fences a THROWN `onToolUse` error via `fenceThrownToolError` (untrustedContent.ts). Its `.slice` calls touch provider error bodies and the model\'s own invalid-JSON arguments, never a fenced string.',
+    },
     'host/agentDispatch.ts': {
       kind: 'PRODUCES',
       why: 'Fences knowledge + tool results for the chat tool loop via fenceUntrustedItems / fenceUntrustedBlock. No length bound of its own.',
@@ -351,6 +371,10 @@ describe('CALL-SITE RATCHET — every handler of fenced text is classified', () 
       kind: 'EXEMPT',
       why: 'Defines executeTool and calls toModelToolResult to BUILD the result; the fence is applied there, and this file imposes no length bound.',
     },
+    'host/agentToolKit.ts': {
+      kind: 'EXEMPT',
+      why: 'TOC2CD-11 (ADR 1000) — names the fence in prose only: its `toolError` / `untrustedToolError` build a structured error payload, and `toModelToolResult` decides and applies the fence. It never shortens text.',
+    },
     'host/packTrust.ts': {
       kind: 'EXEMPT',
       why: 'References toModelToolResult only to decide a trust label for a pack-sourced tool; it never handles the fenced string.',
@@ -434,7 +458,7 @@ describe('CALL-SITE RATCHET — every handler of fenced text is classified', () 
       const code = stripComments(readFileSync(join(SRC, f), 'utf8'));
       if (v.kind === 'PRODUCES') {
         expect(code, `${f} is PRODUCES but calls no fencing function`)
-          .toMatch(/fenceUntrusted\w*\s*\(|defang\w*Fence\s*\(|neutralizeUntrusted\s*\(|toModelToolResult\s*\(/);
+          .toMatch(/fenceUntrusted\w*\s*\(|defang\w*Fence\s*\(|neutralizeUntrusted\s*\(|toModel(?:Workflow)?ToolResult\s*\(|fenceThrownToolError\s*\(/); // ADR 0999 D2 / TOC2CD-14
       }
       if (v.kind === 'EXEMPT') expect(v.why.length, `${f} is EXEMPT with no stated reason`).toBeGreaterThan(60);
     }

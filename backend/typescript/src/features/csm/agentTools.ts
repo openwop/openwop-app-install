@@ -39,10 +39,10 @@ const TOGGLE_ID = 'csm';
 
 export const CSM_HEALTH_READ_TOOL_ID = 'openwop:feature.csm.nodes.health-read';
 
-type ToolResult = { content: string; isError?: boolean };
+type ToolResult = { content: string; isError?: boolean; hostMessage?: true };
 
 function toolError(error: string, message: string, extra?: Record<string, unknown>): ToolResult {
-  return { content: JSON.stringify({ error, message, ...(extra ?? {}) }), isError: true };
+  return { content: JSON.stringify({ ...(extra ?? {}), error, message }), isError: true, hostMessage: true };
 }
 
 const str = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v.trim() : undefined);

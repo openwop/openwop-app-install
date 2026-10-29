@@ -177,11 +177,35 @@ const DEFAULT_DISPATCH_TIMEOUT_MS = (() => {
  *  inconsistent: 300 for anthropic/openai/minimax, 500 for google). */
 const ERR_BODY_MAX = 500;
 
+/** A code-shaped value: `RESOURCE_EXHAUSTED`, `rate_limit_error`. Anything
+ *  else (a message, a URL, a key) is never collected. */
+const PROVIDER_CODE_SHAPE = /^(?:[A-Z][A-Z0-9_]{2,63}|[a-z][a-z0-9_]{2,63})$/;
+const PROVIDER_CODE_SCAN_MAX = 64 * 1024;
+
+/** The `status`/`reason`/`type`/`code` values of a provider error body that look
+ *  like codes, at most 4. Read from the WHOLE body: Google's 429 puts a long
+ *  quota `message` before `"status": "RESOURCE_EXHAUSTED"`, so the truncated
+ *  error message alone lost the code (ADR 0945, prod run 2026-10-29). Callers
+ *  must still scrub before recording. */
+export function providerErrorCodes(text: string): string[] {
+  const codes = new Set<string>();
+  for (const m of text.slice(0, PROVIDER_CODE_SCAN_MAX).matchAll(/"(?:status|reason|type|code)"\s*:\s*"([^"]{1,80})"/g)) {
+    if (PROVIDER_CODE_SHAPE.test(m[1]!)) codes.add(m[1]!);
+    if (codes.size >= 4) break;
+  }
+  return [...codes];
+}
+
+/** A provider HTTP failure. `providerCodes` comes from the full body; the
+ *  message keeps only its first ERR_BODY_MAX bytes. */
+export interface ProviderHttpError extends Error { providerCodes?: readonly string[] }
+
 /** Build a consistent provider HTTP error. Drains the body (so the socket can
  *  be reused) and truncates uniformly. */
-async function providerHttpError(provider: string, res: { status: number; text(): Promise<string> }): Promise<Error> {
+async function providerHttpError(provider: string, res: { status: number; text(): Promise<string> }): Promise<ProviderHttpError> {
   const body = await res.text().catch(() => '');
-  return new Error(`${provider}_${res.status}: ${body.slice(0, ERR_BODY_MAX)}`);
+  return Object.assign(new Error(`${provider}_${res.status}: ${body.slice(0, ERR_BODY_MAX)}`),
+    { providerCodes: providerErrorCodes(body) });
 }
 
 export async function dispatchChat(reqIn: DispatchRequest): Promise<DispatchResult> {

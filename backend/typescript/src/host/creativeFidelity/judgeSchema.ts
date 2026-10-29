@@ -40,7 +40,13 @@ export function judgePrompt(): string {
     'For each attribute below, answer whether the product in the CANDIDATE matches the SOURCE:',
     attrs,
     '',
-    `Each answer is one of ${answers}. Use "not_visible" when the attribute cannot be seen in the CANDIDATE.`,
+    `Each answer is one of ${answers}.`,
+    // ADR 0945 P2 live check (2026-10-29): with only the second sentence, a real
+    // judge answered not_visible for a logo and label the product never had,
+    // which sends every unbranded product to review.
+    'Use "not_visible" only when the SOURCE product has the attribute and the CANDIDATE hides it (cropped, turned away, covered).',
+    'When the SOURCE product does not have the attribute at all (no logo, no printed text) and the CANDIDATE does not add one, answer "match".',
+    'When the CANDIDATE adds a logo or text the SOURCE product does not have, answer "mismatch".',
     `Reply with ONE JSON object and nothing else: {"results": [{"attribute": <name>, "answer": <answer>, "evidence": <one short sentence, at most ${EVIDENCE_MAX} characters>}]}`,
     `List every attribute exactly once: ${FIDELITY_ATTRIBUTES.map((a) => `"${a}"`).join(', ')}.`,
   ].join('\n');

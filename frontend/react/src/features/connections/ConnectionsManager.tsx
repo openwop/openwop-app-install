@@ -76,7 +76,9 @@ export function ConnectionsManager({ returnPath = '/connections' }: { returnPath
   // secure) packaged into ONE sealed secret blob; the rest of the providers post
   // a single secret string.
   const [smtp, setSmtp] = useState({ host: '', port: '587', user: '', pass: '', secure: false });
-  const [shareScope, setShareScope] = useState<'user' | 'org'>('user');
+  // ADR 0994 — `workspace` is the workspace-default row: the only one a send with
+  // no acting user (approval notices, scheduled campaigns) can resolve.
+  const [shareScope, setShareScope] = useState<'user' | 'org' | 'workspace'>('user');
   const [canManageOrg, setCanManageOrg] = useState(false);
   const [scopeUnknown, setScopeUnknown] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -201,7 +203,9 @@ export function ConnectionsManager({ returnPath = '/connections' }: { returnPath
       toast.success(
         shareScope === 'org'
           ? t('connectedForOrg', { label: selected.label })
-          : t('connected', { label: selected.label }),
+          : shareScope === 'workspace'
+            ? t('connectedForWorkspace', { label: selected.label })
+            : t('connected', { label: selected.label }),
       );
     } catch (err) {
       toast.error(failure(err, t('connectFailed')));
@@ -445,13 +449,15 @@ export function ConnectionsManager({ returnPath = '/connections' }: { returnPath
         {scopeUnknown && !embedded ? (
           <p className="u-label-sm muted u-m-0">{t('shareScopeUnknown')}</p>
         ) : null}
-        {canManageOrg && !embedded ? (
+        {canManageOrg && (!embedded || scope === 'workspace') ? (
           <label className="u-grid u-gap-1">
             <span className="u-label-sm">{t('sharedWith')}</span>
-            <select value={shareScope} onChange={(e) => setShareScope(e.target.value as 'user' | 'org')}>
-              <option value="user">{t('shareJustMe')}</option>
+            <select value={shareScope} onChange={(e) => setShareScope(e.target.value as 'user' | 'org' | 'workspace')}>
+              {embedded ? null : <option value="user">{t('shareJustMe')}</option>}
               <option value="org">{t('shareOrganization')}</option>
+              <option value="workspace">{t('shareWorkspaceDefault')}</option>
             </select>
+            {shareScope === 'workspace' ? <span className="u-label-sm muted">{t('shareWorkspaceDefaultHint')}</span> : null}
           </label>
         ) : null}
         <Button variant="primary" disabled={busy || loadingProviders || (isSmtp ? !smtpValid : !secret.trim())} onClick={() => void connect()}>

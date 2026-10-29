@@ -81,7 +81,7 @@ export async function listConnections(): Promise<Connection[]> {
   return (await asJson<{ connections: Connection[] }>(res, 'listConnections')).connections;
 }
 
-export async function createConnection(input: { provider: string; kind: string; secret: string; displayName?: string; scope?: 'user' | 'org' }): Promise<Connection> {
+export async function createConnection(input: { provider: string; kind: string; secret: string; displayName?: string; scope?: 'user' | 'org' | 'workspace' }): Promise<Connection> {
   const { scope = 'user', ...rest } = input;
   const res = await fetch(`${base}/connections`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify({ ...rest, scope }) }));
   return asJson<Connection>(res, 'createConnection');

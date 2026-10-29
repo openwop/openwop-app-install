@@ -14,7 +14,7 @@
  */
 
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
-import { resolveFeatureToggle } from '../../host/agentToolKit.js';
+import { resolveFeatureToggle, untrustedToolError } from '../../host/agentToolKit.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { OpenwopError } from '../../types.js';
 import {
@@ -30,10 +30,10 @@ export const AGENT_AUTHOR_DRAFT_TOOL_ID = 'openwop:feature.agent-author.nodes.dr
 export const AGENT_AUTHOR_VALIDATE_TOOL_ID = 'openwop:feature.agent-author.nodes.validate';
 export const AGENT_AUTHOR_PERSIST_TOOL_ID = 'openwop:feature.agent-author.nodes.persist';
 
-type ToolResult = { content: string; isError?: boolean };
+type ToolResult = { content: string; isError?: boolean; hostMessage?: true };
 
 function toolError(error: string, message: string): ToolResult {
-  return { content: JSON.stringify({ error, message }), isError: true };
+  return { content: JSON.stringify({ error, message }), isError: true, hostMessage: true };
 }
 
 /** ADR 0775 D7 (`ARWF-9`) — per-call toggle honesty (ADR 0308 D2): the
@@ -172,7 +172,7 @@ export function registerAgentAuthorAgentTools(): void {
         // reaches durable state through validation) — invalid drafts return
         // the validator's actionable errors for the bounded repair.
         const v = await validateAgentDraft(draft, { tenantId: scope.tenantId });
-        if (!v.ok) return toolError('validation_error', v.errors.join(' '));
+        if (!v.ok) return untrustedToolError('validation_error', 'The agent draft is invalid; the validator\'s reasons are below.', v.errors.join(' '));
         await stashAgentDraft(scope.tenantId, scope.actingUserId, v.draft);
         return { content: JSON.stringify({ stashed: true, persona: v.draft.persona, wizardPath: '/agents/new' }) };
       }
@@ -180,9 +180,11 @@ export function registerAgentAuthorAgentTools(): void {
         // ADR 0775 D7 — the SAME write authority `POST /roster` requires.
         await assertAgentAuthorWrite(scope);
       } catch (e) {
-        if (e instanceof OpenwopError) return toolError(e.code, e.code === 'forbidden_scope'
-          ? 'You do not have permission to create agents in this workspace (it needs edit access). Nothing was created — tell the user to ask a workspace owner.'
-          : e.message);
+        if (e instanceof OpenwopError) {
+          return e.code === 'forbidden_scope'
+            ? toolError(e.code, 'You do not have permission to create agents in this workspace (it needs edit access). Nothing was created — tell the user to ask a workspace owner.')
+            : untrustedToolError(e.code, 'The tool refused this call; the reason it gave is below.', e.message);
+        }
         throw e;
       }
       try {
@@ -190,7 +192,7 @@ export function registerAgentAuthorAgentTools(): void {
         return { content: JSON.stringify({ ...out, enabled: false, reviewPath: '/agents' }) };
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
-        return toolError('persist_failed', msg);
+        return untrustedToolError('persist_failed', 'The agent could not be saved; the reason is below.', msg);
       }
     },
   });

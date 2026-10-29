@@ -130,9 +130,9 @@ export async function readBoardRanking(
   return { ranked, held };
 }
 
-const toolError = (code: string, message: string) => ({
+const toolError = (code: string, message: string): { content: string; isError: true; hostMessage: true } => ({
   content: JSON.stringify({ error: { code, message } }),
-  isError: true as const,
+  isError: true, hostMessage: true as const,
 });
 
 export function registerWorkSelectionAgentTools(): void {

@@ -18,13 +18,14 @@
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
 import { claimIgnition, recordIgnitionRun, ignitionKey } from '../../host/ignitionGuard.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
-import { resolveFeatureToggle, toolFailLog } from '../../host/agentToolKit.js';
+import { resolveFeatureToggle, toolFailLog, untrustedToolError } from '../../host/agentToolKit.js';
 import { createLogger } from '../../observability/logger.js';
 import { listOrgs, resolveEffectiveAccess, type Scope } from '../../host/accessControlService.js';
 import { OpenwopError } from '../../types.js';
 import {
   listCollections, createCollection, listMerchRules, createMerchRule, searchProducts,
 } from './discoveryService.js';
+import { findCompactionMarkerPath, COMPACTION_MARKER_IN_INPUT } from '../../host/toolResultTransform.js';
 
 export const DISCOVERY_SEARCH_TOOL_ID = 'openwop:discovery.search';
 export const DISCOVERY_LIST_COLLECTIONS_TOOL_ID = 'openwop:discovery.list-collections';
@@ -33,9 +34,9 @@ export const DISCOVERY_CREATE_COLLECTION_TOOL_ID = 'openwop:discovery.create-col
 export const DISCOVERY_CREATE_RULE_TOOL_ID = 'openwop:discovery.create-rule';
 
 const FEATURE = 'discovery';
-type ToolResult = { content: string; isError?: boolean };
+type ToolResult = { content: string; isError?: boolean; hostMessage?: true };
 const ok = (v: unknown): ToolResult => ({ content: JSON.stringify(v) });
-const toolError = (error: string, message: string): { content: string; isError: true } => ({ content: JSON.stringify({ error, message }), isError: true });
+const toolError = (error: string, message: string): { content: string; isError: true; hostMessage: true } => ({ content: JSON.stringify({ error, message }), isError: true, hostMessage: true });
 const str = (v: unknown): string => (typeof v === 'string' ? v.trim() : '');
 const optStr = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
 
@@ -85,7 +86,7 @@ async function resolveToolOrg(
  *  tool error the agent loop feeds back as its ONE repair signal. */
 const log = createLogger('discovery.agent-tools');
 function fromServiceError(e: unknown): { content: string; isError: true } {
-  if (e instanceof OpenwopError) return toolError(e.code, e.message);
+  if (e instanceof OpenwopError) return untrustedToolError(e.code, 'The tool refused this call; the reason it gave is below.', e.message) as { content: string; isError: true };
   return toolFailLog(log, 'openwop:discovery', e) as { content: string; isError: true }; // CFPT-6
 }
 
@@ -262,6 +263,13 @@ export function registerDiscoveryAgentTools(): void {
       },
     },
     async run(input, scope) {
+      // ADR 0999 D3.3 — the WRITER refuses a compaction marker (`{"_elided":N}`)
+      // with a typed error rather than filtering it: a filtered marker persists a
+      // SHORTENED list as if it were whole. The tool loop refuses it too under a
+      // lossy decision; this holds on every path that reaches the writer. First, before
+      // any read: it is a pure function of the input and reveals nothing.
+      const marker = findCompactionMarkerPath(input);
+      if (marker) return untrustedToolError(COMPACTION_MARKER_IN_INPUT, 'Input contains a tool-output compaction marker (its path is below): it stands for rows you were not shown. Re-read the full value and send every element.', marker);
       const resolved = await resolveToolOrg(scope, optStr(input.orgId), 'write');
       if ('error' in resolved) return resolved.error;
       const name = str(input.name);

@@ -16,8 +16,8 @@ import { listAssets } from './mediaService.js';
 
 export const MEDIA_LIST_TOOL_ID = 'openwop:media.list';
 
-function toolError(error: string, message: string): { content: string; isError: true } {
-  return { content: JSON.stringify({ error, message }), isError: true };
+function toolError(error: string, message: string): { content: string; isError: true; hostMessage: true } {
+  return { content: JSON.stringify({ error, message }), isError: true, hostMessage: true };
 }
 
 export function registerMediaAgentTools(): void {

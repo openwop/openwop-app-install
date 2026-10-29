@@ -16,6 +16,7 @@ import { Markdown } from '../../ui/Markdown.js';
 import { FileTextIcon } from '../../ui/icons/index.js';
 import { mediaSrc } from '../mediaSrc.js';
 import { getReviewArtifactRenderer } from './reviewArtifactRenderers.js';
+import { ReadableJsonContent, parseJsonContent } from './ReadableJson.js';
 import type { ReviewAsset } from './reviewClient.js';
 
 const EMAIL_HEADER_LINE = /^\s*(To|From|Cc|Bcc|Subject|Reply-To)\s*:\s*(.*)$/i;
@@ -104,7 +105,12 @@ export function AssetPreview({ asset, hideLabel }: { asset: ReviewAsset; hideLab
       ) : content
         ? (looksLikeEmail(content)
             ? <EmailView content={content} />
-            : <div className="assetpreview-body"><Markdown>{content}</Markdown></div>)
+            // P9 — untyped JSON reads as fields, not as a Markdown dump of `{ … }`.
+            : <div className="assetpreview-body">
+                {parseJsonContent(content)
+                  ? <ReadableJsonContent content={content} {...(asset.label ? { label: asset.label } : {})} />
+                  : <Markdown>{content}</Markdown>}
+              </div>)
         : (
           <p className="muted u-fs-12">
             {asset.artifactId ? t('assetPreviewArtifactRef', { id: asset.artifactId }) : t('assetPreviewNone')}

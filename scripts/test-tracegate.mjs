@@ -8,7 +8,7 @@
 // neither degenerate predictor can pass (the vacuity trap this repo keeps
 // rediscovering — see sabotage-probe-vacuity).
 import cp, { execFileSync } from 'node:child_process';
-import { syncBuiltinESMExports } from 'node:module';
+import { createRequire, syncBuiltinESMExports } from 'node:module';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -34,7 +34,7 @@ export const TABLE = ['alpha', 'beta'];
 export const OTHER = { unused: true };
 
 export function foo(): number {
-  return TABLE.length + helper();
+  return TABLE.length + helper() + parseInt('0', 10);
 }
 
 export function bar(): number {
@@ -50,7 +50,7 @@ router.get('/hit', () => foo());
 router.get('/cold', () => bar());
 `;
 w(SRC, base);
-const bBase = "export function helper(): number { return USED.size; }\nexport const USED = new Set(['x']);\nexport const IDLE = new Set(['y']);\n";
+const bBase = "export function helper(): number { return USED.size; }\nexport const USED = new Set(['x']);\nexport const IDLE = new Set(['y']);\nexport function wrongHelper(): number { return 2; }\nexport function parseInt(_text: string, _radix?: number): number { return 100; }\n";
 w('backend/typescript/src/b.ts', bBase);
 w(TEST, "import { foo } from '../src/a';\nfoo();\n");
 w('backend/typescript/package-lock.json', '{"lockfileVersion":3}\n');
@@ -83,12 +83,43 @@ fs.writeFileSync(path.join(run, 'results.json'), JSON.stringify({
 }));
 tg.ingest({ run });
 
+// Execute the two binding regressions as well as checking the predictor. A
+// fabricated footprint alone must not be the evidence that behavior changed.
+const ts = createRequire(new URL('../backend/typescript/package.json', import.meta.url))('typescript');
+const executeFoo = (source) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tracegate-binding-'));
+  try {
+    for (const [name, text] of [['a', source.replaceAll("'./b'", "'./b.cjs'")], ['b', bBase]]) {
+      fs.writeFileSync(path.join(dir, `${name}.cjs`), ts.transpileModule(text, {
+        compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+      }).outputText);
+    }
+    return Number(execFileSync(process.execPath, ['-e', 'process.stdout.write(String(require(process.argv[1]).foo()))', path.join(dir, 'a.cjs')], { encoding: 'utf8' }));
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+};
+const baselineValue = executeFoo(base);
 const cases = [
   ['body of a function the test never ran', 'skip', () => w(SRC, base.replace('return 42;', 'return 43;'))],
   ['handler the test never hit', 'skip', () => w(SRC, base.replace("() => bar());", "() => bar() + 1);"))],
   ['constant the test never references', 'skip', () => w(SRC, base.replace('unused: true', 'unused: false'))],
   ['interface (erased by the transform)', 'skip', () => w(SRC, base.replace('id: string', 'id: number'))],
   ['import line only', 'skip', () => w(SRC, base.replace("import { helper } from './b';", "import { helper } from './b';\nimport type { Thing } from './c';"))],
+  // The #5359 hole: a value import pulls a module graph into load, which can
+  // reorder vi.mock(importOriginal) resolution. Loaded membership alone cannot
+  // prove binding or evaluation-order neutrality, so value imports always run.
+  ['value import of a module the test never loaded', 'run', () => w(SRC, base.replace("import { helper } from './b';", "import { helper } from './b';\nimport { toModelToolResult } from './c.js';"))],
+  ['value re-export of a module the test never loaded', 'run', () => w(SRC, base + "export { toModelToolResult } from './c';\n")],
+  ['value import of a module the test already loaded', 'run', () => w(SRC, base.replace("import { helper } from './b';", "import { helper } from './b';\nimport { USED } from './b.js';"))],
+  // Both programs remain valid. The first edit is insertion-only, so its old
+  // character span is empty. The second adds a new binding over a used global.
+  // foo's body is unchanged; b.ts was already loaded in the recorded run.
+  ['pure insertion retargets an executed import binding', 'run', () => w(SRC, base.replace('import { helper }', 'import { wrongHelper as helper }')), 4],
+  ['new import shadows a global used by an executed function', 'run', () => w(SRC, "import { parseInt } from './b';\n" + base), 103],
+  // Removing or re-pointing a value import always runs, even when its old target
+  // was loaded: a side-effect module may stop evaluating, or vi.mock may reorder.
+  ['value import of an already-loaded module removed', 'run', () => w(SRC, base.replace("import { helper } from './b';\n", ''))],
+  ['value import specifier edited between two loaded modules', 'run', () => w(SRC, base.replace("from './b';", "from './a';"))],
+  ['type-only declaration removed', 'skip', () => w(SRC, base.replace('export type Id = string;\n', ''))],
   ['a repo file the test never read', 'skip', () => w('data/unread.json', '{"y":2}\n')],
   ['body of a function the test ran', 'run', () => w(SRC, base.replace('TABLE.length + helper()', 'TABLE.length + helper() + 1'))],
   ['handler the test hit', 'run', () => w(SRC, base.replace("() => foo());", "() => foo() * 2);"))],
@@ -103,7 +134,9 @@ const cases = [
   ['Set member of a constant the test never references', 'skip', () => w('backend/typescript/src/b.ts', bBase.replace("'y'", "'z'"))],
   ['Set member of a constant an executed function reads', 'run', () => w('backend/typescript/src/b.ts', bBase.replace("'x'", "'w'"))],
   ['a new empty Map cache nothing names yet', 'skip', () => w(SRC, base + 'const cache = new Map<string, number>();\n')],
-  ['a Set built by a LOCALLY bound constructor', 'run', () => w('backend/typescript/src/b.ts', "import { Set } from './c';\n" + bBase.replace("'y'", "'z'"))],
+  // The local binding is a parameter of a function the test never runs, not an
+  // import: a value import runs on its own (#5363), which would hide this rule.
+  ['a Set built by a LOCALLY bound constructor', 'run', () => w('backend/typescript/src/b.ts', bBase.replace("'y'", "'z'") + 'export function shadow(Set: unknown): unknown { return Set; }\n')],
   ['a repo file the test read', 'run', () => w('data/read.json', '{"x":2}\n')],
   ['the test file itself', 'run', () => w(TEST, "import { foo } from '../src/a';\nfoo();\nfoo();\n")],
   ['a setup file (global input)', 'run', () => w('backend/typescript/test/setup/seam.ts', 'export const x = 1;\n')],
@@ -112,10 +145,18 @@ const cases = [
 ];
 
 let fail = 0; let pass = 0;
-for (const [name, want, mutate] of cases) {
+if (baselineValue !== 3) { fail++; console.log(`  ✗ binding witness baseline — got ${baselineValue}`); }
+else { pass++; console.log('  ✓ binding witness baseline executes to 3'); }
+for (const [name, want, mutate, expectedValue] of cases) {
   g('checkout', '-q', C1, '--', '.');
   g('checkout', '-q', '--detach', C1);
   mutate();
+  if (expectedValue !== undefined) {
+    const actual = executeFoo(fs.readFileSync(path.join(repo, SRC), 'utf8'));
+    const changed = actual === expectedValue && actual !== baselineValue;
+    if (changed) pass++; else fail++;
+    console.log(`  ${changed ? '✓' : '✗'} executed binding witness: ${name} — ${baselineValue} -> ${actual} (expected ${expectedValue})`);
+  }
   g('add', '-A'); g('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', name);
   const d = tg.decide(TEST, tg.head(), process.version, tg.lockHash());
   // ADR 0968 P2: on a footprint with no boot data the shadow verdict must be

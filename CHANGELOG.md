@@ -18,6 +18,88 @@ Commits by the `/cut-app-release` skill; required upgrade stops are tracked in
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-10-29
+
+A MINOR release under ADR 0052. It adds tool-output compaction for child runs
+(off by default), client-report review and whole-workspace Connections, along
+with model-call replay coverage and fixes to how tool errors are fenced. There
+are no schema or app migrations: schema stays at sqlite 51 / postgres 49 and app
+migrations stay at 24.
+
+### Added
+
+- **Tool-output compaction: child runs and editing (ADR 0999).** A sub-workflow
+  child run now keeps the compaction decision its root run fixed. The output of
+  a workflow called as a tool is fenced before it reaches a model. Read-before-write
+  tool outputs are never compacted, and the panel gains a lossy-compaction
+  editor. The `tool-output-compaction` feature stays **off** by default (#5356).
+- **Client reports go through review (ADR 0957 P1b).** Scheduled and on-demand
+  client reports run through the compute → review → publish workflow chain. The
+  client, the report definition and its version, and the calendar period are all
+  fixed when the run starts. Publishing a report requires the computed snapshot's
+  digest to match, an explicit approval, and the client's fixed policy. Reports
+  are not sent to clients automatically (#5364).
+- **Whole-workspace Connections (ADR 0994).** Admins can share a Connection with
+  the whole workspace, for sends that have no acting user, such as approval
+  notices and campaigns (#5368).
+
+### Changed
+
+- **Model calls replay from the invocation log (ADR 1002).** Managed-tier
+  `callAI` calls and tool-calling rounds (managed and BYOK) are now recorded in
+  the invocation log, the same way BYOK `callAI` already was. A replay fork is
+  served from the log rather than making live, paid model calls. If the log has
+  no matching entry, the replayed node fails (#5362).
+- Provider error codes are read from the whole response body, not from the
+  shortened message, so a quota error now reports its code (ADR 0945 P2, #5369).
+- DEPLOY.md now states that production in-process WASI code execution needs
+  `OPENWOP_CODE_EXEC_RUNTIME=wasi` (ADR 0995 D8, #5366).
+
+### Fixed
+
+- KickTodo Challenge Factory reviews no longer show raw JSON. The outline
+  approval and the final result are shown as readable fields, the plan's
+  alternatives are listed, and a submitted request reads as awaiting review, not
+  as published (#5365).
+- Client-report notices name the report, not the engine that produced it
+  (ADR 0926 D1, #5364).
+- The creative-fidelity judge no longer sends unbranded products to review for
+  no reason. An attribute missing from both the source and the edited image
+  (for example, no logo on either) now counts as `match`. `not_visible` now
+  means the source has the attribute and the edit hides it, and an attribute
+  added in the edit is a `mismatch` (ADR 0945 P2, #5375).
+- CI tooling:
+  - Tracegate now invalidates on changed, added or removed value imports, and
+    rejects observations from interrupted runs.
+  - Shutdown probes keep each boot's log, and serial mode now sequences the
+    frontend lanes.
+  - The release-bus INT self-test now passes when the gate runs it as a
+    background job (#5360, #5361, #5363, #5367, #5371).
+
+### Security
+
+- **Tool errors are fenced by where they came from (ADR 1000, TOC2CD-11/14).**
+  Every thrown tool error is fenced before it reaches a model, on every lane:
+  the chat tool loop, the built-in executor, the realtime voice bridge and the
+  provider dispatchers. A returned error from an untrusted tool is shown
+  unfenced only when a host helper vouched for its message. The refusals of the
+  nine default-on trusted tools are unchanged (#5358, #5359).
+- **Replay egress guards (ADR 0531).** On replay forks, `workflows.compose-and-run`
+  / `workflows.propose`, `ai.research.web` and native web search are all refused
+  at the existing effect guard. A refused replay no longer leaves a stray draft
+  behind, falls back to example data, or makes a live model call (#5373).
+
+#### Upgrading from 0.8.0
+
+- **No required stop; rolling-safe.** `node scripts/upgrade-plan.mjs 0.8.0`
+  gives one step, 0.8.0 → 0.9.0: back up the database (and object store); the
+  schema permits 0.8.0 instances during the upgrade; start 0.9.0 (sqlite
+  51 → 51, postgres 49 → 49, app 24 → 24, so no migrations run); check
+  `/readiness`.
+- **No configuration changes are required.** `tool-output-compaction` stays
+  off by default.
+- After the upgrade, check that `/readiness` reports `version: 0.9.0`.
+
 ## [0.8.0] — 2026-10-28
 
 A MINOR release under ADR 0052, including breaking startup requirements under

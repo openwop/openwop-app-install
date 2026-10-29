@@ -332,7 +332,8 @@ describe('C2 (chat-first port) — openwop:documents.generate-from-template + ge
     expect(out.isError).toBe(true);
     const payload = JSON.parse(out.content) as { error: string; message: string };
     expect(payload.error).toBe('validation_error');
-    expect(payload.message).toContain('clientName');
+    // TOC2CD-11 (ADR 1000): the validator's text is the fenced `detail`.
+    expect(`${payload.message} ${(payload as { detail?: string }).detail ?? ''}`).toContain('clientName');
   });
 
   it('rejects an unknown templateId with not_found', async () => {

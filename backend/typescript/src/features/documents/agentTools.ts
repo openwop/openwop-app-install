@@ -31,7 +31,7 @@
  */
 import { createHash } from 'node:crypto';
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
-import { resolveFeatureToggle } from '../../host/agentToolKit.js';
+import { resolveFeatureToggle, untrustedToolError } from '../../host/agentToolKit.js';
 import { listOrgs, resolveEffectiveAccess } from '../../host/accessControlService.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { OpenwopError } from '../../types.js';
@@ -47,11 +47,11 @@ export const DOCUMENTS_GENERATE_FROM_TEMPLATE_TOOL_ID = 'openwop:documents.gener
 export const DOCUMENTS_REVISE_TOOL_ID = 'openwop:documents.revise';
 
 /** Structured tool error (the agent loop surfaces `content` verbatim to the model). */
-function toolError(error: string, message: string): { content: string; isError: true } {
-  return { content: JSON.stringify({ error, message }), isError: true };
+function toolError(error: string, message: string): { content: string; isError: true; hostMessage: true } {
+  return { content: JSON.stringify({ error, message }), isError: true, hostMessage: true };
 }
 
-type ToolResult = { content: string; isError?: boolean };
+type ToolResult = { content: string; isError?: boolean; hostMessage?: true };
 type ToolError = { content: string; isError: true };
 type WriteContext = { orgId: string; actingUserId: string };
 
@@ -489,7 +489,7 @@ export function registerDocumentsAgentTools(): void {
         asm = await assemble(scope.tenantId, orgId, templateId, params);
       } catch (err) {
         if (err instanceof OpenwopError && err.code === 'validation_error') {
-          return toolError('validation_error', err.message);
+          return untrustedToolError('validation_error', 'The tool refused this call; the reason it gave is below.', err.message);
         }
         throw err;
       }
@@ -523,9 +523,10 @@ export function registerDocumentsAgentTools(): void {
           const required = Array.isArray((asm.outputSchema as { required?: unknown }).required)
             ? ((asm.outputSchema as { required: string[] }).required).join(', ')
             : '(none declared)';
-          return toolError(
+          return untrustedToolError(
             'validation_error',
-            `The generated content does not satisfy this template's \`outputSchema\`. Required keys: ${required}. Re-generate with every required key present.`,
+            'The generated content does not satisfy this template\'s `outputSchema`. Re-generate with every required key present; the required keys are below.',
+            required,
           );
         }
       }
@@ -638,9 +639,9 @@ export function registerDocumentsAgentTools(): void {
         };
       } catch (err) {
         if (err instanceof OpenwopError && err.details?.reason === 'stale_base') {
-          return { content: JSON.stringify({ error: 'stale_base', message: err.message, ...(typeof err.details.currentVersionId === 'string' ? { currentVersionId: err.details.currentVersionId } : {}) }), isError: true };
+          return { content: JSON.stringify({ error: 'stale_base', message: err.message, ...(typeof err.details.currentVersionId === 'string' ? { currentVersionId: err.details.currentVersionId } : {}) }), isError: true, fromThrow: true };
         }
-        if (err instanceof OpenwopError && err.code === 'validation_error') return toolError('validation_error', err.message);
+        if (err instanceof OpenwopError && err.code === 'validation_error') return untrustedToolError('validation_error', 'The tool refused this call; the reason it gave is below.', err.message);
         throw err;
       }
     },

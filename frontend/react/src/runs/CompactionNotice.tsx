@@ -22,11 +22,11 @@
  */
 import { useTranslation } from 'react-i18next';
 import { Notice } from '../ui/Notice.js';
-import { formatNumber } from '../i18n/format.js';
+import { formatList, formatNumber } from '../i18n/format.js';
 
 /** The two markers the ADR 0099 kernel writes. Kept in one place so a rename
  *  in `backend/typescript/src/features/tool-output-compaction/compact.ts`
- *  breaks the pinned test in `__tests__/CompactionNotice.test.tsx`, not silently
+ *  breaks the pinned test in `__tests__/compactionNotice.test.tsx`, not silently
  *  the UI. */
 export const ELIDED_MARKER = '_elided';
 export const EMPTIED_MARKER = '_emptied';
@@ -121,7 +121,7 @@ export function CompactionNotice({ markers, announce = false }: { markers: Compa
   if (!hasCompactionMarkers(markers)) return null;
   const parts: string[] = [];
   if (markers.elidedRows > 0) parts.push(t('compactionElidedRows', { count: markers.elidedRows, n: formatNumber(markers.elidedRows) }));
-  if (markers.emptiedFields.length > 0) parts.push(t('compactionEmptiedFields', { fields: markers.emptiedFields.join(', ') }));
+  if (markers.emptiedFields.length > 0) parts.push(t('compactionEmptiedFields', { fields: formatList(markers.emptiedFields, { type: 'unit' }) })); // ADR 0999 D6 — locale list punctuation
   const body = parts.join(' ');
   return (
     <Notice variant="info" {...(announce ? { announce: `${t('compactionNoticeTitle')} ${body}` } : {})}>

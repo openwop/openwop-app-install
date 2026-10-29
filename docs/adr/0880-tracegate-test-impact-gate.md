@@ -610,3 +610,66 @@ fails that check with three unnecessary reads. The complete selector self-test
 on base `9970a354d` passes 108 checks with the fix; reverting only the fix yields
 one failure and 107 passes. Full merge-gate validation remains pending. The
 running train was left untouched.
+
+### Correction — incomplete results are not observations (2026-10-28)
+
+Air release260-r0 was interrupted with exit 143 at 09:24:55Z when macOS memory
+pressure reached warning level. Its backend prediction selected 2,927 files,
+but Vitest never wrote `results.json`. `report` nevertheless printed that all
+2,927 files ran, reported zero misses, and appended a `shadow-*.tsv` observation.
+The gate did not pass; the reporting and enforcement-entry evidence was wrong.
+
+Only append a prediction observation when every selected file has a terminal
+`passed` or `failed` result. In shadow mode every predicted file is selected;
+in enforce mode only required files and audits need results. A wholly reused
+lane supplies no new observation. Missing, malformed, partial or nonterminal
+results print the observed/expected denominator and do not claim zero misses.
+Actual failures still invalidate their footprints, and a witnessed failed audit
+still records a MISS and suspends enforcement even when its run is incomplete.
+No existing ledger logs are deleted or rewritten by this correction.
+
+The isolated CLI witness failed nine cases against the original implementation,
+with two complete-run controls passing. All 11 pass with the correction, and
+the existing selector self-test passes 113 checks. The interrupted real run's
+prediction and missing-result observation are retained in the coordinator's
+`tracegate-report-verification.json` evidence. Full merge-gate qualification is
+still required; these focused results are not a release verdict.
+
+
+### Correction — full observed coverage in enforce mode (2026-10-28)
+
+Release260 selected and passed all 1,146 frontend files after a version-only
+lockfile invalidation, but the live-fetch stale-entry step said a subset ran and
+skipped its assertion. `enforce` describes the selection policy; it does not
+prove that fewer than all files executed. The scheduled full backstop remained
+in place, so this was a missed opportunity to run the existing assertion.
+
+The report now emits a small coverage record from terminal results. A nonempty
+lane qualifies only when every predicted file was selected and has a passing
+result. `ci.sh` reads that record before ingest deletes the run directory, and
+runs the existing stale checker for a qualifying enforce run. Missing, partial,
+failed or reused-but-unobserved files do not qualify. Shadow/off behavior and the
+24-hour full-run/date-sweep backstop are unchanged; this adds a check and grants
+no extra cache reuse. After release260 completed, all 24 report/integration
+checks passed. The extracted actual CI block invokes the real stale checker:
+an unobserved entry fails after full coverage and is not judged on a subset.
+Restoring the old mode-only condition separately makes that refusal test RED;
+removing the passing-result condition makes the failed-file guard test RED.
+Both source guards were restored and all 24 checks passed again. Full CI for
+this follow-up remains queued separately from the release.
+
+
+### Correction — imported bindings affect unchanged functions (2026-10-28)
+
+PR #5360 invalidates new imports when the target module was not loaded, and
+removed or replaced imports from their old spans. Loaded-module membership
+does not prove binding neutrality: an insertion-only alias retarget can change
+the imported function, and a newly imported name can shadow a global used by an
+unchanged function. Both are valid programs. The self-test executes these
+fixtures (3 -> 4 and 3 -> 103) and checks both live and boot-shadow decisions.
+
+Changed value imports now invalidate every footprint that loaded the importer,
+even when it already loaded the target. Type-only imports and unrelated cold
+function changes retain their existing reuse behavior. This is a conservative
+correctness repair; finer binding-aware reuse needs separate observed evidence.
+No ledger history, audit policy or entry-bar threshold is changed.

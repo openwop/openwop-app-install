@@ -374,6 +374,40 @@ on composition, Compliance Reviewer on `needs_review`).
 >    > `model_not_found`), never its message, which can echo the key or the
 >    > prompt. It is logged as `providerStatus`/`providerCodes` and shown in
 >    > the panel. The run is still owed.
+>    >
+>    > **2026-10-29 (00:59Z): the cause is a quota rejection.** The user
+>    > authorized a re-run of `gemini-2.5-pro` on `google:personal`. Google
+>    > answered the first call with **HTTP 429** after the dispatcher's 429
+>    > retries (`calls: 1`, `providerStatus: 429`). The earlier
+>    > `provider_unavailable` runs on both keys fit the same cause. The codes
+>    > were empty for a different reason: Google's quota 429 puts a long
+>    > `message` before `"status": "RESOURCE_EXHAUSTED"`, and the thrown
+>    > message keeps only 500 bytes. The dispatcher now reads the code fields
+>    > from the whole body (`providerErrorCodes`, attached as
+>    > `ProviderHttpError.providerCodes`). The judge summary still filters and
+>    > scrubs them. Test: `adr0945-provider-error-codes.test.ts`, sabotage-red
+>    > when the attachment is removed. A judge answer is still owed. It needs a
+>    > model and key with quota, which is the user's choice.
+>    >
+>    > **2026-10-29 (10:52Z): the first real answer. The judge got 3 of 4
+>    > right, and the miss was the prompt's fault.** The user ran the check on
+>    > `google:personal` with `gemini-3.5-flash` (4 calls). The error codes now
+>    > arrive: `gemini-3.0-flash` gave 404 `NOT_FOUND` and `gemini-3.8-flash`
+>    > gave 503 `UNAVAILABLE` just before. Colour drift, logo swap and the
+>    > extra part were all judged `fail`, as expected. The unchanged product
+>    > came back `needs_review`, not `pass`. Stage A passed it (dhash, phash
+>    > and colour ΔE). The judge matched colour, shape, proportions and parts,
+>    > and answered `not_visible` for `logo` and `label_text`, with the
+>    > evidence "no logo visible on the product in either image" and "no label
+>    > text on the product". The prompt allowed only that answer for an
+>    > attribute the product never had, and `not_visible` on a critical
+>    > attribute is review. So every product without a logo or printed text
+>    > would have gone to review. The prompt now says: `not_visible` only when
+>    > the source has the attribute and the candidate hides it; absent from
+>    > both is `match`; added to the candidate is `mismatch`. The outcome
+>    > rule is unchanged. Test: the new prompt case in
+>    > `adr0945-p2-fidelity-judge.test.ts`. The gate still needs one green
+>    > re-run on the new prompt.
 > 2. **The outcome rule is one function** (`host/creativeFidelity/decide.ts`):
 >    the judge can add failures, never remove one; a non-critical mismatch
 >    (`proportions`, `part_count`, `extra_or_missing_parts`) is `needs_review`,

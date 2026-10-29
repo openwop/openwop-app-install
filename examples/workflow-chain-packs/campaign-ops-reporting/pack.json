@@ -1,0 +1,134 @@
+{
+  "name": "core.openwop.workflows.campaign-ops-reporting",
+  "version": "1.0.0",
+  "kind": "workflow-chain",
+  "description": "Client reporting (ADR 0957): compute a client's report from the app's own figures, put it through the client's report.publish review gate (ADR 0942), and publish only the numbers the reviewer approved.",
+  "keywords": [
+    "campaign-studio",
+    "campaign-ops",
+    "agency",
+    "reporting"
+  ],
+  "engines": {
+    "openwop": ">=1.0.0 <3.0.0"
+  },
+  "chains": [
+    {
+      "chainId": "campaign-ops-reporting.client-report",
+      "version": "1.0.0",
+      "internal": true,
+      "label": "Client report",
+      "description": "Builds one client report for one period: copies each section's figures from the app with their lineage, freezes and fingerprints them, and holds the report for review under the client's autonomy policy (report.publish). Once approved it publishes exactly those numbers; if anything changed after approval, publishing fails rather than sending different numbers. The client report launcher or scheduler binds configuration to the run; a generic copy without that host binding refuses before computing.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "producedVariables": [
+        {
+          "name": "reportId",
+          "producedBy": "compute",
+          "type": "string",
+          "description": "The computed report ID, also exposed in the run variable bag; effect inputs use recorded output ports so a checkpoint fork retains them."
+        },
+        {
+          "name": "snapshotHash",
+          "producedBy": "compute",
+          "type": "string",
+          "description": "The fingerprint of the computed figures; publishing is conditioned on it (ADR 0957 D2)."
+        }
+      ],
+      "capabilities": [
+        "side-effectful"
+      ],
+      "dag": {
+        "nodes": [
+          {
+            "id": "compute",
+            "typeId": "feature.campaign-ops.nodes.compute-snapshot@1.0.0",
+            "name": "Compute report",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {}
+          },
+          {
+            "id": "review",
+            "typeId": "feature.campaign-orchestration.nodes.autonomy-gate@1.1.0",
+            "name": "Review report",
+            "position": {
+              "x": 240,
+              "y": 0
+            },
+            "config": {
+              "actionClass": "report.publish",
+              "title": "Publish this client report?",
+              "prompt": "Review this report’s frozen figures and sources in Campaign operations, then approve it for internal publication."
+            },
+            "inputs": {}
+          },
+          {
+            "id": "publish",
+            "typeId": "feature.campaign-ops.nodes.publish-report@1.0.0",
+            "name": "Publish report",
+            "position": {
+              "x": 480,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {}
+          }
+        ],
+        "edges": [
+          {
+            "from": "compute.orgId",
+            "to": "review.orgId",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "compute.orgId",
+            "to": "publish.orgId",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "compute.reportId",
+            "to": "review.reportId",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "compute.snapshotHash",
+            "to": "review.contentHash",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "compute.snapshotHash",
+            "to": "review.snapshotHash",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "compute.snapshot",
+            "to": "review.snapshot",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "compute.reportId",
+            "to": "publish.reportId",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "compute.snapshotHash",
+            "to": "publish.snapshotHash",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "review",
+            "to": "publish.review",
+            "triggerRule": "all_success"
+          }
+        ]
+      }
+    }
+  ]
+}

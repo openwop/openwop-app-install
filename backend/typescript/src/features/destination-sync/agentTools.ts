@@ -29,7 +29,7 @@ import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { startWorkflowRun, type StartRunDeps } from '../../host/runStarter.js';
 import { claimIgnition, recordIgnitionRun, releaseIgnition, ignitionKey } from '../../host/ignitionGuard.js';
-import { resolveFeatureToggle } from '../../host/agentToolKit.js';
+import { resolveFeatureToggle, untrustedToolError } from '../../host/agentToolKit.js';
 import { createLogger } from '../../observability/logger.js';
 import { ONWARD_SYNC_WORKFLOW_ID } from './onwardSyncWorkflow.js';
 import { applyFieldMap, getDestinationSync, listDestinationSyncs } from './destinationSyncService.js';
@@ -43,11 +43,11 @@ export const DESTINATION_SYNC_LIST_TOOL_ID = 'openwop:destination-sync.list';
 export const DESTINATION_SYNC_DRY_RUN_TOOL_ID = 'openwop:destination-sync.dry-run';
 export const DESTINATION_SYNC_RUN_TOOL_ID = 'openwop:destination-sync.run';
 
-type ToolResult = { content: string; isError?: boolean };
+type ToolResult = { content: string; isError?: boolean; hostMessage?: true };
 
 /** Structured tool error — surfaced to the model verbatim, so it must be actionable. */
 function toolError(error: string, message: string, extra?: Record<string, unknown>): ToolResult {
-  return { content: JSON.stringify({ error, message, ...(extra ?? {}) }), isError: true };
+  return { content: JSON.stringify({ ...(extra ?? {}), error, message }), isError: true, hostMessage: true };
 }
 
 /** Per-call toggle honesty (ADR 0308 D2): per-tenant, dynamic, fail-closed —
@@ -193,9 +193,10 @@ export async function runRunTool(deps: StartRunDeps, input: Record<string, unkno
     return { content: JSON.stringify({ syncId, destinationKind: sync.destinationKind, ...result, ...(note ? { note } : {}) }) };
   }
 
-  return toolError(
+  return untrustedToolError(
     'unsupported_destination_kind',
-    `A '${sync.destinationKind}' sync egresses through the operator's own http/connector nodes and has no chat igniter — only openwop-host and warehouse syncs run from here.`,
+    'A sync of this destination kind (below) egresses through the operator\'s own http/connector nodes and has no chat igniter — only openwop-host and warehouse syncs run from here.',
+    String(sync.destinationKind),
     { syncId, destinationKind: sync.destinationKind },
   );
 }

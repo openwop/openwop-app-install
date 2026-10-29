@@ -30,6 +30,7 @@ import { ensureChallengeAuthor } from './challengeAuthorService.js';
 import { CHALLENGE_FACTORY_WORKFLOW_ID } from './builtinWorkflows.js';
 import { dedicatedFactoryProvider, factoryCredentialRef } from '../kicktodoFactoryAi.js';
 import { PLAN_DAILY_MINUTES, PLAN_DURATION_DAYS } from './planService.js';
+import { toolError, untrustedToolError } from '../../host/agentToolKit.js';
 
 const log = createLogger('kicktodo.challenge-author-tools');
 
@@ -47,7 +48,7 @@ export interface ToolScope {
   onRunDispatched?: TurnRunDispatchSink | undefined;
 }
 
-type ToolResult = { content: string; isError?: boolean };
+type ToolResult = { content: string; isError?: boolean; hostMessage?: true; fromThrow?: true };
 
 /** A compact, model-facing candidate projection (stage + spine + draft binding). */
 async function projectCandidate(tenantId: string, candidateId: string): Promise<Record<string, unknown> | null> {
@@ -120,14 +121,14 @@ export async function runFactoryRunTool(deps: StartRunDeps, input: Record<string
   // the executor honours exist (lessonAssembly.ts CheckpointCadence).
   const cadenceRaw = typeof input.checkpointEvery === 'string' ? input.checkpointEvery.trim() : '';
   if (cadenceRaw && cadenceRaw !== 'outline-only' && cadenceRaw !== 'batched') {
-    return { content: JSON.stringify({ error: 'validation_error', message: '`checkpointEvery` must be "batched" or "outline-only".' }), isError: true };
+    return toolError('validation_error', '`checkpointEvery` must be "batched" or "outline-only".');
   }
   for (const v of [durationDays, dailyMinutes]) if (v !== undefined && typeof v !== 'number') return v;
   // Cheap, I/O-free argument validation runs BEFORE the adapter pre-flight so a
   // malformed call still gets the precise `validation_error` it deserves rather
   // than a config diagnosis that isn't its actual problem.
   if (!candidateIdInput && !topic) {
-    return { content: JSON.stringify({ error: 'validation_error', message: 'Pass a `candidateId` or a `topic` to run the Factory.' }), isError: true };
+    return toolError('validation_error', 'Pass a `candidateId` or a `topic` to run the Factory.');
   }
   const imageArgs = imageArgsError(input);
   if (imageArgs) return imageArgs;
@@ -143,21 +144,18 @@ export async function runFactoryRunTool(deps: StartRunDeps, input: Record<string
   // publication on them, so a provider whose terms license its links only for
   // display alongside the grounded answer must not qualify here.
   if (!(await liveWebSearchConfigured(scope.tenantId, 'durable'))) {
-    return {
-      content: JSON.stringify({
-        error: 'research_adapter_unconfigured',
-        message:
-          // Written for the CREATOR who will read it in chat, not the operator who
+    // TOC2CD-11 (ADR 1000) — a host sentence the agent relays and acts on: vouched, so unfenced.
+    return toolError(
+      'research_adapter_unconfigured',
+      // Written for the CREATOR who will read it in chat, not the operator who
           // configures the fix: no env-var names, no "dossier"/"demo source"
           // jargon, and it names the person to ask because a workspace member may
           // have no Secrets Vault access at all. It also says plainly that nothing
           // was consumed, so re-running after the fix is obviously safe.
           'I can\'t start the Challenge Factory yet. It only builds a plan from real sources it can cite, and this workspace has no web search set up that it\'s allowed to cite from. '
           + 'A workspace admin can fix it in Settings → Secrets Vault by adding a web-search key — Exa, Brave or Tavily all work, and Exa\'s free tier covers about 20,000 searches a month. '
-          + 'Nothing was created and no run was started — your idea is safe to try again once that\'s sorted.',
-      }),
-      isError: true,
-    };
+      + 'Nothing was created and no run was started — your idea is safe to try again once that\'s sorted.',
+    );
   }
 
   // AI PRE-FLIGHT (ADR 0706 §3.1). The factory's evidence nodes dispatch to a
@@ -206,7 +204,7 @@ export async function runFactoryRunTool(deps: StartRunDeps, input: Record<string
       candidateId = created.id;
     } catch (err) {
       if (err instanceof ProhibitedTopicError) {
-        return { content: JSON.stringify({ error: 'prohibited_topic', message: err.message, signals: err.signals }), isError: true };
+        return { content: JSON.stringify({ error: 'prohibited_topic', message: err.message, signals: err.signals }), isError: true, fromThrow: true };
       }
       throw err;
     }
@@ -294,15 +292,15 @@ async function resolveFactoryImage(tenantId: string, input: Record<string, unkno
   const provider = named || FACTORY_IMAGE_DEFAULT_PROVIDER;
   const refuse = (why: string): FactoryImageResolution => ({
     error: {
-      content: JSON.stringify({
-        error: 'image_credential_missing',
-        provider,
-        message:
-          `I can't build this challenge with lesson images yet: images are made with ${provider}, and ${why}. `
-          + `A workspace admin can add a ${provider} key in Settings → Secrets Vault, or you can run it without images. `
+      // TOC2CD-11 (ADR 1000) — `why` can name a tenant's secret ref: fenced detail.
+      ...untrustedToolError(
+        'image_credential_missing',
+        'I can\'t build this challenge with lesson images yet: the image provider (below) has no usable key. '
+          + 'A workspace admin can add that provider\'s key in Settings → Secrets Vault, or you can run it without images. '
           + NOTHING_CREATED,
-      }),
-      isError: true,
+        `${provider}: ${why}`,
+        { provider },
+      ),
     },
   });
   const refs = await listSecretRefs({ tenantId });
@@ -317,13 +315,13 @@ async function resolveFactoryImage(tenantId: string, input: Record<string, unkno
 function imageArgsError(input: Record<string, unknown>): ToolResult | null {
   const named = typeof input.imageProvider === 'string' ? input.imageProvider.trim() : '';
   if (input.generateMedia !== undefined && typeof input.generateMedia !== 'boolean') {
-    return { content: JSON.stringify({ error: 'validation_error', message: '`generateMedia` must be true or false.' }), isError: true };
+    return toolError('validation_error', '`generateMedia` must be true or false.');
   }
   if (named && input.generateMedia !== true) {
-    return { content: JSON.stringify({ error: 'validation_error', message: 'Pass `imageProvider` only with `generateMedia: true`; on its own it would be ignored.' }), isError: true };
+    return toolError('validation_error', 'Pass `imageProvider` only with `generateMedia: true`; on its own it would be ignored.');
   }
   if (named && !(FACTORY_IMAGE_PROVIDERS as readonly string[]).includes(named)) {
-    return { content: JSON.stringify({ error: 'validation_error', message: `\`imageProvider\` must be one of ${FACTORY_IMAGE_PROVIDERS.join(', ')}.` }), isError: true };
+    return toolError('validation_error', `\`imageProvider\` must be one of ${FACTORY_IMAGE_PROVIDERS.join(', ')}.`);
   }
   return null;
 }
@@ -339,7 +337,7 @@ function mergeCredentialRefs(configurable: Record<string, unknown>, ref: string)
 function intakeInt(raw: unknown, bounds: { min: number; max: number }, name: string): number | ToolResult | undefined {
   if (raw === undefined || raw === null || raw === '') return undefined;
   if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < bounds.min || raw > bounds.max) {
-    return { content: JSON.stringify({ error: 'validation_error', message: `\`${name}\` must be a whole number from ${bounds.min} to ${bounds.max}.` }), isError: true };
+    return toolError('validation_error', `\`${name}\` must be a whole number from ${bounds.min} to ${bounds.max}.`);
   }
   return raw;
 }
@@ -385,7 +383,7 @@ async function resolveFactoryAi(tenantId: string, input: Record<string, unknown>
   // are either honoured or rejected, never ignored (review of #3889, nit 6).
   const namedProvider = typeof input.provider === 'string' && input.provider.trim() !== '';
   if (!namedProvider && ((typeof input.model === 'string' && input.model.trim()) || (typeof input.credentialRef === 'string' && input.credentialRef.trim()))) {
-    return { error: { content: JSON.stringify({ error: 'validation_error', message: 'Pass `provider` together with `model` or `credentialRef`; on their own they would be ignored.' }), isError: true } };
+    return { error: toolError('validation_error', 'Pass `provider` together with `model` or `credentialRef`; on their own they would be ignored.') };
   }
   // ADR 0975 D2 — with no creator choice, a stored Factory key (ADR 0910 D8) is the
   // Factory's binding, ahead of the workspace's general headless default: storing
@@ -418,21 +416,22 @@ async function resolveFactoryAi(tenantId: string, input: Record<string, unknown>
   if (!provider) {
     // No binding and no host default (an empty catalog). Refuse rather than
     // start a run that resolves "undefined".
-    return { error: { content: JSON.stringify({ error: 'ai_provider_unresolved', message: `I can't start the Challenge Factory: this workspace has no AI provider set for it. A workspace admin can set a default AI provider in Settings → Secrets Vault. ${NOTHING_CREATED}` }), isError: true } };
+    return { error: toolError('ai_provider_unresolved', `I can't start the Challenge Factory: this workspace has no AI provider set for it. A workspace admin can set a default AI provider in Settings → Secrets Vault. ${NOTHING_CREATED}`) };
   }
 
   if (!probeProviderCapabilities(provider).includes('structured-output')) {
     return {
       error: {
-        content: JSON.stringify({
-          error: 'ai_provider_unsupported',
-          provider,
-          message:
-            `I can't start the Challenge Factory on ${provider}: it needs an AI provider that returns structured JSON, and this workspace's choice doesn't. `
+        // TOC2CD-11 (ADR 1000) — `provider` can be the creator's raw `provider` argument
+        // (`resolveIgnitionAiBinding` does not validate it), so it is not host-only: fenced.
+        ...untrustedToolError(
+          'ai_provider_unsupported',
+          'I can\'t start the Challenge Factory on this AI provider (named below): it needs an AI provider that returns structured JSON, and this one doesn\'t. '
             + 'Anthropic, OpenAI and Google all work — a workspace admin can set the default AI provider in Settings → Secrets Vault. '
             + NOTHING_CREATED,
-        }),
-        isError: true,
+          provider,
+          { provider },
+        ),
       },
     };
   }
@@ -444,32 +443,31 @@ async function resolveFactoryAi(tenantId: string, input: Record<string, unknown>
   if (binding?.credentialRef && isManagedRef(binding.credentialRef)) {
     return {
       error: {
-        content: JSON.stringify({
-          error: 'ai_provider_unsupported',
-          provider,
-          reason: 'managed_tier_no_structured_output',
-          message:
-            "I can't start the Challenge Factory on the free managed AI: it needs structured JSON answers, which the managed tier doesn't provide. "
+        // TOC2CD-11 (ADR 1000) — carries the unvalidated `provider` as a key: fenced whole.
+        ...untrustedToolError(
+          'ai_provider_unsupported',
+          "I can't start the Challenge Factory on the free managed AI: it needs structured JSON answers, which the managed tier doesn't provide. "
             + 'A workspace admin can add an Anthropic, OpenAI or Google key in Settings → Secrets Vault. '
             + NOTHING_CREATED,
-        }),
-        isError: true,
+          undefined,
+          { provider, reason: 'managed_tier_no_structured_output' },
+        ),
       },
     };
   }
 
   const refuse = (reason: string, why: string): FactoryAiResolution => ({
     error: {
-      content: JSON.stringify({
-        error: 'ai_credential_missing',
-        provider,
-        reason,
-        message:
-          `I can't start the Challenge Factory yet. It runs on ${provider} for this workspace, and ${why}. `
-          + `A workspace admin can add a ${provider} key in Settings → Secrets Vault, or pick a different default AI provider there. `
+      // TOC2CD-11 (ADR 1000) — `provider` is not provably host-only and `why` can name a
+      // tenant's secret ref: both go to the fenced detail, the instruction stays host text.
+      ...untrustedToolError(
+        'ai_credential_missing',
+        'I can\'t start the Challenge Factory yet: its AI provider (below) has no usable key. '
+          + 'A workspace admin can add that provider\'s key in Settings → Secrets Vault, or pick a different default AI provider there. '
           + NOTHING_CREATED,
-      }),
-      isError: true,
+        `${provider}: ${why}`,
+        { provider, reason },
+      ),
     },
   });
 

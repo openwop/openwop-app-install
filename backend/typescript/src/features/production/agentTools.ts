@@ -58,12 +58,12 @@ export const PRODUCTION_PLAN_TOOL_ID = 'openwop:production.plan';
  *  pack) — used only to attribute the inline `workflow_run` turn. */
 const PLANNER_AGENT_ID = 'vendor.openwop-app.production.agents.production-planner';
 
-type ToolResult = { content: string; isError?: boolean };
+type ToolResult = { content: string; isError?: boolean; hostMessage?: true };
 
 /** Structured tool error — the agent loop surfaces `content` verbatim to the
  *  model, so the message must say what failed and what to do next. */
 function toolError(error: string, message: string, extra?: Record<string, unknown>): ToolResult {
-  return { content: JSON.stringify({ error, message, ...(extra ?? {}) }), isError: true };
+  return { content: JSON.stringify({ ...(extra ?? {}), error, message }), isError: true, hostMessage: true };
 }
 
 /** Per-call toggle honesty (ADR 0308 D2): per-tenant, dynamic, fail-closed. */

@@ -40,6 +40,8 @@ import type {
   AiCallResult,
   AiToolCallRequest,
   AiToolCallResult,
+  AiToolUseBlock,
+  AiCitation,
   SpeechSynthesisRequest,
   SpeechSynthesisResult,
   TranscribeRequest,
@@ -81,7 +83,7 @@ import { emitCost } from '../observability/costEmitter.js';
 import { classifyProviderOutcome, recordProviderCall } from '../observability/metricSeams.js';
 import { checkMediaBudget, recordMediaUsage } from './mediaBudget.js';
 import { getStreamAudioResolver } from './streamAudio.js';
-import { buildProviderUsagePayloadFromTokens } from '../providers/usageEmitter.js';
+import { buildProviderUsagePayloadFromTokens, type ProviderUsagePayload } from '../providers/usageEmitter.js';
 import { compactToolSchema } from '../providers/toolSchemaCompaction.js';
 import { contextEconomy } from '../host/contextEconomy.js';
 import { getInvocationLog, type InvocationRecordKey } from '../executor/invocationLog.js';
@@ -112,6 +114,10 @@ type InvocationFailureEnvelope = { [K in typeof INVOCATION_FAILURE_TAG]: 'failur
   /** The live throw's `error.name` (generic kind) — restored on replay so
    *  classifyDispatchError's native-error branch sees the same input. */
   name?: string;
+  /** ADR 1002 — a managed-tier failure's pipeline code (`details.managedCode`),
+   *  restored on replay: the tool loop reads it (`managedLimitCode`) to tell a
+   *  daily-limit stop from any other provider failure. */
+  managedCode?: string;
 };
 type InvocationRecord = AiCallResult | InvocationFailureEnvelope;
 
@@ -291,9 +297,9 @@ async function emitProviderUsage(
    *  (1.43.0 schema); cost-only, NOT replay-asserted. */
   cacheReadTokens?: number,
   cacheWriteTokens?: number,
-): Promise<void> {
-  if (!scope.emit) return;
-  if (typeof inputTokens !== 'number' || typeof outputTokens !== 'number') return;
+): Promise<ProviderUsagePayload | undefined> {
+  if (!scope.emit) return undefined;
+  if (typeof inputTokens !== 'number' || typeof outputTokens !== 'number') return undefined;
   try {
     const traceId = trace.getActiveSpan()?.spanContext().traceId;
     const payload = buildProviderUsagePayloadFromTokens(provider, model, inputTokens, outputTokens, {
@@ -304,8 +310,12 @@ async function emitProviderUsage(
       ...(typeof cacheWriteTokens === 'number' ? { cacheWriteTokens } : {}),
     });
     await scope.emit('provider.usage', payload);
+    // ADR 1002 D3 — returned so a recorded invocation can carry the exact payload
+    // its replay re-emits.
+    return payload;
   } catch (err) {
     log.warn('provider.usage emit failed', { err: err instanceof Error ? err.message : String(err) });
+    return undefined;
   }
 }
 
@@ -615,6 +625,268 @@ export function assertModalitiesAdvertised(req: AiCallRequest | AiToolCallReques
   }
 }
 
+/** RFC 0150 §C v2 digest of a plain (non-tools) call: the effective request,
+ *  defaults filled in before hashing (see `callAI`). */
+function plainRequestDigest(req: AiCallRequest): string {
+  return semanticRequestDigestV2({
+    provider: req.provider,
+    model: req.model,
+    messages: toChatMessages(req),
+    ...(typeof req.temperature === 'number' ? { temperature: req.temperature } : {}),
+    maxOutputTokens: req.maxTokens ?? 4096,
+    ...(req.stopSequences ? { stop: [...req.stopSequences] } : {}),
+    ...(req.responseSchema ? { responseFormat: { type: 'json', schema: req.responseSchema } } : {}),
+  });
+}
+
+/** ADR 1002 D1 — the v2 digest of a tools round. The tool definitions are part
+ *  of the request (the v2 recipe's `tools`), and native web search changes the
+ *  output, so it rides the namespaced `providerOptions` carrier. */
+function toolsRoundDigest(req: AiToolCallRequest): string {
+  return semanticRequestDigestV2({
+    provider: req.provider,
+    model: req.model,
+    messages: toChatMessages(req),
+    tools: req.tools.map((t) => ({ name: t.name, description: t.description, parameters: t.inputSchema })),
+    ...(req.maxTokens != null ? { maxOutputTokens: req.maxTokens } : {}),
+    ...(req.webSearch ? { providerOptions: { [`vendor.${req.provider}.webSearch`]: true } } : {}),
+  });
+}
+
+/** ADR 0326 P3a + GC-CHAT-3 — the failure envelope a FAILED invocation records,
+ *  or null for a control-flow signal that is never an attempt outcome
+ *  (SuspendSignal, a raw AbortError). Secrets are scrubbed (SR-1). */
+function failureEnvelopeFor(err: unknown): InvocationFailureEnvelope | null {
+  if (err instanceof AiProviderError) {
+    const managedCode = typeof err.details.managedCode === 'string' ? err.details.managedCode : undefined;
+    return stripSecretsFromPersisted({
+      [INVOCATION_FAILURE_TAG]: 'failure', kind: 'provider', code: err.code, message: err.message,
+      ...(managedCode ? { managedCode } : {}),
+    });
+  }
+  if (err instanceof Error && err.name !== 'SuspendSignal' && err.name !== 'AbortError') {
+    return stripSecretsFromPersisted({ [INVOCATION_FAILURE_TAG]: 'failure', kind: 'generic', name: err.name, message: err.message });
+  }
+  return null;
+}
+
+/** Re-throw a recorded failure in the SAME class family (GC-CHAT-3): a provider
+ *  failure as the identical AiProviderError, a generic throw as a plain Error
+ *  with its live `name` restored. */
+function throwRecordedFailure(recorded: InvocationFailureEnvelope): never {
+  if ((recorded.kind ?? 'provider') === 'provider') {
+    throw new AiProviderError(
+      (recorded.code ?? 'provider_unavailable') as AiProviderErrorCode,
+      recorded.message ?? 'replayed provider failure',
+      recorded.managedCode ? { managedCode: recorded.managedCode } : {},
+    );
+  }
+  const replayed = new Error(recorded.message ?? 'replayed node failure');
+  if (recorded.name) replayed.name = recorded.name;
+  throw replayed;
+}
+
+let lastReplayLaneKeyForTests: InvocationRecordKey | null = null;
+/** Test-only (ADR 1002) — the key `viaReplayLane` last recorded under. */
+export function __lastReplayLaneKeyForTests(): InvocationRecordKey | null {
+  return lastReplayLaneKeyForTests;
+}
+
+/** What a replay-lane call records on success: the result (never the hashed
+ *  credential ref, which is re-attached per call) plus the `provider.usage`
+ *  payload it emitted, so a replay re-emits that exact payload (ADR 1002 D3). */
+type ReplayLaneRecord<T> = T & { providerUsage?: ProviderUsagePayload; tenantId?: string };
+
+function isRecordObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+/** The tenant a replay-lane record was written for (ADR 1002 records stamp it). */
+function recordTenantOf(recorded: Record<string, unknown>): string | undefined {
+  return typeof recorded.tenantId === 'string' ? recorded.tenantId : undefined;
+}
+
+const optString = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined);
+const optNumber = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+type FinishReason = NonNullable<AiCallResult['finishReason']>;
+const FINISH_REASONS: readonly FinishReason[] = ['stop', 'length', 'content-filter', 'tool-call', 'other'];
+const isFinishReason = (v: string): v is FinishReason => (FINISH_REASONS as readonly string[]).includes(v);
+
+/** A recorded failure envelope, decoded, or null if `v` is not one. */
+function decodeFailureEnvelope(v: Record<string, unknown>): InvocationFailureEnvelope | null {
+  if (v[INVOCATION_FAILURE_TAG] !== 'failure') return null;
+  const kind = v.kind === 'generic' ? 'generic' : v.kind === 'provider' ? 'provider' : undefined;
+  const code = optString(v.code);
+  const message = optString(v.message);
+  const name = optString(v.name);
+  const managedCode = optString(v.managedCode);
+  return {
+    [INVOCATION_FAILURE_TAG]: 'failure',
+    ...(kind ? { kind } : {}), ...(code ? { code } : {}), ...(message ? { message } : {}),
+    ...(name ? { name } : {}), ...(managedCode ? { managedCode } : {}),
+  };
+}
+
+/** The recorded `provider.usage` payload, or undefined unless it has the RFC 0026 shape. */
+function decodeProviderUsage(v: unknown): ProviderUsagePayload | undefined {
+  if (!isRecordObject(v)) return undefined;
+  const provider = optString(v.provider);
+  const model = optString(v.model);
+  const inputTokens = optNumber(v.inputTokens);
+  const outputTokens = optNumber(v.outputTokens);
+  if (provider === undefined || model === undefined || inputTokens === undefined || outputTokens === undefined) return undefined;
+  const out: ProviderUsagePayload = { provider, model, inputTokens, outputTokens };
+  const totalTokens = optNumber(v.totalTokens); if (totalTokens !== undefined) out.totalTokens = totalTokens;
+  const costEstimateUsd = optNumber(v.costEstimateUsd); if (costEstimateUsd !== undefined) out.costEstimateUsd = costEstimateUsd;
+  const currency = optString(v.currency); if (currency !== undefined) out.currency = currency;
+  if (typeof v.cacheHit === 'boolean') out.cacheHit = v.cacheHit;
+  const cacheReadTokens = optNumber(v.cacheReadTokens); if (cacheReadTokens !== undefined) out.cacheReadTokens = cacheReadTokens;
+  const cacheWriteTokens = optNumber(v.cacheWriteTokens); if (cacheWriteTokens !== undefined) out.cacheWriteTokens = cacheWriteTokens;
+  const nodeId = optString(v.nodeId); if (nodeId !== undefined) out.nodeId = nodeId;
+  const traceId = optString(v.traceId); if (traceId !== undefined) out.traceId = traceId;
+  return out;
+}
+
+/** ADR 1002 — decode a recorded plain completion (the managed `callAI` result). */
+function decodeAiCallResult(v: Record<string, unknown>): AiCallResult | null {
+  if ('content' in v && v.content !== undefined && typeof v.content !== 'string') return null;
+  const out: AiCallResult = {};
+  const content = optString(v.content); if (content !== undefined) out.content = content;
+  if (isRecordObject(v.usage)) {
+    const u = v.usage;
+    out.usage = {
+      ...(optNumber(u.inputTokens) !== undefined ? { inputTokens: optNumber(u.inputTokens) } : {}),
+      ...(optNumber(u.outputTokens) !== undefined ? { outputTokens: optNumber(u.outputTokens) } : {}),
+      ...(optNumber(u.totalTokens) !== undefined ? { totalTokens: optNumber(u.totalTokens) } : {}),
+    };
+  }
+  const fr = optString(v.finishReason);
+  if (fr !== undefined) {
+    if (!isFinishReason(fr)) return null;
+    out.finishReason = fr;
+  }
+  const model = optString(v.model); if (model !== undefined) out.model = model;
+  return out;
+}
+
+/** ADR 1002 — decode a recorded tools round. Every tool call must have the
+ *  `{id, name, input}` shape, or the record is refused. */
+function decodeAiToolCallResult(v: Record<string, unknown>): AiToolCallResult | null {
+  const base = decodeAiCallResult(v);
+  if (!base) return null;
+  const out: AiToolCallResult = { ...base };
+  if (v.toolCalls !== undefined) {
+    if (!Array.isArray(v.toolCalls)) return null;
+    const calls: AiToolUseBlock[] = [];
+    for (const c of v.toolCalls) {
+      if (!isRecordObject(c) || typeof c.id !== 'string' || typeof c.name !== 'string' || !isRecordObject(c.input)) return null;
+      calls.push({ id: c.id, name: c.name, input: c.input });
+    }
+    out.toolCalls = calls;
+  }
+  if (v.citations !== undefined) {
+    if (!Array.isArray(v.citations)) return null;
+    const cites: AiCitation[] = [];
+    for (const c of v.citations) {
+      if (!isRecordObject(c) || typeof c.url !== 'string') return null;
+      cites.push({ url: c.url, ...(typeof c.title === 'string' ? { title: c.title } : {}), ...(typeof c.snippet === 'string' ? { snippet: c.snippet } : {}) });
+    }
+    out.citations = cites;
+  }
+  return out;
+}
+
+/**
+ * ADR 1002 — record a model call to the invocation log, and serve it from the
+ * log ONLY on the replay lane (`scope.replayInvocationsFromRunId`).
+ *
+ * Used by the three paths that never recorded before: managed `callAI` and both
+ * tools rounds. BYOK `callAI` keeps its own read path.
+ *
+ * Why the read is replay-only (D2): a live run must behave exactly as before.
+ * The executor's `beginNodeActivity` rewinds the ordinal to 0 whenever a node
+ * re-enters at the same attempt (B1), so a loop that revisits a node with an
+ * identical request computes the SAME identity. A live read would serve the
+ * first visit's answer to the second. A retry is a new `attempt`, so it is a
+ * different key and calls live on both lanes.
+ *
+ * On the replay lane: the fork's own record (an earlier pass of this fork),
+ * then the source run's record under the source identity (`runId` is in the
+ * preimage, so it is recomputed), copied under the fork's key so a fork of a
+ * fork replays from its parent. A miss dispatches live.
+ */
+async function viaReplayLane<T extends object>(
+  scope: AdapterScope,
+  providerKey: string,
+  decode: (recorded: Record<string, unknown>) => T | null,
+  live: () => Promise<{ result: T; usage?: ProviderUsagePayload }>,
+): Promise<T> {
+  const logicalInvocationOrdinal = nextLogicalInvocationOrdinal(scope.runId, scope.nodeId, scope.attempt);
+  const identityFor = (runId: string): string =>
+    logicalInvocationId({ tenantId: scope.tenantId, runId, nodeId: scope.nodeId, logicalInvocationOrdinal, providerKey });
+  const cacheKey: InvocationRecordKey = { runId: scope.runId, nodeId: scope.nodeId, attempt: scope.attempt, invocationId: identityFor(scope.runId) };
+  lastReplayLaneKeyForTests = cacheKey;
+  // No installed backend (a bare adapter outside a booted host) means nothing to
+  // record or serve: the call behaves exactly as it did before ADR 1002.
+  let invocationLog: ReturnType<typeof getInvocationLog> | null;
+  try { invocationLog = getInvocationLog(); } catch { invocationLog = null; }
+  if (!invocationLog) return (await live()).result;
+
+  const sourceRunId = scope.replayInvocationsFromRunId;
+  if (sourceRunId) {
+    let recorded: unknown = await invocationLog.get(cacheKey);
+    if (!recorded) {
+      recorded = await invocationLog.get({ ...cacheKey, runId: sourceRunId, invocationId: identityFor(sourceRunId) });
+      if (isRecordObject(recorded) && recordTenantOf(recorded) === scope.tenantId) await invocationLog.put(cacheKey, recorded).catch(() => undefined);
+    }
+    // ADR 1002 — a record never crosses a tenant. The tenant is in the identity
+    // preimage, so another tenant's record cannot be addressed; this is the
+    // explicit second guard, and it refuses rather than dispatching.
+    if (recorded && (!isRecordObject(recorded) || recordTenantOf(recorded) !== scope.tenantId)) {
+      log.error('replay invocation record belongs to another tenant; refused', { runId: scope.runId, nodeId: scope.nodeId });
+      throw new AiProviderError('provider_unavailable', 'replay_tenant_mismatch: the recorded invocation is not this tenant\'s.', { replay: 'tenant_mismatch' });
+    }
+    if (isRecordObject(recorded)) {
+      const failure = decodeFailureEnvelope(recorded);
+      if (failure) throwRecordedFailure(failure);
+      // A record is DECODED, never cast: a shape this host did not write fails
+      // closed (it is not served, and it does not dispatch live either).
+      const result = decode(recorded);
+      if (!result) {
+        log.error('replay invocation record has an unexpected shape; refused', { runId: scope.runId, nodeId: scope.nodeId });
+        throw new AiProviderError('provider_unavailable', 'replay_record_invalid: the recorded invocation could not be decoded.', { replay: 'record_invalid' });
+      }
+      const providerUsage = decodeProviderUsage(recorded.providerUsage);
+      // RFC 0041 §C — the served call's observable `provider.usage` is the
+      // source's payload, verbatim. Best-effort, like the live emit.
+      if (providerUsage && scope.emit) {
+        try { await scope.emit('provider.usage', providerUsage); } catch (err) {
+          log.warn('replay provider.usage re-emit failed', { err: err instanceof Error ? err.message : String(err) });
+        }
+      }
+      return result;
+    }
+  }
+
+  let out: { result: T; usage?: ProviderUsagePayload };
+  try {
+    out = await live();
+  } catch (err) {
+    const envelope = failureEnvelopeFor(err);
+    if (envelope) await invocationLog.put(cacheKey, { ...envelope, tenantId: scope.tenantId }).catch(() => undefined);
+    throw err;
+  }
+  // Best-effort: the call already succeeded and was already metered, so a lost
+  // write must not fail it. Its replay then dispatches live, as before ADR 1002.
+  // Scrubbed like the failure envelopes (SR-1), and stamped with the tenant the
+  // replay read checks.
+  const record: ReplayLaneRecord<T> = stripSecretsFromPersisted({ ...out.result, ...(out.usage ? { providerUsage: out.usage } : {}), tenantId: scope.tenantId });
+  await invocationLog.put(cacheKey, record).catch((err: unknown) => {
+    log.warn('invocation-log record failed', { runId: scope.runId, nodeId: scope.nodeId, err: err instanceof Error ? err.message : String(err) });
+  });
+  return out.result;
+}
+
 // DEBT-3 (decided won't-fix, ADR-0355-thread architect review 2026-07-12): do NOT
 // fill a catalog default model here when `req.model` is empty. The invocation-log
 // cache key embeds `req.model` (see computeProviderKey below) and LLM nodes
@@ -641,11 +913,12 @@ async function callAI(scope: AdapterScope, req: AiCallRequest): Promise<AiCallRe
     return { embedding, model: LOCAL_EMBEDDING_MODEL };
   }
 
-  // Managed-provider short-circuit. Bypasses policy + invocation-log
-  // cache + BYOK resolution; the managed pipeline owns sign-in check,
-  // daily cap, server-held-key lookup, and result rewriting. Replay
-  // determinism does NOT apply: managed dispatch is for ad-hoc chat,
-  // not workflow runs (which keep using BYOK).
+  // Managed-provider short-circuit. Bypasses policy + BYOK resolution; the
+  // managed pipeline owns the sign-in check, daily cap, server-held-key lookup
+  // and result rewriting. It does NOT bypass replay: workflow runs DO reach
+  // here (agent nodes default to the managed tier, `agentDispatch.ts`
+  // `preferManaged: true`), so `callAIManaged` records to and replays from the
+  // same invocation log as BYOK (ADR 1002).
   if (isManagedCredentialRef(req.credentialRef)) {
     return callAIManaged(scope, req);
   }
@@ -668,15 +941,7 @@ async function callAI(scope: AdapterScope, req: AiCallRequest): Promise<AiCallRe
   // NOT be used as a security boundary" because two tenants computing the same
   // request compute the same digest. Isolation moved to where the spec puts it
   // — `tenantId` is in the Layer-2 IDENTITY preimage below.
-  const providerKey = semanticRequestDigestV2({
-    provider: req.provider,
-    model: req.model,
-    messages: toChatMessages(req),
-    ...(typeof req.temperature === 'number' ? { temperature: req.temperature } : {}),
-    maxOutputTokens: req.maxTokens ?? 4096,
-    ...(req.stopSequences ? { stop: [...req.stopSequences] } : {}),
-    ...(req.responseSchema ? { responseFormat: { type: 'json', schema: req.responseSchema } } : {}),
-  });
+  const providerKey = plainRequestDigest(req);
 
   // RFC 0150 §B — the LOGICAL EFFECT IDENTITY. The ordinal is allocated once
   // per logical activity and rewinds at each node attempt, so attempt 2's first
@@ -801,14 +1066,7 @@ async function callAI(scope: AdapterScope, req: AiCallRequest): Promise<AiCallRe
   // re-throws a plain Error with its live `name` restored — so the executor's
   // code derivation AND classifyDispatchError's class branch take the same
   // path live and on replay, keeping the node-failure event byte-identical.
-  if (cached && isFailureEnvelope(cached)) {
-    if ((cached.kind ?? 'provider') === 'provider') {
-      throw new AiProviderError((cached.code ?? 'provider_unavailable') as AiProviderErrorCode, cached.message ?? 'replayed provider failure');
-    }
-    const replayed = new Error(cached.message ?? 'replayed node failure');
-    if (cached.name) replayed.name = cached.name;
-    throw replayed;
-  }
+  if (cached && isFailureEnvelope(cached)) throwRecordedFailure(cached);
   if (cached) {
     log.debug('callAI: invocation-log cache hit', {
       runId: scope.runId,
@@ -854,13 +1112,8 @@ async function callAI(scope: AdapterScope, req: AiCallRequest): Promise<AiCallRe
     // provider_timed_out wrapping) are excluded. Secrets are scrubbed
     // (provider messages can echo key material — SR-1); the write is
     // best-effort and never masks the original throw.
-    if (err instanceof AiProviderError) {
-      const envelope = stripSecretsFromPersisted({ [INVOCATION_FAILURE_TAG]: 'failure', kind: 'provider', code: err.code, message: err.message });
-      await invocationLog.put(cacheKey, envelope).catch(() => undefined);
-    } else if (err instanceof Error && err.name !== 'SuspendSignal' && err.name !== 'AbortError') {
-      const envelope = stripSecretsFromPersisted({ [INVOCATION_FAILURE_TAG]: 'failure', kind: 'generic', name: err.name, message: err.message });
-      await invocationLog.put(cacheKey, envelope).catch(() => undefined);
-    }
+    const envelope = failureEnvelopeFor(err);
+    if (envelope) await invocationLog.put(cacheKey, envelope).catch(() => undefined);
     throw err;
   }
 
@@ -894,11 +1147,13 @@ async function callAI(scope: AdapterScope, req: AiCallRequest): Promise<AiCallRe
  * results in `messages`). This matches the published
  * `core.ai.toolCalling` pack's expected return shape.
  *
- * NOT cached: the model's `toolCalls[]` output is intentionally
- * non-deterministic across attempts when the pack iterates (different
- * tool results lead to different next-round queries). The pack-level
- * cache for the eventual final text is the workflow's invocationLog,
- * not this single round.
+ * ADR 1002 — each round is RECORDED to the invocation log and SERVED from it
+ * only on the replay lane (`viaReplayLane`). A live run never reads it, so a
+ * retry or a loop revisit still dispatches, as this docblock always promised
+ * ("non-deterministic across attempts"). Each round's identity covers its full
+ * message history, so round N+1, which carries round N's tool results, is a
+ * different effect. The `mock` round below is NOT recorded: its scripted
+ * programs are RFC 0041 §B divergence injections and must reach the mock.
  */
 async function callAIWithTools(scope: AdapterScope, req: AiToolCallRequest): Promise<AiToolCallResult> {
   req = withRunAiDefault(req, scope.runAiDefault); // ADR 0903
@@ -942,6 +1197,12 @@ async function callAIWithTools(scope: AdapterScope, req: AiToolCallRequest): Pro
   const { cleartext: credentialCleartext, refUsed } = resolveCredential(scope, req.provider, req.credentialRef);
   const credentialRefHashed = sha256Hex(refUsed);
 
+  const served = await viaReplayLane(scope, toolsRoundDigest(req), decodeAiToolCallResult, () => dispatchByokTools(scope, req, credentialCleartext));
+  return { ...served, credentialRefHashed };
+}
+
+/** The live BYOK tools round behind `callAIWithTools`. */
+async function dispatchByokTools(scope: AdapterScope, req: AiToolCallRequest, credentialCleartext: string): Promise<{ result: AiToolCallResult; usage?: ProviderUsagePayload }> {
   const toolDietOn = contextEconomy().toolDiet; // ADR 0148 A3
   const result = await wrapInSpan(scope, req.provider, req.model, async () => {
     const dispatchRound = toolsRoundDispatcher(req.provider);
@@ -985,7 +1246,7 @@ async function callAIWithTools(scope: AdapterScope, req: AiToolCallRequest): Pro
   // billing reconciliation captures per-call records inside multi-turn
   // tool flows. The pack orchestrates subsequent rounds; each round
   // re-enters this function and emits its own event.
-  await emitProviderUsage(scope, req.provider, req.model, result.inputTokens, result.outputTokens, (result.cachedReadTokens ?? 0) > 0, result.cachedReadTokens, result.cacheWriteTokens);
+  const usage = await emitProviderUsage(scope, req.provider, req.model, result.inputTokens, result.outputTokens, (result.cachedReadTokens ?? 0) > 0, result.cachedReadTokens, result.cacheWriteTokens);
 
   const aiResult: AiToolCallResult = {
     content: result.text,
@@ -996,9 +1257,8 @@ async function callAIWithTools(scope: AdapterScope, req: AiToolCallRequest): Pro
       outputTokens: result.outputTokens,
     },
     finishReason: normalizeFinishReason(result.finishReason),
-    credentialRefHashed,
   };
-  return aiResult;
+  return { result: aiResult, ...(usage ? { usage } : {}) };
 }
 
 async function callAIManaged(scope: AdapterScope, req: AiCallRequest): Promise<AiCallResult> {
@@ -1009,8 +1269,15 @@ async function callAIManaged(scope: AdapterScope, req: AiCallRequest): Promise<A
       { capability: 'managed_provider.modes' },
     );
   }
-  const userFacingProvider = managedProviderIdFromRef(req.credentialRef!);
   const credentialRefHashed = sha256Hex(req.credentialRef!);
+  // ADR 1002 — recorded, and served on the replay lane, like a BYOK call.
+  const served = await viaReplayLane(scope, plainRequestDigest(req), decodeAiCallResult, () => dispatchManagedPlain(scope, req));
+  return { ...served, credentialRefHashed };
+}
+
+/** The live managed plain completion behind `callAIManaged`. */
+async function dispatchManagedPlain(scope: AdapterScope, req: AiCallRequest): Promise<{ result: AiCallResult; usage?: ProviderUsagePayload }> {
+  const userFacingProvider = managedProviderIdFromRef(req.credentialRef!);
   try {
     const managed = await dispatchManagedChat({
       userFacingProvider,
@@ -1036,15 +1303,15 @@ async function callAIManaged(scope: AdapterScope, req: AiCallRequest): Promise<A
 
     // RFC 0026 — managed-provider calls emit the same event shape so
     // tenants can reconcile against their server-held-key spend.
-    await emitProviderUsage(scope, managed.provider, managed.model, managed.usage?.inputTokens, managed.usage?.outputTokens);
+    const usage = await emitProviderUsage(scope, managed.provider, managed.model, managed.usage?.inputTokens, managed.usage?.outputTokens);
 
-    return {
+    const result: AiCallResult = {
       content: managed.completion,
       ...(managed.usage ? { usage: managed.usage } : {}),
       finishReason: normalizeFinishReason(managed.finishReason),
       model: managed.model,
-      credentialRefHashed,
     };
+    return { result, ...(usage ? { usage } : {}) };
   } catch (err) {
     if (err instanceof ManagedProviderError) {
       // Map managed-pipeline errors to canonical aiProviders codes so
@@ -1065,8 +1332,15 @@ async function callAIManaged(scope: AdapterScope, req: AiCallRequest): Promise<A
  *  workspace meters per subject (ADR 0693). Errors map to the canonical codes the
  *  managed chat path uses. */
 async function callAIWithToolsManaged(scope: AdapterScope, req: AiToolCallRequest): Promise<AiToolCallResult> {
-  const userFacingProvider = managedProviderIdFromRef(req.credentialRef!);
   const credentialRefHashed = sha256Hex(req.credentialRef!);
+  // ADR 1002 — recorded, and served on the replay lane, like the BYOK round.
+  const served = await viaReplayLane(scope, toolsRoundDigest(req), decodeAiToolCallResult, () => dispatchManagedTools(scope, req));
+  return { ...served, credentialRefHashed };
+}
+
+/** The live managed tools round behind `callAIWithToolsManaged`. */
+async function dispatchManagedTools(scope: AdapterScope, req: AiToolCallRequest): Promise<{ result: AiToolCallResult; usage?: ProviderUsagePayload }> {
+  const userFacingProvider = managedProviderIdFromRef(req.credentialRef!);
   const toolDietOn = contextEconomy().toolDiet; // ADR 0148 A3, same diet as the BYOK round
   try {
     const round = await dispatchManagedToolsRound({
@@ -1082,14 +1356,14 @@ async function callAIWithToolsManaged(scope: AdapterScope, req: AiToolCallReques
       })),
       ...(req.maxTokens != null ? { maxTokens: req.maxTokens } : {}),
     });
-    await emitProviderUsage(scope, userFacingProvider, userFacingProvider, round.inputTokens, round.outputTokens, (round.cachedReadTokens ?? 0) > 0, round.cachedReadTokens);
-    return {
+    const usage = await emitProviderUsage(scope, userFacingProvider, userFacingProvider, round.inputTokens, round.outputTokens, (round.cachedReadTokens ?? 0) > 0, round.cachedReadTokens);
+    const result: AiToolCallResult = {
       content: round.text,
       toolCalls: round.toolUses.map((t) => ({ id: t.id, name: t.name, input: t.input })),
       usage: { inputTokens: round.inputTokens, outputTokens: round.outputTokens },
       model: userFacingProvider,
-      credentialRefHashed,
     };
+    return { result, ...(usage ? { usage } : {}) };
   } catch (err) {
     if (err instanceof ManagedProviderError) {
       const code: AiProviderErrorCode =

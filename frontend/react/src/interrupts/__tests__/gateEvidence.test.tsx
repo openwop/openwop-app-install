@@ -165,6 +165,37 @@ describe('inbox / runs ApprovalCard — the approver sees what they are approvin
 });
 
 /**
+ * P9 (2026-10-28) — the Challenge Factory outline gate rendered a raw `{ … }`:
+ * its plan was saved UNTYPED (a stale schema copy), so no typed renderer ran
+ * and the JSON fell through to Markdown. A saved envelope whose payload has the
+ * plan's shape now reads as the outline, inline AND in "View full", from the
+ * same pinned revision.
+ */
+describe('ApprovalCard — a saved untyped plan envelope is readable (P9)', () => {
+  const plan = {
+    title: 'Twenty-One Days of Focus', promise: 'Focus daily.', audience: 'Makers', durationDays: 21, dailyMinutesBudget: 20,
+    outcomes: [], achievements: [],
+    days: [{ day: 1, stableActivityId: 'd1', title: 'First block', actionInstruction: 'Focus for 10 minutes.', userFacingWhy: '', estimatedMinutes: 10, achievementIds: [], evidencePolicy: 'note', claimRefs: [],
+      alternatives: [{ stableActivityId: 'd1-alt', title: 'Walk instead', actionInstruction: 'Walk for 10 minutes.', evidencePolicy: 'note' }] }],
+  };
+  beforeEach(() => {
+    art.getArtifact.mockResolvedValue({ source: 'run-event', format: 'application/json' }); // no artifactTypeId: untyped
+    art.getArtifactRevision.mockResolvedValue({ content: JSON.stringify({ plan, artifact: { artifactTypeId: 'kicktodo.challenge-plan', title: plan.title, payload: plan } }, null, 2) });
+  });
+
+  it('inline and full both show the outline, never the JSON', async () => {
+    view({ prompt: GATE_PROMPT, artifactId: 'run-event:r-1:outline-approve', revisionId: 'r-1:outline-approve:1' });
+    expect(await screen.findByText('Day 1: First block')).toBeTruthy();
+    expect(screen.getByText('Walk instead: Walk for 10 minutes.')).toBeTruthy();
+    expect(screen.queryByText(/^\{$/)).toBeNull();
+    expect(art.getArtifactRevision).toHaveBeenCalledWith('run-event:r-1:outline-approve', 'r-1:outline-approve:1'); // revision binding kept
+    fireEvent.click(screen.getByRole('button', { name: /view full/i }));
+    const dialog = await screen.findByRole('dialog');
+    expect(await within(dialog).findByText('Day 1: First block')).toBeTruthy();
+  });
+});
+
+/**
  * ADR 0600 §Correction 1 — §2 claimed ONE shared component and shipped two: the
  * chat card kept a private copy of the ADR 0193 send-approval envelope, which is
  * why the inbox card could say "nothing was captured" over it. The envelope now

@@ -16,6 +16,8 @@ import type { RouteDeps } from '../../../routes/registerAllRoutes.js';
 import { requireFeatureEnabled } from '../../featureRoute.js';
 import { authorizeClient } from '../routes.js';
 import { syncReportSchedule } from './schedule.js';
+import { startClientReportRun } from '../runLauncher.js';
+import { personalTenantOf } from '../../../host/requestSubject.js';
 import {
   createDefinition, createReport, getDefinition, getReport, listDefinitions, listReports, parseDefinition, resolvePeriod, updateDefinition,
 } from './reportService.js';
@@ -83,6 +85,27 @@ export function registerClientReportRoutes(deps: RouteDeps): void {
       const body = (req.body ?? {}) as Record<string, unknown>;
       const period = resolvePeriod(def.period.kind, { start: body.periodStart, end: body.periodEnd });
       res.status(201).json({ report: await createReport(def, period, userId) });
+    } catch (err) { next(err); }
+  });
+
+  // ADR 0957 D2 — run the client-report chain now: compute, then the client's
+  // report.publish review gate, then publish. The same chain the schedule starts.
+  app.post(`${BASE}/report-definitions/:definitionId/runs`, async (req, res, next) => {
+    try {
+      const { tenantId, orgId, userId } = await gate(req, 'workspace:write');
+      const def = await getDefinition(tenantId, orgId, req.params.definitionId);
+      if (!def) throw notFound('Report definition', req.params.definitionId);
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      // Validate the period here so a bad one is a 400, not a failed run.
+      resolvePeriod(def.period.kind, { start: body.periodStart, end: body.periodEnd });
+      const personal = personalTenantOf(req);
+      const runId = await startClientReportRun({ storage: deps.storage, hostSuite: deps.hostSuite }, {
+        tenantId, orgId, definitionId: def.definitionId, definitionVersion: def.version, causedBy: userId,
+        ...(typeof body.periodStart === 'string' ? { periodStart: body.periodStart } : {}),
+        ...(typeof body.periodEnd === 'string' ? { periodEnd: body.periodEnd } : {}),
+        ...(personal ? { personalTenant: personal } : {}),
+      });
+      res.status(202).json({ runId });
     } catch (err) { next(err); }
   });
 

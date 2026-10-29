@@ -16,6 +16,7 @@
  * so a branch fork never inherits its source's approvals (D10.4).
  */
 import type { Storage } from '../../storage/storage.js';
+import type { InterruptRecord } from '../../types.js';
 import type { ActionClass, RiskFacts } from './types.js';
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -45,6 +46,10 @@ export async function findCoveringGrant(
   storage: Pick<Storage, 'listEvents' | 'getInterrupt'>,
   runId: string,
   want: { actionClass: ActionClass; facts: RiskFacts; contentHash?: string },
+  // An effect can require stricter evidence without duplicating the event walk.
+  // Filter each candidate before returning: an ineligible earlier resolution
+  // must not hide a later covering approval from the same run.
+  eligible?: (interrupt: Readonly<InterruptRecord>) => boolean,
 ): Promise<{ interruptId: string } | null> {
   const events = await storage.listEvents(runId);
   const seen = new Set<string>();
@@ -59,7 +64,7 @@ export async function findCoveringGrant(
     if (!block || block.actionClass !== want.actionClass) continue;
     if (block.contentHash !== want.contentHash) continue;
     const approvedFacts = isObj(block.facts) ? (block.facts as RiskFacts) : {};
-    if (factsCovered(approvedFacts, want.facts)) return { interruptId: id };
+    if (factsCovered(approvedFacts, want.facts) && (!eligible || eligible(it))) return { interruptId: id };
   }
   return null;
 }

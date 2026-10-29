@@ -14,22 +14,37 @@ import type { ComponentType } from 'react';
 import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { ReviewAsset } from './reviewClient.js';
-import { LessonBatchReview } from './LessonBatchReview.js';
-import { ChallengePlanReview } from './ChallengePlanReview.js';
+import { LessonBatchReview, parseLessonBatch } from './LessonBatchReview.js';
+import { ChallengePlanReview, parseChallengePlan } from './ChallengePlanReview.js';
 
 export interface ReviewArtifactRendererProps {
   asset: ReviewAsset;
 }
 
 const registry = new Map<string, ComponentType<ReviewArtifactRendererProps>>();
+/** Shape checks for UNTYPED content (P9): a saved envelope is shown in a type's
+ *  layout only when that type registered a matcher and the payload passes it. */
+const matchers = new Map<string, (content: string) => boolean>();
 
-export function registerReviewArtifactRenderer(artifactTypeId: string, Component: ComponentType<ReviewArtifactRendererProps>): void {
+export function registerReviewArtifactRenderer(
+  artifactTypeId: string,
+  Component: ComponentType<ReviewArtifactRendererProps>,
+  opts?: { matches?: (content: string) => boolean },
+): void {
   registry.set(artifactTypeId, Component);
+  if (opts?.matches) matchers.set(artifactTypeId, opts.matches);
 }
 
 export function getReviewArtifactRenderer(artifactTypeId: string | undefined): ComponentType<ReviewArtifactRendererProps> | null {
   if (!artifactTypeId) return null;
   return registry.get(artifactTypeId) ?? null;
+}
+
+/** The renderer for untyped `content` that claims `artifactTypeId`, or null when
+ *  the type has no matcher or the content does not have its shape. */
+export function getReviewArtifactMatch(artifactTypeId: string, content: string): ComponentType<ReviewArtifactRendererProps> | null {
+  const matches = matchers.get(artifactTypeId);
+  return matches && matches(content) ? registry.get(artifactTypeId) ?? null : null;
 }
 
 // ── kicktodo.plan-revision ─────────────────────────────────────────────────
@@ -94,7 +109,11 @@ function PlanRevisionReview({ asset }: ReviewArtifactRendererProps): JSX.Element
 registerReviewArtifactRenderer('kicktodo.plan-revision', PlanRevisionReview);
 
 // XCH-GATE-1 / XCH-LB-3 — the Challenge Factory lesson checkpoint.
-registerReviewArtifactRenderer('kicktodo.challenge-lesson-batch', LessonBatchReview);
+registerReviewArtifactRenderer('kicktodo.challenge-lesson-batch', LessonBatchReview, {
+  matches: (c) => (parseLessonBatch(c)?.length ?? 0) > 0,
+});
 
 // XCH-GATE-1 (outline half) — the Challenge Factory outline approval.
-registerReviewArtifactRenderer('kicktodo.challenge-plan', ChallengePlanReview);
+registerReviewArtifactRenderer('kicktodo.challenge-plan', ChallengePlanReview, {
+  matches: (c) => { const p = parseChallengePlan(c); return p !== null && p.title.length > 0 && p.days.length > 0; },
+});

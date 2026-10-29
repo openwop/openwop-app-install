@@ -53,6 +53,20 @@ else
   bad "CI build-config banner runs npm or changes its displayed commands"
 fi
 
+# Serial frontend mode must bound all three real child processes.
+if python3 "$ROOT/scripts/test-ci-frontend-static.py"; then
+  ok "frontend static scheduler honors serial mode and propagates every failure"
+else
+  bad "frontend static scheduler overlaps serial work or loses a failure"
+fi
+
+# A later successful shutdown case must preserve an earlier startup failure.
+if python3 "$ROOT/scripts/test-shutdown-harness.py"; then
+  ok "shutdown gate retains failed boot evidence and refuses foreign listeners"
+else
+  bad "shutdown gate lost failed boot evidence or accepted a foreign listener"
+fi
+
 # ---------------------------------------------------------------- GATE-4
 # `lsof` unusable must be REFUSED, never read as "every port is free".
 (

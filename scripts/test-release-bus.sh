@@ -397,12 +397,20 @@ esac
 FAKE
   chmod +x "$TMP/tbin/gh" "$TMP/tbin/npm" "$TMP/tbin/npx"
 }
+# The train runs with INT and TERM at their DEFAULT disposition. ci.sh runs this
+# file as a background lane, and a background job of a non-interactive shell
+# starts with SIGINT ignored; bash cannot un-ignore a signal ignored on entry, so
+# the INT case below then got exit 1 every time inside the gate while passing
+# alone (2026-10-29, MyndHyve overlay gate, two reds). perl resets both before exec.
+DEFAULT_SIGNALS=""
+command -v perl >/dev/null 2>&1 && DEFAULT_SIGNALS="perl -e \$SIG{INT}=\$SIG{TERM}='DEFAULT';exec(@ARGV)||die"
 run_train() { # <bus mode> <pr>…
   local m="$1"; shift
   local BUSV=on FM=""; case "$m" in off) BUSV=off ;; unauth|hang) FM="$m" ;; esac
   ( cd "$TMP/repo" && PATH="$TMP/tbin:$BIN:$PATH" FAKE_DIR="$TMP/fake" FAKE_REPO="$TMP/repo" FAKE_ORIGIN="$TMP/origin.git" \
       FAKE_GCS="$TMP/gcs" FAKE_GCLOUD_MODE="$FM" OPENWOP_RELEASE_BUS="$BUSV" OPENWOP_RELEASE_BUS_TIMEOUT_MS=1500 OPENWOP_RELEASE_BUS_HOST=hosta \
-      OPENWOP_TRAIN_DIR="$TMP/repo-train" bash -c 'export FAKE_TRAIN_PID=$$; exec bash scripts/merge-train.sh "$@"' _ "$@" > "$TMP/train.out" 2>&1; echo $? )
+      OPENWOP_TRAIN_DIR="$TMP/repo-train" $DEFAULT_SIGNALS \
+        bash -c 'export FAKE_TRAIN_PID=$$; exec bash scripts/merge-train.sh "$@"' _ "$@" > "$TMP/train.out" 2>&1; echo $? )
 }
 for m in ok unauth hang off; do
   setup_train; fresh

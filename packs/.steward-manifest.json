@@ -352,9 +352,9 @@
       "digest": "3eee76b496623144bb898d68abc62bf7216037faadf003503d0743e44f49ad32"
     },
     "feature.campaign-ops.nodes": {
-      "version": "1.3.0",
+      "version": "1.4.0",
       "files": 2,
-      "digest": "eaf59452acf7cb3918feb8244ce37ecac1abeaa4ad666cf4ea00c65d70fb7dd7"
+      "digest": "6ea8a1217335b4adb294b83ad033d58ffb14f18a3a4852a3047235acfa68b600"
     },
     "feature.campaign-orchestration.nodes": {
       "version": "1.7.0",
@@ -612,9 +612,9 @@
       "digest": "0adbac0ec5a17d56fc45e998452ca2cfb2402a8e277f81aa83a1d7f5df1585bd"
     },
     "feature.tool-output-compaction.nodes": {
-      "version": "1.2.1",
+      "version": "1.2.2",
       "files": 3,
-      "digest": "8684dc7e04d0a27c4a67cdfd7c0eed95abe800e6a3a8f5241ef8dda7be68fd60"
+      "digest": "152bfe215feaf17cb2295a1782377d8a67d54b3dbf30e4b5785f77252d4f7733"
     },
     "feature.users.nodes": {
       "version": "1.0.2",

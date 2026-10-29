@@ -21,6 +21,7 @@ export const messages = {
   testFailed: 'Falha no teste.',
   connected: '{{label}} conectado.',
   connectedForOrg: '{{label}} conectado para a organização.',
+  connectedForWorkspace: '{{label}} conectado para todo o espaço de trabalho.',
   couldNotStart: 'Não foi possível iniciar {{label}}.',
   connectionHealthy: '{{name}} está saudável.',
   connectionNeedsReconnect: '{{name}} precisa se reconectar.',
@@ -66,6 +67,8 @@ export const messages = {
   sharedWith: 'Compartilhado com',
   shareJustMe: 'Apenas eu',
   shareOrganization: 'Organização',
+  shareWorkspaceDefault: 'Todo o espaço de trabalho (envios automáticos)',
+  shareWorkspaceDefaultHint: 'Também usado quando ninguém está agindo, como avisos de aprovação e campanhas agendadas. Qualquer fluxo de trabalho deste espaço pode usá-lo.',
   shareScopeUnknown: 'Não foi possível verificar suas permissões, então esta conexão será criada só para você — não compartilhada com a organização.',
   connect: 'Conectar',
 

@@ -337,7 +337,7 @@ export const messages = {
   noEventAtSeq: 'No event at #{{seq}}.',
   agentActivityUpToPoint: 'Agent activity up to this point',
   payloadSummary: 'payload',
-  compactionNoticeTitle: 'Shortened before the model saw it.',
+  compactionNoticeTitle: "Shortened by tool-output compaction.",
   compactionElidedRows_one: '{{n}} row was removed from the middle of a list.',
   compactionElidedRows_other: '{{n}} rows were removed from the middle of a list.',
   compactionEmptiedFields: 'These fields were present but empty and were removed: {{fields}}.',

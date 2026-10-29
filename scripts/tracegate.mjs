@@ -140,10 +140,13 @@ function lane(o) {
 // Nearest named function chain; anonymous callbacks are named by callee + first
 // string argument (`router.get(/x)`), so a route handler has its own key and
 // editing one handler does not invalidate everything that ran the registrar.
-// Imports, interfaces and type aliases are erased by the transform and map to
-// <import>; a top-level `const X = <literal|object|array|arrow>` maps to
-// <const:X> (invalidates only tests whose executed code names X); any other
-// top-level statement maps to <top> (invalidates every test that loaded the file).
+// Type-only imports, interfaces and type aliases are erased by the transform and
+// map to <import>. A value import or re-export maps to <import:SPEC>: it can pull
+// a module graph into load and reorder vi.mock resolution, so it invalidates
+// unless SPEC is already loaded (importLoaded). A top-level
+// `const X = <literal|object|array|arrow>` maps to <const:X> (invalidates only
+// tests whose executed code names X); any other top-level statement maps to <top>
+// (invalidates every test that loaded the file).
 function nameOf(n, sf) {
   if (n.name && ts.isIdentifier(n.name)) return n.name.text;
   if (n.name) return n.name.getText(sf);
@@ -217,7 +220,10 @@ export function model(src, file) {
     const erased = (ts.isImportDeclaration(st) && st.importClause) || (ts.isExportDeclaration(st) && st.moduleSpecifier) ||
       ts.isInterfaceDeclaration(st) || ts.isTypeAliasDeclaration(st);
     let cls = '<top>';
-    if (erased) cls = '<import>';
+    if (erased) {
+      const typeOnly = !st.moduleSpecifier || (ts.isImportDeclaration(st) ? st.importClause.isTypeOnly : st.isTypeOnly);
+      cls = typeOnly ? '<import>' : `<import:${st.moduleSpecifier.text}>`;
+    }
     else if (ts.isVariableStatement(st)) {
       const d = st.declarationList.declarations;
       if (d.length === 1 && ts.isIdentifier(d[0].name) && d[0].initializer && isPureInit(d[0].initializer, sf)) {
@@ -689,7 +695,10 @@ function changedKeys(C, H, ch) {
       }
       // Each side contributes only the characters it actually has: an insertion is
       // described by the new side, a deletion by the old side, an edit by both.
-      if (pre && i < oldN && r1 > r0) for (const k of pre.keysAt(oldStart + i, r0, r1)) keys.add(k);
+      // An old-side value import is tagged <import-old:SPEC>: dropping or editing
+      // it can stop a side-effect module evaluating or reorder vi.mock, so it
+      // always invalidates, even when SPEC was loaded.
+      if (pre && i < oldN && r1 > r0) for (const k of pre.keysAt(oldStart + i, r0, r1)) keys.add(k.startsWith('<import:') ? `<import-old:${k.slice(8)}` : k);
       if (post && i < newN && a1 > a0) for (const k of post.keysAt(newStart + i, a0, a1)) keys.add(k);
     }
   }
@@ -751,6 +760,8 @@ function invalidates(ln, testFile, fp, H, nodeVersion, lock) {
       const exec = fp.keys[p] ?? [];
       for (const k of changedKeys(fp.commit, H, c)) {
         if (k === '<blank>' || k === '<import>') continue;
+        if (k.startsWith('<import-old:')) return `import ${k.slice(12, -1)} removed or changed in ${p}`;
+        if (k.startsWith('<import:')) return `value import ${k.slice(8, -1)} added or changed in ${p}`;
         if (k === '<top>') return `top-level change in ${p}`;
         if (k.startsWith('<const:')) { if (consts.has(`${p}::${k.slice(7, -1)}`)) return `constant ${k.slice(7, -1)} in ${p}`; continue; }
         if (exec.includes(k)) return `executed function ${k} in ${p}`;
@@ -814,6 +825,8 @@ export function invalidatesBoot(ln, testFile, fp, H, nodeVersion, lock, digestNo
       const moduleBootOnly = boot && !boot.testFiles.has(p) && ![...boot.testConsts].some((id) => id.startsWith(p + '::'));
       for (const k of changedKeys(fp.commit, H, c)) {
         if (k === '<blank>' || k === '<import>') continue;
+        if (k.startsWith('<import-old:')) return `import ${k.slice(12, -1)} removed or changed in ${p}`;
+        if (k.startsWith('<import:')) return `value import ${k.slice(8, -1)} added or changed in ${p}`;
         if (k === '<top>') { if (moduleBootOnly) { absorb(`top-level change in ${p}`); continue; } return `top-level change in ${p}`; }
         if (k.startsWith('<const:')) {
           const id = `${p}::${k.slice(7, -1)}`;
@@ -1049,22 +1062,43 @@ export function report(o) {
   const run = o.run; if (!run) throw new Error('--run <dir> is required');
   let pred; try { pred = JSON.parse(fs.readFileSync(path.join(run, 'predict.json'), 'utf8')); } catch { console.log(`tracegate report (${ln.name}): no prediction for this run.`); return; }
   const results = loadResults(run);
-  let total = 0, ran = 0, reusable = 0, audited = 0, totalMs = 0, runMs = 0;
+  let total = 0, expected = 0, observed = 0, reusable = 0, audited = 0, totalMs = 0, runMs = 0;
   const misses = [];
   for (const [f, d] of Object.entries(pred.decisions)) {
     const r = results.get(f);
+    // Selection is a plan, not proof of execution. A killed Vitest process can
+    // leave no JSON, a partial file set, or a nonterminal result. Shadow needs
+    // every file; enforce needs every required file and every selected audit.
+    if (pred.mode !== 'enforce' || d.run || d.audit) {
+      expected++;
+      if (r?.status === 'passed' || r?.status === 'failed') observed++;
+    }
     const ms = r?.durationMs ?? d.durationMs ?? 0;
     total++; totalMs += ms;
-    if (d.run) { runMs += ms; if (r) ran++; continue; }
+    if (d.run) { runMs += ms; continue; }
     reusable++;
     if (d.audit) audited++;
     if (r && r.status === 'failed') misses.push(f);
   }
   const share = totalMs ? (100 * runMs / totalMs).toFixed(1) : '0.0';
   fs.mkdirSync(LEDGER, { recursive: true });
-  const shadowLog = path.join(LEDGER, `shadow-${HOST}.tsv`);
-  if (!fs.existsSync(shadowLog)) fs.writeFileSync(shadowLog, 'at\tlane\tmode\thead\tfiles\tmust_run\treusable\taudited\trun_time_pct\tmisses\n');
-  fs.appendFileSync(shadowLog, [new Date().toISOString(), ln.name, pred.mode, pred.head.slice(0, 12), total, total - reusable, reusable, audited, share, misses.length].join('\t') + '\n');
+  const complete = observed === expected && expected > 0;
+  // Consumers such as the live-fetch stale check need observed full coverage,
+  // not the selector's mode: enforce can select the entire lane after a global
+  // invalidation. Emit before ingest removes this run directory. A complete red
+  // observation is useful to the predictor but cannot license a stale check.
+  const allFilesPassed = complete && expected === total
+    && Object.keys(pred.decisions).every(f => results.get(f)?.status === 'passed');
+  fs.writeFileSync(path.join(run, 'coverage.json'), JSON.stringify({
+    version: 1, total, expected, observed, allFilesPassed,
+  }) + '\n');
+  // The entry bar consumes this log. An incomplete run or a wholly reused lane
+  // supplies no new complete prediction observation and must not advance it.
+  if (complete) {
+    const shadowLog = path.join(LEDGER, `shadow-${HOST}.tsv`);
+    if (!fs.existsSync(shadowLog)) fs.writeFileSync(shadowLog, 'at\tlane\tmode\thead\tfiles\tmust_run\treusable\taudited\trun_time_pct\tmisses\n');
+    fs.appendFileSync(shadowLog, [new Date().toISOString(), ln.name, pred.mode, pred.head.slice(0, 12), total, total - reusable, reusable, audited, share, misses.length].join('\t') + '\n');
+  }
   // Any file that failed here must run next time, whatever happens to ingest.
   for (const [f, r] of results) if (r.status === 'failed') dropFps(ln.name, f);
   if (misses.length) {
@@ -1076,7 +1110,11 @@ export function report(o) {
   }
   // ci.sh re-runs each miss alone before the gate exits (tg_recheck_misses).
   fs.writeFileSync(path.join(o.run, 'misses.txt'), misses.map((m) => `${m}\n`).join(''));
-  if (pred.mode === 'enforce') {
+  if (expected === 0) {
+    console.log(`tracegate (${ln.name}, ${pred.mode}): no tests selected; ${reusable} verdicts reused; no new observation recorded.`);
+  } else if (!complete) {
+    console.log(`tracegate (${ln.name}, ${pred.mode}): incomplete — ${observed} of ${expected} selected files have terminal results; no complete observation recorded.`);
+  } else if (pred.mode === 'enforce') {
     console.log(`tracegate (${ln.name}, enforce): ran ${total - reusable} files that needed it + ${audited} audits; reused ${reusable - audited} of ${total} verdicts (the run cost ${share}% of the lane's full test time, before audits).`);
   } else {
     console.log(`tracegate (${ln.name}, ${pred.mode}): only ${total - reusable} of ${total} files needed to run (${share}% of the lane's test time); ${reusable} verdicts were reusable.`);
@@ -1084,7 +1122,7 @@ export function report(o) {
   if (misses.length) {
     console.log(`\x1b[31mtracegate (${ln.name}): ${misses.length} MISS(ES) — a file predicted reusable FAILED. Unless it passes when re-run alone at this tree (the gate does that next), that is a hole in its footprint (ADR 0880 §Soundness): enforcement is suspended for this lane for ${MISS_SUSPEND_DAYS} days; file it against the recorder:\x1b[0m`);
     for (const m of misses) console.log(`  ${m}  (${pred.decisions[m].reason})`);
-  } else {
+  } else if (complete) {
     console.log(`tracegate (${ln.name}): 0 misses.`);
   }
 }

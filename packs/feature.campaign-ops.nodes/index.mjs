@@ -236,7 +236,11 @@ export async function computeSnapshot(ctx) {
     ...(str(i.periodStart) ? { periodStart: str(i.periodStart) } : {}),
     ...(str(i.periodEnd) ? { periodEnd: str(i.periodEnd) } : {}),
   });
-  return { status: 'success', outputs: { reportId: out.reportId, snapshotHash: out.snapshotHash, snapshot: out.snapshot } };
+  if (ctx.variables && typeof ctx.variables.set === 'function') {
+    ctx.variables.set('reportId', out.reportId);
+    ctx.variables.set('snapshotHash', out.snapshotHash);
+  }
+  return { status: 'success', outputs: { orgId: out.orgId, reportId: out.reportId, snapshotHash: out.snapshotHash, snapshot: out.snapshot } };
 }
 
 /** ADR 0957 D3 — read a stored report's frozen figures. */
@@ -252,7 +256,7 @@ export async function publishReport(ctx) {
   const ops = ensureOps(ctx);
   const i = ctx.inputs ?? {};
   const out = await reportMethod(ops, 'publishReport')({ orgId: str(i.orgId), reportId: str(i.reportId), snapshotHash: str(i.snapshotHash) });
-  return { status: 'success', outputs: { reportId: out.reportId, status: out.status, publishedAt: out.publishedAt } };
+  return { status: 'success', outputs: { reportId: out.reportId, status: out.status, publishedAt: out.publishedAt, approvedVia: out.approvedVia } };
 }
 
 /** ADR 0944 D4 — read before proposing: the client's curated notes. */

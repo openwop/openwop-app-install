@@ -34,9 +34,9 @@ import { listApplications } from './domain/applications.js';
 export const JOB_SEARCH_LISTINGS_TOOL_ID = 'openwop:job-search.listings.read';
 export const JOB_SEARCH_APPLICATIONS_TOOL_ID = 'openwop:job-search.applications.read';
 
-const toolError = (code: string, message: string) => ({
+const toolError = (code: string, message: string): { content: string; isError: true; hostMessage: true } => ({
   content: JSON.stringify({ error: code, message }),
-  isError: true,
+  isError: true, hostMessage: true,
 });
 
 export function registerJobSearchAgentTools(): void {

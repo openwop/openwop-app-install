@@ -1,8 +1,8 @@
 {
   "name": "feature.tool-output-compaction.nodes",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "kind": "node",
-  "description": "Tool-output compaction node — an explicit mid-graph node that compacts a verbose JSON payload over the ctx.features['tool-output-compaction'] surface (one shared kernel). The default lossless mode DELETES INSIGNIFICANT WHITESPACE ONLY and changes no other byte; the optional lossy mode drops empty fields and elides long arrays, each disclosed in the payload (ADR 0604). Pure + deterministic ⇒ recorded output is replay-safe.",
+  "description": "Tool-output compaction node — compacts a verbose JSON payload mid-workflow, using the same kernel as the automatic tool-result boundary. The default lossless mode DELETES INSIGNIFICANT WHITESPACE ONLY and changes no other byte; the optional lossy mode drops empty fields and shortens long lists of objects, each disclosed in the payload (ADR 0604, ADR 0999). Pure and deterministic, so recorded output is replay-safe.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": ["feature", "tool-output-compaction", "tokens", "compaction"],
@@ -10,9 +10,9 @@
   "nodes": [
     {
       "typeId": "feature.tool-output-compaction.nodes.compact",
-      "version": "1.2.1",
+      "version": "1.2.2",
       "label": "Compact Tool Output",
-      "description": "Compacts a JSON string to cut token spend before it reaches a model. The default lossless mode deletes insignificant whitespace ONLY — no field is added or removed and no other byte changes. The optional lossy mode additionally drops structurally-empty fields (disclosed as _emptied) and elides long arrays (disclosed as _elided). Non-JSON passes through untouched. Over ctx.features['tool-output-compaction'].",
+      "description": "Compacts a JSON string to cut token spend before it reaches a model. The default lossless mode deletes insignificant whitespace ONLY — no field is added or removed and no other byte changes. The optional lossy mode additionally drops structurally-empty fields (disclosed as _emptied) and shortens long lists of objects (disclosed as _elided); lists of plain values such as ids are never shortened. Non-JSON passes through untouched.",
       "category": "data",
       "inputSchemaRef": "schemas/compact.input.json",
       "role": "action",

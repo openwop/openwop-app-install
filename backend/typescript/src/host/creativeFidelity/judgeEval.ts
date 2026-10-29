@@ -14,6 +14,7 @@ import { Resvg } from '@resvg/resvg-js';
 import type { HeadlessDispatch } from '../headlessAi.js';
 import { OpenwopError } from '../../types.js';
 import { scrubSecretShaped } from '../redactSecrets.js';
+import { providerErrorCodes, type ProviderHttpError } from '../../providers/dispatch.js';
 import { JUDGE_EVAL_FIXTURE, type JudgeEvalCase } from './judgeEvalFixture.js';
 import { STAGE_A_RULES } from './rules.js';
 import { rasteriseFull } from './raster.js';
@@ -64,13 +65,12 @@ export function summariseProviderError(err: unknown): ProviderErrorSummary {
     const bare = /^([a-z]+_[a-z_]+)\b/.exec(message)?.[1];
     return { codes: bare && PROVIDER_CODE.test(bare) ? [bare] : [] };
   }
-  const codes = new Set<string>();
-  for (const m of message.matchAll(/"(?:status|reason|type|code)"\s*:\s*"([^"]{1,80})"/g)) {
-    const v = m[1]!;
-    if (PROVIDER_CODE.test(v) && scrubSecretShaped(v) === v) codes.add(v);
-    if (codes.size >= 4) break;
-  }
-  return { status: Number(head[2]), codes: [...codes] };
+  // Prefer the codes the dispatcher read from the WHOLE body: the message is
+  // truncated, and Google's 429 states its code after a long quota message.
+  const attached = (err as ProviderHttpError).providerCodes;
+  const candidates = Array.isArray(attached) ? attached : providerErrorCodes(message);
+  const codes = candidates.filter(v => typeof v === 'string' && PROVIDER_CODE.test(v) && scrubSecretShaped(v) === v).slice(0, 4);
+  return { status: Number(head[2]), codes };
 }
 
 export interface JudgeEvalReport {

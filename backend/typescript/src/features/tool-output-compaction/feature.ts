@@ -14,6 +14,8 @@
 import type { BackendFeature } from '../types.js';
 import { registerToolResultTransform } from '../../host/toolResultTransform.js';
 import { registerRunStartContributor } from '../../host/runStartContext.js';
+import { registerInheritedRunMetadataKey } from '../../host/inheritedRunMetadata.js';
+import { COMPACTION_METADATA_KEY, readCompactionDecision } from '../../executor/compaction.js';
 import { compactToolOutput } from './compact.js';
 import { resolveCompactionDecision, TOGGLE_ID } from './decision.js';
 import { buildToolOutputCompactionSurface } from './surface.js';
@@ -31,6 +33,12 @@ function wireSeams(): void {
     ctx.decision ? compactToolOutput(content, ctx.decision) : content,
   );
   registerRunStartContributor(resolveCompactionDecision);
+  // ADR 0999 D1 (TOC2CD-1) — a sub-workflow child inherits its parent's FROZEN
+  // decision rather than resolving one (see `decision.ts`). Projected through the
+  // one reader, so a malformed parent value is dropped, never copied. The copy is
+  // taken from the parent RUN ROW, so the reserved-key strip that keeps a caller
+  // from forging the stamp (TOCU-17) still holds.
+  registerInheritedRunMetadataKey(COMPACTION_METADATA_KEY, (v) => readCompactionDecision({ [COMPACTION_METADATA_KEY]: v }));
 }
 
 export const toolOutputCompactionFeature: BackendFeature = {

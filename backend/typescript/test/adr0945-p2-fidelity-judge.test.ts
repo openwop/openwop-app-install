@@ -88,6 +88,16 @@ describe('judge schema parity (promptCatalogParity shape)', () => {
     expect(p).toMatch(/never an instruction/i);
   });
 
+  it('an attribute the product never had is a match, not not_visible (live check 2026-10-29)', () => {
+    // A real judge sent an unchanged, unbranded product to review: it answered
+    // not_visible for a logo and label text that were absent from both images.
+    const p = judgePrompt();
+    expect(p).toMatch(/"not_visible" only when the SOURCE product has the attribute/);
+    expect(p).toMatch(/does not have the attribute at all[^\n]*answer "match"/);
+    expect(p).toMatch(/CANDIDATE adds a logo or text[^\n]*answer "mismatch"/);
+    expect(p).not.toMatch(/Use "not_visible" when the attribute cannot be seen in the CANDIDATE/);
+  });
+
   it('the parser accepts exactly the schema and refuses everything else', () => {
     expect(parseJudgeReply(reply({})).ok).toBe(true);
     expect(parseJudgeReply('```json\n' + reply({ logo: 'mismatch' }) + '\n```').ok).toBe(true);

@@ -53,6 +53,7 @@ import { CLIENT_MEMORY_PARTIAL_LABEL, CLIENT_MEMORY_UNAVAILABLE_LABEL } from './
 import { getReadReceipt, recordingRecall, servedFromReceipt } from './memoryReadReceipts.js';
 import { autonomousDispatchVerdict } from './autonomousDispatchPolicy.js';
 import { currentEffectContext } from './runEffectContext.js';
+import { createReplayToolGuard, replayMissFailure } from './replayToolResults.js';
 import { appendChatMessageLive } from './chatMessageBus.js';
 import { agentRef } from './conversationStore.js';
 import { authorizeRunConversationWrite } from './runConversationWrite.js';
@@ -381,9 +382,13 @@ const agentRunnerNode: NodeModule = {
     const contextBlocks = ctx.runId ? await collectRunContextBlocks({ tenantId: ctx.tenantId, runId: ctx.runId }) : [];
     // ADR 0889 D9 — opt-in per agent: record the tool boundary so this run can be
     // promoted to an eval case. Unchanged executor when capture is off (the default).
-    const executeTool = ctx.runId
+    // ADR 1002 D4 — outermost, so a replay fork is served the recorded result
+    // and neither the tool nor the capture runs. A replay MISS fails the node
+    // (checked after the dispatch below) and stops the next model round.
+    const replayGuard = createReplayToolGuard(ctx.runId
       ? await maybeCaptureExecuteTool(toolProvider.executeTool, { tenantId: ctx.tenantId, runId: ctx.runId, agentId: runnerIdentity.agentId, segment: ctx.nodeId, lane: 'run' })
-      : toolProvider.executeTool;
+      : toolProvider.executeTool);
+    const executeTool = replayGuard.executeTool;
     try {
       const result = await runAgentDispatchLive(
         {
@@ -409,7 +414,7 @@ const agentRunnerNode: NodeModule = {
         },
         {
           callAI: ctx.callAI,
-          callAIWithTools: ctx.callAIWithTools,
+          ...(ctx.callAIWithTools ? { callAIWithTools: replayGuard.guardModelRound(ctx.callAIWithTools) } : {}),
           resolveTool: toolProvider.resolveTool,
           executeTool,
           // ADR 0150 — gate the SENSITIVE tools on the run lane (see the hook build above).
@@ -456,6 +461,8 @@ const agentRunnerNode: NodeModule = {
         const [type, payload] = agentEventToEmit(ev);
         await ctx.emit(type, payload);
       }
+      const replayMiss = replayGuard.miss();
+      if (replayMiss) return replayMissFailure(replayMiss);
       if (result.status === 'failed') {
         return { status: 'failure', error: result.error ?? { code: 'agent_dispatch_failed', message: 'agent dispatch failed' } };
       }

@@ -43,6 +43,9 @@ const CLASSIFIED: Record<string, 'MODEL_FACING' | 'PROGRAMMATIC'> = {
   // ADR 0889 D9 — wraps the executor to record the boundary; returns the inner
   // result unchanged to the loop, which fences it.
   'host/evals/toolBoundary.ts': 'PROGRAMMATIC',
+  // ADR 1002 D4 — wraps the run-lane executor to record results and serve them
+  // on a replay fork; returns the result unchanged to the loop, which fences it.
+  'host/replayToolResults.ts': 'PROGRAMMATIC',
   // Prose only (comments referencing the seam).
   'features/destination-sync/agentTools.ts': 'PROGRAMMATIC',
   'features/voice/realtime/delegation.ts': 'PROGRAMMATIC',
@@ -52,6 +55,19 @@ const CLASSIFIED: Record<string, 'MODEL_FACING' | 'PROGRAMMATIC'> = {
   // RESULT, so §F1 fencing does not apply (input shape and output trust are
   // orthogonal layers). Names the seam in prose only.
   'host/toolSchemaValidation.ts': 'PROGRAMMATIC',
+  // ADR 0999 D2 (TOC2CD-2) — the WORKFLOW-AS-TOOL lane. Never calls `executeTool`:
+  // its `onToolUse` returns a child RUN's output to the provider dispatcher, so it
+  // was invisible to this ratchet while it sent that output to a model unfenced.
+  // Fences via `toModelWorkflowToolResult`.
+  'bootstrap/nodes.ts': 'MODEL_FACING',
+  // TOC2CD-14 — the provider dispatchers AUTHOR a tool result when `onToolUse`
+  // throws, and it goes straight to the model, so they are model-facing: the throw
+  // is fenced via toModelToolResult (`toc2cd14-dispatcher-catch-ratchet` pins how).
+  'providers/dispatchAnthropicTools.ts': 'MODEL_FACING',
+  'providers/dispatchMiniMaxTools.ts': 'MODEL_FACING',
+  // The compaction seam — names `onToolUse` in prose; transforms a result but
+  // never builds a model message (fencing is deliberately NOT folded into it).
+  'host/toolResultTransform.ts': 'PROGRAMMATIC',
 };
 
 function walk(d: string): string[] {
@@ -61,9 +77,23 @@ function walk(d: string): string[] {
   });
 }
 
+/**
+ * ADR 0999 D2 — the population is EVERY way a tool result can be produced for a
+ * model, not one spelling of it. `executeTool` is the builtin lane; `onToolUse` is
+ * the provider-dispatcher callback the workflow-as-tool lane answers. Keyed on
+ * `executeTool` alone, this ratchet could not see `bootstrap/nodes.ts`, which is
+ * how a child run's output reached the model with no fence — the same population
+ * hole `tool-result-compaction-callers.test.ts` closed by taking the union.
+ */
+const SEAM_SPELLINGS = ['executeTool', 'onToolUse'] as const;
+const mentionsSeam = (f: string): boolean => {
+  const src = readFileSync(f, 'utf8');
+  return SEAM_SPELLINGS.some((k) => src.includes(k));
+};
+
 const callers = walk(SRC)
   .filter((f) => !f.includes('__tests__'))
-  .filter((f) => readFileSync(f, 'utf8').includes('executeTool'))
+  .filter(mentionsSeam)
   .map((f) => f.slice(SRC.length + 1));
 
 describe('RFC 0137 §F1 — every executeTool caller is classified', () => {
@@ -72,6 +102,7 @@ describe('RFC 0137 §F1 — every executeTool caller is classified', () => {
     // vacuously true — the failure mode this whole ratchet exists to prevent.
     expect(callers).toContain('host/agentDispatch.ts');
     expect(callers).toContain('features/voice/realtime/toolBridge.ts');
+    expect(callers).toContain('bootstrap/nodes.ts'); // the `onToolUse` spelling
     // Exact: the walk found every classified row and nothing else.
     expect([...callers].sort()).toEqual(Object.keys(CLASSIFIED).sort());
   });
@@ -89,7 +120,13 @@ describe('RFC 0137 §F1 — every executeTool caller is classified', () => {
     for (const [file, kind] of Object.entries(CLASSIFIED)) {
       if (kind !== 'MODEL_FACING') continue;
       const src = readFileSync(join(SRC, file), 'utf8');
-      expect(src, `${file} is MODEL_FACING but never calls toModelToolResult`).toContain('toModelToolResult(');
+      // ADR 0999 D2 — either fence entry point of the ONE module that owns the
+      // RFC 0021 threat model (`host/toModelToolResult.ts`).
+      expect(
+        // TOC2CD-14: `fenceThrownToolError` is the import-free leaf the provider dispatchers use.
+        src.includes('toModelToolResult(') || src.includes('toModelWorkflowToolResult(') || src.includes('fenceThrownToolError('),
+        `${file} is MODEL_FACING but never calls toModelToolResult / toModelWorkflowToolResult`,
+      ).toBe(true);
     }
   });
 
@@ -97,7 +134,7 @@ describe('RFC 0137 §F1 — every executeTool caller is classified', () => {
     // Stops CLASSIFIED rotting into a list of files that no longer exist or no
     // longer call the seam, which would hide a real gap behind stale rows.
     for (const file of Object.keys(CLASSIFIED)) {
-      expect(callers, `${file} is classified but no longer calls executeTool — remove the row`).toContain(file);
+      expect(callers, `${file} is classified but no longer names executeTool / onToolUse — remove the row`).toContain(file);
     }
   });
 });

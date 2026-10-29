@@ -28,10 +28,9 @@
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { randomBytes } from 'node:crypto';
+import { realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
@@ -46,36 +45,33 @@ import { buildCampaignOpsSurface } from '../src/features/campaign-ops/surface.js
 import { nodes as opsNodes } from '../../../packs/feature.campaign-ops.nodes/index.mjs';
 import type { ReportDefinition } from '../src/features/campaign-ops/reports/types.js';
 import { hostExtStorage } from '../src/host/hostExtPersistence.js';
-import { loadWorkflowChainPacks } from '../src/host/workflowChainPackLoader.js';
-import { getChainBackedWorkflow, registerChainBackedWorkflow } from '../src/host/chainBackedWorkflows.js';
+import { getChainBackedWorkflow, registerChainBackedWorkflow, _resetChainBackedWorkflowsForTest } from '../src/host/chainBackedWorkflows.js';
+import type { Storage } from '../src/storage/storage.js';
+import type { HostAdapterSuite } from '../src/host/index.js';
+import { getNodeRegistry } from '../src/executor/nodeRegistry.js';
+import { classifyPackDir } from '../src/host/packTrust.js';
+import { AUTONOMY_STAMP_KEY, AUTONOMY_TOGGLE } from '../src/host/autonomyPolicy/index.js';
+import { __awaitRunResumeChainForTests, resolveAndResume } from '../src/routes/interrupts.js';
+import { getRunArtifact, runArtifactKey } from '../src/host/runArtifactStore.js';
+import { getEventLog } from '../src/executor/eventLog.js';
+import { bareRunId } from './support/bareRunId.js';
 
 let BASE: string;
 let server: http.Server;
 let TENANT: string;
 let adminCookie: string;
 let operatorCookie: string;
+let otherClientCookie: string;
+let forkReviewerCookie: string;
 let operatorUserId: string;
 let adminUserId: string;
 let orgA: string;
 let orgB: string;
-let fixtureRoot: string | undefined;
-
-/** A test-only compute chain exercises scheduling bookkeeping. Production
- * publication remains unavailable until the real review/publish chain ships. */
-function installScheduleFixture(): void {
-  fixtureRoot = mkdtempSync(join(tmpdir(), 'owp-report-chain-fixture-'));
-  const dir = join(fixtureRoot, 'report');
-  mkdirSync(dir);
-  const template = JSON.parse(readFileSync(new URL('../../../examples/workflow-chain-packs/campaign-ops/pack.json', import.meta.url), 'utf8')) as { name: string; version: string; chains: Array<Record<string, unknown>> };
-  const pack = { ...template, name: 'core.openwop.workflows.report-fixture', version: '1.0.0', chains: [{
-    ...template.chains[0], chainId: CLIENT_REPORT_CHAIN_ID, version: '1.0.0',
-    parameters: { type: 'object', properties: { orgId: { type: 'string' }, definitionId: { type: 'string' }, definitionVersion: { type: 'integer' } }, required: ['orgId', 'definitionId', 'definitionVersion'] },
-    dag: { nodes: [{ id: 'compute', typeId: 'feature.campaign-ops.nodes.compute-snapshot@1.0.0', inputs: { orgId: '{{params.orgId}}', definitionId: '{{params.definitionId}}', definitionVersion: '{{params.definitionVersion}}' } }], edges: [] },
-  }] };
-  writeFileSync(join(dir, 'pack.json'), JSON.stringify(pack));
-  expect(loadWorkflowChainPacks({ roots: [fixtureRoot] }).errors).toEqual([]);
+let storage: Storage;
+let hostSuite: HostAdapterSuite;
+function restoreReportChain(): void {
   registerChainBackedWorkflow(CLIENT_REPORT_CHAIN_ID, { featureId: 'campaign-ops.client-reports' });
-  expect(getChainBackedWorkflow(CLIENT_REPORT_CHAIN_ID)).toBeDefined();
+  expect(getChainBackedWorkflow(CLIENT_REPORT_CHAIN_ID)?.nodes).toHaveLength(3);
 }
 
 function cookieFor(userId: string, personalTenant: string): string {
@@ -104,6 +100,34 @@ beforeAll(async () => {
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+  storage = app.locals.storage;
+  hostSuite = app.locals.hostSuite;
+  // Resolve through the real boot-installed lazy resolver and local mount. No
+  // explicit pack load or direct registration may bypass discovery or trust.
+  // The focused delegate tests later still use opsNodes directly.
+  for (const [name, typeIds] of [
+    ['feature.campaign-ops.nodes', [
+      'feature.campaign-ops.nodes.compute-snapshot',
+      'feature.campaign-ops.nodes.publish-report',
+    ]],
+    ['feature.campaign-orchestration.nodes', [
+      'feature.campaign-orchestration.nodes.autonomy-gate',
+    ]],
+  ] as const) {
+    const packDir = fileURLToPath(new URL(`../../../packs/${name}/`, import.meta.url));
+    const trust = classifyPackDir(packDir, { noCache: true });
+    expect(trust, name).toMatchObject({ tier: 'steward', dispatchable: true, reason: 'steward_manifest_digest_match' });
+    expect(trust.allowedByBreakGlass, name).toBeUndefined();
+    expect(getNodeRegistry().get(typeIds[0]), `${name} must start unloaded`).toBeNull();
+    for (const typeId of typeIds) {
+      const loaded = await getNodeRegistry().resolve(typeId);
+      expect(loaded, typeId).toMatchObject({
+        typeId, version: trust.version,
+        packOrigin: { packName: name, packVersion: trust.version, tier: 'steward' },
+      });
+      expect(realpathSync(loaded!.packOrigin!.packDir), typeId).toBe(realpathSync(packDir));
+    }
+  }
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   for (const id of ['cms', 'campaign-ops', 'campaign-ops.client-reports', 'email', 'campaign-connectors', 'campaign-intel', 'campaign-orchestration']) {
     const d = getToggleDefault(id);
@@ -120,14 +144,166 @@ beforeAll(async () => {
   orgA = (await createOrg({ tenantId: TENANT, createdBy: 'seed', name: 'Client A' })).orgId;
   orgB = (await createOrg({ tenantId: TENANT, createdBy: 'seed', name: 'Client B' })).orgId;
   await createMember({ tenantId: TENANT, orgId: orgA, subject: operator.userId, displayName: 'Operator', roles: ['editor'] });
+  await createMember({ tenantId: TENANT, orgId: orgA, subject: admin.userId, displayName: 'Reviewer', roles: ['admin'] });
+  const other = await upsertFromPrincipal({ tenantId: TENANT, principalId: 'oidc:rpt-other-client', source: 'oidc' });
+  await createMember({ tenantId: TENANT, orgId: TENANT, subject: other.userId, displayName: 'Other client operator', roles: ['viewer'] });
+  await createMember({ tenantId: TENANT, orgId: orgB, subject: other.userId, displayName: 'Other client operator', roles: ['editor'] });
+  otherClientCookie = cookieFor(other.userId, 'ws:home-other');
   adminCookie = cookieFor(admin.userId, 'ws:home-admin');
   operatorCookie = cookieFor(operator.userId, 'ws:home-operator');
+  const forkReviewer = await upsertFromPrincipal({ tenantId: TENANT, principalId: 'oidc:rpt-fork-reviewer', source: 'oidc' });
+  await createMember({ tenantId: TENANT, orgId: TENANT, subject: forkReviewer.userId, displayName: 'Fork reviewer', roles: ['admin'] });
+  await createMember({ tenantId: TENANT, orgId: orgA, subject: forkReviewer.userId, displayName: 'Fork reviewer', roles: ['admin'] });
+  forkReviewerCookie = cookieFor(forkReviewer.userId, 'ws:home-fork-reviewer');
   expect((await call(adminCookie, 'POST', '/clients', { name: 'Client A', orgId: orgA })).status).toBe(201);
   expect((await call(adminCookie, 'POST', '/clients', { name: 'Client B', orgId: orgB })).status).toBe(201);
   await persistRecords(TENANT, orgA, [row('2026-09-01', 120.5, 40, 3), row('2026-09-02', 80, 25, null)], 'csv');
   await persistRecords(TENANT, orgB, [row('2026-09-01', 999, 99, 9)], 'csv');
 });
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); if (fixtureRoot) rmSync(fixtureRoot, { recursive: true }); });
+
+describe('ADR 0957 P1b — run-now HTTP route through the real executor', () => {
+  async function review(cookie: string, runId: string, nodeId: string, action: string) {
+    const response = await fetch(`${BASE}/runs/${encodeURIComponent(`${TENANT}/${runId}`)}/interrupts/${encodeURIComponent(nodeId)}`, {
+      method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ resumeValue: { action } }),
+    });
+    return { status: response.status, raw: await response.text() };
+  }
+  async function launchToReview() {
+    const toggle = getToggleDefault(AUTONOMY_TOGGLE);
+    if (!toggle) throw new Error('autonomy toggle missing');
+    await saveConfig({ ...toggle, status: 'on' }, 'test');
+    expect((await call(adminCookie, 'PATCH', `/clients/${orgA}`, { mode: 'live' })).status).toBe(200);
+    const def = await newDefinition();
+    const started = await call<{ runId: string }>(operatorCookie, 'POST', `/clients/${orgA}/report-definitions/${def.definitionId}/runs`, { periodStart: '2026-09-01', periodEnd: '2026-09-30' });
+    expect(started.status, started.raw).toBe(202);
+    const runId = started.body.runId;
+    await vi.waitFor(async () => {
+      const run = await storage.getRun(runId);
+      expect(run?.status, JSON.stringify(run)).toBe('waiting-approval');
+    }, { timeout: 8000, interval: 25 });
+    const run = await storage.getRun(runId);
+    expect(run?.metadata).toMatchObject({ orgScopeSubject: operatorUserId, [AUTONOMY_STAMP_KEY]: { orgId: orgA }, 'openwop-app.campaignOps': { orgId: orgA, definitionId: def.definitionId, definitionVersion: def.version, periodStart: '2026-09-01', periodEnd: '2026-09-30' } });
+    const reports = (await listReports(TENANT, orgA, def.definitionId)).filter((report) => report.runId === runId);
+    expect(reports).toHaveLength(1);
+    const report = reports[0]!;
+    const interrupts = await storage.listOpenInterrupts(runId);
+    expect(interrupts).toHaveLength(1);
+    const interrupt = interrupts[0]!;
+    expect(interrupt.data).toMatchObject({ key: 'autonomy-gate', autonomy: { actionClass: 'report.publish', contentHash: report.snapshotHash } });
+    const preview = await getRunArtifact(runArtifactKey(runId, interrupt.nodeId));
+    expect(preview?.role).toBe('gate-preview');
+    expect(JSON.parse(preview!.content)).toMatchObject({ reportId: report.reportId, snapshotHash: report.snapshotHash, snapshot: report.snapshot });
+    expect(report.status).toBe('in_review');
+    return { runId, report, interrupt };
+  }
+
+  it.each(['approve', 'accept'])('a separate reviewer can %s the exact computed snapshot', async (action) => {
+    const { runId, report, interrupt } = await launchToReview();
+    const selfReview = await review(operatorCookie, runId, interrupt.nodeId, action);
+    expect(selfReview.status, selfReview.raw).toBe(403);
+    expect((await storage.getInterrupt(interrupt.interruptId))?.resolvedAt).toBeUndefined();
+    const reviewed = await review(adminCookie, runId, interrupt.nodeId, action);
+    expect(reviewed.status, reviewed.raw).toBe(200);
+    await __awaitRunResumeChainForTests(runId);
+    expect((await storage.getRun(runId))?.status, JSON.stringify(await storage.listEvents(runId))).toBe('completed');
+    expect(await getReport(TENANT, orgA, report.reportId)).toMatchObject({ status: 'published', snapshotHash: report.snapshotHash, snapshot: report.snapshot });
+  });
+
+  it('rejecting the real review keeps the report unpublished', async () => {
+    const { runId, report, interrupt } = await launchToReview();
+    await expect(resolveAndResume(storage, hostSuite, interrupt.interruptId, { action: 'reject' }, { subjectRef: operatorUserId }))
+      .rejects.toMatchObject({ httpStatus: 403 });
+    expect((await storage.getInterrupt(interrupt.interruptId))?.resolvedAt).toBeUndefined();
+    await resolveAndResume(storage, hostSuite, interrupt.interruptId, { action: 'reject' }, { subjectRef: adminUserId });
+    await __awaitRunResumeChainForTests(runId);
+    expect((await storage.getRun(runId))?.status).toBe('failed');
+    expect((await getReport(TENANT, orgA, report.reportId))?.status).toBe('in_review');
+    expect((await storage.listEvents(runId)).some((event) => event.type === 'node.completed' && event.nodeId?.endsWith('_publish'))).toBe(false);
+  });
+
+  it('the review preview exposes the frozen figures only to the report client', async () => {
+    const { runId, report, interrupt } = await launchToReview();
+    const data = interrupt.data as { artifactId: string; revisionId: string };
+    const path = `${BASE}/host/openwop-app/artifacts/${encodeURIComponent(data.artifactId)}/revisions/${encodeURIComponent(data.revisionId)}`;
+    const visible = await fetch(path, { headers: { cookie: adminCookie } });
+    expect(visible.status).toBe(200);
+    const revision = await visible.json() as { content: string };
+    expect(JSON.parse(revision.content)).toMatchObject({ reportId: report.reportId, snapshotHash: report.snapshotHash, snapshot: report.snapshot });
+    const denied = await fetch(path, { headers: { cookie: otherClientCookie } });
+    expect(denied.status, await denied.text()).toBe(404);
+    await review(adminCookie, runId, interrupt.nodeId, 'reject');
+    await __awaitRunResumeChainForTests(runId);
+  });
+
+  it.each(['before-compute', 'after-compute'] as const)('a branch fork %s needs its own review and preserves the source snapshot', async (point) => {
+    const { runId, report, interrupt } = await launchToReview();
+    const marker = await getEventLog().append({ runId, type: 'log.message', payload: { message: 'Report fork checkpoint' } });
+    const response = await fetch(`${BASE}/runs/${encodeURIComponent(`${TENANT}/${runId}`)}:fork`, {
+      method: 'POST', headers: { cookie: adminCookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ mode: 'branch', fromSeq: point === 'before-compute' ? 0 : marker.sequence }),
+    });
+    const raw = await response.text();
+    expect(response.status, raw).toBe(201);
+    const forkId = bareRunId((JSON.parse(raw) as { runId: string }).runId);
+    try {
+      await vi.waitFor(async () => {
+        expect((await storage.getRun(forkId))?.status, JSON.stringify(await storage.listEvents(forkId))).toBe('waiting-approval');
+      }, { timeout: 8000, interval: 25 });
+      const fork = await storage.getRun(forkId);
+      expect(fork).toMatchObject({ parentRunId: runId, forkMode: 'branch', tenantId: TENANT });
+      expect(fork?.metadata?.[AUTONOMY_STAMP_KEY]).toEqual((await storage.getRun(runId))?.metadata?.[AUTONOMY_STAMP_KEY]);
+      expect(fork?.metadata?.['openwop-app.campaignOps']).toEqual((await storage.getRun(runId))?.metadata?.['openwop-app.campaignOps']);
+      const open = await storage.listOpenInterrupts(forkId);
+      expect(open).toHaveLength(1);
+      const gate = open[0]!;
+      expect(gate.interruptId).not.toBe(interrupt.interruptId);
+      expect(gate.token).not.toBe(interrupt.token);
+      const forkReports = (await listReports(TENANT, orgA, report.definitionId)).filter((item) => item.runId === forkId);
+      if (point === 'before-compute') expect(forkReports).toHaveLength(1);
+      else expect(forkReports).toHaveLength(0);
+      const target = point === 'before-compute' ? forkReports[0]! : report;
+      expect(gate.data).toMatchObject({ autonomy: { actionClass: 'report.publish', contentHash: target.snapshotHash } });
+      expect((await getReport(TENANT, orgA, target.reportId))?.status).toBe('in_review');
+      const selfReview = await review(adminCookie, forkId, gate.nodeId, 'accept');
+      expect(selfReview.status, selfReview.raw).toBe(403);
+      const approved = await review(forkReviewerCookie, forkId, gate.nodeId, 'accept');
+      expect(approved.status, approved.raw).toBe(200);
+      await __awaitRunResumeChainForTests(forkId);
+      expect((await storage.getRun(forkId))?.status, JSON.stringify(await storage.listEvents(forkId))).toBe('completed');
+      expect(await getReport(TENANT, orgA, target.reportId)).toMatchObject({ status: 'published', snapshot: target.snapshot, snapshotHash: target.snapshotHash });
+      expect((await storage.getRun(runId))?.status).toBe('waiting-approval');
+      expect(await getReport(TENANT, orgA, report.reportId)).toMatchObject({ snapshot: report.snapshot, snapshotHash: report.snapshotHash });
+    } finally {
+      for (const id of [forkId, runId]) {
+        const pending = await storage.listOpenInterrupts(id);
+        for (const gate of pending) {
+          const rejected = await review(forkReviewerCookie, id, gate.nodeId, 'reject');
+          expect(rejected.status, rejected.raw).toBe(200);
+          await __awaitRunResumeChainForTests(id);
+        }
+      }
+    }
+  });
+
+  it('run-now refuses another client, a foreign definition and the disabled feature', async () => {
+    const def = await newDefinition();
+    const foreign = await call<DefRes>(adminCookie, 'POST', `/clients/${orgB}/report-definitions`, DEF);
+    expect(foreign.status, foreign.raw).toBe(201);
+    for (const [org, id] of [[orgB, foreign.body.definition.definitionId], [orgA, foreign.body.definition.definitionId]]) {
+      const result = await call(operatorCookie, 'POST', `/clients/${org}/report-definitions/${id}/runs`, {});
+      expect(result.status, result.raw).toBe(404);
+      expect(result.body).not.toHaveProperty('runId');
+    }
+    const toggle = getToggleDefault('campaign-ops.client-reports')!;
+    await saveConfig({ ...toggle, status: 'off' }, 'test');
+    try {
+      const result = await call(operatorCookie, 'POST', `/clients/${orgA}/report-definitions/${def.definitionId}/runs`, {});
+      expect(result.status, result.raw).toBe(404);
+      expect(result.body).not.toHaveProperty('runId');
+    } finally { await saveConfig({ ...toggle, status: 'on' }, 'test'); }
+  });
+});
+afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 const DEF = { title: 'Monthly results', sections: [{ kind: 'kpi' }], period: { kind: 'month', timezone: 'UTC' } };
 
@@ -191,7 +367,7 @@ describe('ADR 0957 P1 — publish CAS', () => {
 });
 
 describe('ADR 0957 P1 — the report nodes over the real surface', () => {
-  it('compute-snapshot and report-snapshot-read work; publish-report refuses until the review gate exists', async () => {
+  it('compute-snapshot and report-snapshot-read work; another run cannot publish the report', async () => {
     const def = await newDefinition();
     const ctx = (inputs: Record<string, unknown>) => ({ inputs, features: { 'campaign-ops': surface() } });
     const c = await opsNodes['feature.campaign-ops.nodes.compute-snapshot'](ctx({ orgId: orgA, definitionId: def.definitionId, definitionVersion: def.version }));
@@ -203,10 +379,10 @@ describe('ADR 0957 P1 — the report nodes over the real surface', () => {
     expect(stored?.runId).toMatch(/^run_/);
     const read = await opsNodes['feature.campaign-ops.nodes.report-snapshot-read'](ctx({ orgId: orgA, reportId: out.reportId }));
     expect(read.outputs).toMatchObject({ found: true, snapshotHash: out.snapshotHash });
-    // Until the ADR 0942 gate can approve a client-bound run, the node refuses:
-    // a hand-built workflow must not publish numbers nobody reviewed.
+    // Each surface() fixture has a different run id. Publication cannot borrow
+    // the report computed by a different run.
     await expect(opsNodes['feature.campaign-ops.nodes.publish-report'](ctx({ orgId: orgA, reportId: out.reportId, snapshotHash: out.snapshotHash })))
-      .rejects.toMatchObject({ httpStatus: 409, details: { reason: 'report_publish_unavailable' } });
+      .rejects.toMatchObject({ httpStatus: 409, details: { reason: 'report_not_from_this_run' } });
     expect((await getReport(TENANT, orgA, out.reportId))?.status).toBe('in_review');
   });
 
@@ -225,13 +401,15 @@ describe('ADR 0957 P1 — the report nodes over the real surface', () => {
 
 describe('ADR 0957 P1 — scheduling', () => {
   it('a missing report workflow refuses scheduling before a definition is persisted', async () => {
-    expect(getChainBackedWorkflow(CLIENT_REPORT_CHAIN_ID)).toBeUndefined();
-    const before = (await call<{ definitions: ReportDefinition[] }>(operatorCookie, 'GET', `/clients/${orgA}/report-definitions`)).body.definitions.length;
-    const response = await call(operatorCookie, 'POST', `/clients/${orgA}/report-definitions`, { ...DEF, schedule: { cron: '0 9 1 * *' } });
-    expect(response.status).toBe(400);
-    expect(response.raw).toContain('workflow is installed');
-    expect((await call<{ definitions: ReportDefinition[] }>(operatorCookie, 'GET', `/clients/${orgA}/report-definitions`)).body.definitions).toHaveLength(before);
-    installScheduleFixture();
+    _resetChainBackedWorkflowsForTest();
+    try {
+      expect(getChainBackedWorkflow(CLIENT_REPORT_CHAIN_ID)).toBeUndefined();
+      const before = (await call<{ definitions: ReportDefinition[] }>(operatorCookie, 'GET', `/clients/${orgA}/report-definitions`)).body.definitions.length;
+      const response = await call(operatorCookie, 'POST', `/clients/${orgA}/report-definitions`, { ...DEF, schedule: { cron: '0 9 1 * *' } });
+      expect(response.status).toBe(400);
+      expect(response.raw).toContain('workflow is installed');
+      expect((await call<{ definitions: ReportDefinition[] }>(operatorCookie, 'GET', `/clients/${orgA}/report-definitions`)).body.definitions).toHaveLength(before);
+    } finally { restoreReportChain(); }
   });
   it('every edit re-arms the job with the new pinned version; clearing the schedule removes it', async () => {
     const def = await newDefinition({ schedule: { cron: '0 9 1 * *' } });

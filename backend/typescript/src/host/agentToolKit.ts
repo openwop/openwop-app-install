@@ -31,7 +31,7 @@ import type { Logger } from '../observability/logger.js';
 
 /** The shape a `BuiltinTool.run` returns: a JSON string + an error flag the
  *  conversation loop surfaces verbatim to the model. */
-export type ToolResult = { content: string; isError?: boolean };
+export type ToolResult = { content: string; isError?: boolean; hostMessage?: true };
 
 /** Success — JSON-stringify the payload the tool read/produced. */
 export const toolOk = (payload: unknown): ToolResult => ({ content: JSON.stringify(payload) });
@@ -45,8 +45,20 @@ export const toolEmpty = (payload: unknown): ToolResult => ({ content: JSON.stri
  *  `message` is the actionable line the model reads; `details` merges extra
  *  fields onto the payload. NEVER success-with-empty for invalid model input. */
 export const toolError = (code: string, message: string, details?: Record<string, unknown>): ToolResult => ({
-  content: JSON.stringify({ error: code, message, ...(details ?? {}) }),
-  isError: true,
+  // Spread FIRST (review L1): `details` must never overwrite the ratcheted message.
+  content: JSON.stringify({ ...(details ?? {}), error: code, message }),
+  isError: true, hostMessage: true,
+});
+
+/** TOC2CD-11 — a typed failure whose host sentence comes with text the host did NOT
+ *  write: a caught error's message, a model- or user-supplied id or name, an upstream
+ *  reason. `message` stays a HOST sentence (the AST ratchet holds it like
+ *  `toolError`'s), so recovery instructions keep reading as host text; `detail` is
+ *  rendered INSIDE the untrusted fence (`toModelToolResult`). Any `extra` key makes
+ *  the whole payload fenced. Never put the untrusted text in `message`. */
+export const untrustedToolError = (code: string, message: string, detail?: string, extra?: Record<string, unknown>): ToolResult => ({
+  content: JSON.stringify({ ...(extra ?? {}), error: code, message, ...(detail !== undefined && detail !== '' ? { detail } : {}) }),
+  isError: true, hostMessage: true,
 });
 
 /** Coerce a model-supplied value to a trimmed non-empty string, else undefined.

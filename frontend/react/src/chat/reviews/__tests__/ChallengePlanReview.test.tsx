@@ -58,4 +58,17 @@ describe('kicktodo.challenge-plan review renderer', () => {
       cleanup();
     }
   });
+  // P9 — a day's ADR 0429 substitutions were missing from the outline.
+  it('shows each day\'s alternatives; a malformed alternative is dropped, not dumped', () => {
+    const withAlts = { ...plan, days: [{ ...plan.days[0]!, alternatives: [
+      { stableActivityId: 'a-alt', title: 'Read instead', actionInstruction: 'Read for 10 minutes.', evidencePolicy: 'note' },
+      'not an object',
+      { stableActivityId: 'empty' },
+    ] }, plan.days[1]!] };
+    render(<AssetPreview asset={{ content: JSON.stringify(withAlts), artifactTypeId: 'kicktodo.challenge-plan' }} hideLabel />);
+    expect(screen.getByText('Alternatives')).toBeTruthy();
+    expect(screen.getByText('Read instead: Read for 10 minutes.')).toBeTruthy();
+    expect(screen.getAllByText('Alternatives')).toHaveLength(1); // day 2 has none: no empty heading
+    expect(screen.queryByText(/not an object|stableActivityId/)).toBeNull();
+  });
 });

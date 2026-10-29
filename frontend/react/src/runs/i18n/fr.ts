@@ -335,7 +335,7 @@ export const messages = {
   noEventAtSeq: 'Aucun événement à #{{seq}}.',
   agentActivityUpToPoint: 'Activité de l’agent jusqu’à ce point',
   payloadSummary: 'charge utile',
-  compactionNoticeTitle: 'Raccourci avant que le modèle ne le voie.',
+  compactionNoticeTitle: "Raccourci par la compaction des résultats d’outils.",
   compactionElidedRows_one: '{{n}} ligne a été retirée du milieu d’une liste.',
   compactionElidedRows_other: '{{n}} lignes ont été retirées du milieu d’une liste.',
   compactionEmptiedFields: 'Ces champs étaient présents mais vides et ont été retirés : {{fields}}.',

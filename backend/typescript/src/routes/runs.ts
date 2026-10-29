@@ -43,6 +43,7 @@ import { buildRunRecord, dispatchRunInBackground, stripCallerAttribution } from 
 import { CALLER_LINKAGE_KEYS } from '../host/runLinkage.js';
 import { ownerStampFromRequest, runOwner, runOwnerV2, type RunOwnerBlock, type RunOwnerBlockV2 } from '../host/runOwner.js';
 import { insertRunWithStartContext } from '../host/runInsert.js';
+import { COMPACTION_METADATA_KEY, readCompactionDecision } from '../executor/compaction.js';
 import { traceContextFromHeaders } from '../host/traceContext.js';
 import { eraOf } from '../storage/eventEra.js';
 import { currentContract } from '../storage/eventEraAdapter.js';
@@ -801,8 +802,24 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
       // wildcard service credential (`resolveInternalToken`); its parent must be a
       // run of this tenant. Everyone else had it stripped above.
       {
-        const linkage = await admittedLinkage(storage, principal, tenantId, body.metadata);
-        if (linkage) run.metadata = { ...run.metadata, ...linkage };
+        const admitted = await admittedLinkage(storage, principal, tenantId, body.metadata);
+        if (admitted) {
+          // ADR 0999 D1.3 — the workflow-as-tool child (`dispatchSubRun`) is created HERE,
+          // not by the executor's sub-workflow dispatcher, and never sets the
+          // `parentRunId` column, so neither half of the compaction inheritance reached
+          // it. It inherits the parent's FROZEN compaction decision from the PARENT ROW
+          // (never a caller's value: `compaction` is reserved and stripped above), and
+          // `decision.ts` resolves nothing for it. Deliberately ONLY this key: the
+          // other registered inherited stamps (the campaign family) carry projectors
+          // that can refuse a malformed parent with a 422, and widening what this lane
+          // inherits is that family's decision, not this ADR's (review M3).
+          const parentDecision = readCompactionDecision(admitted.parentMetadata);
+          run.metadata = {
+            ...run.metadata,
+            ...(parentDecision ? { [COMPACTION_METADATA_KEY]: parentDecision } : {}),
+            ...admitted.linkage,
+          };
+        }
       }
       // RFC 0207 — the W3C trace context this run was CREATED under, persisted
       // so an outbound MCP request or A2A message made LATER (the executor runs
@@ -2787,13 +2804,14 @@ function computeRunDiff(
 
 /** ADR 0902 D2 — the linkage keys a wildcard (service) caller may set on a new
  *  run: only when its named parent is a run of the same tenant. Returns the
- *  admitted keys, or `undefined` (a member's value is never admitted). */
+ *  admitted keys plus the parent row's metadata (ADR 0999 D1.3 — the compaction decision a child
+ *  inherits), or `undefined` (a member's value is never admitted). */
 async function admittedLinkage(
   storage: Storage,
   principal: { tenants?: readonly string[] },
   tenantId: string,
   metadata: unknown,
-): Promise<Record<string, string> | undefined> {
+): Promise<{ linkage: Record<string, string>; parentMetadata: Readonly<Record<string, unknown>> | undefined } | undefined> {
   if (principal.tenants?.includes('*') !== true) return undefined;
   if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return undefined;
   const md = metadata as Record<string, unknown>;
@@ -2806,5 +2824,5 @@ async function admittedLinkage(
     const v = md[k];
     if (k !== 'parentRunId' && typeof v === 'string' && v.length > 0) out[k] = v;
   }
-  return out;
+  return { linkage: out, parentMetadata: parent.metadata as Readonly<Record<string, unknown>> | undefined };
 }

@@ -253,7 +253,8 @@ describe('CFP-1 — get-design: the deck-state read path', () => {
 
     const missing = await p.executeTool({ name: SLIDES_GET_DESIGN_TOOL_ID, input: { canvasId: 'canvas-nope' } });
     expect(missing.isError).toBe(true);
-    expect(JSON.parse(missing.content)).toMatchObject({ error: 'not_found', message: "Slide deck 'canvas-nope' not found in this workspace." });
+    // TOC2CD-11 (ADR 1000): the model-supplied id is the fenced `detail`, never part of the host sentence.
+    expect(JSON.parse(missing.content)).toMatchObject({ error: 'not_found', message: 'That slide deck (id below) was not found in this workspace.', detail: 'canvas-nope' });
 
     // Cross-TYPE: a real app-builder canvas in the SAME tenant is not a deck.
     const appCanvas = await createCanvasForTenant(TENANT, {
@@ -261,7 +262,7 @@ describe('CFP-1 — get-design: the deck-state read path', () => {
     });
     const crossType = await p.executeTool({ name: SLIDES_GET_DESIGN_TOOL_ID, input: { canvasId: appCanvas.canvasId } });
     expect(crossType.isError).toBe(true);
-    expect(JSON.parse(crossType.content)).toMatchObject({ error: 'not_found', message: `Slide deck '${appCanvas.canvasId}' not found in this workspace.` });
+    expect(JSON.parse(crossType.content)).toMatchObject({ error: 'not_found', message: 'That slide deck (id below) was not found in this workspace.', detail: appCanvas.canvasId });
   });
 
   it('fails EMPTY without a human-initiated turn (tenant rows never leak to system runs; the loop is not derailed)', async () => {

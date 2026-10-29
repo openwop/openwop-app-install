@@ -27,7 +27,7 @@
  */
 import { createHash, randomUUID } from 'node:crypto';
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
-import { resolveFeatureToggle } from '../../host/agentToolKit.js';
+import { resolveFeatureToggle, untrustedToolError } from '../../host/agentToolKit.js';
 import { listOrgs, resolveEffectiveAccess } from '../../host/accessControlService.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { getNodeRegistry } from '../../executor/nodeRegistry.js';
@@ -42,12 +42,12 @@ export const SLIDES_RENDER_TOOL_ID = 'openwop:slides.render';
 
 const RENDER_NODE_TYPE_ID = 'feature.slides.nodes.render';
 
-type ToolResult = { content: string; isError?: boolean };
+type ToolResult = { content: string; isError?: boolean; hostMessage?: true };
 
 /** Structured tool error — the agent loop surfaces `content` verbatim to the
  *  model, so the message must be actionable (what failed, what to do next). */
 function toolError(error: string, message: string, extra?: Record<string, unknown>): ToolResult {
-  return { content: JSON.stringify({ error, message, ...(extra ?? {}) }), isError: true };
+  return { content: JSON.stringify({ ...(extra ?? {}), error, message }), isError: true, hostMessage: true };
 }
 
 const str = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
@@ -165,7 +165,7 @@ async function normalizeAndValidate(
     payload = artifact.payload;
   } catch (e) {
     const err = e as { code?: string; message?: string };
-    return toolError(err.code ?? 'validation_error', `${err.message ?? 'the deck failed normalization'} — fix the deck and call again.`);
+    return untrustedToolError(err.code ?? 'validation_error', 'The deck failed normalization — fix the deck and call again. The validator\'s reason is below.', err.message);
   }
 
   const inputSlides = deck && typeof deck === 'object' && Array.isArray((deck as { slides?: unknown }).slides)
@@ -246,7 +246,7 @@ export function registerSlidesAgentTools(): void {
       if (!canvasId) return toolError('validation_error', '`canvasId` is required.');
       const canvas = await getCanvasForCaller(scope.tenantId, canvasId, { subject: scope.actingUserId });
       if (!canvas || canvas.canvasTypeId !== SLIDES_CANVAS_TYPE) {
-        return toolError('not_found', `Slide deck '${canvasId}' not found in this workspace.`);
+        return untrustedToolError('not_found', 'That slide deck (id below) was not found in this workspace.', canvasId);
       }
       return {
         content: JSON.stringify({
@@ -318,7 +318,7 @@ export function registerSlidesAgentTools(): void {
         }
         const existing = await getCanvasForCaller(scope.tenantId, canvasId, { subject: scope.actingUserId });
         if (!existing || existing.canvasTypeId !== SLIDES_CANVAS_TYPE) {
-          return toolError('not_found', `Slide deck '${canvasId}' not found in this workspace.`);
+          return untrustedToolError('not_found', 'That slide deck (id below) was not found in this workspace.', canvasId);
         }
         // ADR 0886 D1 — a write needs WRITE on the deck's owner, decided in that
         // owner's org; the org this turn resolved is not the deck's org.
@@ -331,7 +331,7 @@ export function registerSlidesAgentTools(): void {
             merge: 'replace',
             snapshot: { capturedBy: gate.actingUserId },
           });
-          if (!applied) return toolError('not_found', `Slide deck '${canvasId}' not found in this workspace.`);
+          if (!applied) return untrustedToolError('not_found', 'That slide deck (id below) was not found in this workspace.', canvasId);
           return {
             content: JSON.stringify({
               canvasId: applied.canvasId,
@@ -346,7 +346,7 @@ export function registerSlidesAgentTools(): void {
           if (err.code === 'canvas_version_conflict') {
             return toolError('canvas_version_conflict', 'Someone edited this deck since you read it — call get-design again and re-apply your changes on the new version.');
           }
-          return toolError(err.code ?? 'update_failed', err.message ?? 'the update failed');
+          return untrustedToolError(err.code ?? 'update_failed', 'The update failed; the reason is below.', err.message);
         }
       }
 

@@ -59,3 +59,33 @@ export async function startExecutionRun(
   return started;
 }
 
+
+/** ADR 0957 D2 — start the client-report chain on demand (the "run now" path;
+ *  the schedule starts the same chain). The campaign-ops stamp binds the run to
+ *  the client and freezes the client's autonomy policy for its review gate
+ *  (ADR 0942 P2b); the operator who asked is the run's cause. */
+export async function startClientReportRun(
+  deps: { storage: Storage; hostSuite: HostAdapterSuite },
+  input: { tenantId: string; orgId: string; definitionId: string; definitionVersion: number; causedBy: string; periodStart?: string; periodEnd?: string; personalTenant?: string },
+): Promise<string> {
+  const { CLIENT_REPORT_CHAIN_ID } = await import('./reports/types.js');
+  const started = await startWorkflowRun(deps, {
+    tenantId: input.tenantId,
+    workflowId: CLIENT_REPORT_CHAIN_ID,
+    runId: randomUUID(),
+    inputs: {
+      orgId: input.orgId, definitionId: input.definitionId, definitionVersion: input.definitionVersion,
+      ...(input.periodStart ? { periodStart: input.periodStart } : {}),
+      ...(input.periodEnd ? { periodEnd: input.periodEnd } : {}),
+    },
+    metadata: { [CAMPAIGN_OPS_RUN_STAMP]: {
+      orgId: input.orgId, definitionId: input.definitionId, definitionVersion: input.definitionVersion,
+      ...(input.periodStart ? { periodStart: input.periodStart } : {}),
+      ...(input.periodEnd ? { periodEnd: input.periodEnd } : {}),
+    } },
+    orgScopeSubject: input.causedBy,
+    ...(input.personalTenant ? { personalTenant: input.personalTenant } : {}),
+  });
+  if (!started) throw new OpenwopError('workflow_not_found', 'The client-report workflow is not available.', 422, { workflowId: CLIENT_REPORT_CHAIN_ID });
+  return started;
+}

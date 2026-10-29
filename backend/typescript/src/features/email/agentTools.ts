@@ -32,7 +32,7 @@
  */
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
 import { checkTenantEntitlement } from '../../host/entitlementSeam.js';
-import { resolveReadOrgScope, resolveActionOrgScope, toolEmpty } from '../../host/agentToolKit.js';
+import { resolveReadOrgScope, resolveActionOrgScope, toolEmpty, untrustedToolError } from '../../host/agentToolKit.js';
 import { resolveToggle } from '../../host/featureToggles/service.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { createHash } from 'node:crypto';
@@ -50,12 +50,12 @@ export const EMAIL_GET_CAMPAIGN_TOOL_ID = 'openwop:email.get-campaign';
 export const EMAIL_SAVE_DRAFT_TOOL_ID = 'openwop:email.save-draft';
 export const EMAIL_SUBMIT_FOR_REVIEW_TOOL_ID = 'openwop:email.submit-for-review';
 
-type ToolResult = { content: string; isError?: boolean };
+type ToolResult = { content: string; isError?: boolean; hostMessage?: true };
 
 /** Structured tool error — the agent loop surfaces `content` verbatim to the
  *  model, so the message must be actionable (what failed, what to do next). */
 function toolError(error: string, message: string, extra?: Record<string, unknown>): ToolResult {
-  return { content: JSON.stringify({ error, message, ...(extra ?? {}) }), isError: true };
+  return { content: JSON.stringify({ ...(extra ?? {}), error, message }), isError: true, hostMessage: true };
 }
 
 /** Per-call toggle honesty (ADR 0308 D2): per-tenant, dynamic, fail-closed —
@@ -209,10 +209,10 @@ export function registerEmailAgentTools(): void {
       const campaignId = str(input.campaignId);
       if (campaignId) {
         const campaign = await getCampaign(scope.tenantId, gate.orgId, campaignId);
-        if (!campaign) return toolError('not_found', `Draft campaign '${campaignId}' not found in this workspace.`);
-        if (campaign.status !== 'draft') return toolError('campaign_not_draft', `Campaign '${campaignId}' is ${campaign.status}, not a draft — its copy can no longer be edited.`);
+        if (!campaign) return untrustedToolError('not_found', 'That draft campaign (id below) was not found in this workspace.', campaignId);
+        if (campaign.status !== 'draft') return untrustedToolError('campaign_not_draft', `That campaign (id below) is ${campaign.status}, not a draft — its copy can no longer be edited.`, campaignId);
         const updated = await updateTemplate(scope.tenantId, gate.orgId, campaign.templateId, { subject, body, ...(str(input.name) ? { name: str(input.name)! } : {}), ...(format ? { format } : {}) });
-        if (!updated) return toolError('not_found', `The template for campaign '${campaignId}' is missing — cannot update its copy.`);
+        if (!updated) return untrustedToolError('not_found', 'The template for that campaign (id below) is missing — cannot update its copy.', campaignId);
         return { content: JSON.stringify({ campaignId: campaign.campaignId, templateId: updated.templateId, updated: true, note: 'Draft copy updated. Tell the user what changed and that they can review and send it.' }) };
       }
 
@@ -267,7 +267,7 @@ export function registerEmailAgentTools(): void {
         const { campaign, approval } = await submitForReview(scope.tenantId, gate.orgId, campaignId, gate.actingUserId, gate.actingUserId ? undefined : runOrgScopeSubject(scope));
         return { content: JSON.stringify({ campaignId: campaign.campaignId, status: campaign.status, approvalId: approval.approvalId, templateVersion: campaign.review?.pin.templateVersion ?? null, note: 'Submitted for review (NOT approved, NOT sent). Tell the user an approver will decide it in the Approvals inbox.' }) };
       } catch (e) {
-        if (e instanceof OpenwopError) return toolError(String(e.details?.reason ?? e.code), e.message);
+        if (e instanceof OpenwopError) return untrustedToolError(String(e.details?.reason ?? e.code), 'The tool refused this call; the reason it gave is below.', e.message);
         throw e;
       }
     },

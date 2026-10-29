@@ -40,6 +40,7 @@ import { createCanvasForTenant, getCanvasForCaller, canvasWriteAllowed, updateCa
 import type { SubjectCaller } from '../../host/subjectAccess.js';
 import { OpenwopError } from '../../types.js';
 import { validateCampaignDoc } from './validateCampaignDoc.js';
+import { untrustedToolError } from '../../host/agentToolKit.js';
 
 export const CAMPAIGN_STUDIO_RENDER_TOOL_ID = 'openwop:campaign-studio.render';
 export const CAMPAIGN_STUDIO_GET_DESIGN_TOOL_ID = 'openwop:campaign-studio.get-design';
@@ -47,12 +48,12 @@ export const CAMPAIGN_STUDIO_GET_DESIGN_TOOL_ID = 'openwop:campaign-studio.get-d
 const CAMPAIGN_CANVAS_TYPE = 'canvas.campaign';
 const RENDER_NODE_TYPE_ID = 'feature.campaign-studio.nodes.render';
 
-type ToolResult = { content: string; isError?: boolean };
+type ToolResult = { content: string; isError?: boolean; hostMessage?: true };
 
 /** Structured tool error — the agent loop surfaces `content` verbatim to the
  *  model, so the message must be actionable (what failed, what to do next). */
 function toolError(error: string, message: string, extra?: Record<string, unknown>): ToolResult {
-  return { content: JSON.stringify({ error, message, ...(extra ?? {}) }), isError: true };
+  return { content: JSON.stringify({ ...(extra ?? {}), error, message }), isError: true, hostMessage: true };
 }
 
 /** Per-call toggle honesty (ADR 0308 D2): per-tenant, dynamic, fail-closed. */
@@ -259,7 +260,7 @@ export function registerCampaignStudioAgentTools(): void {
       if (!canvasId) return toolError('validation_error', '`canvasId` is required.');
       const canvas = await getCanvasForCaller(scope.tenantId, canvasId, { subject: scope.actingUserId });
       if (!canvas || canvas.canvasTypeId !== CAMPAIGN_CANVAS_TYPE) {
-        return toolError('not_found', `Campaign '${canvasId}' not found in this workspace.`);
+        return untrustedToolError('not_found', 'That campaign (id below) was not found in this workspace.', canvasId);
       }
       return {
         content: JSON.stringify({

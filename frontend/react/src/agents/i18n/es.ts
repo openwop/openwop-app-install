@@ -878,4 +878,21 @@ export const messages = {
   checkHeldNotice: "{{persona}} no tiene nada que tomar: todas las tareas Por hacer están en espera tras una ejecución detenida o fallida. Libera una tarea en el tablero para que el agente la retome.",
   // ADR 0768 follow-up P1 — the embed's honest "can see" scope (the agent is NOT bound to what is on screen)
   authorCanSee: "los agentes y flujos disponibles y tu plantilla",
+  // ADR 0999 D7 — AgentCompactionPanel (the per-agent lossy opt-in, TOCU-2)
+  compactionTitle: "Compactación de resultados de herramientas",
+  compactionDesc: "Cómo se acortan los resultados de las herramientas antes de que este agente los lea. De forma predeterminada solo se eliminan los espacios y se conservan todos los valores.",
+  compactionChipLossless: "Sin pérdida",
+  compactionChipLossy: "Con pérdida",
+  compactionLossyLabel: "Permitir que este agente lea listas acortadas (con pérdida)",
+  compactionLossyWarning: "El modo con pérdida elimina información. Las listas largas de registros conservan solo sus primeras y últimas filas, con un marcador que indica cuántas se eliminaron, y los campos vacíos se quitan y se nombran. Las listas de valores simples (ids, etiquetas) y las lecturas de esquemas o catálogos nunca se acortan. Úsalo solo con agentes que resumen, no con agentes que editan lo que leen.",
+  compactionHead: "Filas conservadas al inicio",
+  compactionTail: "Filas conservadas al final",
+  compactionCountInvalid: "Introduce un número entero, 0 o mayor.",
+  compactionScopeNote: "Se aplica a las nuevas ejecuciones que inicie este agente. Una ejecución en curso mantiene el ajuste con el que empezó, y una ejecución dentro de otra sigue a la ejecución que la inició.",
+  compactionSave: "Guardar compactación",
+  compactionSaving: "Guardando…",
+  compactionLoading: "Cargando el ajuste de compactación…",
+  compactionLoadFailed: "No se pudo cargar el ajuste de compactación.",
+  compactionCountHelp: "Déjalo en blanco para usar {{n}}.",
+  compactionSaved: "Ajuste de compactación guardado. Se aplica a la próxima ejecución que inicie este agente.",
 } as const;

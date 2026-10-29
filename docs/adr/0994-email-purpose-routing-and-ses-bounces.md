@@ -139,6 +139,15 @@ raw body.
 and `DEPLOY.md` get the operator steps: the env vars above, the two Connections,
 and the two bounce webhooks.
 
+> **CORRECTION 2026-10-28 (setup walk-through):** D1 assumed an operator could
+> create a workspace-scope Connection from Access → Connections. The page offered
+> only **Just me** and **Organization**, and `selectAuthorizedConnection` matches an
+> org row only when the send names an org or has an acting user. Approval notices
+> and unattended campaigns have neither, so they would have found no account. The
+> page now offers **Whole workspace (automated sends)** to admins
+> (`host:connections:manage`), which creates the `scope:'workspace'` row the
+> server already accepted.
+
 ## Alternatives
 
 - **A platform-wide account that sends for every workspace.** Rejected by David

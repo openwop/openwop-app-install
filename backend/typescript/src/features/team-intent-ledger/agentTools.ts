@@ -16,12 +16,13 @@ import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
 import { OpenwopError } from '../../types.js';
 import { ledgerAccess } from './access.js';
 import { cleanWhy, currentState, getLedger, LEDGER_LIMITS, proposeDelta, requireBaseVersion, validatePatch } from './ledgerStore.js';
+import { untrustedToolError } from '../../host/agentToolKit.js';
 
 export const TEAM_LEDGER_GET_TOOL_ID = 'openwop:team-ledger.get';
 export const TEAM_LEDGER_PROPOSE_TOOL_ID = 'openwop:team-ledger.propose';
 
-function toolError(error: string, message: string): { content: string; isError: true } {
-  return { content: JSON.stringify({ error, message }), isError: true };
+function toolError(error: string, message: string): { content: string; isError: true; hostMessage: true } {
+  return { content: JSON.stringify({ error, message }), isError: true, hostMessage: true };
 }
 
 export function registerTeamLedgerAgentTools(): void {
@@ -48,12 +49,12 @@ export function registerTeamLedgerAgentTools(): void {
       if (!projectId) return toolError('validation_error', '`projectId` is required.');
       if (!scope.actingUserId) return toolError('acting_user_required', 'Team-ledger reads run on behalf of a signed-in user.');
       // One indistinguishable not_found for missing / invisible / no ledger (the route's 404 posture).
-      const notFound = toolError('not_found', `No team ledger found for project "${projectId}".`);
+      const notFound = untrustedToolError('not_found', 'No team ledger was found for that project id (below).', projectId);
       const access = await ledgerAccess(scope.tenantId, projectId, scope.actingUserId);
       if (!access) return notFound;
       const ledger = await getLedger(scope.tenantId, access.project.id);
       // Visible project, no ledger yet: say so, so the model can tell the user to start one.
-      if (!ledger) return toolError('no_ledger', `Project "${access.project.name}" has no team ledger yet. Someone who can edit the project can start one on its Ledger tab.`);
+      if (!ledger) return untrustedToolError('no_ledger', 'This project (named below) has no team ledger yet. Someone who can edit the project can start one on its Ledger tab.', access.project.name);
       return {
         content: JSON.stringify({
           projectId: access.project.id,
@@ -104,13 +105,13 @@ export function registerTeamLedgerAgentTools(): void {
       if (!scope.actingUserId) return toolError('acting_user_required', 'Proposing a ledger change runs on behalf of a signed-in user.');
       const projectId = typeof input.projectId === 'string' ? input.projectId.trim() : '';
       if (!projectId) return toolError('validation_error', '`projectId` is required.');
-      const notFound = toolError('not_found', `No team ledger found for project "${projectId}".`);
+      const notFound = untrustedToolError('not_found', 'No team ledger was found for that project id (below).', projectId);
       const access = await ledgerAccess(scope.tenantId, projectId, scope.actingUserId);
       if (!access) return notFound;
       if (access.level !== 'write') return toolError('forbidden', 'The user this turn acts for cannot edit this project, so it cannot propose ledger changes.');
       const ledger = await getLedger(scope.tenantId, access.project.id);
       // Visible project, no ledger yet: say so, so the model can tell the user to start one.
-      if (!ledger) return toolError('no_ledger', `Project "${access.project.name}" has no team ledger yet. Someone who can edit the project can start one on its Ledger tab.`);
+      if (!ledger) return untrustedToolError('no_ledger', 'This project (named below) has no team ledger yet. Someone who can edit the project can start one on its Ledger tab.', access.project.name);
       try {
         const patch = await validatePatch(input.patch, access.project);
         const why = cleanWhy(input.why);
@@ -124,7 +125,7 @@ export function registerTeamLedgerAgentTools(): void {
         // Echo what was STORED, so the model can see exactly what the owner will review.
         return { content: JSON.stringify({ proposed: true, deltaId: delta.deltaId, status: delta.status, baseVersion: delta.baseVersion, patch: delta.patch, awaiting: 'the ledger owner must accept or reject it' }) };
       } catch (err) {
-        if (err instanceof OpenwopError) return toolError(err.code, err.message);
+        if (err instanceof OpenwopError) return untrustedToolError(err.code, 'The tool refused this call; the reason it gave is below.', err.message);
         throw err;
       }
     },

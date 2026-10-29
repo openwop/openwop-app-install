@@ -2,7 +2,9 @@
  * `ctx.features['campaign-ops']` (ADR 0921 D3, ADR 0922). P0 exposes reads only.
  *
  * Binding rules, stronger than the ADR 0832 floor:
- *  - every op takes `orgId`; there is no op keyed by a bare record id;
+ *  - every op resolves an explicit client: `orgId` in its arguments, or the
+ *    trusted stored report-run pin for parameterless report computation;
+ *    no operation is keyed by a bare record id;
  *  - an actorless run is refused (`no_acting_user`): webhook and other
  *    authorless runs cannot read client assets (closes R8 for this surface);
  *  - the acting user must hold `workspace:read` on that exact client org;
@@ -30,14 +32,24 @@ import { mcpCampaignPerformance, mcpExplain, mcpGetCampaign, mcpListCampaigns, m
 /** The run-metadata key a campaign-ops run is stamped with (host-namespaced). */
 export const CAMPAIGN_OPS_RUN_STAMP = 'openwop-app.campaignOps';
 
+interface CampaignOpsRunStamp {
+  orgId?: string;
+  changeSetId?: string;
+  changeSetHash?: string;
+  definitionId?: string;
+  definitionVersion?: number;
+  periodStart?: string;
+  periodEnd?: string;
+}
+
 /** The run's campaign-ops stamp, read from the stored run (the bundle scope
  *  carries no metadata). Absent for runs campaign-ops did not start. */
-export async function runStampOf(scope: Pick<BundleScope, 'runId' | 'tenantId'>): Promise<{ orgId?: string; changeSetId?: string; changeSetHash?: string } | undefined> {
+export async function runStampOf(scope: Pick<BundleScope, 'runId' | 'tenantId'>): Promise<CampaignOpsRunStamp | undefined> {
   if (!scope.runId) return undefined;
   const run = await hostExtStorage().getRun(scope.runId);
   if (!run || run.tenantId !== scope.tenantId) return undefined;
   const v = (run.metadata as Record<string, unknown> | undefined)?.[CAMPAIGN_OPS_RUN_STAMP];
-  return v && typeof v === 'object' ? (v as { orgId?: string; changeSetId?: string; changeSetHash?: string }) : undefined;
+  return v && typeof v === 'object' ? (v as CampaignOpsRunStamp) : undefined;
 }
 
 /**
@@ -229,20 +241,42 @@ export function buildCampaignOpsSurface(scope: BundleScope): FeatureSurface {
     /** ADR 0957 D2 `compute-snapshot`: run the definition's section sources for
      *  the client and store a draft report. The run's id is recorded on it. */
     computeReportSnapshot: async (args) => {
-      const orgId = str(args.orgId);
+      // The internal chain has no author-time parameters. Its trusted launcher
+      // or scheduler pins configuration on the stored run, copied on forks.
+      // Node arguments may not override that pin. Explicitly configured nodes
+      // in other workflows retain their existing client-bound API.
+      const stamp = await runStampOf(scope);
+      let config = args;
+      if (stamp?.definitionId !== undefined) {
+        if (!str(stamp.orgId) || !str(stamp.definitionId) || !Number.isInteger(stamp.definitionVersion) || Number(stamp.definitionVersion) < 1) {
+          throw new OpenwopError('validation_error', 'This report run has no complete host configuration.', 400, { reason: 'report_run_unbound' });
+        }
+        for (const key of ['orgId', 'definitionId', 'definitionVersion', 'periodStart', 'periodEnd'] as const) {
+          if (args[key] !== undefined && args[key] !== null && args[key] !== '' && args[key] !== stamp[key]) {
+            throw new OpenwopError('conflict', "Report inputs differ from this run's pinned configuration.", 409, { reason: 'report_run_config_changed', field: key });
+          }
+        }
+        config = { ...stamp };
+      } else if (!str(args.orgId) || !str(args.definitionId)) {
+        throw new OpenwopError('validation_error', 'Start this report from its client report definition.', 400, { reason: 'report_run_unbound' });
+      }
+      const orgId = str(config.orgId);
       const person = await bindRunToClient(scope, orgId, 'workspace:write');
       await requireClientReports(tenantId);
       const { getDefinition, resolvePeriod, createReport } = await import('./reports/reportService.js');
-      const def = await getDefinition(tenantId, orgId, str(args.definitionId));
-      if (!def) throw new OpenwopError('not_found', 'Report definition not found.', 404, { definitionId: str(args.definitionId) });
+      const def = await getDefinition(tenantId, orgId, str(config.definitionId));
+      if (!def) throw new OpenwopError('not_found', 'Report definition not found.', 404, { definitionId: str(config.definitionId) });
       // D2 — a scheduled run pins the version it started with; an edit since then
       // is a typed failure, never a report of a definition nobody scheduled.
-      if (args.definitionVersion !== undefined && args.definitionVersion !== null && Number(args.definitionVersion) !== def.version) {
-        throw new OpenwopError('conflict', 'The report definition changed after this run was scheduled.', 409, { reason: 'report_definition_changed', pinned: Number(args.definitionVersion), current: def.version });
+      if (config.definitionVersion !== undefined && config.definitionVersion !== null && Number(config.definitionVersion) !== def.version) {
+        throw new OpenwopError('conflict', 'The report definition changed after this run was scheduled.', 409, { reason: 'report_definition_changed', pinned: Number(config.definitionVersion), current: def.version });
       }
-      const period = resolvePeriod(def.period.kind, { start: optStr(args.periodStart), end: optStr(args.periodEnd) });
+      const { readClientReportPeriod } = await import('./reports/periodStamp.js');
+      const period = stamp?.definitionId !== undefined
+        ? await readClientReportPeriod(tenantId, scope.runId, { orgId, definitionId: def.definitionId, definitionVersion: def.version })
+        : resolvePeriod(def.period.kind, { start: optStr(config.periodStart), end: optStr(config.periodEnd) });
       const report = await createReport(def, period, person, scope.runId ? { runId: scope.runId } : {});
-      return { reportId: report.reportId, snapshot: report.snapshot, snapshotHash: report.snapshotHash };
+      return { orgId, reportId: report.reportId, snapshot: report.snapshot, snapshotHash: report.snapshotHash };
     },
     /** ADR 0957 D3 `report-snapshot-read`: a stored report's frozen numbers. */
     readReportSnapshot: async (args) => {
@@ -254,17 +288,30 @@ export function buildCampaignOpsSurface(scope: BundleScope): FeatureSurface {
       if (!report) return { found: false };
       return { found: true, reportId: report.reportId, periodStart: report.periodStart, periodEnd: report.periodEnd, snapshot: report.snapshot, snapshotHash: report.snapshotHash };
     },
-    /** ADR 0957 D2 step 5 `publish-report`. Publishing must follow the ADR 0942
-     *  `report.publish` gate's approval of THIS snapshot. That gate cannot yet
-     *  freeze a policy for a client-bound run, so the node REFUSES (typed) until
-     *  it can: otherwise a hand-built workflow chaining compute-snapshot into
-     *  publish-report would publish numbers nobody reviewed. The CAS itself is
-     *  `reportService.publishReport`, which the gated chain will call. */
+    /** ADR 0957 D2 step 5 `publish-report`: the CAS `in_review → published`,
+     *  bound to the approved `snapshotHash`. Only the report THIS run computed
+     *  or inherited through a verified branch checkpoint,
+     *  and only after this run passed the ADR 0942 `report.publish` gate,
+     *  verified host-side from the run (`reports/publishGate.ts`), never from the
+     *  step's own inputs. */
     publishReport: async (args) => {
       const orgId = str(args.orgId);
-      await bindRunToClient(scope, orgId, 'workspace:write');
+      const person = await bindRunToClient(scope, orgId, 'workspace:write');
       await requireClientReports(tenantId);
-      throw new OpenwopError('conflict', 'Publishing a client report needs its review approval, which is not available yet.', 409, { reason: 'report_publish_unavailable', reportId: str(args.reportId) });
+      const { getReport, publishReport } = await import('./reports/reportService.js');
+      const reportId = str(args.reportId);
+      const report = await getReport(tenantId, orgId, reportId);
+      if (!report) throw new OpenwopError('not_found', 'Report not found.', 404, { reportId });
+      if (!scope.runId) throw new OpenwopError('conflict', 'A report publishes only from a run.', 409, { reason: 'report_not_from_this_run', reportId });
+      const { assertReportPublishGatePassed, assertReportSnapshotBelongsToRun } = await import('./reports/publishGate.js');
+      await assertReportSnapshotBelongsToRun(report, scope.runId);
+      const gate = await assertReportPublishGatePassed(tenantId, orgId, scope.runId, str(args.snapshotHash));
+      const published = await publishReport(tenantId, orgId, reportId, str(args.snapshotHash), person);
+      if (report.status !== 'published') {
+        const { noticeAfterEffect } = await import('../../host/autonomyPolicy/index.js');
+        await noticeAfterEffect(tenantId, gate.enforcement, 'report.publish', `Client report ${reportId} was published.`);
+      }
+      return { reportId: published.reportId, status: published.status, publishedAt: published.publishedAt ?? null, approvedVia: gate.via };
     },
     // ── ADR 0962 P1 — the external-agent read door (MCP tools). Each binds first
     // (`externalRead.bindExternalRead`: access on THIS client, `externalAgents`,

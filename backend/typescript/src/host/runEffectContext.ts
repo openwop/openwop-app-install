@@ -149,6 +149,12 @@ export interface RunEffectContext {
   readonly nodeId?: string;
   readonly tenantId?: string;
   readonly attempt?: number;
+  /**
+   * ADR 1002 D4 — on a `replay` fork, the run whose recorded tool results this
+   * execution is served (the same source as `AdapterScope.replayInvocationsFromRunId`).
+   * Absent outside a replay fork.
+   */
+  readonly replaySourceRunId?: string;
 }
 
 const storage = new AsyncLocalStorage<RunEffectContext>();

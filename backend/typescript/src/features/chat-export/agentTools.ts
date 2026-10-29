@@ -27,7 +27,7 @@
  */
 import { createHash } from 'node:crypto';
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
-import { resolveFeatureToggle } from '../../host/agentToolKit.js';
+import { resolveFeatureToggle, untrustedToolError } from '../../host/agentToolKit.js';
 import { listOrgs, resolveEffectiveAccess } from '../../host/accessControlService.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { exportConversationAsDocument } from './asDocumentService.js';
@@ -42,8 +42,8 @@ async function soleAuthorRefusal(sessionId: string, actor: string): Promise<Retu
 
 export const CONVERSATIONS_EXPORT_DOCUMENT_TOOL_ID = 'openwop:conversations.export-document';
 
-function toolError(error: string, message: string): { content: string; isError: true } {
-  return { content: JSON.stringify({ error, message }), isError: true };
+function toolError(error: string, message: string): { content: string; isError: true; hostMessage: true } {
+  return { content: JSON.stringify({ error, message }), isError: true, hostMessage: true };
 }
 const optStr = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
 
@@ -116,7 +116,7 @@ export function registerChatExportAgentTools(): void {
         return toolError('shared_conversation', 'This conversation includes other people (a channel, group, project chat or shared thread). Saving it as a Document would show their messages to everyone in the organization, so it cannot be saved. Tell the user they can download it from the conversation menu instead.');
       }
       if (refusal === 'client_mismatch') {
-        return toolError('client_mismatch', `This conversation belongs to the client organization ${meta?.client?.name ?? ''}; it can only be saved into that organization's Documents.`);
+        return untrustedToolError('client_mismatch', 'This conversation belongs to a client organization (named below); it can only be saved into that organization\'s Documents.', meta?.client?.name ?? '');
       }
       // Deterministic idempotency: an exact re-export in the same run reuses the
       // same transcript document instead of duplicating it.

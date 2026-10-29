@@ -17,8 +17,8 @@ import { resolveIdentityWithAccess } from './identityService.js';
 
 export const CDP_IDENTITY_RESOLVE_TOOL_ID = 'openwop:cdp.identity.resolve';
 
-function toolError(error: string, message: string): { content: string; isError: true } {
-  return { content: JSON.stringify({ error, message }), isError: true };
+function toolError(error: string, message: string): { content: string; isError: true; hostMessage: true } {
+  return { content: JSON.stringify({ error, message }), isError: true, hostMessage: true };
 }
 
 export function registerCdpAgentTools(): void {

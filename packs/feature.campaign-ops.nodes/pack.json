@@ -1,8 +1,8 @@
 {
   "name": "feature.campaign-ops.nodes",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "kind": "node",
-  "description": "Campaign operations node pack (ADR 0923). The change planner: `interpret` turns an operator's change request into structured intents or asks about missing facts (never both), and `propose` turns those intents into constrained before/after edits on the request's assets, minting a hashed change set. Both validate through ctx.features['campaign-ops'], make one error-fed repair, and otherwise fail with a typed reason. `execute` carries out an approved change set and verifies it by read-back. ADR 0957 adds the client-report steps: `compute-snapshot` freezes a report's figures from the app's own sources, `report-snapshot-read` reads a frozen report back, and `publish-report` publishes a reviewed report only if its numbers are the approved ones. Client memory adds client-notes-list and client-note-propose; only a person may approve a proposed fact into memory. Report publication remains unavailable until its review chain ships.",
+  "description": "Campaign operations node pack (ADR 0923). The change planner: `interpret` turns an operator's change request into structured intents or asks about missing facts (never both), and `propose` turns those intents into constrained before/after edits on the request's assets, minting a hashed change set. Both validate through ctx.features['campaign-ops'], make one error-fed repair, and otherwise fail with a typed reason. `execute` carries out an approved change set and verifies it by read-back. ADR 0957 adds the client-report steps: `compute-snapshot` freezes a report's figures from the app's own sources, `report-snapshot-read` reads a frozen report back, and `publish-report` publishes a reviewed report only if its numbers are the approved ones. Client memory adds client-notes-list and client-note-propose; only a person may approve a proposed fact into memory. Report publication uses a snapshot-bound approval from the same run under the client policy; P1 records publication internally.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": [
@@ -47,7 +47,7 @@
       "typeId": "feature.campaign-ops.nodes.compute-snapshot",
       "version": "1.0.0",
       "label": "Client report: Compute snapshot",
-      "description": "Runs a report definition's sections for its client and stores the figures, frozen and fingerprinted, as an internal draft report. Each figure is copied from the app's own source with its lineage; nothing is calculated here. A scheduled run passes the definition version it was armed with and fails if the definition changed since. Inputs: { orgId, definitionId, definitionVersion?, periodStart?, periodEnd? }. Output: { reportId, snapshotHash, snapshot }.",
+      "description": "Runs a report definition's sections for its client and stores the figures, frozen and fingerprinted, as an internal draft report. Each figure is copied from the app's own source with its lineage; nothing is calculated here. A scheduled run passes the definition version it was armed with and fails if the definition changed since. Inputs: explicit { orgId, definitionId, definitionVersion?, periodStart?, periodEnd? }, or none for a host-bound client report run; host-pinned fields cannot be overridden. Output: { orgId, reportId, snapshotHash, snapshot }.",
       "category": "integration",
       "role": "side-effect",
       "capabilities": []
@@ -65,7 +65,7 @@
       "typeId": "feature.campaign-ops.nodes.publish-report",
       "version": "1.0.0",
       "label": "Client report: Publish",
-      "description": "Publishes a report in review, only if its fingerprint is the one its reviewer approved, so changed numbers can never publish under an older approval. Until the review gate can approve a client report (ADR 0942), this step refuses with report_publish_unavailable rather than publish anything unreviewed. Inputs: { orgId, reportId, snapshotHash }. Output: { reportId, status, publishedAt }.",
+      "description": "Publishes a frozen report computed by this run only under its client policy or an explicit approval bound to the same snapshot and policy. Unknown, skipped, cancelled, unrelated or stale approvals refuse. Inputs: { orgId, reportId, snapshotHash }. No client delivery in this phase.",
       "category": "integration",
       "role": "side-effect",
       "capabilities": []

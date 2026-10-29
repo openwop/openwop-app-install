@@ -335,7 +335,7 @@ export const messages = {
   noEventAtSeq: 'Nenhum evento em #{{seq}}.',
   agentActivityUpToPoint: 'Atividade do agente até este ponto',
   payloadSummary: 'payload',
-  compactionNoticeTitle: 'Encurtado antes de o modelo ver.',
+  compactionNoticeTitle: "Encurtado pela compactação de resultados de ferramentas.",
   compactionElidedRows_one: '{{n}} linha foi removida do meio de uma lista.',
   compactionElidedRows_other: '{{n}} linhas foram removidas do meio de uma lista.',
   compactionEmptiedFields: 'Estes campos estavam presentes, porém vazios, e foram removidos: {{fields}}.',

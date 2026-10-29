@@ -88,7 +88,7 @@ const CLASSIFICATION: ReadonlyArray<readonly [string, boolean]> = [
   ['openwop:cms.get-page', false],
   ['openwop:cms.list-pages', false],
   ['openwop:cms.submit-page', false],
-  ['openwop:cms.translate-section', false],
+  ['openwop:cms.translate-section', true], // ADR 0999 D3.1 — category (c); was false
   ['openwop:cms.update-section-draft', false],
   ['openwop:comments.list', false],
   ['openwop:comments.post', false],
@@ -175,7 +175,7 @@ const CLASSIFICATION: ReadonlyArray<readonly [string, boolean]> = [
   ['openwop:funnels.blueprints', true],
   ['openwop:funnels.draft', false],
   ['openwop:funnels.generate', false],
-  ['openwop:funnels.get', false],
+  ['openwop:funnels.get', true], // ADR 0999 D3.1 — category (c); was false
   ['openwop:funnels.list', false],
   ['openwop:funnels.step-stats', false],
   ['openwop:goals.list', false],
@@ -285,7 +285,9 @@ const CLASSIFICATION: ReadonlyArray<readonly [string, boolean]> = [
  *   (b) a closed catalog of legal ids whose SIBLING ENFORCES membership with a
  *       typed refusal (`app-builder.catalog`, `bi.list-metrics`);
  *   (c) a body the model READS BEFORE IT WRITES a replacement (the `get-design`
- *       family, `cms.get-draft-page`);
+ *       family, `cms.get-draft-page`; ADR 0999 added `cms.translate-section` and
+ *       `funnels.get`, which a first census missed because it asked only "is this
+ *       a schema?" — ask "does a write tool take this back?" too);
  *   (d) an INVERTED-POLARITY list — a prohibition/ban list, where truncation
  *       removes a constraint (`intent-ledger.get`'s `forbidden`).
  * Plus a necessary condition that is easy to forget and settled two leads here:
@@ -323,7 +325,8 @@ const ADJUDICATED: Record<string, { schemaCarrying: boolean; why: string }> = {
     why:
       '(b) Its description calls it "the BI catalog" and `bi.run-metric` resolves `metricId` with a TYPED '
       + 'not-found (features/bi/agentTools.ts). Structural twin of app-builder.catalog / slides.catalog. '
-      + 'Probed eliding: ["metric-0","metric-1","metric-2",{_elided:8},"metric-11"].',
+      + 'Probed eliding: ["metric-0","metric-1","metric-2",{_elided:8},"metric-11"]. (ADR 0999 D5.2: a scalar '
+      + 'list is no longer elided at all; a list of metric OBJECTS still would be, so the exemption stands.)',
   },
   'openwop:campaign-channels.channels': {
     schemaCarrying: true,
@@ -392,6 +395,22 @@ const ADJUDICATED: Record<string, { schemaCarrying: boolean; why: string }> = {
       'The PUBLISHED read. Its draft sibling IS exempt, and the difference is load-bearing rather than an '
       + 'oversight: `update-section-draft` "works ONLY on draft pages", so no write tool cites a sectionId '
       + 'from this payload. Nothing enforces the element list.',
+  },
+  'openwop:cms.translate-section': {
+    schemaCarrying: true,
+    why:
+      'ADR 0999 D3.1 — CORRECTED from `false`. Category (c): the `overlay` it returns is the body the model '
+      + 'saves back through `update-section-draft` with `locale`. Under `lossy` a section row list was elided, '
+      + 'and `buildSectionData` FILTERS a `{"_elided":N}` element instead of refusing it, so the shortened '
+      + 'overlay was persisted as the whole translation. The first census asked only "is this a schema?".',
+  },
+  'openwop:funnels.get': {
+    schemaCarrying: true,
+    why:
+      'ADR 0999 D3.1 — CORRECTED from `false`. Category (c): its `steps` are "the bindings a revision must '
+      + 'keep", and `funnels.draft` with `funnelId` replaces the whole list. Under `lossy` a funnel with more '
+      + 'than five steps reached the model as head + marker + tail, and a revision that drops the marker '
+      + 'deletes the middle steps. `coerceKind` refuses the marker itself, not its absence.',
   },
   'openwop:discovery.list-collections': {
     schemaCarrying: false,
@@ -462,7 +481,8 @@ describe('schema-read exemption completeness (ADR 0604 / TOCC-2)', () => {
       unclassified,
       'A tool was registered without a schema-carrying decision. Add it to CLASSIFICATION in ' +
         'this file: `true` if its output is a schema / enum / closed catalog of legal ids / a ' +
-        'design body whose element list IS the contract, else `false`. If `true`, also set ' +
+        'design body whose element list IS the contract, OR a body the model reads in order to ' +
+        'send it back to a write tool (category (c), ADR 0999), else `false`. If `true`, also set ' +
         '`schemaCarrying: true` on its `registerFeatureAgentTool({...})` and add its id to ' +
         'SCHEMA_READ_EXEMPT_TOOLS.',
     ).toEqual([]);
@@ -478,7 +498,7 @@ describe('schema-read exemption completeness (ADR 0604 / TOCC-2)', () => {
     // Floor: the loop is vacuous empty. Raised 18 → 23 by the five review-H4
     // flips, then 23 → 25 to the measured `true` rows on 2404797bf (2026-10-22);
     // a floor that lags the population lets a deletion pass unseen.
-    expect(shouldBeExempt.length).toBeGreaterThanOrEqual(25);
+    expect(shouldBeExempt.length).toBeGreaterThanOrEqual(27); // ADR 0999 D3.1: +2
     for (const id of shouldBeExempt) {
       expect(isSchemaReadExempt(id), `${id} is schema-carrying but NOT exempt`).toBe(true);
       expect(builtinAgentTool(id)?.schemaCarrying, `${id} must DECLARE it, not only be listed`).toBe(true);
@@ -527,7 +547,7 @@ describe('schema-read exemption completeness (ADR 0604 / TOCC-2)', () => {
   it('NEGATIVE CONTROL — a classified-false tool is NOT exempt', () => {
     const plainData = CLASSIFICATION.filter(([, s]) => !s).map(([id]) => id);
     // Floor = the measured `false` rows on 2404797bf (2026-10-22): 186.
-    expect(plainData.length).toBeGreaterThanOrEqual(186);
+    expect(plainData.length).toBeGreaterThanOrEqual(184); // ADR 0999 D3.1: −2
     for (const id of plainData) {
       expect(isSchemaReadExempt(id), `${id} is classified plain data but is exempt`).toBe(false);
     }

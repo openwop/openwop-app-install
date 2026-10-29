@@ -14,8 +14,8 @@ import { listBriefs } from './creativeBriefsService.js';
 
 export const CREATIVE_BRIEFS_LIST_TOOL_ID = 'openwop:creative-briefs.list';
 
-function toolError(error: string, message: string): { content: string; isError: true } {
-  return { content: JSON.stringify({ error, message }), isError: true };
+function toolError(error: string, message: string): { content: string; isError: true; hostMessage: true } {
+  return { content: JSON.stringify({ error, message }), isError: true, hostMessage: true };
 }
 
 export function registerCreativeBriefsAgentTools(): void {

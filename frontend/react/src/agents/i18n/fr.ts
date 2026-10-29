@@ -879,4 +879,21 @@ export const messages = {
   checkHeldNotice: "{{persona}} n'a rien à prendre : toutes les cartes À faire sont en attente après une exécution arrêtée ou échouée. Libérez une carte sur le tableau pour que l'agent la reprenne.",
   // ADR 0768 follow-up P1 — the embed's honest "can see" scope (the agent is NOT bound to what is on screen)
   authorCanSee: "les agents et workflows disponibles et votre équipe",
+  // ADR 0999 D7 — AgentCompactionPanel (the per-agent lossy opt-in, TOCU-2)
+  compactionTitle: "Compaction des résultats d’outils",
+  compactionDesc: "Comment les résultats d’outils sont raccourcis avant que cet agent ne les lise. Par défaut, seuls les espaces sont supprimés et toutes les valeurs sont conservées.",
+  compactionChipLossless: "Sans perte",
+  compactionChipLossy: "Avec perte",
+  compactionLossyLabel: "Autoriser cet agent à lire des listes raccourcies (avec perte)",
+  compactionLossyWarning: "Le mode avec perte supprime des informations. Les longues listes d’enregistrements ne gardent que leurs premières et dernières lignes, avec un marqueur indiquant combien ont été retirées, et les champs vides sont supprimés et nommés. Les listes de valeurs simples (identifiants, étiquettes) et les lectures de schémas ou de catalogues ne sont jamais raccourcies. À réserver aux agents qui résument, pas à ceux qui modifient ce qu’ils lisent.",
+  compactionHead: "Lignes conservées au début",
+  compactionTail: "Lignes conservées à la fin",
+  compactionCountInvalid: "Saisissez un nombre entier, 0 ou plus.",
+  compactionScopeNote: "S’applique aux nouvelles exécutions lancées par cet agent. Une exécution en cours garde le réglage avec lequel elle a démarré, et une exécution imbriquée suit celle qui l’a lancée.",
+  compactionSave: "Enregistrer la compaction",
+  compactionSaving: "Enregistrement…",
+  compactionLoading: "Chargement du réglage de compaction…",
+  compactionLoadFailed: "Le réglage de compaction n’a pas pu être chargé.",
+  compactionCountHelp: "Laissez vide pour {{n}}.",
+  compactionSaved: "Réglage de compaction enregistré. Il s’applique à la prochaine exécution lancée par cet agent.",
 } as const;

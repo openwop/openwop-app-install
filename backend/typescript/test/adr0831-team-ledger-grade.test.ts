@@ -74,7 +74,11 @@ const call = (tenantId: string, scope: { actingUserId?: string; agentProfileId?:
   createAgentToolProvider({ tenantId, runId: 'run-tlt-1', ...scope }).executeTool({ name, input });
 /** A tool result's JSON: the success fields this file reads, or a typed error. */
 interface ToolOut { error?: string; message?: string; deltaId: string; patch: Record<string, unknown> }
-const parse = (r: { content: string }): ToolOut => JSON.parse(r.content) as ToolOut;
+// TOC2CD-11 (ADR 1000): an error's untrusted part moved from `message` into the fenced `detail`; read both.
+const parse = (r: { content: string }): ToolOut => {
+  const o = JSON.parse(r.content) as ToolOut & { detail?: string };
+  return { ...o, ...(o.message !== undefined || o.detail !== undefined ? { message: [o.message, o.detail].filter(Boolean).join(' ') } : {}) };
+};
 
 describe('XCH-TL-1 — grade-pass fixes', () => {
   const P = TEAM_LEDGER_PROPOSE_TOOL_ID;

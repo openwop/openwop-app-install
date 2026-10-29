@@ -21,6 +21,7 @@ export const messages = {
   testFailed: 'Test failed.',
   connected: '{{label}} connected.',
   connectedForOrg: '{{label}} connected for the organization.',
+  connectedForWorkspace: '{{label}} connected for the whole workspace.',
   couldNotStart: 'Could not start {{label}}.',
   connectionHealthy: '{{name}} is healthy.',
   connectionNeedsReconnect: '{{name}} needs to reconnect.',
@@ -66,6 +67,8 @@ export const messages = {
   sharedWith: 'Shared with',
   shareJustMe: 'Just me',
   shareOrganization: 'Organization',
+  shareWorkspaceDefault: 'Whole workspace (automated sends)',
+  shareWorkspaceDefaultHint: 'Also used when nobody is acting, such as approval notices and scheduled campaigns. Any workflow in this workspace can use it.',
   shareScopeUnknown: 'Your permissions could not be checked, so this connection will be created for you only — not shared with the organization.',
   connect: 'Connect',
 

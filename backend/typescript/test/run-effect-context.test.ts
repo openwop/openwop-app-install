@@ -22,6 +22,8 @@
  * seam's own guard call: SMTP (rec-smtp), sub-run dispatch (rec-subrun),
  * ctx.http.safeFetch (rec-safefetch, also reds the TRIPWIRE scan), brokeredPost
  * (rec-brokeredpost).
+ * ADR 1002 D4: dropping `replaySourceRunId` from the executor's `effectCtx`
+ * (rec-1002-src) reds the "establishes the context" case.
  *
  * Order independence (verified under --sequence.shuffle): the e2e cases assert
  * the notification count RELATIVE to their own start, and the "establishes
@@ -56,7 +58,7 @@ let BASE: string;
 const H = { 'content-type': 'application/json', authorization: 'Bearer dev-token' };
 
 /** Records every node execution that observed an ambient context. */
-const seenContext: Array<{ typeId: string; replaying: boolean | 'absent' }> = [];
+const seenContext: Array<{ typeId: string; replaying: boolean | 'absent'; replaySourceRunId?: string; runId?: string }> = [];
 
 /**
  * Counts notifications that ACTUALLY LANDED. The emitter fans out only after
@@ -81,7 +83,7 @@ beforeAll(async () => {
     version: '1.0.0',
     async execute(ctx) {
       const c = currentEffectContext();
-      seenContext.push({ typeId: 'test.unclassified-notifier', replaying: c ? c.replaying : 'absent' });
+      seenContext.push({ typeId: 'test.unclassified-notifier', replaying: c ? c.replaying : 'absent', ...(c?.replaySourceRunId ? { replaySourceRunId: c.replaySourceRunId } : {}), runId: ctx.runId });
       // A real await before the effect — ALS must survive it.
       await new Promise((r) => setTimeout(r, 1));
       await getNotificationEmitter().emit({
@@ -253,6 +255,11 @@ describe('end-to-end: a replay fork cannot re-notify', () => {
     expect(forNode.some((s) => s.replaying === 'absent')).toBe(false);
     expect(forNode.some((s) => s.replaying === false)).toBe(true); // live
     expect(forNode.some((s) => s.replaying === true)).toBe(true); // replay
+    // ADR 1002 D4 — the fork's context names the run its agent tools are served
+    // from (the source), and a live execution names none.
+    const liveExec = forNode.find((s) => s.replaying === false)!;
+    expect(liveExec.replaySourceRunId).toBeUndefined();
+    expect(forNode.find((s) => s.replaying === true)?.replaySourceRunId).toBe(liveExec.runId);
   });
 });
 

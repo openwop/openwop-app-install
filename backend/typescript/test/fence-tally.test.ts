@@ -31,10 +31,14 @@ describe('XCH-F1-2 — per-tool fence tally', () => {
     expect(fenceTally()['openwop:x.unknown']?.fenced).toBe(2);
   });
 
-  it('an ERROR result is neither fenced nor tallied — it is host-authored', () => {
+  // CORRECTED by TOC2CD-11 (ADR 1000): this used to pin "an ERROR is never fenced
+  // nor tallied — it is host-authored". That premise was the defect: a thrown
+  // message or an un-vouched returned error is not host-authored. Errors are now
+  // fenced by PROVENANCE and tallied like every other decision.
+  it('an un-vouched ERROR from an unregistered tool is fenced and tallied', () => {
     const out = toModelToolResult('openwop:x.unknown', 'boom', true);
-    expect(out).toBe('boom');
-    expect(fenceTally()['openwop:x.unknown']).toBeUndefined();
+    expect(out.startsWith('Tool failed: BEGIN UNTRUSTED CONTENT')).toBe(true);
+    expect(fenceTally()['openwop:x.unknown']).toEqual({ fenced: 1, passed: 0 });
   });
 
   it('the tally is a SNAPSHOT — mutating it cannot corrupt the counters', () => {

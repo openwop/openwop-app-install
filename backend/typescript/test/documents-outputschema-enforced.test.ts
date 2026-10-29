@@ -60,10 +60,11 @@ describe('DOCWF-1 — the outputSchema contract is enforced where it is reachabl
     const out = await run({ templateId: tmpl.templateId, orgId: ORG, contentMarkdown: JSON.stringify({ scope: 'build it' }) });
 
     expect(out.isError, 'a schema violation must be an ERROR, not a silent success').toBe(true);
-    const body = JSON.parse(out.content) as { error?: string; message?: string };
+    const body = JSON.parse(out.content) as { error?: string; message?: string; detail?: string };
     expect(body.error).toBe('validation_error');
     // The message must NAME what is missing — it is the agent's one bounded repair input.
-    expect(String(body.message ?? out.content)).toMatch(/deliverables/);
+    // TOC2CD-11 (ADR 1000): the required keys are the fenced `detail`; the instruction is the host `message`.
+    expect(`${body.message ?? ''} ${body.detail ?? ''}`).toMatch(/deliverables/);
 
     // Nothing persisted: success-with-empty is the failure this closes.
     expect(await listDocumentsForTenant(TENANT), 'no document may be created on a rejected generation').toHaveLength(before);

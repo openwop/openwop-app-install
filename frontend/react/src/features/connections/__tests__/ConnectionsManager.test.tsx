@@ -42,6 +42,7 @@ import { getEffectiveAccess, type EffectiveAccess } from '../../../client/access
 import { ConnectionsManager } from '../ConnectionsManager.js';
 import { toast } from '../../../ui/toast.js';
 import { ApiError } from '../../../client/requestJson.js';
+import { HubProvider } from '../../../chrome/hubContext.js';
 
 const mProviders = vi.mocked(listProviders);
 const mConnections = vi.mocked(listConnections);
@@ -165,6 +166,41 @@ describe('ConnectionsManager (FP-2)', () => {
     ));
     // The secret is write-only: it leaves the DOM once the connection is made.
     await waitFor(() => expect(secret.value).toBe(''));
+  });
+
+  it('ADR 0994: an admin can create a workspace-default row, the only kind an unattended send resolves', async () => {
+    mProviders.mockResolvedValue([prov({ id: 'postmark', label: 'Postmark' })]);
+    mConnections.mockResolvedValue([]);
+    mCreate.mockResolvedValue(workspaceConn({ provider: 'postmark' }));
+    mAccess.mockResolvedValue({ ...ADMIN_ACCESS });
+    render(<ConnectionsManager />);
+    await waitFor(() => expect(screen.getByText('Shared with')).toBeTruthy());
+    fireEvent.change(screen.getByRole('combobox', { name: 'Provider (API key / token)' }), { target: { value: 'postmark' } });
+    fireEvent.change(screen.getByRole('combobox', { name: 'Shared with' }), { target: { value: 'workspace' } });
+    expect(screen.getByText(/approval notices and scheduled campaigns/)).toBeTruthy();
+    fireEvent.change(document.querySelector('input[type="password"]') as HTMLInputElement, { target: { value: 'server-token' } });
+    fireEvent.click(screen.getByText('Connect'));
+    await waitFor(() => expect(mCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: 'postmark', secret: 'server-token', scope: 'workspace' }),
+    ));
+    expect(toast.success).toHaveBeenCalledWith('Postmark connected for the whole workspace.');
+  });
+
+  it('ADR 0994: under the hub Workspace pill an admin chooses org-shared or workspace-default; Personal offers neither', async () => {
+    mProviders.mockResolvedValue([prov()]);
+    mConnections.mockResolvedValue([]);
+    mAccess.mockResolvedValue({ ...ADMIN_ACCESS });
+    const { unmount } = render(<HubProvider scope="workspace"><ConnectionsManager /></HubProvider>);
+    await waitFor(() => expect(screen.getByText('Shared with')).toBeTruthy());
+    const options = [...(screen.getByRole('combobox', { name: 'Shared with' }) as HTMLSelectElement).options].map((o) => o.value);
+    expect(options).toEqual(['org', 'workspace']);
+    unmount();
+    render(<HubProvider scope="personal"><ConnectionsManager /></HubProvider>);
+    await waitFor(() => expect(mAccess).toHaveBeenCalledTimes(2));
+    await act(async () => { await mAccess.mock.results[1]!.value; });
+    await settle();
+    expect(screen.getByText('Connect')).toBeTruthy();
+    expect(screen.queryByText('Shared with')).toBeNull();
   });
 
   it('ADR 0780: a Viewer is not offered the connect controls — one read-only notice instead', async () => {

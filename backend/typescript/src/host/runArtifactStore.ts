@@ -27,7 +27,9 @@
  * @see docs/adr/0083-run-output-artifacts-and-preview.md
  */
 
-import { DurableCollection } from './hostExtPersistence.js';
+import { DurableCollection, hostExtStorage } from './hostExtPersistence.js';
+import { runClientStamp } from './runClientOrg.js';
+import { getOrg } from './accessControlService.js';
 import { createLogger } from '../observability/logger.js';
 import { stripSecretsFromPersisted } from '../byok/ephemeralRunSecrets.js';
 import { put as putMediaBytes } from '../features/media/mediaStorage.js';
@@ -52,7 +54,7 @@ export interface RunArtifactRecord {
   /** Deterministic primary key `${runId}:${nodeId}` — replay-safe. */
   artifactKey: string;
   tenantId: string;
-  /** Workspace-root org convention (= run.tenantId; RunRecord has no orgId). */
+  /** The run's host-written client org, or the workspace root for unbound runs. */
   orgId: string;
   runId: string;
   nodeId: string;
@@ -118,9 +120,69 @@ export function deriveArtifact(output: unknown, nodeId: string): { content: stri
     kind = 'data';
     format = 'application/json';
   }
-  const firstLine = content.split('\n').find((l) => l.trim().length > 0)?.trim();
-  const title = firstLine ? (firstLine.length > 120 ? `${firstLine.slice(0, 120)}…` : firstLine) : `${nodeId} output`;
+  // A JSON output's first line is `{` or `[`, which made a useless title (P9: the
+  // Factory outline and its final result both listed as `{`). JSON is named by
+  // its own fields instead; text keeps its first line.
+  const title = format === 'application/json'
+    ? (jsonOutputTitle(typeof value === 'string' ? parseJsonOrUndefined(value) : value) ?? `${nodeId} output`)
+    : (firstLineTitle(content) ?? `${nodeId} output`);
   return { content, kind, format, title };
+}
+
+const TITLE_MAX = 120;
+
+function clipTitle(s: string): string {
+  return s.length > TITLE_MAX ? `${s.slice(0, TITLE_MAX)}…` : s;
+}
+
+function firstLineTitle(content: string): string | undefined {
+  const line = content.split('\n').find((l) => l.trim().length > 0)?.trim();
+  return line ? clipTitle(line) : undefined;
+}
+
+function parseJsonOrUndefined(text: string): unknown {
+  try { return JSON.parse(text); } catch { return undefined; }
+}
+
+function namedField(v: unknown): string | undefined {
+  return typeof v === 'string' && v.trim() ? clipTitle(v.trim()) : undefined;
+}
+
+/** A title for a JSON output, taken from the output's OWN fields, or undefined
+ *  when it names nothing. In order: a typed-envelope title (`artifact.title`,
+ *  kept even when the envelope failed typed validation and was stored as plain
+ *  JSON), a `plan.title`, a top-level `title` / `name`, and an approval-request
+ *  result (`{approvalId, state}`) named by its state. The state is quoted as
+ *  stored and never upgraded: `submitted` is not `published`. */
+export function jsonOutputTitle(value: unknown): string | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const rec = value as Record<string, unknown>;
+  const sub = (k: string): Record<string, unknown> | undefined => {
+    const v = rec[k];
+    return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined;
+  };
+  const named = namedField(sub('artifact')?.title) ?? namedField(sub('plan')?.title) ?? namedField(rec.title) ?? namedField(rec.name);
+  if (named) return named;
+  if (typeof rec.approvalId === 'string' && typeof rec.state === 'string' && rec.state.trim()) {
+    return clipTitle(`Approval request (${rec.state.trim()})`);
+  }
+  return undefined;
+}
+
+/** Saved JSON rows whose title is longer than this are not re-parsed on read. */
+const LEGACY_TITLE_PARSE_MAX = 256 * 1024;
+
+/** The display title for a saved row, computed on READ (no data migration). A
+ *  row written before `jsonOutputTitle` existed carries its JSON's first line
+ *  (`{`) as its title; such a row is re-named from its content. A row whose
+ *  title came from anywhere else (a typed envelope, a file name) is returned
+ *  unchanged. The content is already on the row, so this costs no extra read. */
+export function displayRunArtifactTitle(row: Pick<RunArtifactRecord, 'title' | 'content' | 'format' | 'nodeId'>): string {
+  if (row.format !== 'application/json') return row.title;
+  const generic = firstLineTitle(row.content);
+  if (row.title !== generic || !/^[[{]/.test(row.title)) return row.title;
+  const parsed = row.content.length <= LEGACY_TITLE_PARSE_MAX ? parseJsonOrUndefined(row.content) : undefined;
+  return jsonOutputTitle(parsed) ?? `${row.nodeId} output`;
 }
 
 /** ADR 0055/0128 — a node may declare a typed INLINE artifact via an
@@ -264,6 +326,21 @@ export interface PersistRunArtifactInput {
 
 type PersistResult = { artifactId: string; revisionId: string } | null;
 
+/** ADR 0957 P1b: output is no broader than the client that supplied it. Read
+ * only the existing host-written run stamps, never an orgId in node output.
+ * Unbound/legacy producers retain the workspace-root convention. */
+async function artifactOrg(input: Pick<PersistRunArtifactInput, 'tenantId' | 'runId'>): Promise<string> {
+  const run = await hostExtStorage().getRun(input.runId);
+  if (!run) return input.tenantId;
+  if (run.tenantId !== input.tenantId) throw new Error('Artifact run belongs to another tenant.');
+  const stamp = runClientStamp(run.metadata);
+  if (!stamp) return input.tenantId;
+  if ('refused' in stamp) throw new Error('Artifact run has an invalid client binding.');
+  const org = await getOrg(stamp.orgId);
+  if (!org || org.tenantId !== input.tenantId) throw new Error('Artifact client does not belong to the run tenant.');
+  return stamp.orgId;
+}
+
 /** The PersistResult for a stored row (link → its owner; else the run-event id). */
 function resultFor(row: RunArtifactRecord): { artifactId: string; revisionId: string } {
   return row.linkedArtifactId
@@ -281,7 +358,7 @@ async function writeRow(input: PersistRunArtifactInput, row: Partial<RunArtifact
   const full: RunArtifactRecord = stripSecretsFromPersisted({
     artifactKey: row.artifactKey,
     tenantId: input.tenantId,
-    orgId: input.tenantId,
+    orgId: await artifactOrg(input),
     runId: input.runId,
     nodeId: input.nodeId,
     role: input.role,
@@ -304,13 +381,14 @@ async function writeRow(input: PersistRunArtifactInput, row: Partial<RunArtifact
 }
 
 /** Mint a `media:` artifact from inline base64 bytes (so it previews as real bytes). */
-async function mintMedia(input: PersistRunArtifactInput, b64: MediaBytes): Promise<{ artifactId: string; revisionId: string } | null> {
+async function mintMedia(input: PersistRunArtifactInput, b64: MediaBytes): Promise<{ artifactId: string; revisionId: string; orgId: string } | null> {
+  const orgId = await artifactOrg(input);
   const estBytes = Math.floor((b64.contentBase64.length * 3) / 4);
-  await assertOrgCapacity(input.tenantId, input.tenantId, estBytes); // throws if over org quota → caller catches
+  await assertOrgCapacity(input.tenantId, orgId, estBytes); // throws if over org quota → caller catches
   const stored = await putMediaBytes(input.tenantId, { contentBase64: b64.contentBase64, contentType: b64.contentType });
   const asset = await createAsset({
     tenantId: input.tenantId,
-    orgId: input.tenantId,
+    orgId,
     name: `${input.nodeId}-${b64.name}.${extOf(b64.contentType)}`,
     contentType: b64.contentType,
     sizeBytes: stored.sizeBytes,
@@ -318,7 +396,7 @@ async function mintMedia(input: PersistRunArtifactInput, b64: MediaBytes): Promi
     serveToken: stored.serveToken,
     uploadedBy: input.runId,
   });
-  return { artifactId: `${ARTIFACT_PREFIX.media}${asset.assetId}`, revisionId: `${asset.assetId}:1` };
+  return { artifactId: `${ARTIFACT_PREFIX.media}${asset.assetId}`, revisionId: `${asset.assetId}:1`, orgId };
 }
 
 /** Mint a media asset for `b64` + record an idempotent bookkeeping row under `key` linking it.
@@ -336,7 +414,9 @@ async function mintAndLink(input: PersistRunArtifactInput, key: string, b64: Med
   if (stored.artifactId !== minted.artifactId) {
     // ART-3 — we lost the insert-only CAS race; GC the asset we minted. Log on failure
     // (previously swallowed → an orphaned asset with no trail).
-    await deleteAsset(input.tenantId, input.tenantId, minted.artifactId.slice(ARTIFACT_PREFIX.media.length))
+    // Use the scope captured at creation. A client-bound asset is not in the
+    // workspace root, and re-reading a mutable run cannot relocate this mint.
+    await deleteAsset(input.tenantId, minted.orgId, minted.artifactId.slice(ARTIFACT_PREFIX.media.length))
       .catch((err) => log.warn('run_artifact_cas_loss_gc_failed', {
         tenantId: input.tenantId, assetId: minted.artifactId, error: err instanceof Error ? err.message : String(err),
       }));

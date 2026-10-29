@@ -18,6 +18,7 @@ import { registerInheritedRunMetadataKey } from '../../host/inheritedRunMetadata
 import { CAMPAIGN_OPS_RUN_STAMP, buildCampaignOpsSurface } from './surface.js';
 import { registerCampaignOpsErasure } from './erasure.js';
 import { registerClientAutonomyStamp } from './autonomyStamp.js';
+import { clientReportPeriodContributor } from './reports/periodStamp.js';
 import { registerChainBackedWorkflow } from '../../host/chainBackedWorkflows.js';
 import { CHANGE_REQUEST_CHAIN_ID, EXECUTE_CHAIN_ID, startChangeRequestRun, startExecutionRun } from './runLauncher.js';
 import { registerChangeSetApproval, registerChangeSetExecutionStarter } from './approval.js';
@@ -56,6 +57,7 @@ export const campaignOpsFeature: BackendFeature = {
     });
     // ADR 0942 P2b — a client-bound run (no campaign) freezes the client's policy.
     registerClientAutonomyStamp();
+    registerRunStartContributor(clientReportPeriodContributor);
     // ADR 0923 — the change-request chain, SAME-ID chain-backed (the crm-ops.triage
     // precedent): the request routes launch it by this stable id, gated on the toggle.
     registerChainBackedWorkflow(CHANGE_REQUEST_CHAIN_ID, { featureId: CAMPAIGN_OPS_TOGGLE });

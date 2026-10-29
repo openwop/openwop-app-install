@@ -45,7 +45,7 @@ export function setAutonomyCampaignStatusResolver(fn: AutonomyCampaignStatusReso
 export function setAutonomyToggleResolver(fn: AutonomyToggleResolver | null): void { toggleResolver = fn; }
 
 /** Classes whose effect chokepoint is wired (and so emits its own notify-after notice, D5). */
-export const CHOKEPOINT_CLASSES: ReadonlySet<ActionClass> = new Set<ActionClass>(['ads.publish', 'ads.budget', 'sms.send']);
+export const CHOKEPOINT_CLASSES: ReadonlySet<ActionClass> = new Set<ActionClass>(['ads.publish', 'ads.budget', 'sms.send', 'report.publish']);
 
 export type EnforceVerdict =
   | { kind: 'unbound' }

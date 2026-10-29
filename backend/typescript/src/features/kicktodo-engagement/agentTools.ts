@@ -23,9 +23,9 @@ import { listEnrollmentsFor } from '../kicktodo-core/enrollmentService.js';
 
 export const KICKTODO_ENGAGEMENT_SUMMARY_TOOL_ID = 'openwop:kicktodo.engagement-summary';
 
-type ToolResult = { content: string; isError?: boolean };
+type ToolResult = { content: string; isError?: boolean; hostMessage?: true };
 function toolError(error: string, message: string): ToolResult {
-  return { content: JSON.stringify({ error, message }), isError: true };
+  return { content: JSON.stringify({ error, message }), isError: true, hostMessage: true };
 }
 
 export function registerKicktodoEngagementAgentTools(): void {

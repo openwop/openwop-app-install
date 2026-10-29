@@ -26,12 +26,13 @@ import type { IntentLedger } from './types.js';
 import { assertTransition, ledgerAuthorityOf } from './authority.js';
 import { OpenwopError } from '../../types.js';
 import { assertKeepsInherited, missionInheritanceFor, withInheritedDefaults } from './inheritance.js';
+import { untrustedToolError } from '../../host/agentToolKit.js';
 
 export const INTENT_LEDGER_GET_TOOL_ID = 'openwop:intent-ledger.get';
 export const INTENT_LEDGER_DRAFT_TOOL_ID = 'openwop:intent-ledger.draft-contract';
 
-function toolError(error: string, message: string): { content: string; isError: true } {
-  return { content: JSON.stringify({ error, message }), isError: true };
+function toolError(error: string, message: string): { content: string; isError: true; hostMessage: true } {
+  return { content: JSON.stringify({ error, message }), isError: true, hostMessage: true };
 }
 
 export function registerIntentLedgerAgentTools(): void {
@@ -74,7 +75,7 @@ export function registerIntentLedgerAgentTools(): void {
       // The route's requireVisible, verbatim: meta + visibility with the
       // acting user as subject; every deny is the same not_found (no
       // existence leak — invisible and nonexistent are indistinguishable).
-      const notFound = toolError('not_found', `No intent ledger found for conversation "${conversationId}".`);
+      const notFound = untrustedToolError('not_found', 'No intent ledger was found for that conversation id (below).', conversationId);
       const meta = await getConversationMeta(scope.tenantId, conversationId);
       if (!meta || !(await isVisibleToAsync(meta, scope.tenantId, scope.actingUserId))) return notFound;
       const ledger = await getLedger(scope.tenantId, conversationId);
@@ -143,7 +144,7 @@ export function registerIntentLedgerAgentTools(): void {
       // leak) except the authority refusal. IL2CD-6: the route also honours the
       // wildcard operator credential; a tool turn never carries one, so the tool is
       // never LOOSER than its route.
-      const notFound = toolError('not_found', `No conversation found for "${conversationId}".`);
+      const notFound = untrustedToolError('not_found', 'No conversation was found for that id (below).', conversationId);
       const meta = await getConversationMeta(scope.tenantId, conversationId);
       if (!meta || !(await isVisibleToAsync(meta, scope.tenantId, scope.actingUserId))) return notFound;
       const authority = await ledgerAuthorityOf(scope.tenantId, meta, scope.actingUserId, scope.personalTenant ? { personalTenant: scope.personalTenant } : {});
@@ -167,7 +168,7 @@ export function registerIntentLedgerAgentTools(): void {
         fields = validateLedgerInput(withInheritedDefaults(input, inherited));
         assertKeepsInherited(fields, inherited);
       } catch (err) {
-        return toolError('validation_error', err instanceof Error ? err.message : 'Invalid mission fields.');
+        return untrustedToolError('validation_error', 'Invalid mission fields; the validator\'s reason is below.', err instanceof Error ? err.message : undefined);
       }
       // Persist a DRAFT only — proposedBy 'extractor' (the chat agent authored it);
       // approval stays an explicit human action.

@@ -31,6 +31,7 @@ import {
 import { dispatchChat, dispatchEmbeddings, EMBEDDINGS_PROVIDERS, type ChatMessage, type ProviderId } from '../providers/dispatch.js';
 import { getClassDefault, getDefaultModel } from '../providers/catalog.js';
 import { createLogger } from '../observability/logger.js';
+import { assertEffectAllowed } from './runEffectContext.js';
 import { nativeSearchSatisfies, nativeSearchSuitability } from './webSearchCapability.js';
 import { registerCredentialRefConsumer } from './credentialRefRegistry.js';
 import { createVertexEmbed, VERTEX_EMBEDDING_MAX_DIMS, VERTEX_EMBEDDING_MODELS } from './vertexEmbedder.js';
@@ -489,6 +490,10 @@ export async function resolveNativeWebSearch(
       // never model prose), but an unfenced query could redirect the turn and waste
       // the call. Same `<UNTRUSTED>` posture the MCP inbound path uses.
       const fenced = `<UNTRUSTED_QUERY>\n${query.slice(0, 2000)}\n</UNTRUSTED_QUERY>`;
+      // ADR 0531 — a paid model call on the tenant's key. `dispatchChat` pins egress
+      // only for the `compat` provider and otherwise uses the plain global fetch,
+      // which no other seam guards, so a replay fork made this call LIVE.
+      assertEffectAllowed('network-egress', `native-web-search ${provider}`);
       const r = await dispatchChat({
         provider: provider as ProviderId,
         model,

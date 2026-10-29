@@ -34,7 +34,7 @@
  * read = workspace:read).
  */
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
-import { resolveFeatureToggle } from '../../host/agentToolKit.js';
+import { resolveFeatureToggle, untrustedToolError } from '../../host/agentToolKit.js';
 import { listOrgs, resolveEffectiveAccess } from '../../host/accessControlService.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { getCanvasForCaller } from '../../host/canvasSurface.js';
@@ -45,12 +45,12 @@ export const APP_BUILDER_RENDER_TOOL_ID = 'openwop:app-builder.render';
 export const APP_BUILDER_CATALOG_TOOL_ID = 'openwop:app-builder.catalog';
 export const APP_BUILDER_GET_DESIGN_TOOL_ID = 'openwop:app-builder.get-design';
 
-type ToolResult = { content: string; isError?: boolean };
+type ToolResult = { content: string; isError?: boolean; hostMessage?: true };
 
 /** Structured tool error — the agent loop surfaces `content` verbatim to the
  *  model, so the message must be actionable (what failed, what to do next). */
 function toolError(error: string, message: string, extra?: Record<string, unknown>): ToolResult {
-  return { content: JSON.stringify({ error, message, ...(extra ?? {}) }), isError: true };
+  return { content: JSON.stringify({ ...(extra ?? {}), error, message }), isError: true, hostMessage: true };
 }
 
 /** Per-call toggle honesty (ADR 0308 D2): per-tenant, dynamic, fail-closed. */
@@ -146,7 +146,7 @@ export function registerAppBuilderAgentTools(): void {
       if (!canvasId) return toolError('validation_error', '`canvasId` is required.');
       const canvas = await getCanvasForCaller(scope.tenantId, canvasId, { subject: scope.actingUserId });
       if (!canvas || canvas.canvasTypeId !== APP_BUILDER_CANVAS_TYPE) {
-        return toolError('not_found', `App Builder canvas '${canvasId}' not found in this workspace.`);
+        return untrustedToolError('not_found', 'That App Builder canvas (id below) was not found in this workspace.', canvasId);
       }
       return {
         content: JSON.stringify({

@@ -14,6 +14,7 @@
  */
 
 import type { CompactionDecision } from '../executor/types.js';
+import { ELIDED_MARKER } from '../executor/compaction.js';
 import { builtinAgentTool } from './agentToolProvider.js';
 import { createLogger } from '../observability/logger.js';
 
@@ -26,6 +27,13 @@ export interface ToolResultTransformContext {
   toolName?: string;
   /** The run's tenant, when available (absent on the runless dispatch path). */
   tenantId?: string;
+  /**
+   * ADR 0999 D4 (TOC2CD-4) — the result is a tool ERROR. A `lossy` decision is
+   * downgraded to `lossless` for it: a failure's content is the error-fed repair
+   * loop's only input, and eliding a validation-issue list hands the ONE repair
+   * attempt a third of what is wrong.
+   */
+  isError?: boolean;
 }
 
 /**
@@ -154,6 +162,12 @@ export const SCHEMA_READ_EXEMPT_TOOLS: readonly string[] = [
   // ADR 0948 P3a — each blueprint's `parameters` JSON Schema: the model authors
   // `openwop:funnels.generate` params against it, so a compacted schema is a lie.
   'openwop:funnels.blueprints',
+  // ADR 0999 D3.1 — category (c) read-before-write bodies the first census
+  // classified `false`: each is saved back by a write tool that replaces the
+  // stored list (`update-section-draft` with `locale`; `funnels.draft` with
+  // `funnelId`). The rationale is at each registration site.
+  'openwop:cms.translate-section',
+  'openwop:funnels.get',
 ];
 
 /**
@@ -219,9 +233,13 @@ export function applyToolResultTransform(content: string, ctx: ToolResultTransfo
   // Per-tool exemption (ADR 0099 §residuals): a tool whose output must stay
   // byte-exact is skipped. The exempt list is frozen in the decision (replay-safe).
   if (ctx.toolName && ctx.decision.exemptTools?.includes(ctx.toolName)) return content;
+  // ADR 0999 D4 — an error keeps every byte but insignificant whitespace.
+  const effective: ToolResultTransformContext = ctx.isError && ctx.decision.mode === 'lossy'
+    ? { ...ctx, decision: { ...ctx.decision, mode: 'lossless' } }
+    : ctx;
   let out: string;
   try {
-    out = current(content, ctx);
+    out = current(content, effective);
   } catch {
     return content;
   }
@@ -240,4 +258,77 @@ export function applyToolResultTransform(content: string, ctx: ToolResultTransfo
     }
   }
   return out;
+}
+
+/**
+ * ADR 0999 D3.2 (TOC2CD-3) — the write edge's half of the read-before-write rule.
+ *
+ * `lossy` replaces the middle of a row list with ONE element, `{"_elided": N}`.
+ * A model that reads an elided list and writes it back hands that element to a
+ * write tool, and the write paths that filter malformed elements instead of
+ * refusing them (`cms buildSectionData`, `discovery cleanActions`, measured
+ * 2026-10-28) then persist the SHORTENED list as if it were whole. The exemption
+ * list (`isSchemaReadExempt`) is reviewed by a person and so is a floor; this
+ * check holds for every write tool, classified or not.
+ *
+ * Returns the JSON path of the first marker in a tool INPUT, or `undefined`. A
+ * marker is exactly what the kernel writes: an array ELEMENT that is an object
+ * whose only own key is `_elided`, with a number value. Callers apply it only
+ * under a `lossy` decision, where a marker can have come from us. Accepted false
+ * refusal: a payload's own `{"_elided":N}` row survives compaction (D5.3), and a
+ * model copying it back is refused too — preferred to persisting a fabricated row.
+ * Bounded (depth 64, path ≤ 200 chars) and total: never throws on a cycle or an
+ * odd shape. Known, accepted false negatives (review L7): a marker deeper than 64
+ * levels, one inside a STRINGIFIED-JSON field, and an echoed `_emptied` list
+ * (which names keys, never stands in for rows, so it cannot shorten a write).
+ */
+export function findCompactionMarkerPath(input: unknown): string | undefined {
+  const seen = new Set<unknown>();
+  const walk = (v: unknown, path: string, depth: number): string | undefined => {
+    if (depth > 64 || v === null || typeof v !== 'object' || seen.has(v)) return undefined;
+    seen.add(v);
+    if (Array.isArray(v)) {
+      for (let i = 0; i < v.length; i += 1) {
+        const el = v[i];
+        if (el && typeof el === 'object' && !Array.isArray(el)) {
+          const keys = Object.keys(el);
+          if (keys.length === 1 && keys[0] === ELIDED_MARKER && typeof (el as Record<string, unknown>)[ELIDED_MARKER] === 'number') {
+            return `${path}[${i}]`;
+          }
+        }
+        const hit = walk(el, `${path}[${i}]`, depth + 1);
+        if (hit) return hit;
+      }
+      return undefined;
+    }
+    for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+      const hit = walk(val, `${path}.${k}`, depth + 1);
+      if (hit) return hit;
+    }
+    return undefined;
+  };
+  try {
+    const path = walk(input, '$', 0);
+    // Bounded (review L5): the path is built from model-supplied keys and is
+    // written into a wire `error.message` and a model message.
+    return path && path.length > MAX_MARKER_PATH ? `${path.slice(0, MAX_MARKER_PATH)}…` : path;
+  } catch {
+    return undefined;
+  }
+}
+
+const MAX_MARKER_PATH = 200;
+
+/** ADR 0999 D3.2 — the typed code a refused marker-carrying tool input carries. */
+export const COMPACTION_MARKER_IN_INPUT = 'compaction_marker_in_input';
+
+/** The model-facing refusal text: names the path and how to recover. */
+export function compactionMarkerRefusal(toolName: string, path: string): string {
+  return JSON.stringify({
+    error: COMPACTION_MARKER_IN_INPUT,
+    message: `${toolName} was not run: its input contains a tool-output compaction marker at ${path} `
+      + '({"_elided": N} stands for rows that were removed from what you read, not data). '
+      + 'Sending it back would save a shortened list. Re-read the full value and send every element, '
+      + 'or send only the elements you mean to change.',
+  });
 }

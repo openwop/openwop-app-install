@@ -23,7 +23,7 @@ import type { TurnRunDispatchSink } from './turnRunDispatch.js';
 import type { AgentToolDef, ExecuteAgentTool, ResolveAgentTool } from './agentDispatch.js';
 import { getNodeRegistry } from '../executor/nodeRegistry.js';
 import { featureAccessRefusal } from './workflowFeatureGate.js';
-import { toolError } from './agentToolKit.js';
+import { toolError, untrustedToolError } from './agentToolKit.js';
 import type { NodeContext } from '../executor/types.js';
 import { createSandboxRunner } from './sandboxAdapter.js';
 import { getAgentProfile } from './agentProfileService.js';
@@ -130,7 +130,10 @@ export interface BuiltinTool {
   /** `continueTurn` (ADR 0773 B.7): host-internal, never sent to the model as-is.
    *  A string = the tool's work is unfinished, and the chat loop may send it as
    *  ONE follow-up if the model then stops without a call; `null` clears one. */
-  run(input: Record<string, unknown>, scope: BundleScope): Promise<{ content: string; isError?: boolean; continueTurn?: string | null }>;
+  /** `hostMessage` (TOC2CD-11): set ONLY by a `toolError` helper — the error's
+   *  `message` is a host-authored sentence, so the model reads it outside the fence.
+   *  `test/toc2cd11-tool-error-message-ratchet.test.ts` holds every such call. */
+  run(input: Record<string, unknown>, scope: BundleScope): Promise<{ content: string; isError?: boolean; continueTurn?: string | null; hostMessage?: true; fromThrow?: true }>;
 }
 
 /**
@@ -535,10 +538,10 @@ const CODE_EXEC: BuiltinTool = {
   async run(input, scope) {
     const runner = createSandboxRunner(scope.tenantId);
     if (!runner) {
-      return { content: JSON.stringify({ error: 'capability_not_provided', message: 'No code-execution sandbox is configured on this host.' }), isError: true };
+      return toolError('capability_not_provided', 'No code-execution sandbox is configured on this host.');
     }
     const code = String(input.code ?? '');
-    if (code.length === 0) return { content: JSON.stringify({ error: 'validation_error', message: '`code` is required.' }), isError: true };
+    if (code.length === 0) return toolError('validation_error', '`code` is required.');
     const language = typeof input.language === 'string' ? input.language : 'python';
     try {
       const r = await runner({
@@ -590,7 +593,7 @@ const CODE_EXEC: BuiltinTool = {
       return { content: JSON.stringify({ ...result, ...artifactFields }) };
     } catch (e) {
       const err = e as { code?: string; message?: string };
-      return { content: JSON.stringify({ error: err.code ?? 'sandbox_error', message: err.message ?? 'execution failed' }), isError: true };
+      return untrustedToolError(err.code ?? 'sandbox_error', 'The code did not run to completion; the sandbox\'s reason is below.', err.message);
     }
   },
 };
@@ -793,7 +796,9 @@ export function createAgentToolProvider(
         // throwing `host_capability_disabled`, an `AiProviderError`). Without this
         // the code is lost here and every throw degrades to `tool_execution_failed`
         // with `durationMs` falsely present — the WFAU-4 wire-honesty gap.
-        return { content: `tool_failed: ${err instanceof Error ? err.message : String(err)}`, isError: true, errorCode: extractToolErrorCode(err) };
+        // TOC2CD-14 — `fromThrow`: a thrown message is arbitrary text, so the
+        // model-facing builder fences it.
+        return { content: `tool_failed: ${err instanceof Error ? err.message : String(err)}`, isError: true, errorCode: extractToolErrorCode(err), fromThrow: true };
       }
     },
   };

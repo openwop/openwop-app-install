@@ -48,6 +48,7 @@ import { registerWorkflow, registerWorkflowDurable, getRegisteredWorkflowAsync }
 import { withLifecycle, withHostLifecycle, lifecycleOf } from './workflowLifecycle.js';
 import { recordOwnership, listOwned, isSharedWorkflowId } from './workflowOwnership.js';
 import { startWorkflowRun, type StartRunDeps } from './runStarter.js';
+import { assertEffectAllowed } from './runEffectContext.js';
 import {
   createComposedWorkflowApproval,
   registerComposedWorkflowApprovalHandler,
@@ -108,14 +109,14 @@ const err = (message: string): { content: string; isError: true } =>
  *  REQUEST that nothing executes or promotes until someone holding authority
  *  approves it (ADR 0473) — it is how a Viewer asks for a change. `null` =
  *  allowed; otherwise the typed refusal the model relays. */
-async function composeWriteRefusal(scope: { tenantId: string; actingUserId?: string; personalTenant?: string }): Promise<{ content: string; isError: true } | null> {
+async function composeWriteRefusal(scope: { tenantId: string; actingUserId?: string; personalTenant?: string }): Promise<{ content: string; isError: true; fromThrow?: true } | null> {
   if (!scope.actingUserId) return null;
   try {
     await assertModelWorkflowWrite(scope);
     return null;
   } catch (e) {
     if (!(e instanceof OpenwopError)) throw e;
-    return { content: JSON.stringify({ error: e.code, message: e.message, ...(e.details ?? {}) }), isError: true };
+    return { content: JSON.stringify({ error: e.code, message: e.message, ...(e.details ?? {}) }), isError: true, fromThrow: true };
   }
 }
 
@@ -387,6 +388,12 @@ export function registerWorkflowComposeTool(deps: StartRunDeps): void {
         return err(transientCapMessage());
       }
 
+      // ADR 0531 — refuse a replay BEFORE the draft is written. `startWorkflowRun`
+      // guards `dispatch` too, but only after step 5 has registered the draft,
+      // its revision and its ownership row, so a refused replay left an orphan
+      // transient behind (counting toward the cap). Same seam, earlier.
+      assertEffectAllowed('dispatch', `run-start ${def.workflowId}`);
+
       // 5. Register transient + record ownership (the tenant owns its agent's work).
       const generatedBy = await registerTransientDraft(def, scope);
 
@@ -481,6 +488,11 @@ export function registerWorkflowProposeTool(resolver: WorkflowResolver): void {
       if (await transientCapReached(scope.tenantId)) {
         return err(transientCapMessage());
       }
+
+      // ADR 0531 — a proposal is a deferred run start (and may auto-approve into
+      // one), so a replay is refused before the draft, revision, ownership row
+      // and approval hold are written. See compose-and-run above.
+      assertEffectAllowed('dispatch', `run-proposal ${def.workflowId}`);
 
       const generatedBy = await registerTransientDraft(def, scope);
 

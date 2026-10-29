@@ -878,4 +878,21 @@ export const messages = {
   checkHeldNotice: "{{persona}} não tem nada para pegar: todos os cartões A fazer estão em espera após uma execução interrompida ou com falha. Libere um cartão no quadro para que o agente o retome.",
   // ADR 0768 follow-up P1 — the embed's honest "can see" scope (the agent is NOT bound to what is on screen)
   authorCanSee: "os agentes e fluxos disponíveis e sua equipe",
+  // ADR 0999 D7 — AgentCompactionPanel (the per-agent lossy opt-in, TOCU-2)
+  compactionTitle: "Compactação de resultados de ferramentas",
+  compactionDesc: "Como os resultados das ferramentas são encurtados antes de este agente lê-los. Por padrão, apenas os espaços são removidos e todos os valores são mantidos.",
+  compactionChipLossless: "Sem perda",
+  compactionChipLossy: "Com perda",
+  compactionLossyLabel: "Permitir que este agente leia listas encurtadas (com perda)",
+  compactionLossyWarning: "O modo com perda remove informações. Listas longas de registros mantêm apenas as primeiras e últimas linhas, com um marcador dizendo quantas foram removidas, e campos vazios são descartados e nomeados. Listas de valores simples (ids, tags) e leituras de esquemas ou catálogos nunca são encurtadas. Use apenas em agentes que resumem, não em agentes que editam o que leem.",
+  compactionHead: "Linhas mantidas no início",
+  compactionTail: "Linhas mantidas no fim",
+  compactionCountInvalid: "Digite um número inteiro, 0 ou maior.",
+  compactionScopeNote: "Vale para novas execuções que este agente iniciar. Uma execução em andamento mantém a configuração com que começou, e uma execução dentro de outra segue a execução que a iniciou.",
+  compactionSave: "Salvar compactação",
+  compactionSaving: "Salvando…",
+  compactionLoading: "Carregando a configuração de compactação…",
+  compactionLoadFailed: "Não foi possível carregar a configuração de compactação.",
+  compactionCountHelp: "Deixe em branco para usar {{n}}.",
+  compactionSaved: "Configuração de compactação salva. Vale para a próxima execução que este agente iniciar.",
 } as const;

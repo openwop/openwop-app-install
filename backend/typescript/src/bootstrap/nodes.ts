@@ -29,7 +29,8 @@ import { refuseUnknownRejectionPolicy } from '../host/reviewDecisionLedger.js';
 
 const hostLog = createLogger('bootstrap.nodes');
 import { composeAgentSystemPrompt } from '../host/agentPromptScaffold.js';
-import { applyToolResultTransform } from '../host/toolResultTransform.js';
+import { applyToolResultTransform, findCompactionMarkerPath, compactionMarkerRefusal, COMPACTION_MARKER_IN_INPUT } from '../host/toolResultTransform.js';
+import { toModelWorkflowToolResult } from '../host/toModelToolResult.js';
 import { resolveAgentKnowledgeRetrieve, composeAgentKnowledgeContext } from '../host/agentKnowledgeComposition.js';
 import { resolveAgentIdentity } from '../host/agentIdentity.js';
 import { createAgentMemoryPort } from '../host/agentMemoryAdapter.js';
@@ -2250,6 +2251,20 @@ export const chatResponderNode: NodeModule = {
               isError: true,
             };
           }
+          // ADR 0999 D3.2 — the same write-edge refusal as `runChatToolLoop`: under a
+          // `lossy` decision, a compaction marker in the input is a stand-in for rows
+          // the model never saw, and the child workflow would receive it as data.
+          const markerPath = ctx.compaction?.mode === 'lossy' ? findCompactionMarkerPath(use.input) : undefined;
+          if (markerPath) {
+            // Recorded like any other tool call (review M4): a refusal that leaves no
+            // event is invisible on the run timeline. No child run was started.
+            await ctx.emit('node.tool_use', { toolUseId: use.id, name: use.name, workflowId: binding.workflowId, input: use.input });
+            await ctx.emit('node.tool_result', {
+              toolUseId: use.id, name: use.name, status: 'failed',
+              error: { code: COMPACTION_MARKER_IN_INPUT, message: `input contains a compaction marker at ${markerPath}` },
+            });
+            return { toolUseId: use.id, content: compactionMarkerRefusal(use.name, markerPath), isError: true };
+          }
           await ctx.emit('node.tool_use', {
             toolUseId: use.id,
             name: use.name,
@@ -2274,16 +2289,23 @@ export const chatResponderNode: NodeModule = {
             ...(subResult.status === 'failed' ? { error: subResult.error } : {}),
             ...(subResult.status !== 'completed' && 'runId' in subResult ? { runId: subResult.runId } : {}),
           });
+          // ADR 0099 — compact the tool result at this typed boundary (the
+          // string is known to be tool output) before it re-enters the model
+          // context. Fail-open identity when no compaction decision is frozen.
+          // ADR 0999 D4 — a failed child is never lossy-compacted.
+          const compacted = applyToolResultTransform(formatSubRunResult(subResult), {
+            decision: ctx.compaction,
+            toolName: use.name,
+            tenantId: ctx.tenantId,
+            ...(subResult.status === 'failed' ? { isError: true } : {}),
+          });
           return {
             toolUseId: use.id,
-            // ADR 0099 — compact the tool result at this typed boundary (the
-            // string is known to be tool output) before it re-enters the model
-            // context. Fail-open identity when no compaction decision is frozen.
-            content: applyToolResultTransform(formatSubRunResult(subResult), {
-              decision: ctx.compaction,
-              toolName: use.name,
-              tenantId: ctx.tenantId,
-            }),
+            // ADR 0999 D2 (TOC2CD-2) — fenced AFTER compaction, so the fence wraps
+            // exactly what the model reads. A child run's output (and its error) is
+            // whatever its nodes produced; only the host-authored `pending` note
+            // stays unfenced. See `toModelWorkflowToolResult`.
+            content: subResult.status === 'pending' ? compacted : toModelWorkflowToolResult(use.name, compacted),
             isError: subResult.status === 'failed',
           };
         };

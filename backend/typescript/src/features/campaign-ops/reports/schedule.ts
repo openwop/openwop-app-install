@@ -18,6 +18,7 @@ import { deleteJob, getJob, registerJob, type ScheduledJob, type ScheduleSkipRea
 import { OpenwopError } from '../../../types.js';
 import { getClient } from '../clientService.js';
 import { getDefinition } from './reportService.js';
+import { CAMPAIGN_OPS_RUN_STAMP } from '../surface.js';
 import type { ReportDefinition } from './types.js';
 import { CLIENT_REPORT_CHAIN_ID } from './types.js';
 import { getChainBackedWorkflow } from '../../../host/chainBackedWorkflows.js';
@@ -47,7 +48,7 @@ export async function syncReportSchedule(def: ReportDefinition, actor: string): 
     enabled: true,
     featureId: 'campaign-ops',
     timezone: def.period.timezone,
-    metadata: { purpose: REPORT_JOB_PURPOSE, orgId: def.orgId, definitionId: def.definitionId, orgScopeSubject: actor },
+    metadata: { purpose: REPORT_JOB_PURPOSE, orgId: def.orgId, definitionId: def.definitionId, orgScopeSubject: actor, [CAMPAIGN_OPS_RUN_STAMP]: { orgId: def.orgId, definitionId: def.definitionId, definitionVersion: def.version } },
     inputs: { orgId: def.orgId, definitionId: def.definitionId, definitionVersion: def.version },
   });
   if (!res.ok) {

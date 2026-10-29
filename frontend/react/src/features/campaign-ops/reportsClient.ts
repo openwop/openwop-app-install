@@ -45,6 +45,11 @@ export async function createDefinition(orgId: string, body: { title: string; sec
 export async function computeReport(orgId: string, definitionId: string): Promise<ClientReport> {
   return (await post<{ report: ClientReport }>(`${base(orgId)}/report-definitions/${encodeURIComponent(definitionId)}/reports`, {})).report;
 }
+/** ADR 0957 D2 — start the client-report workflow: compute, the client's review
+ *  gate (report.publish), then publish once approved. */
+export async function sendReportForReview(orgId: string, definitionId: string): Promise<{ runId: string }> {
+  return post<{ runId: string }>(`${base(orgId)}/report-definitions/${encodeURIComponent(definitionId)}/runs`, {});
+}
 export async function listReports(orgId: string): Promise<ClientReport[]> {
   return (await get<{ reports: ClientReport[] }>(`${base(orgId)}/reports`)).reports;
 }

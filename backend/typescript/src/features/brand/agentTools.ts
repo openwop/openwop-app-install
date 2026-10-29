@@ -27,10 +27,10 @@ export const BRAND_LIST_TOOL_ID = 'openwop:brand.list-brands';
 export const BRAND_RESOLVE_VOICE_TOOL_ID = 'openwop:brand.resolve-voice';
 export const BRAND_COMPLIANCE_CHECK_TOOL_ID = 'openwop:brand.compliance-check';
 
-type ToolResult = { content: string; isError?: boolean };
+type ToolResult = { content: string; isError?: boolean; hostMessage?: true };
 
 function toolError(error: string, message: string): ToolResult {
-  return { content: JSON.stringify({ error, message }), isError: true };
+  return { content: JSON.stringify({ error, message }), isError: true, hostMessage: true };
 }
 
 const asChannel = (v: unknown): BrandChannel | undefined =>

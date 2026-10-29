@@ -78,7 +78,10 @@ describe('RFC 0137 §F1 — untrusted tool results are fenced on the real path',
     expect(forModel).not.toContain('UNTRUSTED');
   });
 
-  it('does NOT fence an ERROR from an untrusted tool — it is host-authored', async () => {
+  // CORRECTED by TOC2CD-11 (ADR 1000): "an ERROR from an untrusted tool is
+  // host-authored" held only for errors a `toolError` helper vouched for. A raw
+  // returned error is fenced (by provenance); a vouched `{error, message}` is not.
+  it('fences an UN-VOUCHED error from an untrusted tool, after a host "Tool failed" prefix', async () => {
     registerFeatureAgentTool({
       contentTrust: 'untrusted',
       effect: 'read', // test probe (ADR 0784)
@@ -87,7 +90,20 @@ describe('RFC 0137 §F1 — untrusted tool results are fenced on the real path',
     });
     const { executeTool } = createAgentToolProvider(scope);
     const raw = await executeTool({ name: 'test:f1.err', input: {} });
-    expect(toModelToolResult('test:f1.err', raw.content, raw.isError)).toBe('not_found');
+    expect(toModelToolResult('test:f1.err', raw.content, raw.isError).startsWith('Tool failed: BEGIN UNTRUSTED CONTENT')).toBe(true);
+  });
+
+  it('does NOT fence a VOUCHED `{error, message}` from an untrusted tool — recovery text stays host text', async () => {
+    const host = JSON.stringify({ error: 'not_found', message: 'Form not found in this workspace.' });
+    registerFeatureAgentTool({
+      contentTrust: 'untrusted',
+      effect: 'read', // test probe (ADR 0784)
+      def: { name: 'test:f1.err-vouched', description: 'd', inputSchema: { type: 'object' } } as never,
+      run: async () => ({ content: host, isError: true, hostMessage: true }),
+    });
+    const { executeTool } = createAgentToolProvider(scope);
+    const raw = await executeTool({ name: 'test:f1.err-vouched', input: {} });
+    expect(toModelToolResult('test:f1.err-vouched', raw.content, raw.isError, { hostVouched: raw.hostMessage === true })).toBe(host);
   });
 
   it('DEFANGS a payload that tries to spoof the fence from inside', async () => {

@@ -196,6 +196,16 @@ scheduling, test setup/waits, and this ADR; application runtime files are intact
 
 ## D7 — Frontend lint, build and types use the preamble's idle cores
 
+**Correction, 2026-10-28:** `OPENWOP_CI_SERIAL_LANES=1` originally moved the
+frontend static lane into the foreground but still launched its lint, build and
+unit-test typecheck children together. On the Air, the resource monitor interrupted
+train 268 R1 during that phase despite the requested serial mode. Serial mode now
+waits for each child before starting the next; the default retains all three in
+parallel. Both schedules retain every command, failure status and output. The
+process fixture `scripts/test-ci-frontend-static.py` measures concurrency and
+injects a failure into each command. This scheduling correction does not establish
+that the interrupted train would otherwise have passed.
+
 MEASURED from the D6 gate's vitest summary: backend vitest keeps **~6.7 of its 7
 workers busy for the whole run** (8,044 worker-seconds over 1,199 s), so after
 D6 there is no spare CPU left beside it. Anything else placed there only takes

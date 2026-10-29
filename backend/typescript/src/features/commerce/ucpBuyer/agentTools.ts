@@ -36,6 +36,7 @@ import type { Scope } from '../../../host/accessControlService.js';
 import { getApproval } from '../../../host/approvalService.js';
 import { OpenwopError } from '../../../types.js';
 import { listPurchases, getPurchase, trackPurchase, buildPurchaseDraft, checkoutPurchase } from './ucpBuyerService.js';
+import { untrustedToolError } from '../../../host/agentToolKit.js';
 
 const BUYER_TOGGLE = 'commerce-ucp-buyer';
 const NS = 'openwop:feature.commerce.buyer.nodes.';
@@ -53,10 +54,10 @@ export const COMMERCE_BUYER_TOOL_IDS: readonly string[] = [
   BUYER_CHECKOUT_TOOL_ID,
 ];
 
-type ToolResult = { content: string; isError?: boolean };
+type ToolResult = { content: string; isError?: boolean; hostMessage?: true };
 const ok = (payload: unknown): ToolResult => ({ content: JSON.stringify(payload) });
 const empty = (note: string): ToolResult => ({ content: JSON.stringify({ note }) });
-const toolError = (error: string, message: string): ToolResult => ({ content: JSON.stringify({ error, message }), isError: true });
+const toolError = (error: string, message: string): ToolResult => ({ content: JSON.stringify({ error, message }), isError: true, hostMessage: true });
 const isResult = (v: unknown): v is ToolResult => typeof (v as { content?: unknown }).content === 'string';
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');
 
@@ -133,7 +134,7 @@ export function registerCommerceBuyerAgentTools(): void {
         const purchase = await trackPurchase(scope.tenantId, org.orgId, purchaseId, { actingUserId: scope.actingUserId });
         return ok({ orgId: org.orgId, purchase: project(purchase) });
       } catch (err) {
-        if (err instanceof OpenwopError) return toolError(err.code, err.message);
+        if (err instanceof OpenwopError) return untrustedToolError(err.code, 'The tool refused this call; the reason it gave is below.', err.message);
         throw err;
       }
     },
@@ -207,7 +208,7 @@ export function registerCommerceBuyerAgentTools(): void {
           note: 'Cart prepared as a capped draft — it buys nothing. Next, request checkout; it always pauses for a human sign-off in the reviews inbox.',
         });
       } catch (err) {
-        if (err instanceof OpenwopError) return toolError(err.code, err.message);
+        if (err instanceof OpenwopError) return untrustedToolError(err.code, 'The tool refused this call; the reason it gave is below.', err.message);
         throw err;
       }
     },
@@ -290,7 +291,7 @@ export function registerCommerceBuyerAgentTools(): void {
           if (err.code === 'approval_required') {
             return ok({ purchaseId, status: 'awaiting_approval', note: 'A human sign-off has been requested — it is waiting in the reviews inbox. Nothing is bought until it is approved, and once approved the human completes it with "Place this purchase" on the purchase page (not chat, and not the inbox).', placementUrl: `/commerce/purchases/${encodeURIComponent(purchaseId)}?org=${encodeURIComponent(org.orgId)}` });
           }
-          return toolError(err.code, err.message);
+          return untrustedToolError(err.code, 'The tool refused this call; the reason it gave is below.', err.message);
         }
         throw err;
       }

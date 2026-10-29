@@ -14,6 +14,8 @@
  */
 
 import type { ChatMessage, ContentPart, DispatchRequest, DispatchResult, Citation } from './dispatch.js';
+// TOC2CD-14 — the import-free leaf, NOT toModelToolResult: see fenceThrownToolError.
+import { fenceThrownToolError } from '../host/untrustedContent.js';
 import { sanitizeToolName, toolNameMap } from './dispatchProviderTools.js';
 import { contextEconomy } from '../host/contextEconomy.js';
 import {
@@ -202,9 +204,11 @@ export async function dispatchAnthropicWithTools(req: ToolsDispatchRequest): Pro
       try {
         toolResult = await req.onToolUse({ id: tu.id, name: tu.name, input: tu.input });
       } catch (err) {
+        // TOC2CD-14 — a THROWN `onToolUse` error's message is arbitrary text: fenced
+        // (`Tool failed:` outside, the message inside), never handed to the model raw.
         toolResult = {
           toolUseId: tu.id,
-          content: `tool_dispatch_failed: ${err instanceof Error ? err.message : String(err)}`,
+          content: fenceThrownToolError(tu.name, `tool_dispatch_failed: ${err instanceof Error ? err.message : String(err)}`, 'tool_dispatch_failed'),
           isError: true,
         };
       }

@@ -335,7 +335,7 @@ export const messages = {
   noEventAtSeq: 'No hay ningún evento en #{{seq}}.',
   agentActivityUpToPoint: 'Actividad de agentes hasta este punto',
   payloadSummary: 'carga útil',
-  compactionNoticeTitle: 'Se acortó antes de que el modelo lo viera.',
+  compactionNoticeTitle: "Acortado por la compactación de resultados de herramientas.",
   compactionElidedRows_one: 'Se eliminó {{n}} fila del centro de una lista.',
   compactionElidedRows_other: 'Se eliminaron {{n}} filas del centro de una lista.',
   compactionEmptiedFields: 'Estos campos estaban presentes pero vacíos y se eliminaron: {{fields}}.',

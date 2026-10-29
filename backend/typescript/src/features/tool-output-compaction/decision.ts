@@ -73,6 +73,17 @@ export async function resolveCompactionDecision(ctx: RunStartContext): Promise<R
   // This is checked BEFORE the toggle read on purpose: the toggle's CURRENT
   // state is exactly the input a fork must not be sensitive to.
   if (ctx.derivedFromRun) return {};
+  // ADR 0999 D1 (TOC2CD-1) — a CHILD run never resolves its own decision. Its
+  // parent's frozen stamp is copied onto it as an inherited key (`feature.ts`),
+  // and a parent that had NO stamp hands down that absence: resolving here would
+  // give a child of a born-OFF parent a live decision, and a `:fork` replay would
+  // re-spawn children under whatever the toggle says now (TOCWF-1, one level
+  // down). Two spellings of "child": the executor's sub-workflow dispatcher sets
+  // the `parentRunId` column; the workflow-as-tool lane (`dispatchSubRun` →
+  // `POST /runs`) carries only the host-admitted `metadata.parentRunId`. The
+  // metadata key is stripped from a caller's body, and if one ever slipped
+  // through, the only effect is an UNcompacted run — the safe direction.
+  if (ctx.parentRunId || typeof ctx.metadata?.parentRunId === 'string') return {};
 
   const assignment = await resolveOne(TOGGLE_ID, { tenantId: ctx.tenantId });
   if (!assignment?.enabled) return {};

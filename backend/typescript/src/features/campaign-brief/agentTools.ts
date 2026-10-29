@@ -36,6 +36,7 @@ import { orgScopeGranted } from './routes.js';
 import { getBrief, validateBrief } from './briefService.js';
 import { isTargetingPlatform, TARGETING_PLATFORMS } from './targetingService.js';
 import { MARKET_INTEL_WORKFLOW_ID, KERNEL_WORKFLOW_ID } from './intelWorkflows.js';
+import { untrustedToolError } from '../../host/agentToolKit.js';
 
 const log = createLogger('campaign-brief.agent-tools');
 
@@ -58,10 +59,10 @@ export interface ToolScope {
   onRunDispatched?: TurnRunDispatchSink | undefined;
 }
 
-type ToolResult = { content: string; isError?: boolean };
+type ToolResult = { content: string; isError?: boolean; hostMessage?: true };
 
 function toolError(error: string, message: string, extra?: Record<string, unknown>): ToolResult {
-  return { content: JSON.stringify({ error, message, ...extra }), isError: true };
+  return { content: JSON.stringify({ ...extra, error, message }), isError: true, hostMessage: true };
 }
 
 /** Per-call toggle honesty (ADR 0308 D2) — fail-closed FIRST, SAME subject shape
@@ -175,7 +176,7 @@ async function guardBriefAction(
     if (loaded.reason === 'forbidden') {
       return { ok: false, result: toolError('forbidden', 'You need workspace:write in this brief\'s organization to run this.') };
     }
-    return { ok: false, result: toolError('not_found', `Brief '${briefId}' not found.`) };
+    return { ok: false, result: untrustedToolError('not_found', 'That brief (id below) was not found.', briefId) };
   }
   return { ok: true, briefId, orgId: loaded.brief.orgId };
 }

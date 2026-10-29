@@ -1142,10 +1142,18 @@ export const SUITES: TestSuite[] = [
     sourceFiles: ['backend/typescript/src/features/tool-output-compaction', 'backend/typescript/src/host/toolResultTransform.ts', 'frontend/react/src/runs/CompactionNotice.tsx'],
     cases: [
       { id: 'TOC-01', title: 'A shortened list is DISCLOSED, not passed off as complete', priority: 'P1',
-        preconditions: ['tool-output-compaction ON', 'an agent with configParameters.compaction.lossy = true', 'a run whose tool returned >5 rows'],
+        preconditions: ['tool-output-compaction ON', 'a workflow with a "Compact Tool Output" node whose mode is lossy, fed a JSON value holding a list of more than five objects'],
         steps: [
-          { action: 'Open /runs → the run → select the compacting step in the timeline', expect: 'Above the JSON, an info notice states how many rows were removed (e.g. "137 rows were removed from the middle of a list"). FAIL if the payload shows `{"_elided": N}` with no notice — that is the TOCU-1 defect.' },
+          { action: 'Run the workflow, open /runs → the run → select the Compact Tool Output step in the timeline', expect: 'Above the JSON, an info notice titled "Shortened by tool-output compaction." states how many rows were removed (e.g. "137 rows were removed from the middle of a list"). FAIL if the payload shows `{"_elided": N}` with no notice — that is the TOCU-1 defect.' },
           { action: 'Expand the same event’s "payload" disclosure in the timeline lane', expect: 'The same notice appears there too — both surfaces render the raw payload, so both must disclose.' },
+          { action: 'Feed the node a list of more than five plain strings (ids) instead', expect: 'The list is NOT shortened and no notice appears (ADR 0999 D5.2: a list of plain values is never elided).' },
+        ] },
+      { id: 'TOC-06', title: 'The per-agent lossy opt-in can be seen and set', priority: 'P1',
+        preconditions: ['tool-output-compaction ON', 'an agent you can edit'],
+        steps: [
+          { action: 'Open /agents → the agent → Instructions tab', expect: 'A "Tool-output compaction" card shows a "Lossless" chip. FAIL if there is no card — that is TOCU-2 (the only control that removes information had no editor).' },
+          { action: 'Tick "Let this agent read shortened lists (lossy)", set rows kept at the start to 2, save', expect: 'A warning explains what lossy removes; the chip reads "Lossy" after save; reloading the page shows the same values.' },
+          { action: 'Open the same agent as a workspace viewer', expect: 'The card shows the setting with every control disabled and the read-only note; there is no Save button.' },
         ] },
       { id: 'TOC-02', title: 'The DEFAULT mode does not delete anything', priority: 'P1',
         preconditions: ['tool-output-compaction ON', 'NO per-agent lossy opt-in (the default)'],
@@ -1159,7 +1167,7 @@ export const SUITES: TestSuite[] = [
           { action: 'Start a run with the toggle OFF, then turn the toggle ON, then fork that run from /runs → "Fork from here"', expect: 'The fork runs UNCOMPACTED, exactly as its source was born. FAIL if the fork compacts — that is TOCWF-1, and it applies to every run created before the toggle was first enabled.' },
         ] },
       { id: 'TOC-04', title: 'Schema/catalog tools stay byte-exact even under lossy', priority: 'P2',
-        preconditions: ['tool-output-compaction ON', 'lossy opt-in ON for the agent'],
+        preconditions: ['tool-output-compaction ON', 'lossy opt-in ON for the agent (set it as in TOC-06)'],
         steps: [
           { action: 'In chat, ask the agent to list the app-builder component catalog (`openwop:app-builder.catalog`)', expect: 'The full catalog reaches the model — no `_elided` marker inside it. A truncated enum makes the model author against a catalog this host does not have.' },
         ] },

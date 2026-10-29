@@ -29,7 +29,7 @@
 
 import { createHash } from 'node:crypto';
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
-import { resolveFeatureToggle } from '../../host/agentToolKit.js';
+import { resolveFeatureToggle, untrustedToolError } from '../../host/agentToolKit.js';
 import { listOrgs, resolveEffectiveAccess } from '../../host/accessControlService.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import {
@@ -46,12 +46,12 @@ export const STRATEGY_CONTEXT_TOOL_ID = 'openwop:strategy.get-context';
 export const STRATEGY_HEALTH_TOOL_ID = 'openwop:strategy.get-health';
 export const STRATEGY_BOARD_MEMO_TOOL_ID = 'openwop:strategy.create-board-memo';
 
-type ToolResult = { content: string; isError?: boolean };
+type ToolResult = { content: string; isError?: boolean; hostMessage?: true };
 
 /** Structured tool error — the agent loop surfaces `content` verbatim to the
  *  model, so the message must say what failed and what to do next. */
 function toolError(error: string, message: string, extra?: Record<string, unknown>): ToolResult {
-  return { content: JSON.stringify({ error, message, ...(extra ?? {}) }), isError: true };
+  return { content: JSON.stringify({ ...(extra ?? {}), error, message }), isError: true, hostMessage: true };
 }
 
 const ok = (payload: unknown): ToolResult => ({ content: JSON.stringify(payload) });
@@ -284,7 +284,7 @@ export function registerStrategyAgentTools(): void {
           note: 'Board memo drafted and saved as a Document. Tell the user the memo title and that it is a draft in Documents.',
         });
       } catch (err) {
-        return toolError('persist_failed', `The memo could not be saved: ${err instanceof Error ? err.message : String(err)}`);
+        return untrustedToolError('persist_failed', 'The memo could not be saved; the reason is below.', err instanceof Error ? err.message : String(err));
       }
     },
   });

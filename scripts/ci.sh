@@ -528,6 +528,7 @@ run_selftests() {
   echo
   echo "▶ Tracegate: the predictor reuses only what it may, and runs what it must (ADR 0880)"
   node "$ROOT/scripts/test-tracegate.mjs"
+  node --test --test-concurrency=1 "$ROOT/scripts/test-tracegate-report.mjs"
   echo
   echo "▶ payload ratchet: a subset run never judges an admission stale (ADR 0702 × ADR 0880)"
   node --test "$ROOT/scripts/test-audit-event-payloads.mjs"
@@ -592,17 +593,26 @@ run_frontend_static() ( # a subshell: the serial fallback must not leave ci.sh i
     local log="$1" title="$2"; shift 2
     { echo "▶ frontend: $title"; npm "$@"; } > "$log" 2>&1 < /dev/null
   }
+  fe_static_wait() { # retain every lane's failure and log, in either schedule
+    local n="$1" p="$2"
+    if wait "$p"; then :; else rc=$?; echo "frontend static step $n FAILED (exit $rc)" >> "$dir/$n"; fi
+  }
   fe_static_one "$dir/1" "lint (eslint, zero warnings)" run lint -- --max-warnings=0 & p1=$!
+  # Serial mode must bound the work inside this lane too: both tsc processes
+  # otherwise overlap with eslint even when the outer lane runs in line.
+  if [ "${OPENWOP_CI_SERIAL_LANES:-0}" = 1 ]; then fe_static_wait 1 "$p1"; fi
   if [ -n "$envd" ]; then
     echo "frontend build: adopter bundle — budgeting the default build on .env.production.example, not this tree's .env.production (#5006)"
     OPENWOP_VITE_ENV_DIR="$envd" fe_static_one "$dir/2" "build (tsc + token/CSS checks + vite + bundle budget; host-only env)" run build & p2=$!
   else
     fe_static_one "$dir/2" "build (tsc + token/CSS checks + vite + bundle budget)" run build & p2=$!
   fi
+  if [ "${OPENWOP_CI_SERIAL_LANES:-0}" = 1 ]; then fe_static_wait 2 "$p2"; fi
   fe_static_one "$dir/3" "unit-test types (shrink-only ratchet — tests are excluded from the build's tsc)" run check:test-types & p3=$!
+  if [ "${OPENWOP_CI_SERIAL_LANES:-0}" = 1 ]; then fe_static_wait 3 "$p3"; fi
   for n in 1 2 3; do
     eval "p=\$p$n"
-    if wait "$p"; then :; else rc=$?; echo "frontend static step $n FAILED (exit $rc)" >> "$dir/$n"; fi
+    if [ "${OPENWOP_CI_SERIAL_LANES:-0}" != 1 ]; then fe_static_wait "$n" "$p"; fi
     cat "$dir/$n"; echo
   done
   rm -rf "$dir"
@@ -714,8 +724,14 @@ tg_begin() { # tg_begin <lane> → TG_LANE TG_MODE TG_RUN TG_ARGS
 }
 TG_RED_RUN="" # a red lane's predict/results/misses, kept for its Red Reader packet (ADR 0980 P1)
 tg_end() { # tg_end [lane rc] — report now (cheap, prints in place); ingest in the BACKGROUND
+  TG_ALL_FILES_PASSED=0
   [ -n "$TG_RUN" ] || return 0
   node "$TG" report --lane "$TG_LANE" --run "$TG_RUN" || echo "tracegate: report failed (ignored)"
+  # Capture before background ingest removes the directory. Missing/malformed
+  # coverage never promotes an enforce selection to a full observed lane.
+  if node -e 'const c=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); process.exit(c.version===1 && c.allFilesPassed===true && Number.isSafeInteger(c.total) && c.total>0 && c.expected===c.total && c.observed===c.total ? 0 : 1)' "$TG_RUN/coverage.json" 2>/dev/null; then
+    TG_ALL_FILES_PASSED=1
+  fi
   # The background ingest deletes the run dir, so a RED lane's three small files
   # are copied aside first; tg_red_packet turns them into the packet and removes them.
   TG_RED_RUN=""
@@ -951,15 +967,14 @@ tg_vitest frontend/react OPENWOP_LIVE_FETCH_AUDIT="$LIVE_FETCH_AUDIT" ${FE_CAP[@
 FE_SECS=$(( $(date +%s) - FE_T0 ))
 echo "  (frontend vitest ran ${FE_SECS}s${FE_BG_LIVE:+ with a worker cap, beside: $FE_BG_LIVE})"
 tg_end "$fe_rc"
+FE_ALL_FILES_PASSED="$TG_ALL_FILES_PASSED"
 [ "$fe_rc" -eq 0 ] || { tg_recheck_misses frontend frontend/react; tg_red_packet frontend; echo "frontend vitest FAILED (exit $fe_rc)"; exit "$fe_rc"; }
 
 step "frontend: live-fetch allowlist has no STALE entries (ADR 0661 phase 2)"
-if [ "$FE_TG_MODE" = enforce ]; then
-  # A stale entry is an allowlisted fetch NO test makes — provable only from a
-  # FULL run. Under enforce only a subset ran, so judging here would red every
-  # gate. A FULL run judges it: the gate runs the lane full when its last
-  # complete full run is > 24 h old (ADR 0880 D5 correction).
-  echo "↷ skipped: Tracegate ran a subset of the frontend lane; a full run checks stale entries (one runs in a gate once the last is > 24 h old)."
+if [ "$FE_TG_MODE" = enforce ] && [ "$FE_ALL_FILES_PASSED" != 1 ]; then
+  # A stale entry is provable only after every file actually passed. Enforce
+  # can select all files too; its mode alone does not establish a subset.
+  echo "↷ skipped: no complete passing frontend coverage was observed; the next explicit full lane checks stale entries (at least once every 24 h)."
 else
   node "$ROOT/scripts/check-live-fetch-stale.mjs" "$LIVE_FETCH_AUDIT"
   # `full-done --lane frontend` is recorded AFTER the date-bomb sweep, not here

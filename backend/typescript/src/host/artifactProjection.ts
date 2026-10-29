@@ -36,7 +36,7 @@ import {
 } from '../features/documents/documentsService.js';
 import { getAssetByIdForTenant, viewAsset, listAssetsForTenant, type MediaAsset } from '../features/media/mediaService.js';
 import { listDocumentsForTenant } from '../features/documents/documentsService.js';
-import { getRunArtifact, listRunArtifactsForTenant, type RunArtifactRecord, listRunArtifactsForRun } from './runArtifactStore.js';
+import { getRunArtifact, listRunArtifactsForTenant, type RunArtifactRecord, listRunArtifactsForRun, displayRunArtifactTitle } from './runArtifactStore.js';
 import type { Subject } from './subject.js';
 import { canReadChatArtifact } from './chatArtifactScope.js';
 
@@ -206,7 +206,8 @@ export function runArtifactToArtifact(row: RunArtifactRecord): ArtifactProjectio
     ...(row.artifactTypeId && isRegisteredArtifactType(row.artifactTypeId) ? { artifactTypeId: row.artifactTypeId } : {}),
     source: 'run-event',
     sourceId: row.artifactKey,
-    title: row.title,
+    // Read-time rename of a legacy `{` title (no migration; content is on the row).
+    title: displayRunArtifactTitle(row),
     kind: row.kind,
     format: row.format,
     status: row.status,

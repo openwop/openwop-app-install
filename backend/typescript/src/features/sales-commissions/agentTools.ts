@@ -31,10 +31,10 @@ import { listStatements } from './entities/statement.js';
 export const COMMISSIONS_LIST_PLANS_TOOL_ID = 'openwop:sales-commissions.list-plans';
 export const COMMISSIONS_LIST_STATEMENTS_TOOL_ID = 'openwop:sales-commissions.list-statements';
 
-type ToolResult = { content: string; isError?: boolean };
+type ToolResult = { content: string; isError?: boolean; hostMessage?: true };
 
 function toolError(error: string, message: string): ToolResult {
-  return { content: JSON.stringify({ error, message }), isError: true };
+  return { content: JSON.stringify({ error, message }), isError: true, hostMessage: true };
 }
 
 const str = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v.trim() : undefined);

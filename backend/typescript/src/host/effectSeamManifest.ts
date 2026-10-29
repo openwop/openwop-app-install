@@ -86,6 +86,12 @@ export const SEAM_CALL_SITES: ReadonlyArray<{ file: string; effectKind: string; 
   { file: 'src/host/smtpEgress.ts', effectKind: 'email', seam: 'smtp.send' },
   { file: 'src/host/runStarter.ts', effectKind: 'dispatch', seam: 'queue.run-start' },
   { file: 'src/features/campaign-orchestration/agentTools.ts', effectKind: 'dispatch', seam: 'queue.run-start' },
+  // ADR 0531 (replay egress follow-up, #5362): compose-and-run / propose refuse a replay BEFORE writing
+  // their transient draft (the run start itself is still guarded in runStarter).
+  { file: 'src/host/workflowComposeTool.ts', effectKind: 'dispatch', seam: 'queue.run-start' },
+  // ADR 0531 (replay egress follow-up, #5362): the NATIVE web-search leg is a paid provider call that
+  // used the plain global fetch, outside every other egress seam.
+  { file: 'src/host/headlessAi.ts', effectKind: 'network-egress', seam: 'provider.native-web-search' },
   // ADR 0954 P3: pre-reservation guards narrow the SAME existing run/inbox
   // owners, just as the campaign ignition guard does. No parallel emitter.
   { file: 'src/features/crm/leadIntel/speedToLead.ts', effectKind: 'dispatch', seam: 'queue.run-start' },
@@ -111,6 +117,8 @@ export const SEAM_ROWS: readonly SeamRow[] = [
   { seam: 'provider.stripe', kind: 'provider-sdk', guarded: true, guardedBy: GUARDED_BY, branchReFires: true,
     note: 'Both the general Stripe call seam and the off-session payment-intent path.' },
   { seam: 'provider.ucp-merchant', kind: 'provider-sdk', guarded: true, guardedBy: GUARDED_BY, branchReFires: true },
+  { seam: 'provider.native-web-search', kind: 'provider-sdk', guarded: true, guardedBy: GUARDED_BY, branchReFires: true,
+    note: 'ai.research.web / web research with no host search key: a search-shaped completion on the tenant\'s own LLM key (headlessAi native leg).' },
   { seam: 'queue.sub-run-dispatch', kind: 'queue', guarded: true, guardedBy: GUARDED_BY, branchReFires: true },
   { seam: 'queue.notification-emit', kind: 'queue', guarded: true, guardedBy: GUARDED_BY, branchReFires: true },
   // The row that produced the enum change. A direct SMTP connection is not `http`

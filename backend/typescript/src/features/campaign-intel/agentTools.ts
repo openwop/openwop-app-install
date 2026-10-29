@@ -52,12 +52,12 @@ export const CAMPAIGN_INTEL_ATTRIBUTION_TOOL_ID = 'openwop:campaign-intel.attrib
 export const CAMPAIGN_INTEL_CAPS_TOOL_ID = 'openwop:campaign-intel.caps';
 export const CAMPAIGN_INTEL_PROPOSE_REALLOCATION_TOOL_ID = 'openwop:campaign-intel.propose-reallocation';
 
-type ToolResult = { content: string; isError?: boolean };
+type ToolResult = { content: string; isError?: boolean; hostMessage?: true };
 
 /** Structured tool error — the agent loop surfaces `content` verbatim to the
  *  model, so the message must be actionable (what failed, what to do next). */
 function toolError(error: string, message: string, extra?: Record<string, unknown>): ToolResult {
-  return { content: JSON.stringify({ error, message, ...(extra ?? {}) }), isError: true };
+  return { content: JSON.stringify({ ...(extra ?? {}), error, message }), isError: true, hostMessage: true };
 }
 
 /** Per-call toggle honesty (ADR 0308 D2): per-tenant, dynamic, fail-closed. */

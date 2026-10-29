@@ -1,15 +1,15 @@
 /**
- * ADR 0957 P0 — the internal review view for client reports: the client's
- * report definitions, a "Compute report" action, and each frozen draft with
- * every figure's source. Nothing here reaches the client: review and
- * publishing are P1, portal delivery P2.
+ * ADR 0957 P1 — the internal review view for client reports: the client's
+ * definitions, local draft computation and the workflow-backed review action.
+ * Each frozen draft shows its figures' sources. Publication follows the
+ * workflow's scoped approval; portal delivery remains P2.
  *
  * Lazy (own chunk). Renders nothing when client reports are off for the
  * workspace. A failed read is said with a retry, never shown as "no reports".
  * A figure with no value reads "Not available", never 0, and every source's
  * window is stated: the sources are not filtered to the report period.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '../../ui/Button.js';
 import { InlineState } from '../../ui/InlineState.js';
@@ -18,7 +18,7 @@ import { SelectField, TextField } from '../../ui/Field.js';
 import { formatCurrency, formatDateTime, formatNumber } from '../../i18n/format.js';
 import { CampaignOpsError } from './campaignOpsClient.js';
 import {
-  computeReport, createDefinition, listDefinitions, listReports,
+  computeReport, createDefinition, listDefinitions, listReports, sendReportForReview,
   type ClientReport, type ReportDefinition, type ReportMetric, type ReportPeriodKind,
 } from './reportsClient.js';
 
@@ -104,6 +104,9 @@ function ClientReportsForOrg({ orgId }: { orgId: string }): JSX.Element | null {
   const [open, setOpen] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [sent, setSent] = useState<string | null>(null);
+  const mounted = useRef(false);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const [title, setTitle] = useState('');
   const [period, setPeriod] = useState<ReportPeriodKind>('month');
 
@@ -129,6 +132,18 @@ function ClientReportsForOrg({ orgId }: { orgId: string }): JSX.Element | null {
     catch (e) { setError(e instanceof Error && e.message ? e.message : t('reportsComputeFailed')); } finally { setBusy(null); }
   };
 
+  // ADR 0957 D2 — the gated path: the report waits in the approvals inbox under
+  // the client's review policy and publishes once approved.
+  const sendForReview = async (definitionId: string): Promise<void> => {
+    setBusy(definitionId); setError(null); setSent(null);
+    try {
+      await sendReportForReview(orgId, definitionId);
+      if (!mounted.current) return;
+      setSent(definitionId); await refresh();
+    } catch (e) { if (mounted.current) setError(e instanceof Error && e.message ? e.message : t('reportsSendFailed')); }
+    finally { if (mounted.current) setBusy(null); }
+  };
+
   if (load.kind === 'off') return null;
   return (
     <section className="surface-card" aria-labelledby="campaign-ops-reports">
@@ -140,6 +155,7 @@ function ClientReportsForOrg({ orgId }: { orgId: string }): JSX.Element | null {
           action={<Button variant="secondary" size="sm" onClick={() => void refresh()}>{t('reportsRetry')}</Button>} />
       ) : null}
       {error ? <Notice variant="error" announce={error}>{error}</Notice> : null}
+      {sent ? <Notice variant="success" announce={t('reportsSentForReview')}>{t('reportsSentForReview')}</Notice> : null}
       {load.kind === 'ready' ? (
         <>
           <div className="action-bar u-flex u-items-center u-gap-2 u-mb-2">
@@ -158,7 +174,8 @@ function ClientReportsForOrg({ orgId }: { orgId: string }): JSX.Element | null {
                   <li key={d.definitionId} className="u-mb-3">
                     <span className="u-fw-600">{d.title}</span>{' '}
                     <span className="chip chip--muted">{t('reportsVersion', { version: d.version })}</span>{' '}
-                    <Button variant="link" disabled={busy !== null} onClick={() => void compute(d.definitionId)}>{t('reportsCompute')}</Button>
+                    <Button variant="link" disabled={busy !== null} onClick={() => void compute(d.definitionId)}>{t('reportsCompute')}</Button>{' '}
+                    <Button variant="link" disabled={busy !== null} onClick={() => void sendForReview(d.definitionId)}>{t('reportsSendForReview')}</Button>
                     {reports.length > 0 ? (
                       <ul className="u-m-0">
                         {reports.map((r) => (

@@ -17,7 +17,7 @@
  * EMPTY without an acting user; the draft write fails TYPED.
  */
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
-import { toolFailLog } from '../../host/agentToolKit.js';
+import { toolFailLog, untrustedToolError } from '../../host/agentToolKit.js';
 import { createLogger } from '../../observability/logger.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { resolveOne } from '../../host/featureToggles/service.js';
@@ -30,9 +30,9 @@ export const PROMOTIONS_APPLY_PREVIEW_TOOL_ID = 'openwop:promotions.apply-previe
 export const PROMOTIONS_DRAFT_TOOL_ID = 'openwop:promotions.draft';
 
 const FEATURE = 'promotions';
-type ToolResult = { content: string; isError?: boolean };
+type ToolResult = { content: string; isError?: boolean; hostMessage?: true };
 const ok = (v: unknown): ToolResult => ({ content: JSON.stringify(v) });
-const toolError = (error: string, message: string): { content: string; isError: true } => ({ content: JSON.stringify({ error, message }), isError: true });
+const toolError = (error: string, message: string): { content: string; isError: true; hostMessage: true } => ({ content: JSON.stringify({ error, message }), isError: true, hostMessage: true });
 const str = (v: unknown): string => (typeof v === 'string' ? v.trim() : '');
 const optStr = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
 
@@ -72,7 +72,7 @@ async function resolveToolOrg(
 
 const log = createLogger('promotions.agent-tools');
 function fromServiceError(e: unknown): { content: string; isError: true } {
-  if (e instanceof OpenwopError) return toolError(e.code, e.message);
+  if (e instanceof OpenwopError) return untrustedToolError(e.code, 'The tool refused this call; the reason it gave is below.', e.message) as { content: string; isError: true };
   return toolFailLog(log, 'openwop:promotions', e) as { content: string; isError: true }; // CFPT-6
 }
 

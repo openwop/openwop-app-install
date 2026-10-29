@@ -880,4 +880,21 @@ export const messages = {
   checkHeldNotice: "{{persona}} has nothing to pick up: every To Do card is held after a stopped or failed run. Release a card on the board to let the agent take it again.",
   // ADR 0768 follow-up P1 — the embed's honest "can see" scope (the agent is NOT bound to what is on screen)
   authorCanSee: "available agents, workflows and your roster",
+  // ADR 0999 D7 — AgentCompactionPanel (the per-agent lossy opt-in, TOCU-2)
+  compactionTitle: "Tool-output compaction",
+  compactionDesc: "How tool results are shortened before this agent reads them. By default only spacing is removed and every value is kept.",
+  compactionChipLossless: "Lossless",
+  compactionChipLossy: "Lossy",
+  compactionLossyLabel: "Let this agent read shortened lists (lossy)",
+  compactionLossyWarning: "Lossy removes information. Long lists of records keep only their first and last rows, with a marker saying how many were removed, and empty fields are dropped and named. Lists of plain values (ids, tags) and schema or catalog reads are never shortened. Use it only for agents that summarise, not agents that edit what they read.",
+  compactionHead: "Rows kept at the start",
+  compactionTail: "Rows kept at the end",
+  compactionCountInvalid: "Enter a whole number, 0 or more.",
+  compactionScopeNote: "Applies to new runs this agent starts. A run already under way keeps the setting it started with, and a run inside another run follows the run that started it.",
+  compactionSave: "Save compaction",
+  compactionSaving: "Saving…",
+  compactionLoading: "Loading the compaction setting…",
+  compactionLoadFailed: "The compaction setting could not be loaded.",
+  compactionCountHelp: "Leave blank for {{n}}.",
+  compactionSaved: "Compaction setting saved. It applies to the next run this agent starts.",
 } as const;

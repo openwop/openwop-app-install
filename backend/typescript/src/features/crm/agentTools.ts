@@ -73,12 +73,12 @@ export const CRM_CREATE_TASK_TOOL_ID = 'openwop:feature.crm.nodes.create-task';
 export const CRM_LIST_SEGMENT_MEMBERS_TOOL_ID = 'openwop:feature.crm.nodes.list-segment-members';
 export const CRM_PERSIST_SEGMENT_TOOL_ID = 'openwop:feature.crm.nodes.persist-segment';
 
-type ToolResult = { content: string; isError?: boolean };
+type ToolResult = { content: string; isError?: boolean; hostMessage?: true };
 
 /** Structured tool error — the agent loop surfaces `content` verbatim to the
  *  model, so the message must be actionable (what failed, what to do next). */
 function toolError(error: string, message: string, extra?: Record<string, unknown>): ToolResult {
-  return { content: JSON.stringify({ error, message, ...(extra ?? {}) }), isError: true };
+  return { content: JSON.stringify({ ...(extra ?? {}), error, message }), isError: true, hostMessage: true };
 }
 
 const str = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v.trim() : undefined);

@@ -39,12 +39,12 @@ export const TERRITORIES_LIST_QUOTAS_TOOL_ID = 'openwop:territories.list-quotas'
 export const TERRITORIES_PREVIEW_TOOL_ID = 'openwop:territories.preview';
 export const TERRITORIES_ATTAINMENT_TOOL_ID = 'openwop:territories.attainment';
 
-type ToolResult = { content: string; isError?: boolean };
+type ToolResult = { content: string; isError?: boolean; hostMessage?: true };
 
 /** Structured tool error — the agent loop surfaces `content` verbatim, so the
  *  message must say what failed and what to do next. */
 function toolError(error: string, message: string): ToolResult {
-  return { content: JSON.stringify({ error, message }), isError: true };
+  return { content: JSON.stringify({ error, message }), isError: true, hostMessage: true };
 }
 
 const str = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v.trim() : undefined);

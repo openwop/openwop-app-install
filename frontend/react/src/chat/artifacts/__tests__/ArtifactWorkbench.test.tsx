@@ -87,4 +87,36 @@ describe('ArtifactWorkbench (ART-2)', () => {
     expect(screen.queryByText(/artifact_unreachable/)).toBeNull(); // never the raw exception
     expect(screen.queryByText('Quarterly Report')).toBeNull();
   });
+  // P9 — an untyped JSON run output, and a typed review artifact the workbench
+  // has no renderer for, both used to preview as Markdown of the raw JSON.
+  it('an untyped JSON output previews as fields; the Raw tab still has the exact bytes', async () => {
+    const raw = JSON.stringify({ approvalId: 'appr:1', state: 'submitted' }, null, 2);
+    mockGet.mockResolvedValueOnce({ ...ART, title: 'Approval request (submitted)', kind: 'data', format: 'application/json' });
+    mockRevs.mockResolvedValueOnce([REV]);
+    mockRev.mockResolvedValueOnce({ ...REV, content: raw });
+    render(<ArtifactWorkbench artifactId="run-event:r:n" onClose={() => {}} />);
+    expect(await screen.findByText('Submitted and awaiting review. Not published yet.')).toBeTruthy();
+    expect(screen.getByText('Approval id')).toBeTruthy();
+    fireEvent.click(screen.getByRole('tab', { name: 'Raw' }));
+    expect(document.querySelector('.artifact-workbench__raw')?.textContent).toBe(raw);
+  });
+
+  it('a typed review artifact with no workbench renderer uses its review layout', async () => {
+    const plan = { title: 'Twenty-One Days of Focus', promise: 'p', audience: 'a', outcomes: [], achievements: [],
+      days: [{ day: 1, stableActivityId: 'd1', title: 'First block', actionInstruction: 'Focus.', userFacingWhy: '', achievementIds: [], evidencePolicy: 'note', claimRefs: [] }] };
+    mockGet.mockResolvedValueOnce({ ...ART, artifactTypeId: 'kicktodo.challenge-plan', kind: 'data', format: 'application/json' });
+    mockRevs.mockResolvedValueOnce([REV]);
+    mockRev.mockResolvedValueOnce({ ...REV, content: JSON.stringify(plan) });
+    render(<ArtifactWorkbench artifactId="run-event:r:n" onClose={() => {}} />);
+    expect(await screen.findByText('Day 1: First block')).toBeTruthy();
+  });
+
+  it('plain text still previews through Markdown, unchanged', async () => {
+    mockGet.mockResolvedValueOnce(ART);
+    mockRevs.mockResolvedValueOnce([REV]);
+    mockRev.mockResolvedValueOnce(REV);
+    render(<ArtifactWorkbench artifactId="run-event:r:n" onClose={() => {}} />);
+    expect(await screen.findByText('Q3 variance was within plan.')).toBeTruthy();
+    expect(screen.queryByRole('status')).toBeNull();
+  });
 });

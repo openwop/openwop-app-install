@@ -48,6 +48,7 @@ import { getApproval, resolveApproval, reopenApproval, eraseApprovalSubject, reg
 import { resolveEffectiveAccess } from './accessControlService.js';
 import { OpenwopError } from '../types.js';
 import { createLogger } from '../observability/logger.js';
+import { toolError, untrustedToolError } from './agentToolKit.js';
 
 const log = createLogger('host.anonymousActor');
 
@@ -438,7 +439,7 @@ export async function runAnonReadTurn(params: AnonReadTurnParams): Promise<AnonR
     await decide(call.name, auth.allowed, auth.reason);
     if (auth.tier === 'read' && auth.allowed) return toolProvider.executeTool(call);
     if (auth.reason === 'anon-write-ungated') {
-      return { content: JSON.stringify({ error: 'anon_write_ungated', message: 'This action requires an approval control that is not configured for this public surface.' }), isError: true };
+      return toolError('anon_write_ungated', 'This action requires an approval control that is not configured for this public surface.');
     }
     // ADR 0469 Phase D — `rate-limit-session-cap`: AUTO-EXECUTE the write inline under
     // a per-session (+per-day) cap, NO human gate. Honored ONLY for a pure tenant-write
@@ -451,7 +452,7 @@ export async function runAnonReadTurn(params: AnonReadTurnParams): Promise<AnonR
       const cap = await params.autoWriteUnderCap({ name: call.name, ...(call.input ? { input: call.input } : {}) }, { runId, principal });
       if (!cap.allowed) {
         await decide(call.name, false, 'anon-write-auto-capped');
-        return { content: JSON.stringify({ error: 'anon_write_auto_capped', message: cap.message ?? 'This surface has reached its automatic-action limit — tell the visitor to try again later.' }), isError: true };
+        return untrustedToolError('anon_write_auto_capped', 'This surface has reached its automatic-action limit — tell the visitor to try again later.', cap.message);
       }
       await decide(call.name, true, 'anon-write-auto-allowed');
       return toolProvider.executeTool(call);
@@ -464,10 +465,10 @@ export async function runAnonReadTurn(params: AnonReadTurnParams): Promise<AnonR
       const held = await params.holdGrantedWrite({ name: call.name, ...(call.input ? { input: call.input } : {}) }, { runId, principal, toolCallIdx: anonWriteIdx++ });
       if (held.status === 'capped') {
         await decide(call.name, false, 'anon-write-capped');
-        return { content: JSON.stringify({ error: 'anon_write_capped', message: held.message ?? 'This surface has reached its limit for queued actions — tell the visitor to try again later.' }), isError: true };
+        return untrustedToolError('anon_write_capped', 'This surface has reached its limit for queued actions — tell the visitor to try again later.', held.message);
       }
       if (held.status === 'error') {
-        return { content: JSON.stringify({ error: 'anon_write_error', message: 'This action could not be queued for review.' }), isError: true };
+        return toolError('anon_write_error', 'This action could not be queued for review.');
       }
       await decide(call.name, true, 'anon-write-held');
     }

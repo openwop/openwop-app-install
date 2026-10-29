@@ -48,6 +48,24 @@ describe('schema ↔ producer parity', () => {
     expect(v.registered).toBe(true);
     expect(v.valid, JSON.stringify(v.errors)).toBe(true);
   });
+
+  // P9 (2026-10-28): the registered schema's day lacked `alternatives`, so every
+  // plan the producer emitted with substitutions failed typed persistence.
+  it('a day with alternatives validates; a malformed alternative still does not', () => {
+    const alt = { stableActivityId: 'd1-walk-alt', title: 'Walk instead', actionInstruction: 'Walk for 10 minutes.', evidencePolicy: 'attestation' as const };
+    const withAlt = { ...VALID, days: [{ ...VALID.days[0]!, alternatives: [alt] }, ...VALID.days.slice(1)] };
+    const ok = validateArtifact(CHALLENGE_PLAN_TYPE, withAlt);
+    expect(ok.valid, JSON.stringify(ok.errors)).toBe(true);
+
+    for (const bad of [
+      { ...alt, evidencePolicy: 'vibes' },
+      { ...alt, extra: 'not in the schema' },
+      { stableActivityId: 'x', title: 'No instruction', evidencePolicy: 'note' },
+    ]) {
+      const v = validateArtifact(CHALLENGE_PLAN_TYPE, { ...VALID, days: [{ ...VALID.days[0]!, alternatives: [bad] }, ...VALID.days.slice(1)] });
+      expect(v.valid, JSON.stringify(bad)).toBe(false);
+    }
+  });
 });
 
 describe('validatePlan — every defect class reported', () => {

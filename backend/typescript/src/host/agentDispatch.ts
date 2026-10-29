@@ -37,7 +37,7 @@ import { scrubSecretShaped } from './redactSecrets.js';
 import { evaluateToolPermissionSet, agentToolPermissionsEnabled, type ToolPermissions } from './agentToolPermissions.js';
 import { resolveAgentToolPermissionSet } from './agentProfileService.js';
 import { effectiveToolAllowlist, resolveAgentToolAllowlistOverride } from './agentToolAllowlistService.js';
-import { applyToolResultTransform } from './toolResultTransform.js';
+import { applyToolResultTransform, findCompactionMarkerPath, compactionMarkerRefusal, COMPACTION_MARKER_IN_INPUT } from './toolResultTransform.js';
 import { toModelToolResult } from './toModelToolResult.js';
 import { acceptEnvelope, loadEnvelopePayloadSchema } from './envelopeAcceptor.js';
 import { tryLenientParse } from './envelopeReliabilityEmit.js';
@@ -323,7 +323,14 @@ export type ResolveAgentTool = (name: string) => AgentToolDef | undefined;
 export type ExecuteAgentTool = (
   /** `callId` is the dispatcher's call id (ADR 0984 D7 keys the as-executed record by it). */
   call: { name: string; input: Record<string, unknown>; callId?: string },
-) => Promise<{ content: string; isError?: boolean; errorCode?: string; continueTurn?: string | null }>;
+) => Promise<{
+  content: string; isError?: boolean; errorCode?: string; continueTurn?: string | null;
+  /** TOC2CD-14 — the error content is a CAUGHT THROW's message (arbitrary text, never a
+   *  sentence the tool wrote on purpose), so `toModelToolResult` always fences it. */
+  fromThrow?: true;
+  /** TOC2CD-11 — set only by a `toolError` helper: the error's `message` is a host sentence. */
+  hostMessage?: true;
+}>;
 
 /** Bound `ctx.callAIWithTools` (a single Anthropic tool-calling round). */
 export type CallAiWithTools = (req: AiToolCallRequest) => Promise<AiToolCallResult>;
@@ -1332,6 +1339,20 @@ export async function runChatToolLoop(
         messages.push({ role: 'user', content: `Tool "${call.name}" is not enabled for this conversation.` });
         continue;
       }
+      // ADR 0999 D3.2 (TOC2CD-3) — under a `lossy` decision, refuse an input that
+      // carries a compaction marker back to a tool: it is a stand-in for rows the
+      // model never saw, and a write path that filters malformed elements would
+      // persist the SHORTENED list. Emitted exactly like `invalid_args` — the tool
+      // never ran, so `status:'error'` with no `durationMs`. Checked BEFORE the
+      // approval / permission / firewall gates (review L6): it is a pure function of
+      // the input, and queueing a marker-carrying call for human approval would ask
+      // a person to approve a write that is then refused.
+      const markerPath = opts.compaction?.mode === 'lossy' ? findCompactionMarkerPath(call.input) : undefined;
+      if (markerPath) {
+        await emit({ type: 'agent.toolReturned', agentId, toolName: call.name, callId: call.id, status: 'error', error: { code: COMPACTION_MARKER_IN_INPUT, message: scrubSecretShaped(`input contains a compaction marker at ${markerPath}`) } });
+        messages.push({ role: 'user', content: `Result of ${call.name}: ${compactionMarkerRefusal(call.name, markerPath)}` });
+        continue;
+      }
       // ADR 0132 Phase 3 — per-conversation approval gate. The tool is enabled but
       // requires a human approval first: do NOT execute it. Collect it as a pending
       // approval (deduped by name — one card per tool this turn) and tell the model
@@ -1421,7 +1442,7 @@ export async function runChatToolLoop(
       firewallSeen.push(call.name); // ADR 0135 — this tool's classes now count toward later combinations this turn
       await emit({ type: 'agent.toolCalled', agentId, toolName: call.name, callId: call.id, argsHash: computeArgsHash(call.input), transport: 'native' });
       const startedAt = Date.now();
-      let execOut: { content: string; isError?: boolean; errorCode?: string; continueTurn?: string | null };
+      let execOut: Awaited<ReturnType<ExecuteAgentTool>>;
       try {
         execOut = await deps.executeTool({ name: call.name, input: call.input, callId: call.id });
       } catch (err) {
@@ -1431,7 +1452,7 @@ export async function runChatToolLoop(
         // `featureSurfaces` capability gate, `AiProviderError`, `OpenwopError`)
         // so a capability-precondition failure is nameable + duration-suppressed
         // below; unstructured throws fall back to `tool_execution_failed`.
-        execOut = { content: `tool_execution_failed: ${err instanceof Error ? err.message : String(err)}`, isError: true, errorCode: extractToolErrorCode(err) };
+        execOut = { content: `tool_execution_failed: ${err instanceof Error ? err.message : String(err)}`, isError: true, errorCode: extractToolErrorCode(err), fromThrow: true };
       }
       // ADR 0773 B.7 — the latest word from a tool that tracks unfinished work:
       // a string arms the follow-up, `null` (the work is done) disarms it.
@@ -1459,8 +1480,14 @@ export async function runChatToolLoop(
       }
       const compactedContent = toModelToolResult(
         call.name,
-        applyToolResultTransform(execOut.content, { decision: opts.compaction, toolName: call.name, ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) }),
+        applyToolResultTransform(execOut.content, { decision: opts.compaction, toolName: call.name, ...(opts.tenantId ? { tenantId: opts.tenantId } : {}), ...(execOut.isError ? { isError: true } : {}) }),
         execOut.isError,
+        // TOC2CD-14 — a caught throw's message is arbitrary text: always fenced.
+        // TOC2CD-11 — a `toolError` helper vouched for the error's host `message`.
+        {
+          ...(execOut.fromThrow ? { fromThrow: true, ...(execOut.errorCode ? { code: execOut.errorCode } : {}) } : {}),
+          ...(execOut.hostMessage ? { hostVouched: true } : {}),
+        },
       );
       // `compactedContent` is ALREADY fenced when the tool declares
       // `contentTrust: 'untrusted'` — `toModelToolResult` above is the single

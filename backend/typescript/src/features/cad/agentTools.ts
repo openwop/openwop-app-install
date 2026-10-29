@@ -33,7 +33,7 @@
  */
 import { createHash } from 'node:crypto';
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
-import { resolveFeatureToggle } from '../../host/agentToolKit.js';
+import { resolveFeatureToggle, untrustedToolError } from '../../host/agentToolKit.js';
 import { listOrgs, resolveEffectiveAccess } from '../../host/accessControlService.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { getNodeRegistry } from '../../executor/nodeRegistry.js';
@@ -46,12 +46,12 @@ export const CAD_RENDER_TOOL_ID = 'openwop:cad.render';
 const CAD_CANVAS_TYPE = 'canvas.cad';
 const RENDER_NODE_TYPE_ID = 'feature.cad.nodes.render';
 
-type ToolResult = { content: string; isError?: boolean };
+type ToolResult = { content: string; isError?: boolean; hostMessage?: true };
 
 /** Structured tool error — the agent loop surfaces `content` verbatim to the
  *  model, so the message must be actionable (what failed, what to do next). */
 function toolError(error: string, message: string, extra?: Record<string, unknown>): ToolResult {
-  return { content: JSON.stringify({ error, message, ...(extra ?? {}) }), isError: true };
+  return { content: JSON.stringify({ ...(extra ?? {}), error, message }), isError: true, hostMessage: true };
 }
 
 /** Per-call toggle honesty (ADR 0308 D2): per-tenant, dynamic, fail-closed. */
@@ -116,7 +116,7 @@ async function normalizeModel(tenantId: string, model: unknown): Promise<{ paylo
     solidCount = typeof out.solidCount === 'number' ? out.solidCount : 0;
   } catch (e) {
     const err = e as { code?: string; message?: string };
-    return toolError(err.code ?? 'validation_error', `${err.message ?? 'the model failed normalization'} — fix the model and call again.`);
+    return untrustedToolError(err.code ?? 'validation_error', 'The model failed normalization — fix the model and call again. The validator\'s reason is below.', err.message);
   }
   // Closed-world validation — the gate the editor PATCH enforces, now AT
   // AUTHORING TIME so the model gets the defects while it can react (repair loop).
@@ -166,7 +166,7 @@ export function registerCadAgentTools(): void {
       if (!canvasId) return toolError('validation_error', '`canvasId` is required (no model is open beside this chat).');
       const canvas = await getCanvasForCaller(scope.tenantId, canvasId, { subject: scope.actingUserId });
       if (!canvas || canvas.canvasTypeId !== CAD_CANVAS_TYPE) {
-        return toolError('not_found', `CAD model '${canvasId}' not found in this workspace.`);
+        return untrustedToolError('not_found', 'That CAD model (id below) was not found in this workspace.', canvasId);
       }
       return {
         content: JSON.stringify({
@@ -226,7 +226,7 @@ export function registerCadAgentTools(): void {
         // uniform not_found — the agent can never overwrite another type.
         const existing = await getCanvasForCaller(scope.tenantId, canvasId, { subject: scope.actingUserId });
         if (!existing || existing.canvasTypeId !== CAD_CANVAS_TYPE) {
-          return toolError('not_found', `CAD model '${canvasId}' not found in this workspace.`);
+          return untrustedToolError('not_found', 'That CAD model (id below) was not found in this workspace.', canvasId);
         }
         // ADR 0886 D1 — WRITE on the owner, decided in the owner's org.
         if (!(await canvasWriteAllowed(scope.tenantId, existing, { subject: scope.actingUserId }))) {
@@ -242,7 +242,7 @@ export function registerCadAgentTools(): void {
             merge: 'replace',
             snapshot: { capturedBy: gate.actingUserId },
           });
-          if (!result) return toolError('not_found', `CAD model '${canvasId}' not found in this workspace.`);
+          if (!result) return untrustedToolError('not_found', 'That CAD model (id below) was not found in this workspace.', canvasId);
           return {
             content: JSON.stringify({
               canvasId: result.canvasId,
@@ -257,7 +257,7 @@ export function registerCadAgentTools(): void {
           if (err.code === 'canvas_version_conflict') {
             return toolError('canvas_version_conflict', 'Someone edited this model since you read it — call get-design again and re-apply your changes on the new version.');
           }
-          return toolError(err.code ?? 'update_failed', err.message ?? 'the update failed');
+          return untrustedToolError(err.code ?? 'update_failed', 'The update failed; the reason is below.', err.message);
         }
       }
 

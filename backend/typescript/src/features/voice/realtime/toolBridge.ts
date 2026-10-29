@@ -251,6 +251,12 @@ export async function executeRealtimeToolCall(input: {
     name,
     typeof out.content === 'string' ? out.content : JSON.stringify(out.content),
     out.isError,
+    // TOC2CD-14 — a caught throw's message is arbitrary text: always fenced.
+    // TOC2CD-11 — a `toolError` helper vouched for the error's host `message`.
+    {
+      ...(out.fromThrow ? { fromThrow: true, ...(out.errorCode ? { code: out.errorCode } : {}) } : {}),
+      ...(out.hostMessage ? { hostVouched: true } : {}),
+    },
   );
   return { status: 'ok', result: modelText, ...(out.isError ? { isError: true } : {}) };
 }

@@ -158,7 +158,11 @@ describe('schema-read tool outputs are never compacted (XCH-INFRA-1)', () => {
   // negative control below correctly reported as "not compacted". A negative
   // control that cannot distinguish "exempt" from "not worth compacting" would
   // have been the same vacuity in a new costume.
-  const elidable = JSON.stringify({ rows: Array.from({ length: 60 }, (_, i) => `row-value-${i}`), note: '', extra: [] });
+  // ADR 0999 D5.2 — rows are OBJECTS: `lossy` no longer elides an array of
+  // scalars (an enum or id list gained an object element), so a string row list
+  // would make the negative control below report "not compacted" for the wrong
+  // reason.
+  const elidable = JSON.stringify({ rows: Array.from({ length: 60 }, (_, i) => ({ id: `row-value-${i}` })), note: '', extra: [] });
 
   it('the exempt set is non-empty and still contains every id it was proved to need', async () => {
     const { SCHEMA_READ_EXEMPT_TOOLS } = await import('../src/host/toolResultTransform.js');

@@ -59,7 +59,7 @@ PASS=0; FAIL=0
 # peer's `npm run ci`) used to write the SAME /tmp/owp-shutdown-test.log, so one
 # run could grep another run's backend output.
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/owp-shutdown.XXXXXX")"
-LOG="$WORK/backend.log"
+LOG=""
 HELD="$WORK/held"
 ok()  { PASS=$((PASS + 1)); echo "  ✓ $1"; }
 bad() { FAIL=$((FAIL + 1)); echo "  ✗ $1" >&2; }
@@ -70,13 +70,16 @@ BE=""
 cleanup() {
   [ -n "$HOLDER" ] && kill "$HOLDER" 2>/dev/null
   [ -n "$BE" ] && kill -9 "$BE" 2>/dev/null
-  if [ "$FAIL" -gt 0 ]; then echo "  (backend log kept: $LOG — $(wc -c <"$LOG" 2>/dev/null || echo 0) bytes)" >&2
+  if [ "$FAIL" -gt 0 ]; then echo "  (shutdown logs kept: $WORK)" >&2
   else rm -rf "$WORK"; fi
   return 0
 }
 trap cleanup EXIT INT TERM
 
 boot() { # graceMs -> sets BE
+  # Each attempt owns its evidence. A successful force-path boot must not erase
+  # the preceding failed clean-path startup (observed in train 268, 2026-10-28).
+  LOG="$WORK/backend-$1.log"
   # DO NOT re-point the SHARED pack namespace. `ensureLocalPacksMounted`
   # (index.ts:344) rewrites every ~/.openwop-packs symlink to point at THIS
   # worktree on boot, and symlinks resolve on every read — so a peer's suite,
@@ -91,7 +94,21 @@ boot() { # graceMs -> sets BE
   OPENWOP_SESSION_SECRET=dev-session-secret-at-least-32-characters-long \
   PORT="$PORT" node "$ENTRY" >"$LOG" 2>&1 &
   BE=$!
-  for _ in $(seq 1 60); do gate_port_in_use "$PORT" && return 0; sleep 1; done
+  for _ in $(seq 1 60); do
+    if gate_port_in_use "$PORT"; then
+      gate_assert_port_owned_by "$PORT" "$BE" && return 0
+      echo "  backend listener is not owned by pid $BE; log: $LOG" >&2
+      return 1
+    fi
+    if ! kill -0 "$BE" 2>/dev/null; then
+      local code=0
+      wait "$BE" || code=$?
+      echo "  backend exited before listening (exit $code); log: $LOG" >&2
+      return 1
+    fi
+    sleep 1
+  done
+  echo "  backend startup timed out after 60s; pid $BE; log: $LOG" >&2
   return 1
 }
 

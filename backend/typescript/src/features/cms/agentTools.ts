@@ -36,6 +36,8 @@ import { LOCALE_RE } from '../../host/i18n/index.js';
 import { buildCmsSurface } from './surface.js';
 import { translateSectionData } from './translate.js';
 import { getLocaleGrant, SECTION_TYPES, type SectionType } from './cmsService.js';
+import { findCompactionMarkerPath, COMPACTION_MARKER_IN_INPUT } from '../../host/toolResultTransform.js';
+import { untrustedToolError } from '../../host/agentToolKit.js';
 
 export const CMS_GET_PAGE_TOOL_ID = 'openwop:cms.get-page';
 export const CMS_LIST_PAGES_TOOL_ID = 'openwop:cms.list-pages';
@@ -44,12 +46,12 @@ export const CMS_TRANSLATE_SECTION_TOOL_ID = 'openwop:cms.translate-section';
 export const CMS_UPDATE_SECTION_DRAFT_TOOL_ID = 'openwop:cms.update-section-draft';
 export const CMS_SUBMIT_PAGE_TOOL_ID = 'openwop:cms.submit-page';
 
-type ToolResult = { content: string; isError?: boolean };
+type ToolResult = { content: string; isError?: boolean; hostMessage?: true };
 
 /** Structured tool error — the agent loop surfaces `content` verbatim to the
  *  model, so the message must say what failed and what to do next. */
 function toolError(error: string, message: string, extra?: Record<string, unknown>): ToolResult {
-  return { content: JSON.stringify({ error, message, ...(extra ?? {}) }), isError: true };
+  return { content: JSON.stringify({ ...(extra ?? {}), error, message }), isError: true, hostMessage: true };
 }
 
 function ok(payload: Record<string, unknown>): ToolResult {
@@ -218,6 +220,13 @@ export function registerCmsAgentTools(): void {
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
     effect: 'read',
+    // ADR 0999 D3.1 (TOC2CD-3) — category (c), read-before-write: the `overlay`
+    // this returns is the body the model saves back through
+    // `update-section-draft` (with `locale`). Under `lossy` a section's row
+    // lists (columns, comparison rows) were elided, and `buildSectionData`
+    // FILTERS the `{"_elided":N}` element instead of refusing it, so the
+    // shortened overlay was persisted as the whole translation.
+    schemaCarrying: true,
     def: {
       name: CMS_TRANSLATE_SECTION_TOOL_ID,
       description:
@@ -305,6 +314,13 @@ export function registerCmsAgentTools(): void {
       },
     },
     async run(input, scope) {
+      // ADR 0999 D3.3 — the WRITER refuses a compaction marker (`{"_elided":N}`)
+      // with a typed error rather than filtering it: a filtered marker persists a
+      // SHORTENED list as if it were whole. The tool loop refuses it too under a
+      // lossy decision; this holds on every path that reaches the writer. First, before
+      // any read: it is a pure function of the input and reveals nothing.
+      const marker = findCompactionMarkerPath(input);
+      if (marker) return untrustedToolError(COMPACTION_MARKER_IN_INPUT, 'Input contains a tool-output compaction marker (its path is below): it stands for rows you were not shown. Re-read the full value and send every element.', marker);
       const gate = await resolveOrgScope(scope, str(input.orgId), 'workspace:write');
       if ('content' in gate) return gate;
       const pageId = str(input.pageId);
@@ -319,7 +335,7 @@ export function registerCmsAgentTools(): void {
       if (!updateSectionDraftFn) return toolError('surface_unavailable', 'cms surface method updateSectionDraft is not available.');
       const res = await updateSectionDraftFn({ orgId: gate.orgId, pageId, sectionId, data, ...(locale ? { locale } : {}) });
         if (!res.updated) {
-          return toolError(strField(res.reason, 'not_updated'), `The section was not updated (${strField(res.reason, 'unknown reason')}).`);
+          return untrustedToolError(strField(res.reason, 'not_updated'), 'The section was not updated; the reason is below.', strField(res.reason, 'unknown reason'));
         }
         return ok({ updated: true, ...(res.locale ? { locale: res.locale } : {}) });
       } catch (err) {
@@ -357,7 +373,7 @@ export function registerCmsAgentTools(): void {
       if (!submitPageFn) return toolError('surface_unavailable', 'cms surface method submitPage is not available.');
       const res = await submitPageFn({ orgId: gate.orgId, pageId });
         if (!res.submitted) {
-          return toolError(strField(res.reason, 'not_submitted'), `The page was not submitted (${strField(res.reason, 'unknown reason')}).`);
+          return untrustedToolError(strField(res.reason, 'not_submitted'), 'The page was not submitted; the reason is below.', strField(res.reason, 'unknown reason'));
         }
         return ok({ submitted: true, status: res.status, note: 'The page is awaiting human review — tell the user a human must approve and publish it.' });
       } catch (err) {

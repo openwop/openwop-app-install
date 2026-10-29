@@ -30,6 +30,7 @@ import { hasAssistantWriteAuthority } from './writeAuthority.js';
 import { buildAssistantSurface } from './surface.js';
 import { PRIORITY_PROFILES } from './prioritization.js';
 import { ENQUEUEABLE_ACTION_KINDS } from './assistantService.js';
+import { untrustedToolError } from '../../host/agentToolKit.js';
 
 export const ASSISTANT_LIST_COMMITMENTS_TOOL_ID = 'openwop:assistant.list-commitments';
 export const ASSISTANT_LIST_PENDING_ACTIONS_TOOL_ID = 'openwop:assistant.list-pending-actions';
@@ -46,8 +47,8 @@ const ENQUEUEABLE_KINDS = ENQUEUEABLE_ACTION_KINDS;
 
 
 /** Structured tool error (the agent loop surfaces `content` verbatim to the model). */
-function toolError(error: string, message: string): { content: string; isError: true } {
-  return { content: JSON.stringify({ error, message }), isError: true };
+function toolError(error: string, message: string): { content: string; isError: true; hostMessage: true } {
+  return { content: JSON.stringify({ error, message }), isError: true, hostMessage: true };
 }
 
 const str = (v: unknown): string => (typeof v === 'string' ? v.trim() : '');
@@ -299,7 +300,7 @@ export function registerAssistantAgentTools(): void {
         // action kind, or the acting agent's `permissions.never`) — surface it as
         // a typed refusal so the model tells the user, never a silent success.
         const e = err as { code?: string; message?: string };
-        return toolError(e.code ?? 'enqueue_failed', e.message ?? 'The action could not be drafted.');
+        return untrustedToolError(e.code ?? 'enqueue_failed', 'The action could not be drafted; the reason is below.', e.message);
       }
     },
   });

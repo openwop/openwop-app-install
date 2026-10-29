@@ -1,6 +1,6 @@
 # ADR 0957 — Client reporting and the client portal
 
-Status: Accepted (P0 implemented 2026-10-20; P1 in progress: steps and scheduling built, the chain and its gate step wait on ADR 0942's org-scoped freeze; P2–P5 open)
+Status: Accepted (P0 implemented 2026-10-20; P1 in progress: current-main chain/publication rebuild prepared; execution, security review and full gate pending; P2–P5 open)
 
 Date: 2026-10-19. Program: Campaign Studio (ADRs 0941–0962), Tier 4 — agency scale.
 Net-new feature planned with `/feature-refinement`; not a MyndHyve port.
@@ -444,3 +444,312 @@ that a proposal CAS with no confirmed winner must refuse, rather than return a
 phantom pending proposal; the corrected implementation passes. This does not
 complete the later phases listed above. Full canonical CI remains required
 before merge, and deployment remains separately queued.
+
+
+## P1b recovery review — 2026-10-28
+
+The archived `6cd56188c` implementation was untested and based on an old tree.
+Its 67-file ancestry includes unrelated already-landed changes; recovery is
+limited to the 21-file P1b commit and adapted to current main `002e1ed15`.
+The org-scoped freeze is already implemented by
+`campaign-ops/autonomyStamp.ts`; no second policy or approval system is added.
+
+**Corrections to the archived publication check:**
+
+- Publication uses `enforceCampaignAction`, including current client mode/status
+  and fork floors, followed by the existing `findCoveringGrant`. The chain
+  supplies the computed snapshot hash as the gate's `contentHash`.
+- Approval must belong to this run, the exact snapshot and frozen policy,
+  explicitly say `action: approve`, and name the autonomy gate in the run's
+  persisted definition revision. Missing/pruned revisions fail closed. A mutable
+  current catalog, null/skip/cancelled resolution or node output is not approval.
+  **Correction, 2026-10-28:** the protocol advertises `accept`, which the core
+  interrupt owner treats as the spelling equivalent to UI `approve`. Both
+  explicit actions must pass the same checks; the original approve-only filter
+  caused an accepted real review to fail at publication.
+- The report still belongs to the computing run and exact client; the existing
+  report CAS rechecks the stored snapshot and its digest at publication.
+- Client-policy auto/notify outcomes remain supported. Notices are emitted at
+  the publication boundary after the effect, not before it. Portal delivery is
+  P2; this phase records internal publication only. UI copy does not promise
+  that a client has received anything.
+- The existing scheduler, reserved job ownership, run starter, feature route
+  authorization, policy freeze, chain loader and produced-variable mechanism
+  remain the sole owners. Pack versions advance from current 1.3 to 1.4; the old
+  archive's 1.2 would incorrectly downgrade newer client-memory nodes.
+
+**Evidence state:** source prepared, not qualified. The archived fixtures are
+being rebuilt around real persisted definition revisions and interrupt events.
+Required before merge: canonical backend typecheck and focused tests; witnessed
+negative cases for missing/wrong/skip/cancelled approval, wrong snapshot/policy,
+wrong run/client, absent revision, archived/preview client and fork; route-level
+run-now authorization and real executor approve/reject behavior; reviewer-visible
+snapshot/lineage; UI action/error behavior; pack/schema/pin checks; full canonical
+CI. No test result is claimed by this source checkpoint. Retain the archive tag
+until the replacement is merged and independently verified.
+
+### P1b targeted qualification — 2026-10-28
+
+Real npm 10.9.8 installs completed at root, backend and frontend under Node 22.
+The initial backend typecheck exposed the optional chain-edge type; the assertion
+now maps an empty fallback and still requires the exact two expected edges. The
+first focused run also exposed an obsolete fixture toggle: CMS is always on,
+while the KPI source requires `campaign-connectors`. Correcting that setup made
+the P0 report and P1 chain suites pass (2 files, 19 cases, 12.12 seconds), followed
+by a clean backend typecheck. Original failure logs remain in the coordinator's
+state directory alongside `client-report-targeted-r2.log` and
+`client-report-typecheck-r1.log`.
+
+These fixtures use real storage and loaded chains, but manually insert run and
+interrupt events. They do not prove execution through the real executor or the
+reviewer's browser. Route, executor, approval/fork negative witnesses, visible
+snapshot/lineage, frontend and full-gate qualification listed above remain owed.
+
+### Approval search correction — 2026-10-28
+
+Five real-storage witnesses exposed a recovery defect: a skipped, empty,
+cancelled, cascaded or unrelated-node resolution before a valid review caused
+publication to keep refusing. The shared covering-grant search stopped at the
+first content/class match, before the report's stricter eligibility checks.
+
+The existing autonomy owner now accepts an optional additional eligibility
+predicate and applies it while scanning candidates. Reports bind that predicate
+to the pinned definition's review nodes, explicit approval and frozen policy
+hash. Earlier invalid responses still cannot publish and no longer hide a later
+valid approval. Other callers retain their existing behavior; no second grant
+store or event scanner was introduced.
+
+The five new cases failed before the correction (`client-report-grant-r1.log`)
+and pass afterwards with the existing report tests (24 cases, two files,
+12.45 seconds). The existing autonomy chokepoint suite also passes (23 cases,
+10.26 seconds), and backend typecheck passes. The first attempted diagnostic
+used an unsupported Vitest option and ran no tests; it is retained separately
+as `client-report-grant-r0.log`, not counted as a product failure. These are
+focused checks, not full-gate or real-executor qualification.
+
+### HTTP/executor qualification and preview isolation — 2026-10-28
+
+The run-now route now has a real HTTP/executor witness using the loaded chain,
+actual compute/gate/publish pack functions and real storage. Both advertised
+`accept` and UI `approve` complete after a distinct eligible reviewer responds
+through the HTTP interrupt route. Self-review is refused, rejection leaves the
+report unpublished, and wrong-client/definition and disabled-feature requests
+create no run. The executor's existing immutable gate preview contains the exact
+snapshot, digest and source lineage; no new preview store or wire field is needed.
+
+Two failures were reproduced before repair. First, `accept` reached publication
+and failed the approve-only check (`client-report-executor-r1.log`). Second, a
+workspace viewer seated only in client B could fetch client A's preview content
+through the real artifact revision route (`client-report-preview-r0.log`). The
+shared artifact writer had put every run output in the workspace-root org.
+It now derives the organization from the existing host-written `runClientStamp`,
+checks that client's tenant and refuses malformed/conflicting bindings. Inline
+outputs and newly minted media use that organization; node output cannot choose
+it. Existing artifact access rules then enforce the client boundary. This changes
+new writes, not the organization of historical already-persisted artifacts.
+
+Focused checks pass: HTTP report/executor plus artifact/replay-preview suites
+(32 cases, four files), and client binding plus existing report chain suites
+(29 cases, two files; counts overlap). The legacy missing-chain test now removes
+the chain-backed registration explicitly and restores the real chain afterward;
+it no longer assumes the shipped report chain is absent. Original red logs are
+retained. Browser UX, remaining negative cases and full integrated CI are still
+owed; this is a qualified checkpoint, not merge-ready or deployed.
+
+### Additional policy and UI qualification — 2026-10-28
+
+Five additional cases keep a report in review when an approval names a different
+policy, the as-run definition revision is absent/pruned, or the client becomes
+preview/archived after approval. The real-storage chain suite passes all 19 cases.
+Removing only the policy-hash comparison makes its new wrong-policy case fail
+(18 controls pass), establishing that the check observes the publication boundary.
+The source was restored after this deliberate probe.
+
+Seven frontend component checks pass, including pending acknowledgement,
+refusal-and-retry, and switching clients during a pending review start. The old
+client's late acknowledgement does not refresh or announce in the new client.
+These use a mocked network boundary and do not claim browser or pack-trust-loader
+qualification. Backend typecheck passes. Real fork execution, browser validation
+and full integrated CI remain owed before the recovery can merge.
+
+### Fork witness preparation — 2026-10-28
+
+The original matrix promises that a fork after computation reuses the frozen
+snapshot, while the current publication surface accepts only the computing run.
+Two HTTP/executor cases now exercise branch forks before and after computation,
+independent review, refusal of the forking caller's self-review, and preservation
+of the source snapshot. These cases are prepared but **not yet executed**: CI257
+owns this machine's current full-gate slot. They are not evidence of passing fork
+behavior. Read their actual failures before changing the authorization boundary;
+ancestry alone must never grant publication or borrow the parent's approval.
+
+
+### Fork computation and publication correction — 2026-10-28
+
+The real HTTP/executor witnesses exposed two independent defects. A branch made
+past computation initially failed with `Report not found`: the fork reseeds its
+variable bag from inputs, so an earlier produced-variable assignment is absent.
+The report chain now supplies report identity, hash and review preview through
+recorded compute-output edges. The branch checkpoint already preserves these
+outputs; the executor and protocol need no change.
+
+With those inputs restored, publication still refused a branch because the report
+was owned by its computing run. The host now admits a branch only when its copied
+checkpoint proves that exact report/hash came from the original computation.
+Each ancestor hop must preserve tenant, trusted client stamp, workflow identity,
+as-run compute-node identity, prefix sequence, source event causation and complete
+output payload. Missing/pruned evidence refuses. The walk is bounded to 32 hops
+and 10,000 prefix events per hop. Parentage alone is insufficient, and replay
+runs do not acquire this branch exception. The original report row and snapshot
+remain immutable; the existing publication CAS still checks the stored digest.
+
+The branch must separately obtain its own current-policy approval. A parent's
+approval cannot authorize it. Real fork witnesses cover before-compute and
+post-compute branches, fresh review, refusal of self-review and source snapshot
+preservation. Additional real-storage cases exercise missing/altered copied
+outputs, incorrect causation, node and checkpoint, wrong client and replay.
+Their fixtures must insert immutable fork lineage at run creation and copy the
+parent's frozen policy, exactly as the route does; `updateRun` intentionally does
+not change lineage. Browser, pack-trust-loader and full composition CI remain
+owed before this recovery can merge. The archive tag stays until verified merge.
+
+Focused evidence: `client-report-fork-r8.log` records 45 passing cases across
+the chain/storage and real HTTP/executor files; backend typecheck exits zero.
+Removing only the copied event's causation comparison makes the wrong-origin
+test fail because publication unexpectedly succeeds. The production source was
+restored byte-for-byte; `client-report-fork-negative.json` records both hashes.
+Earlier failures remain in the coordinator's state directory, including the two
+real behavior defects and the subsequently corrected fixture/type errors.
+
+### P1b loader qualification preparation — 2026-10-28
+
+The real HTTP/executor report tests now load the two vendored node packs through
+`loadPackFromManifest`, requiring committed steward digest matches and the actual
+pack version/provenance on every compute, review and publish module. This replaces
+the test's hand-written outcome adapter and direct registry registration; the
+focused delegate tests remain explicitly separate. No trust bypass is enabled.
+
+This source change is prepared but **not yet executed** while Air train 258 owns
+the local test slot. The prior 45-case/typecheck result belongs to checkpoint
+`5d0a4ccab`; it does not qualify this changed setup. Next run the same executor/fork
+cases and a changed-pack-byte negative control, then typecheck and the full gate.
+The loader is invoked with the candidate's actual pack path: lazy resolver mount
+discovery and browser rendering remain separate qualification obligations.
+
+### P1b loader and browser qualification — 2026-10-28
+
+The preparation paragraph above is superseded by measured results on the rebuild
+containing main `db7756980` (integration commit `abb6aa1e0`). All three ADR 0957
+backend files passed (55 cases), backend typechecking passed, and the canonical
+frontend build passed. Appending one comment byte sequence to the actual vendored
+node-pack entry changed its trust classification to untrusted/non-dispatchable
+and failed the setup assertion; the original bytes were restored and hash-checked.
+
+The executor test now goes further: it asserts the report packs start unloaded,
+then resolves their nodes through the resolver installed by `createApp`, without
+calling the loader directly. It checks steward trust, version and the real path
+behind the mount. All 17 executor cases passed. Disabling only the resolver's load
+made this setup fail with a missing compute module; its source was restored
+byte-for-byte. The seven frontend interaction cases also passed.
+
+A local Chromium run served the canonical production bundle against the real
+application with ephemeral memory storage, a fixture user and scoped client.
+External requests were blocked. The actual “Generate with review” button created
+exactly one workflow; its real storage row reached `waiting-approval` and the
+report reached `in_review`. No browser page errors were observed. Light and dark
+screenshots and ARIA snapshots were inspected; the native theme controls changed
+the actual root class and computed text color. This does not qualify production
+identity providers, external fonts/SSE, or durable multi-instance storage.
+
+Evidence is retained in the coordinator's `client-report-loader-*`,
+`client-report-lazy-*`, `client-report-frontend-*` and
+`client-report-browser-r3/` artifacts. Earlier browser fixture attempts are
+retained: an invalid `cms` toggle assumption, a guessed button/theme selector,
+and an immediate assertion on an asynchronously starting run were corrected in
+the fixture. The successful run awaited the real state transition. Its monitor
+recorded no signals or remaining owned processes. Full gate and review remain
+required before opening the replacement PR or deleting the archive tag.
+
+### Client artifact cleanup correction — 2026-10-28
+
+Source review found that moving a minted media asset into its run's client org
+left the older CAS-loss cleanup scoped to the workspace root. Two simultaneous
+outputs can both mint before the bookkeeping CAS chooses one; deleting the
+losing asset under the wrong org returns false and leaves it in the Library.
+The mint now returns its creation org internally, and cleanup uses that exact
+scope rather than re-reading a mutable run or assuming the workspace root.
+
+A new witness pauses both writers immediately before their actual storage CAS,
+then checks that both return the winner, only one client asset remains, and the
+loser's bytes are gone. It is prepared for memory and SQLite adapters. This
+source checkpoint is untested while CI261 owns the local gate slot; the focused
+run and a deliberate reversion of the cleanup scope are required next. Prior
+loader/browser evidence does not establish this concurrency case.
+
+**Focused qualification, 2026-10-28 14:23Z:** both memory and SQLite witnesses
+passed at `0bfb48f46`, after integrating main `81a3cd3d6`. Reverting only the
+cleanup org to the tenant root made both cases fail because two assets remained
+instead of one. Restoring the client org returned both to green; the source was
+restored byte-for-byte. Each case uses real competing storage CAS operations and
+checks the winning bytes remain while the losing bytes disappear. Evidence:
+`client-report-race-verification.json` and its baseline, negative-control and
+restored reports in the coordinator's state directory. This is focused storage
+evidence; the refreshed branch still requires typechecking and the full gate.
+
+
+### P1b correction — host-bound report configuration (2026-10-28)
+
+Full preflight266 exposed the new chain adding an unfilled required-parameter
+instance to the seeded-chain ratchet. The ceiling remains152. The internal
+client-report chain now has zero author-time parameters: run-now and scheduler
+launchers pin client, definition version and any custom period on the existing
+host-owned campaign-ops run stamp. The surface reads that stored stamp, checks
+client membership and the pinned definition version, and rejects conflicting
+node inputs. Caller-supplied run inputs cannot replace this configuration.
+
+The compute step emits the resolved client on recorded output ports to the
+review and publish nodes, alongside report and snapshot hash. A checkpoint fork
+keeps the stored pin and output edges; it still needs its own publication
+approval. A generic parameterless copy without a complete trusted report pin
+refuses before creating a report. Explicitly configured compute nodes in other
+workflows retain their client-bound input contract. This extends the existing
+feature surface/run/scheduler seams; no wire, route or storage schema changes.
+
+Prepared checks cover zero unfilled expansion parameters, pinned-period
+computation, conflicting node inputs, missing/wrong-tenant pins, stale versions,
+real run-now HTTP execution and fork metadata. They are not yet executed: the
+Air is running CI267. Focused positives, negative controls, canonical typecheck
+and a new full gate are required before merge.
+
+### P1b correction — freeze the default reporting dates (2026-10-28)
+
+Source review found that the preceding host pin froze only an explicit custom
+period. A monthly/weekly run dispatched after a calendar boundary, or a branch
+forked before compute in a later month, called `resolvePeriod` against execution
+time and could report a different window. The 73 passing host-binding checks
+qualified explicit dates; they did not cover this default-period path.
+
+Use the existing ADR 0099 run-start contributor to resolve the dates once for
+a fresh report chain. `openwop-app.clientReportPeriod` is a reserved host decision
+bound to client, definition and version. Run-now and schedule fires share the
+same insertion seam. Forks copy the decision; an inherited absence stays absent
+and computation refuses. Contributors remain read-only and fail-soft; the report
+surface refuses a missing/invalid decision rather than consulting today's clock.
+No workflow wire, scheduler timer, authorization grant or public route is added.
+
+Prepared five regressions cover delayed execution, pre-compute branch inheritance,
+inherited absence, a mismatched definition and caller metadata stripping. They
+are UNRUN while Air268 owns the local gate. Prior 73PASS/5+2negativeRED/restored73
+and native typecheck belong to head1e8df26; current source needs fresh checks.
+
+### Frozen-period focused qualification — 2026-10-28 17:21Z
+
+At `d7b341bb3`, five focused suites passed all 78 cases, including the five
+calendar/fork regressions above. Restoring execution-time calendar resolution
+makes both delayed-dispatch/fork witnesses fail; removing the reserved metadata
+key fails its caller-injection witness; allowing derived runs to fill an absent
+decision fails its inherited-absence witness. The restored source again passes
+78 cases and the canonical native backend typecheck. Original/negative/restored
+results are retained in `client-report-period-verification.json` in the release
+coordinator state directory. This supersedes the UNRUN note above for those
+checks only; the full current-tree gate and merge qualification remain pending.

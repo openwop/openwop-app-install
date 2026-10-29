@@ -80,12 +80,12 @@ export const WORKFLOW_AUTHOR_GET_TOOL_ID = 'openwop:feature.workflow-author.node
 export const WORKFLOW_AUTHOR_VALIDATE_TOOL_ID = 'openwop:feature.workflow-author.nodes.validate';
 export const WORKFLOW_AUTHOR_PERSIST_TOOL_ID = 'openwop:feature.workflow-author.nodes.persist';
 
-type ToolResult = { content: string; isError?: boolean };
+type ToolResult = { content: string; isError?: boolean; hostMessage?: true };
 
 /** Structured tool error — the agent loop surfaces `content` verbatim to the
  *  model, so the message must be actionable (what failed, what to do next). */
 function toolError(error: string, message: string, extra?: Record<string, unknown>): ToolResult {
-  return { content: JSON.stringify({ error, message, ...(extra ?? {}) }), isError: true };
+  return { content: JSON.stringify({ ...(extra ?? {}), error, message }), isError: true, hostMessage: true };
 }
 
 import { CATALOG_SEARCH_DEFAULT_LIMIT, CATALOG_SEARCH_MAX_LIMIT, CATALOG_SEARCH_MAX_TYPE_IDS, searchAuthoringCatalog, selectExcluded } from './catalogSearch.js';

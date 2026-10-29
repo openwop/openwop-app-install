@@ -39,6 +39,8 @@ import { generateFunnelFromBlueprint } from './generateService.js';
 import { surfaceDispatchedRun } from '../../host/turnRunDispatch.js';
 
 import { getFunnelStats } from './funnelStats.js';
+import { findCompactionMarkerPath, COMPACTION_MARKER_IN_INPUT } from '../../host/toolResultTransform.js';
+import { untrustedToolError } from '../../host/agentToolKit.js';
 
 export const FUNNELS_LIST_TOOL_ID = 'openwop:funnels.list';
 export const FUNNELS_GET_TOOL_ID = 'openwop:funnels.get';
@@ -47,12 +49,12 @@ export const FUNNELS_DRAFT_TOOL_ID = 'openwop:funnels.draft';
 export const FUNNELS_BLUEPRINTS_TOOL_ID = 'openwop:funnels.blueprints';
 export const FUNNELS_GENERATE_TOOL_ID = 'openwop:funnels.generate';
 
-type ToolResult = { content: string; isError?: boolean };
+type ToolResult = { content: string; isError?: boolean; hostMessage?: true };
 
 /** Structured tool error — the agent loop surfaces `content` verbatim to the
  *  model, so the message must be actionable (what failed, what to do next). */
 function toolError(error: string, message: string, extra?: Record<string, unknown>): ToolResult {
-  return { content: JSON.stringify({ error, message, ...(extra ?? {}) }), isError: true };
+  return { content: JSON.stringify({ ...(extra ?? {}), error, message }), isError: true, hostMessage: true };
 }
 
 const ok = (payload: unknown): ToolResult => ({ content: JSON.stringify(payload) });
@@ -144,6 +146,12 @@ export function registerFunnelsAgentTools(deps: StartRunDeps): void {
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
     effect: 'read',
+    // ADR 0999 D3.1 (TOC2CD-3) — category (c), read-before-write: `steps` are
+    // "the bindings a revision must keep", and `funnels.draft` with `funnelId`
+    // REPLACES the whole list. Under `lossy` a funnel with more than five steps
+    // reached the model as head + `{"_elided":N}` + tail; a revision that drops
+    // the marker deletes the middle steps.
+    schemaCarrying: true,
     def: {
       name: FUNNELS_GET_TOOL_ID,
       description:
@@ -248,6 +256,13 @@ export function registerFunnelsAgentTools(deps: StartRunDeps): void {
       },
     },
     async run(input, scope) {
+      // ADR 0999 D3.3 — the WRITER refuses a compaction marker (`{"_elided":N}`)
+      // with a typed error rather than filtering it: a filtered marker persists a
+      // SHORTENED list as if it were whole. The tool loop refuses it too under a
+      // lossy decision; this holds on every path that reaches the writer. First, before
+      // any read: it is a pure function of the input and reveals nothing.
+      const marker = findCompactionMarkerPath(input);
+      if (marker) return untrustedToolError(COMPACTION_MARKER_IN_INPUT, 'Input contains a tool-output compaction marker (its path is below): it stands for rows you were not shown. Re-read the full value and send every element.', marker);
       const actingUserId = scope.actingUserId;
       if (!actingUserId) {
         return toolError('acting_user_required', 'Funnels can only be drafted from a human-initiated turn.');
@@ -293,7 +308,7 @@ export function registerFunnelsAgentTools(deps: StartRunDeps): void {
         // Closed-world validation defects come back typed + verbatim so the loop
         // can repair (bad step kind, missing pageId, dangling route, slug clash).
         if (err && typeof err === 'object' && 'code' in err && 'message' in err) {
-          return toolError(String((err as { code: unknown }).code), String((err as { message: unknown }).message));
+          return untrustedToolError(String((err as { code: unknown }).code), 'The tool refused this call; the reason it gave is below.', String((err as { message: unknown }).message));
         }
         throw err;
       }

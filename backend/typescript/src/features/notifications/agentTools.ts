@@ -25,8 +25,8 @@ export const AGENT_DELIVERABLE_NOTIFICATION_TYPE = 'agent.deliverable';
 const TITLE_MAX = 200;
 const MESSAGE_MAX = 1_000;
 
-function toolError(error: string, message: string): { content: string; isError: true } {
-  return { content: JSON.stringify({ error, message }), isError: true };
+function toolError(error: string, message: string): { content: string; isError: true; hostMessage: true } {
+  return { content: JSON.stringify({ error, message }), isError: true, hostMessage: true };
 }
 
 

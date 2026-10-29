@@ -12,7 +12,7 @@
  *    toggle-honest per call (registration is process-wide; toggles are per-tenant).
  */
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
-import { resolveFeatureToggle } from '../../host/agentToolKit.js';
+import { resolveFeatureToggle, untrustedToolError } from '../../host/agentToolKit.js';
 import { listOrgs, resolveEffectiveAccess } from '../../host/accessControlService.js';
 import { checkContentA11y, coerceContentA11yModel } from '../../host/contentA11y.js';
 import { generateAltText } from '../media/mediaService.js';
@@ -21,9 +21,9 @@ import { OpenwopError } from '../../types.js';
 export const ACCESSIBILITY_CHECK_TOOL_ID = 'openwop:accessibility.check';
 export const ACCESSIBILITY_ALT_TEXT_TOOL_ID = 'openwop:accessibility.alt-text.generate';
 
-type ToolResult = { content: string; isError?: boolean };
+type ToolResult = { content: string; isError?: boolean; hostMessage?: true };
 function toolError(error: string, message: string): ToolResult {
-  return { content: JSON.stringify({ error, message }), isError: true };
+  return { content: JSON.stringify({ error, message }), isError: true, hostMessage: true };
 }
 const str = (v: unknown): string => (typeof v === 'string' ? v.trim() : '');
 const optStr = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
@@ -92,7 +92,7 @@ export function registerAccessibilityAgentTools(): void {
         const proposal = await generateAltText(scope.tenantId, orgId, assetId);
         return { content: JSON.stringify({ assetId: proposal.assetId, altText: proposal.altText, note: proposal.altText === '' ? 'The image appears decorative (empty alt).' : 'Proposed alt text — apply it to the asset to save.' }) };
       } catch (e) {
-        if (e instanceof OpenwopError) return toolError(e.code, e.message);
+        if (e instanceof OpenwopError) return untrustedToolError(e.code, 'The tool refused this call; the reason it gave is below.', e.message);
         return toolError('internal_error', 'Alt-text generation failed.');
       }
     },

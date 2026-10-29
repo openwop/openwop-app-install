@@ -35,7 +35,7 @@ import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
 import { releaseIgnition, claimIgnition, recordIgnitionRun, ignitionKey } from '../../host/ignitionGuard.js';
 // PMX-14 (ADR 0590) — the shared kit helpers replace this module's former
 // byte-identical local re-declarations (toolError/ok/str).
-import { resolveFeatureToggle, toolOk as ok, toolError, str, type ToolResult } from '../../host/agentToolKit.js';
+import { resolveFeatureToggle, toolOk as ok, toolError, str, type ToolResult, untrustedToolError } from '../../host/agentToolKit.js';
 // PMX-14 → ADR 0842 D1 — the ONE list-access module the routes and the workflow surface
 // also import, so the three lanes cannot drift independently.
 import { orgScopeGranted, listProjectReadable as projectReadableFor, listAccessLevel } from './listAccess.js';
@@ -79,7 +79,7 @@ async function loadListForWrite(scope: BundleScope, listId: string | undefined):
   // answers 'none' for was refused by the route and written through by the tool).
   const level = list ? await listAccessLevel(scope.tenantId, list, actingUserId) : 'none';
   if (!list || level === 'none') {
-    return toolError('not_found', `Priority list '${listId}' not found in this workspace.`);
+    return untrustedToolError('not_found', 'That priority list (id below) was not found in this workspace.', listId);
   }
   if (level !== 'write') {
     return toolError('forbidden_scope', 'The user does not have write access to that list\'s organization.');
@@ -325,12 +325,16 @@ export function registerPriorityMatrixAgentTools(): void {
       const unknown = submitted.filter(([k]) => !valid.has(k)).map(([k]) => k);
       const outOfRange = submitted.filter(([k, v]) => valid.has(k) && !(typeof v === 'number' && Number.isFinite(v) && v >= 1 && v <= 10)).map(([k]) => k);
       if (submitted.length === 0 || unknown.length > 0 || outOfRange.length > 0) {
-        return toolError('validation_error', [
-          submitted.length === 0 ? 'No scores were supplied.' : '',
-          unknown.length > 0 ? `Unknown criterion id(s): ${unknown.join(', ')}.` : '',
-          outOfRange.length > 0 ? `Scores must be integers 1..10; out of range: ${outOfRange.join(', ')}.` : '',
-          `This list's criteria are: ${[...valid.entries()].map(([id, name]) => `${id} (${name})`).join(', ')}.`,
-        ].filter(Boolean).join(' '));
+        return untrustedToolError(
+          'validation_error',
+          'The scores were refused: every score must be an integer 1..10 for one of this list\'s criterion ids. The details and the valid criteria are below.',
+          [
+            submitted.length === 0 ? 'No scores were supplied.' : '',
+            unknown.length > 0 ? `Unknown criterion id(s): ${unknown.join(', ')}.` : '',
+            outOfRange.length > 0 ? `Out of range: ${outOfRange.join(', ')}.` : '',
+            `This list's criteria are: ${[...valid.entries()].map(([id, name]) => `${id} (${name})`).join(', ')}.`,
+          ].filter(Boolean).join(' '),
+        );
       }
       // PMXU-1 (ADR 0590) — an AI-cast score is stamped source:'agent'.
       // ADR 0667 D4 (PMXWF-11) — 'merge': a model naming three criteria asserts three

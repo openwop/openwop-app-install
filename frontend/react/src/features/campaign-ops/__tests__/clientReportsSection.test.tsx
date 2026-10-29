@@ -11,9 +11,10 @@
  * an empty list reds the failed case.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import i18next from 'i18next';
 import { render, cleanup, screen, fireEvent, act } from '@testing-library/react';
 
-const h = vi.hoisted(() => ({ listDefinitions: vi.fn(), listReports: vi.fn(), createDefinition: vi.fn(), computeReport: vi.fn() }));
+const h = vi.hoisted(() => ({ listDefinitions: vi.fn(), listReports: vi.fn(), createDefinition: vi.fn(), computeReport: vi.fn(), sendReportForReview: vi.fn() }));
 vi.mock('../reportsClient.js', async (orig) => ({ ...(await orig<Record<string, unknown>>()), ...h }));
 
 import { ClientReportsSection } from '../ClientReportsSection.js';
@@ -31,6 +32,54 @@ beforeEach(() => { for (const f of Object.values(h)) f.mockReset(); });
 afterEach(cleanup);
 
 describe('ClientReportsSection', () => {
+  const label = (key: string) => String(i18next.t(`campaign-ops:${key}`));
+  it('starts one review workflow for the current client and waits for its acknowledgement', async () => {
+    h.listDefinitions.mockResolvedValue([DEF]); h.listReports.mockResolvedValue([]);
+    let finish!: (value: { runId: string }) => void;
+    h.sendReportForReview.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    render(<ClientReportsSection orgId="o1" />);
+    const button = await screen.findByRole('button', { name: label('reportsSendForReview') });
+    fireEvent.click(button);
+    expect(h.sendReportForReview).toHaveBeenCalledExactlyOnceWith('o1', 'rdef_1');
+    expect((button as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByText(label('reportsSentForReview'))).toBeNull();
+    await act(async () => { finish({ runId: 'review-run' }); });
+    expect(await screen.findByText(label('reportsSentForReview'))).toBeTruthy();
+    expect((button as HTMLButtonElement).disabled).toBe(false);
+    expect(h.computeReport).not.toHaveBeenCalled();
+  });
+
+  it('a refused start shows the failure without a success notice and permits retry', async () => {
+    h.listDefinitions.mockResolvedValue([DEF]); h.listReports.mockResolvedValue([]);
+    h.sendReportForReview.mockRejectedValueOnce(new CampaignOpsError('Review policy changed. Reload and try again.', 409)).mockResolvedValueOnce({ runId: 'retry-run' });
+    render(<ClientReportsSection orgId="o1" />);
+    const button = await screen.findByRole('button', { name: label('reportsSendForReview') });
+    fireEvent.click(button);
+    expect(await screen.findByText('Review policy changed. Reload and try again.')).toBeTruthy();
+    expect(screen.queryByText(label('reportsSentForReview'))).toBeNull();
+    fireEvent.click(button);
+    expect(await screen.findByText(label('reportsSentForReview'))).toBeTruthy();
+    expect(screen.queryByText('Review policy changed. Reload and try again.')).toBeNull();
+    expect(h.sendReportForReview).toHaveBeenCalledTimes(2);
+  });
+
+  it('switching clients ignores a late review-start acknowledgement from the previous client', async () => {
+    h.listDefinitions.mockImplementation((orgId: string) => Promise.resolve([{ ...DEF, orgId, title: orgId === 'o1' ? 'Client A report' : 'Client B report' }]));
+    h.listReports.mockResolvedValue([]);
+    let finish!: (value: { runId: string }) => void;
+    h.sendReportForReview.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    const { rerender } = render(<ClientReportsSection orgId="o1" />);
+    fireEvent.click(await screen.findByRole('button', { name: label('reportsSendForReview') }));
+    rerender(<ClientReportsSection orgId="o2" />);
+    expect(await screen.findByText('Client B report')).toBeTruthy();
+    const readsBeforeAcknowledgement = h.listDefinitions.mock.calls.map((args) => [...args]);
+    await act(async () => { finish({ runId: 'old-client-run' }); });
+    expect(h.listDefinitions.mock.calls).toEqual(readsBeforeAcknowledgement);
+    expect(screen.queryByText(label('reportsSentForReview'))).toBeNull();
+    expect(screen.getByText('Client B report')).toBeTruthy();
+    expect(h.sendReportForReview).toHaveBeenCalledExactlyOnceWith('o1', 'rdef_1');
+  });
+
   it('switching clients clears the draft and ignores the previous client’s late save refresh', async () => {
     let finishSave!: (value: unknown) => void;
     h.createDefinition.mockImplementation(() => new Promise((resolve) => { finishSave = resolve; }));

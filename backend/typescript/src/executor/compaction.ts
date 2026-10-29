@@ -9,6 +9,14 @@
 
 import type { CompactionDecision } from './types.js';
 
+/**
+ * ADR 0999 D3.2 — the disclosure marker `lossy` array elision leaves in place of
+ * the removed rows. Core-owned (not the feature's) because the write edge that
+ * REFUSES it in a tool input (`host/toolResultTransform.ts`
+ * `findCompactionMarkerPath`) is core, and core never imports the feature.
+ */
+export const ELIDED_MARKER = '_elided';
+
 /** The `run.metadata` key the decision is frozen under (sibling of `trustBoundary`). */
 export const COMPACTION_METADATA_KEY = 'compaction';
 

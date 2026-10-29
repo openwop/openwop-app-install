@@ -29,9 +29,14 @@ import type { Storage } from '../src/storage/storage.js';
 import {
   persistRunArtifact, getRunArtifact, deriveArtifact, listRunArtifactsForTenant, __resetRunArtifactStore,
 } from '../src/host/runArtifactStore.js';
-import { getArtifact, getArtifactRevision, listArtifacts } from '../src/host/artifactProjection.js';
+import { getArtifact, getArtifactRevision, listArtifacts, listArtifactsForRun } from '../src/host/artifactProjection.js';
+import { DurableCollection } from '../src/host/hostExtPersistence.js';
+import type { RunArtifactRecord } from '../src/host/runArtifactStore.js';
+import { registerKicktodoCreatorArtifactTypes } from '../src/features/kicktodo-creator/artifactSchemas.js';
 import { createDocument } from '../src/features/documents/documentsService.js';
 import { __resetMedia } from '../src/features/media/mediaService.js';
+import { createMember, createOrg, createWorkspace } from '../src/host/accessControlService.js';
+import { clientRunStamp } from '../src/host/runClientOrg.js';
 
 // a tiny valid base64 payload (the media store just persists the bytes)
 const PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
@@ -166,5 +171,99 @@ describe('ADR 0083 amendment — reference resolution (media / document / serve)
     const rev = await getArtifactRevision('tS', undefined, r!.artifactId, r!.revisionId);
     expect(rev?.content).toContain('(/host/openwop-app/assets/tok-xyz)');
     expect(rev?.content).toMatch(/^\[.*\]\(/); // a markdown link, not raw JSON
+  });
+});
+
+describe('ADR 0957 P1b — client-bound outputs retain their organization', () => {
+  it.each(['inline', 'media'] as const)('%s output is readable only in the run client; output cannot forge its organization', async (kind) => {
+    const { tenantId } = await createWorkspace({ name: 'Artifact agency', ownerSubject: 'owner' });
+    const a = await createOrg({ tenantId, createdBy: 'owner', name: 'A' });
+    const b = await createOrg({ tenantId, createdBy: 'owner', name: 'B' });
+    for (const [subject, orgId] of [['reviewer-a', a.orgId], ['reviewer-b', b.orgId]]) {
+      await createMember({ tenantId, orgId: tenantId, subject, displayName: subject, roles: ['viewer'] });
+      await createMember({ tenantId, orgId, subject, displayName: subject, roles: ['editor'] });
+    }
+    const now = new Date().toISOString();
+    const runId = `client-artifact-${kind}`;
+    await storage.insertRun({ runId, tenantId, workflowId: 'client-report', status: 'running', inputs: {}, configurable: {}, metadata: clientRunStamp(a.orgId), createdAt: now, updatedAt: now });
+    const result = await persistRunArtifact({ tenantId, runId, nodeId: 'preview', role: 'gate-preview', now,
+      output: kind === 'inline' ? { orgId: b.orgId, snapshot: { spend: 123 } } : { orgId: b.orgId, contentBase64: PNG_B64, contentType: 'image/png' },
+    });
+    expect(result).not.toBeNull();
+    const visible = await getArtifact(tenantId, 'reviewer-a', result!.artifactId);
+    expect(visible?.orgId).toBe(a.orgId);
+    expect(await getArtifact(tenantId, 'reviewer-b', result!.artifactId)).toBeNull();
+    expect(await getArtifactRevision(tenantId, 'reviewer-b', result!.artifactId, result!.revisionId)).toBeNull();
+    expect((await listArtifacts(tenantId, 'reviewer-b')).some((item) => item.artifactId === result!.artifactId)).toBe(false);
+  });
+
+  it.each([
+    ['malformed', { 'openwop-app.campaignOps': {} }],
+    ['conflicting', { ...clientRunStamp('a'), campaignOrchestration: { orgId: 'b' } }],
+    ['missing client', clientRunStamp('missing-client')],
+  ])('a %s client binding never falls back to the workspace', async (_reason, metadata) => {
+    const now = new Date().toISOString();
+    await storage.insertRun({ runId: 'bad-client-run', tenantId: 'tenant', workflowId: 'client-report', status: 'running', inputs: {}, configurable: {}, metadata, createdAt: now, updatedAt: now });
+    expect(await persistRunArtifact({ tenantId: 'tenant', runId: 'bad-client-run', nodeId: 'preview', role: 'gate-preview', output: 'private figures', now })).toBeNull();
+    expect(await getRunArtifact('bad-client-run:preview')).toBeNull();
+  });
+});
+
+// P9 (2026-10-28) — the Challenge Factory outline and final result both listed
+// as `{`: an untyped JSON row took its first line as its title.
+describe('JSON artifact titles', () => {
+  const day = (n: number, extra: Record<string, unknown> = {}) => ({ day: n, stableActivityId: `d${n}`, title: `Day ${n}`, actionInstruction: 'Do it.', userFacingWhy: 'Because.', estimatedMinutes: 10, achievementIds: ['a1'], evidencePolicy: 'note', claimRefs: [], ...extra });
+  const plan = (days: unknown[]) => ({ title: 'Twenty-One Days of Focus', promise: 'Focus daily', audience: 'makers', durationDays: 21, dailyMinutesBudget: 20, outcomes: [{ outcomeId: 'o1', measurableOutcome: 'x', method: 'y' }], achievements: [{ achievementId: 'a1', observableEvidence: 'z', outcomeIds: ['o1'] }], days });
+  const envelope = (p: ReturnType<typeof plan>) => ({ plan: p, artifact: { artifactTypeId: 'kicktodo.challenge-plan', title: p.title, payload: p } });
+  const alt = { stableActivityId: 'd1-alt', title: 'Alt', actionInstruction: 'Alt.', evidencePolicy: 'note' };
+
+  it('a plan with alternatives persists TYPED, titled by the plan', async () => {
+    registerKicktodoCreatorArtifactTypes();
+    await persistRunArtifact({ tenantId: 't1', runId: 'p9', nodeId: 'outline-approve', role: 'gate-preview', output: envelope(plan([day(1, { alternatives: [alt] }), day(2)])), now: '2026-10-28T00:00:00Z' });
+    const row = await getRunArtifact('p9:outline-approve');
+    expect(row?.artifactTypeId).toBe('kicktodo.challenge-plan');
+    expect(row?.title).toBe('Twenty-One Days of Focus');
+  });
+
+  it('a malformed alternative stays UNTYPED (no false typed claim) but is still titled by the plan', async () => {
+    registerKicktodoCreatorArtifactTypes();
+    await persistRunArtifact({ tenantId: 't1', runId: 'p9b', nodeId: 'outline-approve', role: 'gate-preview', output: envelope(plan([day(1, { alternatives: [{ ...alt, evidencePolicy: 'vibes' }] })])), now: '2026-10-28T00:00:00Z' });
+    const row = await getRunArtifact('p9b:outline-approve');
+    expect(row?.artifactTypeId).toBeUndefined();
+    expect(row?.format).toBe('application/json');
+    expect(row?.title).toBe('Twenty-One Days of Focus');
+    expect(row?.content).toContain('"vibes"'); // raw bytes kept as produced
+  });
+
+  it('a submitted approval result is named by its state, never as published', () => {
+    const { title } = deriveArtifact({ approvalId: 'appr:1', state: 'submitted' }, 'submit');
+    expect(title).toBe('Approval request (submitted)');
+    expect(title.toLowerCase()).not.toContain('publish');
+  });
+
+  it('JSON that names nothing falls back to the node, never to `{` or `[`', () => {
+    expect(deriveArtifact({ a: 1 }, 'n').title).toBe('n output');
+    expect(deriveArtifact('[1, 2]', 'n').title).toBe('n output');
+    expect(deriveArtifact('{"name":"Weekly report"}', 'n').title).toBe('Weekly report');
+    expect(deriveArtifact('plain first line\nmore', 'n').title).toBe('plain first line');
+  });
+
+  it('a SAVED legacy `{` row is renamed on read (get + run list), with its stored title and bytes untouched', async () => {
+    const rows = new DurableCollection<RunArtifactRecord>('runartifact', (a) => a.artifactKey);
+    const content = JSON.stringify(envelope(plan([day(1)])), null, 2);
+    const base = { tenantId: 't1', orgId: 't1', runId: 'old', role: 'gate-preview' as const, kind: 'data', format: 'application/json', status: 'in-review', createdBy: 'old', createdAt: '2026-10-28T16:01:35Z' };
+    await rows.put({ ...base, artifactKey: 'old:outline-approve', nodeId: 'outline-approve', title: '{', content });
+    await rows.put({ ...base, artifactKey: 'old:submit', nodeId: 'submit', title: '{', content: JSON.stringify({ approvalId: 'appr:1', state: 'submitted' }, null, 2), createdAt: '2026-10-28T16:05:00Z' });
+    await rows.put({ ...base, artifactKey: 'old:named', nodeId: 'named', title: 'Chosen by the node', content: '{\n  "x": 1\n}', createdAt: '2026-10-28T16:06:00Z' });
+
+    expect((await getArtifact('t1', undefined, 'run-event:old:outline-approve'))?.title).toBe('Twenty-One Days of Focus');
+    const listed = await listArtifactsForRun('t1', undefined, 'old');
+    expect(Object.fromEntries(listed.map((a) => [a.runNodeId, a.title]))).toEqual({
+      'outline-approve': 'Twenty-One Days of Focus',
+      submit: 'Approval request (submitted)',
+      named: 'Chosen by the node',
+    });
+    expect((await getRunArtifact('old:outline-approve'))?.title).toBe('{'); // no migration
+    expect((await getArtifactRevision('t1', undefined, 'run-event:old:outline-approve', 'old:outline-approve:1'))?.content).toBe(content);
   });
 });

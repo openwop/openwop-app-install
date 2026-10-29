@@ -11,8 +11,11 @@
  *     middleware, so it is a no-op there (it returns early without a session key);
  *   - `reservePlanRun` (monthly plan) has exactly one caller, `host/runStarter.ts`;
  *   - `insertRunWithStartContext` is called from 18 files;
- *   - `startWorkflowRun` has 38 code call sites in 32 files. ADR 0987's context
+ *   - `startWorkflowRun` has 39 code call sites in 32 files. ADR 0987's context
  *     table says 43 in 34: that raw grep also matched 5 mentions in comments.
+ *     (39 since ADR 0957 D2: `startClientReportRun` in campaign-ops/runLauncher.ts
+ *     is the client-report "run now" lane, the third launcher in that file. It goes
+ *     through the same `startWorkflowRun`, so it takes the same monthly check.)
  *
  * Counts read code lines only (a line starting with `//`, `*` or `/*` is skipped).
  *
@@ -108,8 +111,8 @@ describe('ADR 0987 P0 — the run-admission lane census (as of P0)', () => {
     ]);
   });
 
-  it('startWorkflowRun has 38 code call sites in 32 files (the monthly check, no per-day or concurrency check)', () => {
+  it('startWorkflowRun has 39 code call sites in 32 files (the monthly check, no per-day or concurrency check)', () => {
     const m = callSites(/startWorkflowRun\(/, /export async function startWorkflowRun/);
-    expect({ sites: total(m), files: m.size }).toEqual({ sites: 38, files: 32 });
+    expect({ sites: total(m), files: m.size }).toEqual({ sites: 39, files: 32 });
   });
 });

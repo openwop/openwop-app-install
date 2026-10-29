@@ -194,7 +194,8 @@ describe('CFP-1 — Procurement Concierge is money-safe (prepare + request only)
     expect(prep.purchaseId).toMatch(/^ucpb:/); // a real draft, so the refusal below is the cap's
     const out = await provider({ actingUserId: 'u-1' }).executeTool({ name: BUYER_CHECKOUT_TOOL_ID, input: { purchaseId: prep.purchaseId } });
     expect(out.isError).toBe(true); // fail-closed cap — purchasing not enabled
-    expect(parse(out.content)).toEqual({ error: 'forbidden', message: 'Agent purchasing is not enabled — set OPENWOP_UCP_BUYER_ORG_CAP_MINOR to authorize a spend cap.' });
+    // TOC2CD-11 (ADR 1000): a service error's text is the fenced `detail` under a host sentence.
+    expect(parse(out.content)).toEqual({ error: 'forbidden', message: 'The tool refused this call; the reason it gave is below.', detail: 'Agent purchasing is not enabled — set OPENWOP_UCP_BUYER_ORG_CAP_MINOR to authorize a spend cap.' });
     const after = await getPurchase(TENANT, orgId, prep.purchaseId);
     expect(after?.status).toBe('draft'); // refused BEFORE the approval gate: nothing parked, nothing bought
     expect(after?.approvalId).toBeUndefined();

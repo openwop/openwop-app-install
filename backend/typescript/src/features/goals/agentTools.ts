@@ -10,6 +10,7 @@ import { OpenwopError } from '../../types.js';
 import { GOALS_READ } from './access.js';
 import { listGoals } from './goalsService.js';
 import type { GoalState } from './types.js';
+import { toolError } from '../../host/agentToolKit.js';
 
 export const GOALS_LIST_TOOL_ID = 'openwop:goals.list';
 
@@ -46,13 +47,13 @@ export function registerGoalsAgentTools(): void {
       } catch (err) {
         // A typed refusal, never success-with-empty: the model must not read
         // "no goals" when it was refused the read.
-        if (err instanceof OpenwopError) return { content: JSON.stringify({ error: err.code, message: err.message }), isError: true };
+        if (err instanceof OpenwopError) return { content: JSON.stringify({ error: err.code, message: err.message }), isError: true, fromThrow: true };
         throw err;
       }
       // `GL2UX-6` — an unknown filter is a typed refusal (as the route's 400),
       // never a silent "all goals".
       if (input.state !== undefined && (typeof input.state !== 'string' || !GOAL_STATES.has(input.state))) {
-        return { content: JSON.stringify({ error: 'validation_error', message: 'state must be one of: active, satisfied, escalated, abandoned, bound-exceeded.' }), isError: true };
+        return toolError('validation_error', 'state must be one of: active, satisfied, escalated, abandoned, bound-exceeded.');
       }
       const state = input.state as GoalState | undefined;
       // `GL2UX-2` — these are the WORKSPACE's goals, a colleague's personal ones

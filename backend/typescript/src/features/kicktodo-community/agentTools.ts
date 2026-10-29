@@ -21,9 +21,9 @@ import { visibleReviews, aggregateRating } from './communityService.js';
 
 export const KICKTODO_COMMUNITY_REVIEWS_TOOL_ID = 'openwop:kicktodo.community-reviews';
 
-type ToolResult = { content: string; isError?: boolean };
+type ToolResult = { content: string; isError?: boolean; hostMessage?: true };
 function toolError(error: string, message: string): ToolResult {
-  return { content: JSON.stringify({ error, message }), isError: true };
+  return { content: JSON.stringify({ error, message }), isError: true, hostMessage: true };
 }
 const str = (v: unknown): string => (typeof v === 'string' ? v.trim() : '');
 

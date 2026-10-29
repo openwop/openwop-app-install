@@ -7,7 +7,7 @@
  */
 
 import { Button } from '../../ui/Button.js';
-import { Suspense, useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Modal } from '../../ui/Modal.js';
 import { StateCard, Notice } from '../../ui/index.js';
@@ -21,6 +21,9 @@ import { ProvenancePanel } from './ProvenancePanel.js';
 // canvas.* renderers). The chosen renderer's component is lazy-split and wrapped in a
 // single <Suspense> below (the PR #804 entry-budget pattern).
 import { getArtifactRenderer } from './rendererRegistry.js';
+// P9 — the approval card's readable preview, reused for typed review artifacts
+// and untyped JSON that have no workbench renderer. Lazy: most artifacts never need it.
+const ReviewAssetPreview = lazy(() => import('../reviews/AssetPreview.js').then((m) => ({ default: m.AssetPreview })));
 import {
   getArtifact, listArtifactRevisions, getArtifactRevision, diffArtifact,
   type ArtifactProjection, type ArtifactRevision, type ArtifactDiff,
@@ -197,7 +200,22 @@ export function ArtifactWorkbench({ artifactId, revisionId, onClose, docked = fa
                 // persistence). Unknown types fall back to inert Markdown.
                 (() => {
                   const renderer = getArtifactRenderer(artifact.artifactTypeId);
-                  if (!renderer) return <Markdown className="artifact-workbench__preview">{shown.content}</Markdown>;
+                  if (!renderer) {
+                    const head = shown.content.trimStart()[0];
+                    if (!artifact.artifactTypeId && head !== '{' && head !== '[') {
+                      return <Markdown className="artifact-workbench__preview">{shown.content}</Markdown>;
+                    }
+                    return (
+                      <div className="artifact-workbench__preview">
+                        <Suspense fallback={<StateCard loading title={t('artifactLoading')} />}>
+                          <ReviewAssetPreview
+                            asset={{ content: shown.content, label: artifact.title, ...(artifact.artifactTypeId ? { artifactTypeId: artifact.artifactTypeId } : {}) }}
+                            hideLabel
+                          />
+                        </Suspense>
+                      </div>
+                    );
+                  }
                   const RendererComponent = renderer.Component;
                   const body = editing ? renderSrc : shown.content;
                   return (

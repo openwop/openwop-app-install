@@ -23,7 +23,7 @@
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
 import { PREAUTHORIZED_CALLER } from '../../host/subjectAccess.js'; // KBC-1 (ADR 0643 D2 precondition) — an in-process lane that owns these rows / gates at its own door
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
-import { resolveFeatureToggle, str, toolError } from '../../host/agentToolKit.js';
+import { resolveFeatureToggle, str, toolError, untrustedToolError } from '../../host/agentToolKit.js';
 import { surfaceOptCount } from '../../host/featureSurfaces.js';
 import { resolveProjectAccess, projectSubject } from '../projects/projectsService.js';
 import { getConversationMeta } from '../../host/conversationStore.js';
@@ -174,7 +174,7 @@ export function registerNotebooksAgentTools(deps: StartRunDeps): void {
       if (!nb) return notAnAnswer('Notebook not found or not accessible — no notebook was searched.');
       const query = str(input.query) ?? '';
       const parsedTopK = readTopK(input.topK);
-      if (!parsedTopK.ok) return toolError('validation_error', `\`topK\`: ${parsedTopK.message}`);
+      if (!parsedTopK.ok) return untrustedToolError('validation_error', '`topK` is invalid; the reason is below.', parsedTopK.message);
       const topK = parsedTopK.topK;
       const { hits, citations } = await searchNotebook(scope.tenantId, nb.id, query, topK);
       return { content: JSON.stringify({ hits, citations }) };
@@ -217,7 +217,7 @@ export function registerNotebooksAgentTools(deps: StartRunDeps): void {
       if (!nb) return notAnAnswer('Notebook not found or not accessible — no notebook was consulted.');
       const query = str(input.query) ?? '';
       const parsedTopK = readTopK(input.topK);
-      if (!parsedTopK.ok) return toolError('validation_error', `\`topK\`: ${parsedTopK.message}`);
+      if (!parsedTopK.ok) return untrustedToolError('validation_error', '`topK` is invalid; the reason is below.', parsedTopK.message);
       const topK = parsedTopK.topK;
       const augmentedPrompt = await composeKnowledgeForSubject(
         scope.tenantId,
@@ -266,7 +266,7 @@ export function registerNotebooksAgentTools(deps: StartRunDeps): void {
 
       const templateId = str(input.templateId) ?? '';
       const tpl = getTransformation(templateId);
-      if (!tpl) return toolError('validation_error', `Unknown transformation templateId \`${templateId}\`.`, { templateIds });
+      if (!tpl) return untrustedToolError('validation_error', 'Unknown transformation templateId (below); the valid ids are listed.', templateId, { templateIds });
       const sourceId = str(input.sourceId);
       if (!sourceId) return toolError('validation_error', '`sourceId` is required (use a source documentId from search/ask).');
       const doc = await getDocument(scope.tenantId, nb.orgId, nb.collectionId, sourceId, PREAUTHORIZED_CALLER); // KBC-1

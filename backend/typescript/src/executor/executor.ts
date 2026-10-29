@@ -1201,6 +1201,8 @@ async function runOneNode(input: {
     nodeId: nodeRef.nodeId,
     tenantId: run.tenantId,
     attempt: input.attempt ?? 1,
+    // ADR 1002 D4 — where a replay fork's agent tools read recorded results.
+    ...(input.replayInvocationsFromRunId ? { replaySourceRunId: input.replayInvocationsFromRunId } : {}),
   };
   // ADR 0555 P1 — WHERE this node runs. Decided here and nowhere else; the
   // refuse arm is a typed node failure, never a quiet fallback to in-process.

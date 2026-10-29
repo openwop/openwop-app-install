@@ -22,6 +22,8 @@
  */
 
 import type { ChatMessage, ContentPart, DispatchResult } from './dispatch.js';
+// TOC2CD-14 — the import-free leaf, NOT toModelToolResult: see fenceThrownToolError.
+import { fenceThrownToolError } from '../host/untrustedContent.js';
 import type { ToolsDispatchRequest, ToolUseResult } from './dispatchAnthropicTools.js';
 
 const MAX_TOOL_ROUNDS = 5;
@@ -154,9 +156,11 @@ export async function dispatchMiniMaxWithTools(req: ToolsDispatchRequest): Promi
       try {
         toolResult = await req.onToolUse({ id: tc.id, name: tc.function.name, input });
       } catch (err) {
+        // TOC2CD-14 — a THROWN `onToolUse` error's message is arbitrary text: fenced
+        // (`Tool failed:` outside, the message inside), never handed to the model raw.
         toolResult = {
           toolUseId: tc.id,
-          content: `tool_dispatch_failed: ${err instanceof Error ? err.message : String(err)}`,
+          content: fenceThrownToolError(tc.function.name, `tool_dispatch_failed: ${err instanceof Error ? err.message : String(err)}`, 'tool_dispatch_failed'),
           isError: true,
         };
       }

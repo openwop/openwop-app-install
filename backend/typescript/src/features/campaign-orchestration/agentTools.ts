@@ -48,6 +48,7 @@ import { ORCHESTRATION_ID } from './orchestrationWorkflow.js';
 import { readableCampaignAutonomy } from './autonomyAccess.js';
 import { autonomyTogglesOn } from './autonomyStamp.js';
 import { projectPolicyForModel } from '../../host/autonomyPolicy/index.js';
+import { untrustedToolError } from '../../host/agentToolKit.js';
 
 const log = createLogger('campaign-orchestration.strategist-tools');
 
@@ -63,11 +64,11 @@ export const CAMPAIGN_ORCH_AUTONOMY_TOOL_ID = 'openwop:campaign-orchestration.ge
 const STRATEGIST_AGENT_ID = 'vendor.openwop-app.campaign-orchestration.agents.campaign-strategist';
 const TOGGLE_ID = 'campaign-orchestration';
 
-type ToolResult = { content: string; isError?: boolean };
+type ToolResult = { content: string; isError?: boolean; hostMessage?: true };
 
 const str = (v: unknown): string => (typeof v === 'string' ? v.trim() : '');
 function toolError(error: string, message: string, extra?: Record<string, unknown>): ToolResult {
-  return { content: JSON.stringify({ error, message, ...(extra ?? {}) }), isError: true };
+  return { content: JSON.stringify({ ...(extra ?? {}), error, message }), isError: true, hostMessage: true };
 }
 
 /** Per-call toggle honesty (ADR 0308 D2): per-tenant, dynamic, fail-closed. */
@@ -203,7 +204,7 @@ export async function runOrchestrationRunTool(deps: StartRunDeps, input: Record<
   const briefId = str(input.briefId);
   if (!briefId) return toolError('validation_error', 'Pass the `briefId` of the confirmed brief to run.');
   const brief = await getBrief(scope.tenantId, briefId);
-  if (!brief) return toolError('not_found', `Brief not found: ${briefId}`);
+  if (!brief) return untrustedToolError('not_found', 'That brief (id below) was not found.', briefId);
   if (!(await hasOrgScope(scope.tenantId, scope.actingUserId, brief.orgId, 'workspace:write'))) {
     return toolError('forbidden', 'You need write access to this brief\'s workspace to run its campaign.');
   }

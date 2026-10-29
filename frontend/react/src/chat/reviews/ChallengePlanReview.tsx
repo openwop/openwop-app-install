@@ -10,7 +10,8 @@ import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { ReviewAsset } from './reviewClient.js';
 
-interface PlanDay { day: number; title: string; actionInstruction: string; userFacingWhy: string; estimatedMinutes?: number; claimRefs: string[] }
+interface PlanAlternative { title: string; actionInstruction: string }
+interface PlanDay { day: number; title: string; actionInstruction: string; userFacingWhy: string; estimatedMinutes?: number; claimRefs: string[]; alternatives: PlanAlternative[] }
 interface Plan { title: string; promise: string; audience: string; durationDays?: number; dailyMinutesBudget?: number; outcomes: string[]; days: PlanDay[] }
 
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');
@@ -29,7 +30,15 @@ export function parseChallengePlan(content: string | undefined): Plan | null {
     const x = d as Record<string, unknown>;
     if (typeof x.day !== 'number') return [];
     const minutes = num(x.estimatedMinutes);
-    return [{ day: x.day, title: str(x.title), actionInstruction: str(x.actionInstruction), userFacingWhy: str(x.userFacingWhy), claimRefs: strs(x.claimRefs), ...(minutes !== undefined ? { estimatedMinutes: minutes } : {}) }];
+    // ADR 0429 P4 substitutions. A malformed entry is dropped, never shown as JSON.
+    const alternatives = Array.isArray(x.alternatives)
+      ? x.alternatives.flatMap((a): PlanAlternative[] => {
+        if (!a || typeof a !== 'object') return [];
+        const y = a as Record<string, unknown>;
+        return str(y.title) || str(y.actionInstruction) ? [{ title: str(y.title), actionInstruction: str(y.actionInstruction) }] : [];
+      })
+      : [];
+    return [{ day: x.day, title: str(x.title), actionInstruction: str(x.actionInstruction), userFacingWhy: str(x.userFacingWhy), claimRefs: strs(x.claimRefs), alternatives, ...(minutes !== undefined ? { estimatedMinutes: minutes } : {}) }];
   });
   const outcomes = Array.isArray(r.outcomes)
     ? r.outcomes.flatMap((o) => (o && typeof o === 'object' && str((o as Record<string, unknown>).measurableOutcome) ? [str((o as Record<string, unknown>).measurableOutcome)] : []))
@@ -68,6 +77,16 @@ export function ChallengePlanReview({ asset }: { asset: ReviewAsset }): JSX.Elem
             <span>{t('challengePlanDayTitle', { day: d.day, title: d.title })}</span>
             <p className="u-m-0">{d.actionInstruction}</p>
             {d.userFacingWhy ? <p className="u-fs-12 u-text-muted u-m-0">{t('lessonBatchPlanWhy', { why: d.userFacingWhy })}</p> : null}
+            {d.alternatives.length > 0 ? (
+              <div className="u-fs-12">
+                <p className="u-text-muted u-m-0">{t('challengePlanAlternativesHeading')}</p>
+                <ul className="u-m-0">
+                  {d.alternatives.map((a, i) => (
+                    <li key={i}>{a.title && a.actionInstruction ? t('challengePlanAlternative', { title: a.title, instruction: a.actionInstruction }) : (a.title || a.actionInstruction)}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
             <p className="u-fs-11 u-text-muted u-m-0">
               {d.claimRefs.length > 0 ? t('lessonBatchCites', { ids: d.claimRefs.join(', ') }) : t('lessonBatchCitesNone')}
             </p>
